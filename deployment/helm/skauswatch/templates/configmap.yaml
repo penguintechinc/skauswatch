@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "skauswatch.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "skauswatch.labels" . | nindent 4 }}
+data:
+  # Environment configuration
+  ENVIRONMENT: {{ .Values.environment | quote }}
+  LOG_LEVEL: {{ .Values.logLevel | quote }}
+  
+  # Service ports
+  MANAGER_SERVICE_PORT: {{ .Values.manager.service.port | quote }}
+  PKI_SERVER_SERVICE_PORT: {{ .Values.pkiServer.service.port | quote }}
+  SSH_CA_SERVICE_PORT: {{ .Values.sshCa.service.port | quote }}
+  AAA_MONITOR_SERVICE_PORT: {{ .Values.aaaMonitor.service.port | quote }}
+  
+  # Metrics ports
+  MANAGER_METRICS_PORT: {{ .Values.manager.service.metricsPort | quote }}
+  PKI_SERVER_METRICS_PORT: {{ .Values.pkiServer.service.metricsPort | quote }}
+  SSH_CA_METRICS_PORT: {{ .Values.sshCa.service.metricsPort | quote }}
+  AAA_MONITOR_METRICS_PORT: {{ .Values.aaaMonitor.service.metricsPort | quote }}
+  
+  # Database configuration
+  {{- if .Values.postgresql.enabled }}
+  DATABASE_HOST: {{ .Release.Name }}-postgresql
+  DATABASE_PORT: "5432"
+  POSTGRES_DB: {{ .Values.postgresql.auth.database | quote }}
+  {{- end }}
+  
+  # Redis configuration
+  {{- if .Values.redis.enabled }}
+  REDIS_HOST: {{ .Release.Name }}-redis-master
+  REDIS_PORT: "6379"
+  {{- end }}
+  
+  # Certificate settings
+  CA_CERT_VALIDITY_DAYS: {{ .Values.certificates.ca.validityDays | quote }}
+  SERVER_CERT_VALIDITY_DAYS: {{ .Values.certificates.server.validityDays | quote }}
+  SSH_CERT_VALIDITY_HOURS: {{ .Values.certificates.ssh.validityHours | quote }}
+  SSH_HOST_CERT_VALIDITY_DAYS: {{ .Values.certificates.ssh.hostValidityDays | quote }}
+  
+  # Other settings
+  SYSLOG_PORT: {{ .Values.aaaMonitor.service.syslogPort | quote }}
+  MAX_LOG_RETENTION_DAYS: "90"
+  CELERY_WORKER_CONCURRENCY: "4"

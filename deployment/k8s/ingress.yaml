@@ -1,0 +1,260 @@
+# SkausWatch Kubernetes Ingress Configuration
+# Provides external access to SkausWatch services with TLS termination and path-based routing
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: skauswatch-ingress
+  namespace: skauswatch
+  labels:
+    app.kubernetes.io/name: skauswatch
+    app.kubernetes.io/component: ingress
+    app.kubernetes.io/part-of: skauswatch
+  annotations:
+    # NGINX Ingress Controller annotations
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    
+    # Security headers
+    nginx.ingress.kubernetes.io/server-snippet: |
+      add_header X-Frame-Options "SAMEORIGIN" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-XSS-Protection "1; mode=block" always;
+      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+      add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' https:; connect-src 'self'; frame-ancestors 'self';" always;
+    
+    # Rate limiting
+    nginx.ingress.kubernetes.io/rate-limit-connections: "10"
+    nginx.ingress.kubernetes.io/rate-limit-requests-per-minute: "120"
+    
+    # Request size limits
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    
+    # Timeout settings
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    
+    # CORS settings (if needed for API access)
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, PUT, POST, DELETE, PATCH, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
+    nginx.ingress.kubernetes.io/cors-allow-credentials: "true"
+    
+    # Certificate management (cert-manager)
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    cert-manager.io/acme-challenge-type: "http01"
+
+spec:
+  # TLS configuration
+  tls:
+  - hosts:
+    - skauswatch.yourdomain.com
+    - api.skauswatch.yourdomain.com
+    - monitoring.skauswatch.yourdomain.com
+    secretName: skauswatch-tls
+  
+  # Routing rules
+  rules:
+  # Main application domain
+  - host: skauswatch.yourdomain.com
+    http:
+      paths:
+      # Manager service (main API and dashboard)
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: manager
+            port:
+              number: 8000
+      
+      # PKI Server endpoints
+      - path: /pki
+        pathType: Prefix
+        backend:
+          service:
+            name: pki-server
+            port:
+              number: 8001
+      
+      # SSH CA endpoints
+      - path: /ssh-ca
+        pathType: Prefix
+        backend:
+          service:
+            name: ssh-ca
+            port:
+              number: 8002
+      
+      # AAA Monitor endpoints
+      - path: /aaa
+        pathType: Prefix
+        backend:
+          service:
+            name: aaa-monitor
+            port:
+              number: 8003
+
+  # API subdomain (dedicated API access)
+  - host: api.skauswatch.yourdomain.com
+    http:
+      paths:
+      # Manager API
+      - path: /v1
+        pathType: Prefix
+        backend:
+          service:
+            name: manager
+            port:
+              number: 8000
+      
+      # PKI API
+      - path: /pki
+        pathType: Prefix
+        backend:
+          service:
+            name: pki-server
+            port:
+              number: 8001
+      
+      # SSH CA API
+      - path: /ssh
+        pathType: Prefix
+        backend:
+          service:
+            name: ssh-ca
+            port:
+              number: 8002
+      
+      # AAA Monitor API
+      - path: /aaa
+        pathType: Prefix
+        backend:
+          service:
+            name: aaa-monitor
+            port:
+              number: 8003
+
+  # Monitoring subdomain (Grafana dashboard)
+  - host: monitoring.skauswatch.yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana
+            port:
+              number: 3000
+
+---
+# Separate ingress for Prometheus (internal access only, behind authentication)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: skauswatch-prometheus-ingress
+  namespace: skauswatch
+  labels:
+    app.kubernetes.io/name: skauswatch
+    app.kubernetes.io/component: prometheus-ingress
+    app.kubernetes.io/part-of: skauswatch
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    
+    # Basic authentication for Prometheus
+    nginx.ingress.kubernetes.io/auth-type: "basic"
+    nginx.ingress.kubernetes.io/auth-secret: "prometheus-auth"
+    nginx.ingress.kubernetes.io/auth-realm: "Authentication Required - SkausWatch Prometheus"
+    
+    # Additional security
+    nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+
+spec:
+  tls:
+  - hosts:
+    - prometheus.skauswatch.yourdomain.com
+    secretName: prometheus-tls
+  
+  rules:
+  - host: prometheus.skauswatch.yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: prometheus
+            port:
+              number: 9090
+
+---
+# Network Policy for ingress security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: skauswatch-ingress-policy
+  namespace: skauswatch
+  labels:
+    app.kubernetes.io/name: skauswatch
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: skauswatch
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: skauswatch
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow ingress from nginx ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+  # Allow inter-service communication within namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: skauswatch
+  # Allow prometheus scraping
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 9000
+    - protocol: TCP
+      port: 9001
+    - protocol: TCP
+      port: 9002
+    - protocol: TCP
+      port: 9003
+  egress:
+  # Allow DNS resolution
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  # Allow outbound HTTPS for cert-manager, updates, etc.
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow inter-service communication
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: skauswatch

@@ -127,3 +127,84 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Pyright type checker
+.pyright/
+
+# IDEs
+.vscode/settings.json
+.vscode/launch.json
+.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+.docker/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids
+*.pid
+*.seed
+
+# Security
+.env.local
+.env.production
+secrets/
+certs/
+keys/
+*.key
+*.crt
+*.pem
+
+# Application specific
+uploads/
+downloads/
+temp/
+tmp/
+
+# Monitoring and profiling
+.profiler/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+
+# Pytest
+.pytest_cache/
+.cache/
+
+# Distribution / packaging
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local configuration
+local_settings.py
+config.local.yml
+config.local.yaml

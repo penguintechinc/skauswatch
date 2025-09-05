@@ -1,0 +1,71 @@
+SkausWatch Commercial License Agreement
+
+Copyright (c) 2024 Penguin Tech Inc. All rights reserved.
+
+COMMERCIAL SOFTWARE LICENSE
+
+This software and associated documentation files (the "Software") are proprietary 
+to Penguin Tech Inc ("Company") and are protected by copyright law and international 
+treaty provisions.
+
+GRANT OF LICENSE
+
+Subject to the terms and conditions of this Agreement and payment of applicable 
+license fees, Company grants you a non-exclusive, non-transferable license to use 
+the Software solely for your internal business purposes.
+
+PRICING AND PAYMENT
+
+The Software is licensed on a per-compute-node basis at the following rates:
+- Standard Rate: $7.50 USD per month per compute node
+- Volume Discounts: Available for deployments of 100 or more compute nodes
+- Enterprise Pricing: Custom pricing available for large deployments
+
+A "compute node" is defined as any cloud virtual machine instance or physical 
+hardware server where the Software is installed or executed.
+
+RESTRICTIONS
+
+You may not:
+- Redistribute, sublicense, sell, or rent the Software
+- Reverse engineer, decompile, or disassemble the Software
+- Remove or modify any proprietary notices or labels
+- Use the Software for any unlawful purpose
+- Exceed the number of licensed compute nodes
+
+SUPPORT AND UPDATES
+
+Enterprise support is included with your license subscription. Updates and patches 
+are provided at Company's discretion.
+
+TERMINATION
+
+This license terminates automatically if you fail to comply with its terms or 
+fail to pay applicable fees. Upon termination, you must cease all use of the 
+Software and destroy all copies.
+
+DISCLAIMER OF WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND. COMPANY DISCLAIMS 
+ALL WARRANTIES, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO IMPLIED 
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL COMPANY BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, OR 
+CONSEQUENTIAL DAMAGES ARISING OUT OF THE USE OF OR INABILITY TO USE THE SOFTWARE.
+
+GOVERNING LAW
+
+This Agreement shall be governed by the laws of the jurisdiction where Company 
+is incorporated.
+
+CONTACT INFORMATION
+
+For licensing inquiries, contact:
+Email: sales@penguintech.io
+Website: https://skauswatch.io
+
+For technical support, contact:
+Email: support@skauswatch.io
+Documentation: https://docs.skauswatch.io

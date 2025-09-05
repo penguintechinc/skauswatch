@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: skauswatch-config
+  namespace: skauswatch
+  labels:
+    app.kubernetes.io/name: skauswatch
+    app.kubernetes.io/component: configuration
+    app.kubernetes.io/part-of: skauswatch
+data:
+  # Environment configuration
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+  
+  # Database configuration
+  DATABASE_HOST: "postgres"
+  DATABASE_PORT: "5432"
+  POSTGRES_DB: "skauswatch"
+  
+  # Redis configuration
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  
+  # Service configuration
+  MANAGER_SERVICE_PORT: "8000"
+  PKI_SERVER_SERVICE_PORT: "8001"
+  SSH_CA_SERVICE_PORT: "8002"
+  AAA_MONITOR_SERVICE_PORT: "8003"
+  
+  # Metrics configuration
+  MANAGER_METRICS_PORT: "9000"
+  PKI_SERVER_METRICS_PORT: "9001"
+  SSH_CA_METRICS_PORT: "9002"
+  AAA_MONITOR_METRICS_PORT: "9003"
+  
+  # Certificate settings
+  CA_CERT_VALIDITY_DAYS: "3650"
+  SERVER_CERT_VALIDITY_DAYS: "365"
+  SSH_CERT_VALIDITY_HOURS: "24"
+  SSH_HOST_CERT_VALIDITY_DAYS: "365"
+  
+  # Logging and monitoring
+  MAX_LOG_RETENTION_DAYS: "90"
+  SYSLOG_PORT: "514"
+  
+  # Celery settings
+  CELERY_WORKER_CONCURRENCY: "4"
+  
+  # Security settings
+  CORS_ORIGINS: "https://your-frontend-domain.com"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: skauswatch
+  labels:
+    app.kubernetes.io/name: skauswatch
+    app.kubernetes.io/component: redis-configuration
+    app.kubernetes.io/part-of: skauswatch
+data:
+  redis.conf: |
+    # Redis configuration for SkausWatch
+    # Security and performance optimized configuration
+
+    # Network and connection settings
+    bind 0.0.0.0
+    port 6379
+    tcp-backlog 511
+    timeout 300
+    tcp-keepalive 60
+
+    # General settings
+    daemonize no
+    supervised no
+    pidfile /var/run/redis_6379.pid
+    loglevel notice
+    logfile ""
+    databases 16
+
+    # Snapshotting - persistence settings
+    save 900 1
+    save 300 10
+    save 60 10000
+    stop-writes-on-bgsave-error yes
+    rdbcompression yes
+    rdbchecksum yes
+    dbfilename dump.rdb
+    dir /data
+
+    # Memory management
+    maxmemory 256mb
+    maxmemory-policy allkeys-lru
+    maxmemory-samples 5
+
+    # Append only file settings
+    appendonly yes
+    appendfilename "appendonly.aof"
+    appendfsync everysec
+    no-appendfsync-on-rewrite no
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+    aof-load-truncated yes
+    aof-use-rdb-preamble yes
+
+    # Lua scripting
+    lua-time-limit 5000
+
+    # Slow log settings
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+
+    # Event notification settings
+    notify-keyspace-events Ex
+
+    # Advanced settings
+    hash-max-ziplist-entries 512
+    hash-max-ziplist-value 64
+    list-max-ziplist-size -2
+    list-compress-depth 0
+    set-max-intset-entries 512
+    zset-max-ziplist-entries 128
+    zset-max-ziplist-value 64
+    hll-sparse-max-bytes 3000
+    stream-node-max-bytes 4096
+    stream-node-max-entries 100
+
+    # Active rehashing
+    activerehashing yes
+
+    # Client output buffer limits
+    client-output-buffer-limit normal 0 0 0
+    client-output-buffer-limit replica 256mb 64mb 60
+    client-output-buffer-limit pubsub 32mb 8mb 60
+
+    # Client query buffer limit
+    client-query-buffer-limit 1gb
+
+    # Protocol max bulk length
+    proto-max-bulk-len 512mb
+
+    # Frequency of rehashing
+    hz 10

@@ -1,0 +1,65 @@
+apiVersion: v2
+name: skauswatch
+description: SkausWatch Security Monitoring and Alerting System
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+keywords:
+  - security
+  - monitoring
+  - alerting
+  - ssh
+  - pki
+  - certificates
+  - authentication
+
+home: https://skauswatch.io
+sources:
+  - https://github.com/penguintechinc/skauswatch
+
+maintainers:
+  - name: SkausWatch Team
+    email: support@skauswatch.io
+    url: https://skauswatch.io
+
+icon: https://skauswatch.io/assets/logo.png
+
+annotations:
+  category: Security
+  licenses: Commercial
+  images: |
+    - name: manager
+      image: skauswatch/manager:0.1.0
+    - name: pki-server
+      image: skauswatch/pki-server:0.1.0
+    - name: ssh-ca
+      image: skauswatch/ssh-ca:0.1.0
+    - name: aaa-monitor
+      image: skauswatch/aaa-monitor:0.1.0
+
+dependencies:
+  - name: postgresql
+    version: "12.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+    tags:
+      - database
+  - name: redis
+    version: "18.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled
+    tags:
+      - cache
+  - name: prometheus
+    version: "25.x.x"
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: prometheus.enabled
+    tags:
+      - monitoring
+  - name: grafana
+    version: "7.x.x"
+    repository: https://grafana.github.io/helm-charts
+    condition: grafana.enabled
+    tags:
+      - visualization

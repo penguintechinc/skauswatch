@@ -1,0 +1,58 @@
+1. Get the application URL by running these commands:
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- else if contains "NodePort" .Values.manager.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "skauswatch.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo http://$NODE_IP:$NODE_PORT
+{{- else if contains "LoadBalancer" .Values.manager.service.type }}
+     NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+           You can watch the status of by running 'kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "skauswatch.fullname" . }}'
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "skauswatch.fullname" . }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo http://$SERVICE_IP:{{ .Values.manager.service.port }}
+{{- else if contains "ClusterIP" .Values.manager.service.type }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "skauswatch.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
+  export CONTAINER_PORT=$(kubectl get pod --namespace {{ .Release.Namespace }} $POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")
+  echo "Visit http://127.0.0.1:8080 to use your application"
+  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:$CONTAINER_PORT
+{{- end }}
+
+2. SkausWatch Components:
+{{- if .Values.manager.enabled }}
+   - Manager Service: Available on port {{ .Values.manager.service.port }}
+{{- end }}
+{{- if .Values.pkiServer.enabled }}
+   - PKI Server: Available on port {{ .Values.pkiServer.service.port }}
+{{- end }}
+{{- if .Values.sshCa.enabled }}
+   - SSH CA: Available on port {{ .Values.sshCa.service.port }}
+{{- end }}
+{{- if .Values.aaaMonitor.enabled }}
+   - AAA Monitor: Available on port {{ .Values.aaaMonitor.service.port }}
+{{- end }}
+
+3. Monitoring:
+{{- if .Values.prometheus.enabled }}
+   - Prometheus: Available internally for metrics collection
+{{- end }}
+{{- if .Values.grafana.enabled }}
+   - Grafana: Available for dashboards and visualization
+{{- end }}
+
+4. Initial Setup:
+   - Default admin credentials are configured via secrets
+   - Update all default passwords before production use
+   - Configure TLS certificates for external access
+   - Set up proper backup procedures for persistent data
+
+5. Security Considerations:
+   - All services run with non-root users
+   - Network policies are enforced (if enabled)
+   - Secrets should be managed externally in production
+   - Regular security updates are recommended
+
+For more information, visit: https://docs.skauswatch.io
