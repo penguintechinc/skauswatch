@@ -1,0 +1,350 @@
+# SkausWatch Performance Configuration
+# This file contains all configuration options for the performance optimization system
+
+# Thread Pool Configuration
+thread_pools:
+  # CPU-bound operations (certificate generation, cryptographic operations)
+  cpu_bound:
+    initial_size: 4
+    max_size: 8
+    scaling_factor: 1.5
+    idle_timeout: 300
+    health_check_interval: 60
+    queue_size_limit: 1000
+    
+  # I/O-bound operations (database queries, network requests)
+  io_bound:
+    initial_size: 10
+    max_size: 50
+    scaling_factor: 2.0
+    idle_timeout: 180
+    health_check_interval: 30
+    queue_size_limit: 5000
+    
+  # Background tasks (cleanup, maintenance)
+  background:
+    initial_size: 2
+    max_size: 5
+    scaling_factor: 1.2
+    idle_timeout: 600
+    health_check_interval: 120
+    queue_size_limit: 500
+
+# Connection Pool Configuration
+connection_pools:
+  # Database connections
+  database:
+    type: "postgresql"
+    host: "localhost"
+    port: 5432
+    database: "skauswatch"
+    username: "skauswatch_user"
+    password_env: "DB_PASSWORD"
+    min_connections: 5
+    max_connections: 50
+    connection_timeout: 30.0
+    idle_timeout: 300.0
+    health_check_query: "SELECT 1"
+    health_check_interval: 60.0
+    retry_attempts: 3
+    retry_delay: 1.0
+    
+  # Redis connections
+  redis:
+    type: "redis"
+    host: "localhost"
+    port: 6379
+    database: 0
+    password_env: "REDIS_PASSWORD"
+    min_connections: 3
+    max_connections: 20
+    connection_timeout: 10.0
+    idle_timeout: 180.0
+    health_check_interval: 30.0
+    retry_attempts: 3
+    retry_delay: 0.5
+    
+  # HTTP client connections
+  http:
+    type: "http"
+    min_connections: 2
+    max_connections: 30
+    connection_timeout: 15.0
+    read_timeout: 30.0
+    idle_timeout: 120.0
+    keep_alive: true
+    max_redirects: 3
+    retry_attempts: 2
+
+# Cache Configuration
+caching:
+  # Memory cache settings
+  memory:
+    max_size: 10000
+    eviction_policy: "lru"  # lru, lfu, fifo, ttl
+    default_ttl: 300.0
+    cleanup_interval: 60.0
+    
+  # Redis cache settings
+  redis:
+    key_prefix: "skauswatch"
+    default_ttl: 3600.0
+    compression: true
+    serialization: "json"  # json, pickle, msgpack
+    
+  # Tiered cache configuration
+  tiered:
+    levels:
+      - type: "memory"
+        max_size: 1000
+        ttl: 60.0
+      - type: "redis"
+        ttl: 3600.0
+    promotion_threshold: 3
+    demotion_threshold: 0.1
+
+# Rate Limiting Configuration
+rate_limiting:
+  # Global rate limits
+  global:
+    algorithm: "token_bucket"  # token_bucket, sliding_window, fixed_window
+    requests: 1000
+    window_seconds: 60.0
+    burst_capacity: 1500
+    
+  # Service-specific rate limits
+  services:
+    pki_server:
+      certificate_requests:
+        requests: 100
+        window_seconds: 60.0
+        algorithm: "sliding_window"
+      revocation_requests:
+        requests: 50
+        window_seconds: 60.0
+        algorithm: "token_bucket"
+        
+    ssh_ca:
+      certificate_requests:
+        requests: 200
+        window_seconds: 60.0
+        algorithm: "token_bucket"
+      config_updates:
+        requests: 10
+        window_seconds: 300.0
+        algorithm: "fixed_window"
+        
+    database:
+      queries:
+        requests: 500
+        window_seconds: 60.0
+        algorithm: "sliding_window"
+      bulk_operations:
+        requests: 20
+        window_seconds: 300.0
+        algorithm: "token_bucket"
+
+# Message Queue Configuration
+message_queue:
+  backend: "redis"
+  redis_url: "redis://localhost:6379/1"
+  queue_prefix: "skauswatch_mq"
+  default_timeout: 30.0
+  max_retries: 3
+  retry_delay: 1.0
+  dead_letter_queue: true
+  message_ttl: 3600.0
+  
+  # Service routing
+  services:
+    - name: "manager"
+      queues: ["database", "user_management", "system"]
+    - name: "pki_server"
+      queues: ["certificates", "revocation", "ocsp"]
+    - name: "ssh_ca"
+      queues: ["ssh_certs", "krl", "config"]
+    - name: "aaa_monitor"
+      queues: ["logs", "alerts", "analysis"]
+
+# Performance Monitoring Configuration
+monitoring:
+  # Metrics collection
+  metrics:
+    collection_interval: 10.0
+    retention_days: 7
+    export_format: "prometheus"
+    export_endpoint: "/metrics"
+    
+  # System metrics
+  system_metrics:
+    cpu_usage: true
+    memory_usage: true
+    disk_usage: true
+    network_io: true
+    process_stats: true
+    
+  # Application metrics
+  application_metrics:
+    request_rates: true
+    response_times: true
+    error_rates: true
+    queue_depths: true
+    connection_pool_stats: true
+    cache_hit_rates: true
+    
+  # Alerting
+  alerts:
+    enabled: true
+    handlers:
+      - type: "log"
+        level: "WARNING"
+      - type: "email"
+        smtp_host: "smtp.example.com"
+        smtp_port: 587
+        username: "alerts@skauswatch.com"
+        password_env: "SMTP_PASSWORD"
+        recipients: ["admin@skauswatch.com"]
+    
+    rules:
+      - name: "high_cpu_usage"
+        metric: "cpu_usage_percent"
+        threshold: 80.0
+        operator: ">"
+        duration: 300  # 5 minutes
+        severity: "warning"
+        
+      - name: "high_memory_usage"
+        metric: "memory_usage_percent"
+        threshold: 85.0
+        operator: ">"
+        duration: 180  # 3 minutes
+        severity: "warning"
+        
+      - name: "high_error_rate"
+        metric: "error_rate_percent"
+        threshold: 5.0
+        operator: ">"
+        duration: 60   # 1 minute
+        severity: "critical"
+        
+      - name: "queue_backlog"
+        metric: "queue_depth"
+        threshold: 1000
+        operator: ">"
+        duration: 120  # 2 minutes
+        severity: "warning"
+
+# Service-Specific Configuration
+services:
+  # Manager Service
+  manager:
+    database:
+      batch_size: 100
+      bulk_insert_size: 1000
+      query_timeout: 30.0
+      cache_query_results: true
+      cache_ttl: 300.0
+      
+    background_tasks:
+      cleanup_interval: 3600  # 1 hour
+      session_timeout: 1800   # 30 minutes
+      backup_interval: 86400  # 24 hours
+      
+  # PKI Server
+  pki_server:
+    certificate_processing:
+      batch_size: 10
+      signing_timeout: 60.0
+      validation_cache_ttl: 3600.0
+      ocsp_response_cache_ttl: 7200.0
+      
+    background_workers:
+      crl_generation_interval: 3600    # 1 hour
+      ocsp_update_interval: 300        # 5 minutes
+      certificate_cleanup_interval: 86400  # 24 hours
+      
+  # SSH CA Server
+  ssh_ca:
+    certificate_processing:
+      batch_size: 20
+      signing_timeout: 30.0
+      config_cache_ttl: 1800.0
+      
+    background_workers:
+      krl_update_interval: 1800        # 30 minutes
+      key_rotation_interval: 604800    # 7 days
+      
+  # AAA Monitor
+  aaa_monitor:
+    log_collection:
+      batch_size: 100
+      processing_workers: 5
+      ai_analysis_batch_size: 50
+      log_retention_days: 30
+      
+    analysis:
+      alert_threshold_score: 0.8
+      analysis_interval: 60.0
+      pattern_cache_ttl: 3600.0
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  handlers:
+    console:
+      enabled: true
+      level: "INFO"
+      
+    file:
+      enabled: true
+      filename: "/var/log/skauswatch/performance.log"
+      level: "DEBUG"
+      max_bytes: 10485760  # 10MB
+      backup_count: 5
+      
+    syslog:
+      enabled: false
+      facility: "local0"
+      level: "WARNING"
+
+# Environment-Specific Overrides
+environments:
+  development:
+    thread_pools:
+      cpu_bound:
+        max_size: 4
+      io_bound:
+        max_size: 20
+    connection_pools:
+      database:
+        max_connections: 20
+    monitoring:
+      metrics:
+        collection_interval: 30.0
+        
+  production:
+    thread_pools:
+      cpu_bound:
+        max_size: 16
+      io_bound:
+        max_size: 100
+    connection_pools:
+      database:
+        max_connections: 100
+    monitoring:
+      metrics:
+        collection_interval: 5.0
+        retention_days: 30
+        
+  testing:
+    caching:
+      memory:
+        max_size: 100
+    rate_limiting:
+      global:
+        requests: 10000  # Higher limits for testing
+    monitoring:
+      alerts:
+        enabled: false

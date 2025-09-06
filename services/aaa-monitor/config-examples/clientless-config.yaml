@@ -1,0 +1,306 @@
+# SkausWatch AAA Monitor Service - Clientless Configuration Example
+# 
+# This configuration demonstrates how to set up completely clientless log collection
+# using direct API calls, without any agents or log forwarding infrastructure.
+
+# Service Configuration
+service:
+  name: "aaa-monitor-clientless"
+  host: "0.0.0.0"
+  port: 8080
+  debug: false
+  log_level: "INFO"
+
+# Redis for caching and coordination
+redis:
+  enabled: true
+  url: "redis://localhost:6379"
+  db: 0
+
+# Log Processing Pipeline
+log_processing:
+  worker_count: 4
+  queue_max_size: 10000
+  hp_queue_max_size: 1000
+  dedup_window_minutes: 5
+  rate_limit_window: 60
+  rate_limit_events: 1000
+  
+  # Storage backends
+  elasticsearch:
+    enabled: true
+    hosts: ["https://elasticsearch.example.com:9200"]
+    auth: ["username", "password"]
+    use_ssl: true
+    verify_certs: true
+    shards: 1
+    replicas: 0
+    
+  mongodb:
+    enabled: false
+    uri: "mongodb://localhost:27017"
+    database: "aaa_monitor"
+
+# Completely Clientless Log Collectors
+collectors:
+  # Kubernetes - Direct API Access
+  kubernetes:
+    enabled: true
+    
+    # Multiple Kubernetes clusters via API
+    api_servers:
+      - server: "https://k8s-cluster1.example.com:6443"
+        token_file: "/etc/kubernetes/tokens/cluster1-token"
+        ca_file: "/etc/kubernetes/ca-certificates/cluster1-ca.pem"
+        verify_ssl: true
+        timeout: 30
+        
+      - server: "https://k8s-cluster2.example.com:6443"
+        token: "eyJhbGciOiJSUzI1NiIsImtpZCI6IjBOVE..."
+        ca_file: "/etc/kubernetes/ca-certificates/cluster2-ca.pem"
+        verify_ssl: true
+        timeout: 30
+    
+    # Collection settings
+    namespaces: ["default", "kube-system", "monitoring"]
+    collect_pod_logs: true
+    collect_events: true
+    collect_audit_logs: true
+    monitor_rbac: true
+    
+    # API polling configuration
+    log_poll_interval: 30
+    event_watch_timeout: 300
+    log_lines_per_request: 1000
+    max_connections: 20
+    api_rate_limit: 1000
+
+  # LXD - REST API Access
+  lxc_lxd:
+    enabled: true
+    
+    # Multiple LXD hosts via REST API
+    lxd_endpoints:
+      - url: "https://lxd-host1.example.com:8443"
+        cert_file: "/etc/lxd/client-certificates/host1.crt"
+        key_file: "/etc/lxd/client-certificates/host1.key"
+        server_cert_file: "/etc/lxd/server-certificates/host1.pem"
+        verify_ssl: true
+        
+      - url: "https://lxd-host2.example.com:8443"
+        cert_file: "/etc/lxd/client-certificates/host2.crt"
+        key_file: "/etc/lxd/client-certificates/host2.key"
+        server_cert_file: "/etc/lxd/server-certificates/host2.pem"
+        verify_ssl: true
+    
+    # Collection settings
+    collect_container_logs: true
+    monitor_events: true
+    monitor_resource_usage: true
+    
+    # Polling and WebSocket settings
+    log_poll_interval: 30
+    event_monitor_interval: 30
+    websocket_timeout: 300
+    max_connections: 10
+
+  # Auditd - Centralized Sources
+  auditd:
+    enabled: true
+    
+    # Elasticsearch integration
+    elasticsearch_url: "https://elk.example.com:9200"
+    elasticsearch_username: "auditd_reader"
+    elasticsearch_password: "secure_password"
+    elasticsearch_index_pattern: "auditd-*"
+    
+    # Splunk integration
+    splunk_url: "https://splunk.example.com:8089"
+    splunk_token: "eyJhbGciOiJIUzI1NiJ..."
+    splunk_index: "audit"
+    
+    # SSH connections to hypervisors
+    ssh_connections:
+      - host: "hypervisor1.example.com"
+        port: 22
+        username: "auditd_reader"
+        key_file: "/etc/ssh/keys/hypervisor1_key"
+        
+      - host: "hypervisor2.example.com"
+        port: 22
+        username: "auditd_reader"
+        key_file: "/etc/ssh/keys/hypervisor2_key"
+    
+    # Centralized syslog servers
+    syslog_servers:
+      - host: "syslog.example.com"
+        port: 514
+        protocol: "tcp"
+        tls_cert: "/etc/ssl/certs/syslog.pem"
+        
+    # Journald API endpoints
+    journald_endpoints:
+      - host: "journald-gateway.example.com"
+        port: 19531
+        ssl: true
+        cert_file: "/etc/ssl/certs/journald-client.pem"
+        key_file: "/etc/ssl/keys/journald-client.key"
+    
+    # Polling intervals
+    audit_poll_interval: 30
+    ssh_poll_interval: 60
+    connection_timeout: 30
+    max_connections_per_host: 5
+
+  # Syslog - RFC3164/RFC5424 Messages
+  syslog:
+    enabled: true
+    
+    # Syslog server settings
+    listen_port: 514
+    listen_address: "0.0.0.0"
+    protocol: "both"  # tcp, udp, both
+    max_message_size: 65536
+    
+    # Remote syslog servers to connect to
+    servers:
+      - host: "central-syslog.example.com"
+        port: 514
+        protocol: "tcp"
+        
+      - host: "backup-syslog.example.com"
+        port: 514
+        protocol: "tcp"
+
+  # Journald - Systemd APIs
+  journald:
+    enabled: true
+    
+    # Remote journald endpoints
+    endpoints:
+      - host: "systemd-gateway1.example.com"
+        port: 19531
+        ssl: true
+        cert_file: "/etc/ssl/certs/journald1.pem"
+        key_file: "/etc/ssl/keys/journald1.key"
+        
+      - host: "systemd-gateway2.example.com"
+        port: 19531
+        ssl: false
+    
+    # Specific systemd units to monitor
+    units: 
+      - "sshd.service"
+      - "systemd-logind.service"
+      - "auditd.service"
+      - "firewalld.service"
+    
+    poll_interval: 30
+
+  # File - Network Mounted Logs
+  file:
+    enabled: true
+    
+    # Network mount points containing log files
+    mount_points:
+      - "/mnt/nfs-logs/server1"
+      - "/mnt/nfs-logs/server2" 
+      - "/mnt/cifs-logs/domain-controllers"
+      - "/mnt/logs/network-devices"
+    
+    # File patterns to monitor
+    file_patterns:
+      - "*.log"
+      - "*.txt"
+      - "access_log*"
+      - "error_log*"
+      - "audit*.log"
+    
+    # Monitoring settings
+    poll_interval: 60
+    use_inotify: true
+
+  # Database - Logs in Databases
+  database:
+    enabled: true
+    
+    # Database connections
+    connections:
+      - id: "security_db"
+        type: "postgresql"
+        host: "postgres.example.com"
+        port: 5432
+        database: "security_logs"
+        username: "log_reader"
+        password: "secure_password"
+        max_connections: 5
+        
+      - id: "audit_db"
+        type: "mysql"
+        host: "mysql.example.com"
+        port: 3306
+        database: "audit_logs"
+        username: "audit_reader"
+        password: "secure_password"
+        max_connections: 3
+        
+      - id: "local_logs"
+        type: "sqlite"
+        database: "/var/lib/logs/application.db"
+    
+    # SQL queries to execute
+    queries:
+      - id: "security_events"
+        connection_id: "security_db"
+        event_type: "security_violation"
+        sql: "SELECT * FROM security_events ORDER BY timestamp DESC"
+        incremental: true
+        timestamp_field: "timestamp"
+        message_field: "description"
+        severity_field: "level"
+        
+      - id: "auth_events"
+        connection_id: "security_db"
+        event_type: "authentication"
+        sql: "SELECT * FROM auth_logs ORDER BY event_time DESC"
+        incremental: true
+        timestamp_field: "event_time"
+        message_field: "message"
+        
+      - id: "audit_trail"
+        connection_id: "audit_db"
+        event_type: "accounting"
+        sql: "SELECT * FROM audit_trail ORDER BY logged_at DESC"
+        incremental: true
+        timestamp_field: "logged_at"
+        message_field: "action_description"
+        severity_field: "severity"
+    
+    poll_interval: 300
+
+# Threat Intelligence (optional)
+threat_intelligence:
+  enabled: false
+  
+# AI Integration (optional) 
+ai_integration:
+  enabled: false
+
+# Security Settings
+security:
+  api_keys:
+    - "your-api-key-here"
+  cors:
+    enabled: true
+    origins: ["*"]
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 1000
+
+# Health Check
+health_check:
+  enabled: true
+  check_interval: 30
+  endpoints:
+    - "/health"
+    - "/ready"
