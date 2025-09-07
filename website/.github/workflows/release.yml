@@ -1,0 +1,503 @@
+name: Release Management
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v1.2.3)'
+        required: true
+        type: string
+      release_type:
+        description: 'Type of release'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - prerelease
+      draft:
+        description: 'Create as draft release'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+            TAG="$VERSION"
+          else
+            TAG="${{ github.ref_name }}"
+            VERSION="$TAG"
+          fi
+          
+          # Validate version format
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
+            echo "❌ Invalid version format: $VERSION"
+            echo "Expected format: v1.2.3 or v1.2.3-alpha.1"
+            exit 1
+          fi
+          
+          # Check if it's a prerelease
+          IS_PRERELEASE="false"
+          if [[ "$VERSION" =~ -[a-zA-Z] ]]; then
+            IS_PRERELEASE="true"
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+          
+          echo "Release version: $VERSION"
+          echo "Is prerelease: $IS_PRERELEASE"
+      
+      - name: Validate changelog
+        run: |
+          if [ ! -f "CHANGELOG.md" ]; then
+            echo "❌ CHANGELOG.md not found"
+            exit 1
+          fi
+          
+          if ! grep -q "${{ steps.version.outputs.version }}" CHANGELOG.md; then
+            echo "⚠️ Version ${{ steps.version.outputs.version }} not found in CHANGELOG.md"
+            echo "Please update the changelog before creating a release"
+          fi
+      
+      - name: Check if tag already exists
+        run: |
+          if git tag -l | grep -q "^${{ steps.version.outputs.tag }}$"; then
+            echo "❌ Tag ${{ steps.version.outputs.tag }} already exists"
+            exit 1
+          fi
+
+  build-release-artifacts:
+    runs-on: ubuntu-latest
+    needs: validate-release
+    strategy:
+      matrix:
+        service: [manager, aaa-monitor, pki-server, ssh-ca]
+        platform: [linux/amd64, linux/arm64]
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.validate-release.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.validate-release.outputs.version }}
+            type=semver,pattern={{major}},value=${{ needs.validate-release.outputs.version }}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=SkausWatch ${{ matrix.service }}
+            org.opencontainers.image.description=Security monitoring service - ${{ matrix.service }}
+            org.opencontainers.image.version=${{ needs.validate-release.outputs.version }}
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./services/${{ matrix.service }}/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            SERVICE=${{ matrix.service }}
+            VERSION=${{ needs.validate-release.outputs.version }}
+            BUILD_DATE=${{ steps.meta.outputs.created }}
+            VCS_REF=${{ github.sha }}
+
+  build-python-packages:
+    runs-on: ubuntu-latest
+    needs: validate-release
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+      
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine setuptools wheel
+      
+      - name: Update version in pyproject.toml
+        run: |
+          VERSION="${{ needs.validate-release.outputs.version }}"
+          # Remove 'v' prefix for Python version
+          PYTHON_VERSION="${VERSION#v}"
+          sed -i "s/version = \".*\"/version = \"$PYTHON_VERSION\"/" pyproject.toml
+      
+      - name: Build Python packages
+        run: |
+          python -m build
+      
+      - name: Check packages
+        run: |
+          twine check dist/*
+      
+      - name: Upload Python packages as artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: python-packages
+          path: dist/
+          retention-days: 30
+
+  build-documentation:
+    runs-on: ubuntu-latest
+    needs: validate-release
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+      
+      - name: Install documentation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[docs]
+      
+      - name: Build documentation
+        run: |
+          mkdocs build
+      
+      - name: Package documentation
+        run: |
+          tar -czf documentation-${{ needs.validate-release.outputs.version }}.tar.gz -C site .
+      
+      - name: Upload documentation
+        uses: actions/upload-artifact@v3
+        with:
+          name: documentation
+          path: documentation-*.tar.gz
+          retention-days: 30
+
+  generate-changelog:
+    runs-on: ubuntu-latest
+    needs: validate-release
+    outputs:
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -v "^${{ needs.validate-release.outputs.tag }}$" | head -1)
+          
+          if [ -z "$PREVIOUS_TAG" ]; then
+            echo "No previous tag found, using initial commit"
+            PREVIOUS_TAG=$(git rev-list --max-parents=0 HEAD)
+          fi
+          
+          echo "Generating changelog from $PREVIOUS_TAG to ${{ needs.validate-release.outputs.tag }}"
+          
+          # Generate changelog using git log
+          CHANGELOG=$(git log --pretty=format:"- %s (%h)" $PREVIOUS_TAG..HEAD | grep -v "^- Merge ")
+          
+          # If CHANGELOG.md exists, extract the section for this version
+          if [ -f "CHANGELOG.md" ] && grep -q "${{ needs.validate-release.outputs.version }}" CHANGELOG.md; then
+            echo "Extracting changelog from CHANGELOG.md"
+            CHANGELOG=$(awk "/## \[${{ needs.validate-release.outputs.version }}\]/,/## \[/{if(/## \[/ && !/## \[${{ needs.validate-release.outputs.version }}\]/) exit; if(!/## \[${{ needs.validate-release.outputs.version }}\]/) print}" CHANGELOG.md)
+          fi
+          
+          # Save changelog to file for multiline output
+          echo "$CHANGELOG" > release-changelog.md
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          cat release-changelog.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      - name: Upload changelog
+        uses: actions/upload-artifact@v3
+        with:
+          name: changelog
+          path: release-changelog.md
+          retention-days: 30
+
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: [validate-release, build-release-artifacts]
+    strategy:
+      matrix:
+        service: [manager, aaa-monitor, pki-server, ssh-ca]
+    
+    steps:
+      - name: Run Trivy security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:${{ needs.validate-release.outputs.version }}'
+          format: 'sarif'
+          output: 'trivy-${{ matrix.service }}.sarif'
+        continue-on-error: true
+      
+      - name: Upload security scan results
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-scans
+          path: trivy-*.sarif
+          retention-days: 30
+
+  create-github-release:
+    runs-on: ubuntu-latest
+    needs: [validate-release, build-release-artifacts, build-python-packages, build-documentation, generate-changelog, security-scan]
+    if: always() && !cancelled()
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+      
+      - name: Create release tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a ${{ needs.validate-release.outputs.tag }} -m "Release ${{ needs.validate-release.outputs.version }}"
+          git push origin ${{ needs.validate-release.outputs.tag }}
+      
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          
+          # Copy Python packages
+          if [ -d "python-packages" ]; then
+            cp python-packages/* release-assets/
+          fi
+          
+          # Copy documentation
+          if [ -d "documentation" ]; then
+            cp documentation/* release-assets/
+          fi
+          
+          # Create checksums
+          cd release-assets
+          if ls * >/dev/null 2>&1; then
+            sha256sum * > checksums.txt
+          fi
+          cd ..
+      
+      - name: Create GitHub Release
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            // Read changelog
+            let changelog = 'Release notes not available.';
+            if (fs.existsSync('changelog/release-changelog.md')) {
+              changelog = fs.readFileSync('changelog/release-changelog.md', 'utf8');
+            }
+            
+            // Create release
+            const release = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: '${{ needs.validate-release.outputs.tag }}',
+              name: 'SkausWatch ${{ needs.validate-release.outputs.version }}',
+              body: changelog,
+              draft: ${{ github.event.inputs.draft || 'false' }},
+              prerelease: ${{ needs.validate-release.outputs.is_prerelease }}
+            });
+            
+            // Upload assets
+            const assetsDir = 'release-assets';
+            if (fs.existsSync(assetsDir)) {
+              const files = fs.readdirSync(assetsDir);
+              for (const file of files) {
+                const filePath = path.join(assetsDir, file);
+                const data = fs.readFileSync(filePath);
+                
+                await github.rest.repos.uploadReleaseAsset({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release.data.id,
+                  name: file,
+                  data: data
+                });
+              }
+            }
+            
+            console.log(`Release created: ${release.data.html_url}`);
+
+  publish-packages:
+    runs-on: ubuntu-latest
+    needs: [validate-release, create-github-release]
+    if: needs.validate-release.outputs.is_prerelease == 'false' && !github.event.inputs.draft
+    
+    steps:
+      - name: Download Python packages
+        uses: actions/download-artifact@v3
+        with:
+          name: python-packages
+          path: dist/
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+      
+      - name: Install publishing dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install twine
+      
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          twine upload dist/* --non-interactive
+        continue-on-error: true
+
+  update-documentation:
+    runs-on: ubuntu-latest
+    needs: [validate-release, create-github-release]
+    if: needs.validate-release.outputs.is_prerelease == 'false'
+    
+    steps:
+      - name: Checkout documentation repository
+        uses: actions/checkout@v4
+        with:
+          repository: penguintechinc/skauswatch-docs
+          token: ${{ secrets.DOCS_DEPLOY_TOKEN }}
+          path: docs
+      
+      - name: Download documentation
+        uses: actions/download-artifact@v3
+        with:
+          name: documentation
+          path: .
+      
+      - name: Update documentation
+        run: |
+          cd docs
+          tar -xzf ../documentation-${{ needs.validate-release.outputs.version }}.tar.gz
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Update documentation for ${{ needs.validate-release.outputs.version }}"
+          git push
+
+  notify-release:
+    runs-on: ubuntu-latest
+    needs: [validate-release, create-github-release, publish-packages]
+    if: always()
+    
+    steps:
+      - name: Notify Slack on success
+        if: needs.create-github-release.result == 'success'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          channel: '#releases'
+          text: |
+            🎉 SkausWatch ${{ needs.validate-release.outputs.version }} has been released!
+            
+            📦 **Release Type:** ${{ needs.validate-release.outputs.is_prerelease == 'true' && 'Pre-release' || 'Stable Release' }}
+            🏷️ **Tag:** ${{ needs.validate-release.outputs.tag }}
+            📝 **Release Notes:** https://github.com/${{ github.repository }}/releases/tag/${{ needs.validate-release.outputs.tag }}
+            
+            **What's included:**
+            - 🐳 Multi-platform Docker images
+            - 🐍 Python packages (PyPI)
+            - 📚 Updated documentation
+            - 🔒 Security scanned
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      
+      - name: Notify Slack on failure
+        if: failure()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          channel: '#releases'
+          text: |
+            ❌ Failed to release SkausWatch ${{ needs.validate-release.outputs.version }}
+            
+            Please check the GitHub Actions logs and resolve any issues.
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      
+      - name: Create release summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ needs.validate-release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Type:** ${{ needs.validate-release.outputs.is_prerelease == 'true' && 'Pre-release' || 'Stable Release' }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Docker Images | ${{ needs.build-release-artifacts.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Python Packages | ${{ needs.build-python-packages.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Documentation | ${{ needs.build-documentation.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| GitHub Release | ${{ needs.create-github-release.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| PyPI Publish | ${{ needs.publish-packages.result || 'Skipped' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.create-github-release.result }}" == "success" ]]; then
+            echo "✅ **Release completed successfully!**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "🔗 **GitHub Release:** https://github.com/${{ github.repository }}/releases/tag/${{ needs.validate-release.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Release failed - please check the logs**" >> $GITHUB_STEP_SUMMARY
+          fi

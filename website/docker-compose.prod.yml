@@ -1,0 +1,631 @@
+# Production-like Docker Compose configuration for testing
+# This file simulates production environment for testing and staging
+
+version: '3.8'
+
+services:
+  # PostgreSQL with production settings
+  postgres:
+    image: postgres:15-alpine
+    container_name: skauswatch-postgres-prod
+    restart: always
+    environment:
+      POSTGRES_DB: skauswatch_prod
+      POSTGRES_USER: skauswatch_prod
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+      - ./config/postgres/prod/postgresql.conf:/etc/postgresql/postgresql.conf
+      - ./config/postgres/prod/pg_hba.conf:/etc/postgresql/pg_hba.conf
+    networks:
+      - skauswatch-backend-net
+    secrets:
+      - postgres_password
+    command: >
+      postgres
+      -c config_file=/etc/postgresql/postgresql.conf
+      -c hba_file=/etc/postgresql/pg_hba.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skauswatch_prod -d skauswatch_prod"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Redis Cluster (single node in this setup)
+  redis:
+    image: redis:7-alpine
+    container_name: skauswatch-redis-prod
+    restart: always
+    volumes:
+      - redis_prod_data:/data
+      - ./config/redis/prod.conf:/usr/local/etc/redis/redis.conf
+    networks:
+      - skauswatch-backend-net
+    command: redis-server /usr/local/etc/redis/redis.conf
+    sysctls:
+      - net.core.somaxconn=511
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # RabbitMQ with clustering support
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: skauswatch-rabbitmq-prod
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER_FILE: /run/secrets/rabbitmq_user
+      RABBITMQ_DEFAULT_PASS_FILE: /run/secrets/rabbitmq_password
+      RABBITMQ_DEFAULT_VHOST: /skauswatch
+      RABBITMQ_VM_MEMORY_HIGH_WATERMARK: 0.6
+    volumes:
+      - rabbitmq_prod_data:/var/lib/rabbitmq
+      - ./config/rabbitmq/prod_enabled_plugins:/etc/rabbitmq/enabled_plugins
+      - ./config/rabbitmq/prod.conf:/etc/rabbitmq/rabbitmq.conf
+    networks:
+      - skauswatch-backend-net
+    secrets:
+      - rabbitmq_user
+      - rabbitmq_password
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # MinIO with production security
+  minio:
+    image: minio/minio:latest
+    container_name: skauswatch-minio-prod
+    restart: always
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/minio_root_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/minio_root_password
+      MINIO_BROWSER_REDIRECT_URL: https://minio-console.skauswatch.local
+    volumes:
+      - minio_prod_data:/data
+      - ./config/minio/prod:/root/.minio
+    networks:
+      - skauswatch-backend-net
+    secrets:
+      - minio_root_user
+      - minio_root_password
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Elasticsearch with production cluster settings
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: skauswatch-elasticsearch-prod
+    restart: always
+    environment:
+      - node.name=es-node-1
+      - cluster.name=skauswatch-cluster
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - xpack.security.enabled=true
+      - xpack.security.enrollment.enabled=false
+      - ELASTIC_PASSWORD_FILE=/run/secrets/elastic_password
+    volumes:
+      - elasticsearch_prod_data:/usr/share/elasticsearch/data
+      - ./config/elasticsearch/prod:/usr/share/elasticsearch/config
+    networks:
+      - skauswatch-backend-net
+    secrets:
+      - elastic_password
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -u elastic:$(cat /run/secrets/elastic_password) -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"\\(green\\|yellow\\)'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Prometheus with production configuration
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: skauswatch-prometheus-prod
+    restart: always
+    user: "65534:65534"  # nobody user
+    volumes:
+      - prometheus_prod_data:/prometheus
+      - ./config/prometheus/prod.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus/prod-rules:/etc/prometheus/rules:ro
+    networks:
+      - skauswatch-backend-net
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+      - '--storage.tsdb.wal-compression'
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Grafana with production security
+  grafana:
+    image: grafana/grafana:latest
+    container_name: skauswatch-grafana-prod
+    restart: always
+    environment:
+      - GF_SECURITY_ADMIN_USER__FILE=/run/secrets/grafana_admin_user
+      - GF_SECURITY_ADMIN_PASSWORD__FILE=/run/secrets/grafana_admin_password
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_USERS_ALLOW_ORG_CREATE=false
+      - GF_SECURITY_DISABLE_GRAVATAR=true
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+    volumes:
+      - grafana_prod_data:/var/lib/grafana
+      - ./config/grafana/prod/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - skauswatch-backend-net
+    secrets:
+      - grafana_admin_user
+      - grafana_admin_password
+    user: "472:0"  # grafana user
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Manager Service with production settings
+  manager:
+    image: skauswatch/manager:stable
+    container_name: skauswatch-manager-prod
+    restart: always
+    environment:
+      - DATABASE_URL_FILE=/run/secrets/manager_db_url
+      - REDIS_URL=redis://redis:6379
+      - RABBITMQ_URL_FILE=/run/secrets/manager_rabbitmq_url
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY_FILE=/run/secrets/minio_root_user
+      - MINIO_SECRET_KEY_FILE=/run/secrets/minio_root_password
+      - ELASTICSEARCH_URL_FILE=/run/secrets/manager_elastic_url
+      - PKI_SERVER_URL=http://pki-server:8081
+      - SSH_CA_URL=http://ssh-ca:8082
+      - AAA_MONITOR_URL=http://aaa-monitor:8083
+      - JWT_SECRET_FILE=/run/secrets/jwt_secret
+      - ENCRYPTION_KEY_FILE=/run/secrets/encryption_key
+      - LOG_LEVEL=info
+      - DEBUG=false
+      - GO_ENV=production
+    volumes:
+      - ./config/manager/prod.yml:/app/config/config.yml:ro
+      - manager_prod_data:/app/data
+      - manager_prod_logs:/app/logs
+    networks:
+      - skauswatch-backend-net
+      - skauswatch-frontend-net
+    secrets:
+      - manager_db_url
+      - manager_rabbitmq_url
+      - manager_elastic_url
+      - jwt_secret
+      - encryption_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # PKI Server with production security
+  pki-server:
+    image: skauswatch/pki-server:stable
+    container_name: skauswatch-pki-server-prod
+    restart: always
+    environment:
+      - DATABASE_URL_FILE=/run/secrets/pki_db_url
+      - REDIS_URL=redis://redis:6379
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY_FILE=/run/secrets/minio_root_user
+      - MINIO_SECRET_KEY_FILE=/run/secrets/minio_root_password
+      - HSM_ENABLED=false
+      - CA_ROOT_PATH=/app/ca/root
+      - CA_INTERMEDIATE_PATH=/app/ca/intermediate
+      - LOG_LEVEL=info
+      - DEBUG=false
+      - GO_ENV=production
+    volumes:
+      - ./config/pki-server/prod.yml:/app/config/config.yml:ro
+      - pki_prod_ca:/app/ca:ro
+      - pki_prod_certs:/app/certs
+      - pki_prod_logs:/app/logs
+    networks:
+      - skauswatch-backend-net
+      - skauswatch-frontend-net
+    secrets:
+      - pki_db_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # SSH CA with production security
+  ssh-ca:
+    image: skauswatch/ssh-ca:stable
+    container_name: skauswatch-ssh-ca-prod
+    restart: always
+    environment:
+      - DATABASE_URL_FILE=/run/secrets/ssh_ca_db_url
+      - REDIS_URL=redis://redis:6379
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY_FILE=/run/secrets/minio_root_user
+      - MINIO_SECRET_KEY_FILE=/run/secrets/minio_root_password
+      - SSH_CA_KEY_PATH=/app/ssh-ca/ca_key
+      - SSH_CA_CERT_PATH=/app/ssh-ca/ca_cert.pub
+      - LOG_LEVEL=info
+      - DEBUG=false
+      - GO_ENV=production
+    volumes:
+      - ./config/ssh-ca/prod.yml:/app/config/config.yml:ro
+      - ssh_ca_prod_keys:/app/ssh-ca:ro
+      - ssh_ca_prod_logs:/app/logs
+    networks:
+      - skauswatch-backend-net
+      - skauswatch-frontend-net
+    secrets:
+      - ssh_ca_db_url
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # AAA Monitor with production settings
+  aaa-monitor:
+    image: skauswatch/aaa-monitor:stable
+    container_name: skauswatch-aaa-monitor-prod
+    restart: always
+    environment:
+      - DATABASE_URL_FILE=/run/secrets/aaa_db_url
+      - REDIS_URL=redis://redis:6379
+      - ELASTICSEARCH_URL_FILE=/run/secrets/aaa_elastic_url
+      - RABBITMQ_URL_FILE=/run/secrets/aaa_rabbitmq_url
+      - LDAP_URL_FILE=/run/secrets/ldap_url
+      - LDAP_BIND_DN_FILE=/run/secrets/ldap_bind_dn
+      - LDAP_BIND_PASSWORD_FILE=/run/secrets/ldap_bind_password
+      - LOG_LEVEL=info
+      - DEBUG=false
+      - GO_ENV=production
+    volumes:
+      - ./config/aaa-monitor/prod.yml:/app/config/config.yml:ro
+      - aaa_monitor_prod_data:/app/data
+      - aaa_monitor_prod_logs:/app/logs
+    networks:
+      - skauswatch-backend-net
+      - skauswatch-frontend-net
+    secrets:
+      - aaa_db_url
+      - aaa_elastic_url
+      - aaa_rabbitmq_url
+      - ldap_url
+      - ldap_bind_dn
+      - ldap_bind_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Web Portal with production build
+  web-portal:
+    image: skauswatch/web-portal:stable
+    container_name: skauswatch-web-portal-prod
+    restart: always
+    environment:
+      - NEXT_PUBLIC_API_URL=https://api.skauswatch.local
+      - NEXT_PUBLIC_PKI_URL=https://pki.skauswatch.local
+      - NEXT_PUBLIC_SSH_CA_URL=https://ssh-ca.skauswatch.local
+      - NEXT_PUBLIC_AAA_URL=https://aaa.skauswatch.local
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+    networks:
+      - skauswatch-frontend-net
+    depends_on:
+      - manager
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # HAProxy Load Balancer
+  haproxy:
+    image: haproxy:2.8-alpine
+    container_name: skauswatch-haproxy-prod
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8404:8404"  # Stats page
+    volumes:
+      - ./config/haproxy/prod.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./config/ssl/prod:/etc/ssl/certs/skauswatch:ro
+      - haproxy_prod_logs:/var/log/haproxy
+    networks:
+      - skauswatch-frontend-net
+    depends_on:
+      - web-portal
+      - manager
+      - pki-server
+      - ssh-ca
+      - aaa-monitor
+      - grafana
+    sysctls:
+      - net.ipv4.ip_unprivileged_port_start=0
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Filebeat for log collection
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.11.0
+    container_name: skauswatch-filebeat-prod
+    restart: always
+    user: root
+    volumes:
+      - ./config/filebeat/prod.yml:/usr/share/filebeat/filebeat.yml:ro
+      - manager_prod_logs:/var/log/manager:ro
+      - pki_prod_logs:/var/log/pki-server:ro
+      - ssh_ca_prod_logs:/var/log/ssh-ca:ro
+      - aaa_monitor_prod_logs:/var/log/aaa-monitor:ro
+      - haproxy_prod_logs:/var/log/haproxy:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - skauswatch-backend-net
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+volumes:
+  postgres_prod_data:
+    driver: local
+  redis_prod_data:
+    driver: local
+  rabbitmq_prod_data:
+    driver: local
+  minio_prod_data:
+    driver: local
+  elasticsearch_prod_data:
+    driver: local
+  prometheus_prod_data:
+    driver: local
+  grafana_prod_data:
+    driver: local
+  manager_prod_data:
+    driver: local
+  manager_prod_logs:
+    driver: local
+  pki_prod_ca:
+    driver: local
+  pki_prod_certs:
+    driver: local
+  pki_prod_logs:
+    driver: local
+  ssh_ca_prod_keys:
+    driver: local
+  ssh_ca_prod_logs:
+    driver: local
+  aaa_monitor_prod_data:
+    driver: local
+  aaa_monitor_prod_logs:
+    driver: local
+  haproxy_prod_logs:
+    driver: local
+
+networks:
+  skauswatch-backend-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
+    driver_opts:
+      com.docker.network.bridge.name: skauswatch-backend
+  skauswatch-frontend-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.22.0.0/16
+    driver_opts:
+      com.docker.network.bridge.name: skauswatch-frontend
+
+secrets:
+  postgres_password:
+    file: ./secrets/prod/postgres_password.txt
+  rabbitmq_user:
+    file: ./secrets/prod/rabbitmq_user.txt
+  rabbitmq_password:
+    file: ./secrets/prod/rabbitmq_password.txt
+  minio_root_user:
+    file: ./secrets/prod/minio_root_user.txt
+  minio_root_password:
+    file: ./secrets/prod/minio_root_password.txt
+  elastic_password:
+    file: ./secrets/prod/elastic_password.txt
+  grafana_admin_user:
+    file: ./secrets/prod/grafana_admin_user.txt
+  grafana_admin_password:
+    file: ./secrets/prod/grafana_admin_password.txt
+  jwt_secret:
+    file: ./secrets/prod/jwt_secret.txt
+  encryption_key:
+    file: ./secrets/prod/encryption_key.txt
+  manager_db_url:
+    file: ./secrets/prod/manager_db_url.txt
+  manager_rabbitmq_url:
+    file: ./secrets/prod/manager_rabbitmq_url.txt
+  manager_elastic_url:
+    file: ./secrets/prod/manager_elastic_url.txt
+  pki_db_url:
+    file: ./secrets/prod/pki_db_url.txt
+  ssh_ca_db_url:
+    file: ./secrets/prod/ssh_ca_db_url.txt
+  aaa_db_url:
+    file: ./secrets/prod/aaa_db_url.txt
+  aaa_elastic_url:
+    file: ./secrets/prod/aaa_elastic_url.txt
+  aaa_rabbitmq_url:
+    file: ./secrets/prod/aaa_rabbitmq_url.txt
+  ldap_url:
+    file: ./secrets/prod/ldap_url.txt
+  ldap_bind_dn:
+    file: ./secrets/prod/ldap_bind_dn.txt
+  ldap_bind_password:
+    file: ./secrets/prod/ldap_bind_password.txt

@@ -1,0 +1,500 @@
+name: Deploy to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Production environment'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - production-eu
+          - production-us
+          - production-ap
+      version:
+        description: 'Version/Tag to deploy (required)'
+        required: true
+        type: string
+      deployment_strategy:
+        description: 'Deployment strategy'
+        required: true
+        default: 'rolling'
+        type: choice
+        options:
+          - rolling
+          - blue_green
+          - canary
+      skip_tests:
+        description: 'Skip pre-deployment tests (use with caution)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  ENVIRONMENT: ${{ github.event.inputs.environment }}
+  VERSION: ${{ github.event.inputs.version }}
+  DEPLOYMENT_STRATEGY: ${{ github.event.inputs.deployment_strategy }}
+
+jobs:
+  pre-deployment-validation:
+    runs-on: ubuntu-latest
+    environment: 
+      name: ${{ github.event.inputs.environment }}
+      url: https://api-${{ github.event.inputs.environment }}.skauswatch.io
+    outputs:
+      current-version: ${{ steps.current.outputs.version }}
+      deploy-matrix: ${{ steps.matrix.outputs.services }}
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERSION }}
+      
+      - name: Validate version format
+        run: |
+          if [[ ! "${{ env.VERSION }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Version must be in format v1.2.3"
+            echo "Provided: ${{ env.VERSION }}"
+            exit 1
+          fi
+          echo "✅ Version format is valid: ${{ env.VERSION }}"
+      
+      - name: Validate images exist
+        run: |
+          for service in manager aaa-monitor pki-server ssh-ca; do
+            echo "Checking image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-$service:${{ env.VERSION }}"
+            if ! docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-$service:${{ env.VERSION }}; then
+              echo "❌ Image not found for $service:${{ env.VERSION }}"
+              exit 1
+            fi
+          done
+          echo "✅ All container images exist"
+        env:
+          DOCKER_CLI_EXPERIMENTAL: enabled
+      
+      - name: Get current production version
+        id: current
+        run: |
+          CURRENT_VERSION=$(curl -s https://api-${{ env.ENVIRONMENT }}.skauswatch.io/version | jq -r .version || echo "unknown")
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "Current production version: $CURRENT_VERSION"
+      
+      - name: Setup deployment matrix
+        id: matrix
+        run: |
+          echo "services=[\"manager\", \"aaa-monitor\", \"pki-server\", \"ssh-ca\"]" >> $GITHUB_OUTPUT
+      
+      - name: Check for breaking changes
+        run: |
+          echo "Checking for breaking changes between versions..."
+          # This would typically involve API compatibility checks
+          # For now, we'll just log the version comparison
+          echo "Deploying from ${{ steps.current.outputs.current-version }} to ${{ env.VERSION }}"
+
+  security-validation:
+    runs-on: ubuntu-latest
+    needs: pre-deployment-validation
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Security scan of production images
+        run: |
+          for service in manager aaa-monitor pki-server ssh-ca; do
+            echo "Scanning $service:${{ env.VERSION }}"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:latest image \
+              --exit-code 1 --severity HIGH,CRITICAL \
+              ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-$service:${{ env.VERSION }}
+          done
+
+  backup-current-state:
+    runs-on: ubuntu-latest
+    needs: pre-deployment-validation
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Backup database
+        run: |
+          # Create database backup
+          BACKUP_NAME="pre-deploy-backup-$(date +%Y%m%d-%H%M%S)"
+          aws rds create-db-snapshot \
+            --db-instance-identifier skauswatch-${{ env.ENVIRONMENT }} \
+            --db-snapshot-identifier $BACKUP_NAME
+          
+          # Wait for backup to complete
+          aws rds wait db-snapshot-completed \
+            --db-snapshot-identifier $BACKUP_NAME
+          
+          echo "Database backup created: $BACKUP_NAME"
+      
+      - name: Backup current configuration
+        run: |
+          # Export current ECS task definitions
+          for service in manager aaa-monitor pki-server ssh-ca; do
+            aws ecs describe-task-definition \
+              --task-definition skauswatch-$service-${{ env.ENVIRONMENT }} \
+              --query 'taskDefinition' \
+              > backup-$service-task-definition.json
+          done
+      
+      - name: Upload backup artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: production-backup-${{ env.VERSION }}
+          path: backup-*.json
+          retention-days: 30
+
+  database-migration:
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-validation, backup-current-state]
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERSION }}
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install alembic asyncpg
+      
+      - name: Check migration safety
+        run: |
+          cd services/manager
+          # Check for potentially destructive migrations
+          alembic history --verbose | grep -E "(drop|delete|truncate)" && {
+            echo "❌ Potentially destructive migration detected!"
+            echo "Please review migrations carefully before proceeding."
+            exit 1
+          } || echo "✅ No obviously destructive migrations found"
+      
+      - name: Run database migrations
+        run: |
+          cd services/manager
+          alembic upgrade head
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          SKAUSWATCH_ENV: production
+      
+      - name: Verify migration
+        run: |
+          cd services/manager
+          alembic current
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          SKAUSWATCH_ENV: production
+
+  deploy-blue-green:
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-validation, security-validation, database-migration]
+    environment: ${{ github.event.inputs.environment }}
+    if: github.event.inputs.deployment_strategy == 'blue_green'
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.pre-deployment-validation.outputs.deploy-matrix) }}
+      fail-fast: true
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Deploy to green environment
+        run: |
+          # Create new task definition with new image
+          aws ecs register-task-definition \
+            --family skauswatch-${{ matrix.service }}-${{ env.ENVIRONMENT }}-green \
+            --cli-input-json file://task-definition-${{ matrix.service }}.json
+          
+          # Update green service
+          aws ecs update-service \
+            --cluster skauswatch-${{ env.ENVIRONMENT }} \
+            --service skauswatch-${{ matrix.service }}-${{ env.ENVIRONMENT }}-green \
+            --task-definition skauswatch-${{ matrix.service }}-${{ env.ENVIRONMENT }}-green
+      
+      - name: Wait for green deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster skauswatch-${{ env.ENVIRONMENT }} \
+            --services skauswatch-${{ matrix.service }}-${{ env.ENVIRONMENT }}-green
+      
+      - name: Test green environment
+        run: |
+          # Test green environment endpoints
+          GREEN_URL="https://${{ matrix.service }}-green-${{ env.ENVIRONMENT }}.skauswatch.io"
+          
+          for i in {1..30}; do
+            if curl -f $GREEN_URL/health; then
+              echo "✅ Green environment is healthy"
+              break
+            fi
+            echo "Waiting for green environment... ($i/30)"
+            sleep 10
+          done
+
+  deploy-rolling:
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-validation, security-validation, database-migration]
+    environment: ${{ github.event.inputs.environment }}
+    if: github.event.inputs.deployment_strategy == 'rolling'
+    strategy:
+      matrix:
+        service: ${{ fromJson(needs.pre-deployment-validation.outputs.deploy-matrix) }}
+      fail-fast: true
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+      
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Tag and push to ECR
+        run: |
+          SOURCE_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}:${{ env.VERSION }}"
+          TARGET_IMAGE="${{ steps.login-ecr.outputs.registry }}/skauswatch-${{ matrix.service }}:${{ env.VERSION }}"
+          
+          docker pull $SOURCE_IMAGE
+          docker tag $SOURCE_IMAGE $TARGET_IMAGE
+          docker push $TARGET_IMAGE
+      
+      - name: Update ECS service
+        run: |
+          # Create new task definition revision
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition skauswatch-${{ matrix.service }}-${{ env.ENVIRONMENT }} \
+            --query 'taskDefinition')
+          
+          # Update image in task definition
+          NEW_TASK_DEF=$(echo $TASK_DEF | jq \
+            --arg IMAGE "${{ steps.login-ecr.outputs.registry }}/skauswatch-${{ matrix.service }}:${{ env.VERSION }}" \
+            '.containerDefinitions[0].image = $IMAGE | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .placementConstraints, .compatibilities, .registeredAt, .registeredBy)')
+          
+          # Register new task definition
+          aws ecs register-task-definition \
+            --cli-input-json "$NEW_TASK_DEF"
+          
+          # Update service with rolling deployment
+          aws ecs update-service \
+            --cluster skauswatch-${{ env.ENVIRONMENT }} \
+            --service skauswatch-${{ matrix.service }}-${{ env.ENVIRONMENT }} \
+            --task-definition skauswatch-${{ matrix.service }}-${{ env.ENVIRONMENT }} \
+            --deployment-configuration "minimumHealthyPercent=50,maximumPercent=200"
+      
+      - name: Wait for rolling deployment
+        run: |
+          aws ecs wait services-stable \
+            --cluster skauswatch-${{ env.ENVIRONMENT }} \
+            --services skauswatch-${{ matrix.service }}-${{ env.ENVIRONMENT }}
+
+  deploy-canary:
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-validation, security-validation, database-migration]
+    environment: ${{ github.event.inputs.environment }}
+    if: github.event.inputs.deployment_strategy == 'canary'
+    
+    steps:
+      - name: Deploy canary (10% traffic)
+        run: |
+          echo "Deploying canary with 10% traffic..."
+          # Implementation would depend on load balancer configuration
+          # This is a placeholder for the canary deployment logic
+      
+      - name: Monitor canary metrics
+        run: |
+          echo "Monitoring canary metrics for 10 minutes..."
+          sleep 600
+      
+      - name: Promote canary to full deployment
+        run: |
+          echo "Promoting canary to 100% traffic..."
+          # Switch traffic to new version
+
+  post-deployment-tests:
+    runs-on: ubuntu-latest
+    needs: [deploy-blue-green, deploy-rolling, deploy-canary]
+    if: always() && !cancelled() && !github.event.inputs.skip_tests
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.VERSION }}
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest httpx
+      
+      - name: Run production smoke tests
+        run: |
+          pytest tests/smoke/ -v \
+            --base-url=https://api-${{ env.ENVIRONMENT }}.skauswatch.io \
+            --tb=short
+        env:
+          SKAUSWATCH_API_KEY: ${{ secrets.PRODUCTION_API_KEY }}
+          SKAUSWATCH_ENV: production
+      
+      - name: Run critical path tests
+        run: |
+          pytest tests/critical-path/ -v \
+            --base-url=https://api-${{ env.ENVIRONMENT }}.skauswatch.io \
+            --tb=short
+        env:
+          SKAUSWATCH_API_KEY: ${{ secrets.PRODUCTION_API_KEY }}
+          SKAUSWATCH_ENV: production
+
+  traffic-switch:
+    runs-on: ubuntu-latest
+    needs: [deploy-blue-green, post-deployment-tests]
+    if: github.event.inputs.deployment_strategy == 'blue_green' && needs.post-deployment-tests.result == 'success'
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Switch traffic to green
+        run: |
+          # Update load balancer to point to green environment
+          aws elbv2 modify-listener \
+            --listener-arn ${{ secrets.PRODUCTION_LISTENER_ARN }} \
+            --default-actions Type=forward,TargetGroupArn=${{ secrets.PRODUCTION_GREEN_TARGET_GROUP_ARN }}
+          
+          echo "✅ Traffic switched to green environment"
+      
+      - name: Verify traffic switch
+        run: |
+          # Verify that traffic is now going to green environment
+          for i in {1..10}; do
+            VERSION=$(curl -s https://api-${{ env.ENVIRONMENT }}.skauswatch.io/version | jq -r .version)
+            if [[ "$VERSION" == "${{ env.VERSION }}" ]]; then
+              echo "✅ Traffic successfully switched to ${{ env.VERSION }}"
+              break
+            fi
+            echo "Waiting for traffic switch... ($i/10)"
+            sleep 30
+          done
+
+  cleanup-old-resources:
+    runs-on: ubuntu-latest
+    needs: [traffic-switch, deploy-rolling, deploy-canary]
+    if: always() && !cancelled()
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Cleanup old task definitions
+        run: |
+          # Keep only the last 5 task definition revisions
+          for service in manager aaa-monitor pki-server ssh-ca; do
+            aws ecs list-task-definitions \
+              --family-prefix skauswatch-$service-${{ env.ENVIRONMENT }} \
+              --status INACTIVE \
+              --query 'taskDefinitionArns[:-5]' \
+              --output text | xargs -n1 aws ecs delete-task-definition --task-definition || true
+          done
+      
+      - name: Cleanup old container images
+        run: |
+          # This would typically involve cleaning up old images from ECR
+          echo "Cleaning up old container images..."
+
+  monitoring-setup:
+    runs-on: ubuntu-latest
+    needs: [traffic-switch, deploy-rolling, deploy-canary]
+    if: always() && !cancelled()
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Update monitoring dashboards
+        run: |
+          # Update Grafana dashboards with new version info
+          echo "Updating monitoring dashboards..."
+      
+      - name: Configure alerts
+        run: |
+          # Update alerting rules for the new version
+          echo "Configuring alerts for version ${{ env.VERSION }}"
+
+  deployment-summary:
+    runs-on: ubuntu-latest
+    needs: [pre-deployment-validation, deploy-blue-green, deploy-rolling, deploy-canary, post-deployment-tests, traffic-switch]
+    if: always()
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Generate deployment report
+        run: |
+          echo "## Production Deployment Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ env.ENVIRONMENT }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ env.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Strategy:** ${{ env.DEPLOYMENT_STRATEGY }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_STEP_SUMMARY
+          echo "**Previous Version:** ${{ needs.pre-deployment-validation.outputs.current-version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Pre-deployment Validation | ${{ needs.pre-deployment-validation.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security Validation | ${{ needs.security-validation.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Database Migration | ${{ needs.database-migration.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Service Deployment | ${{ needs.deploy-blue-green.result || needs.deploy-rolling.result || needs.deploy-canary.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Post-deployment Tests | ${{ needs.post-deployment-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Traffic Switch | ${{ needs.traffic-switch.result || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.post-deployment-tests.result }}" == "success" ]]; then
+            echo "✅ **Production deployment completed successfully**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Production URLs:**" >> $GITHUB_STEP_SUMMARY
+            echo "- API: https://api-${{ env.ENVIRONMENT }}.skauswatch.io" >> $GITHUB_STEP_SUMMARY
+            echo "- Dashboard: https://dashboard-${{ env.ENVIRONMENT }}.skauswatch.io" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Production deployment had issues**" >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: Notify team
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#production-deployments'
+          text: |
+            Production Deployment ${{ job.status == 'success' && '✅ COMPLETED' || '❌ FAILED' }}
+            Environment: ${{ env.ENVIRONMENT }}
+            Version: ${{ env.VERSION }}
+            Strategy: ${{ env.DEPLOYMENT_STRATEGY }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

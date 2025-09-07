@@ -1,0 +1,263 @@
+name: ✨ Feature Request
+description: Suggest a new feature or enhancement for SkausWatch
+title: "[FEATURE] "
+labels: ["enhancement", "feature-request"]
+assignees:
+  - penguintechinc/product-team
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a new feature! Your input helps make SkausWatch better.
+
+        **Before submitting:**
+        - Search existing feature requests to avoid duplicates
+        - Consider if this fits with the project's goals and scope
+        - Think about implementation complexity and impact
+
+  - type: checkboxes
+    id: preliminary-checks
+    attributes:
+      label: Preliminary Checks
+      description: Please confirm you have done the following
+      options:
+        - label: I have searched existing issues and this is not a duplicate
+          required: true
+        - label: I have read the project roadmap and documentation
+          required: true
+        - label: This feature aligns with the project's goals
+          required: false
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component would this feature affect?
+      options:
+        - Manager Service
+        - AAA Monitor
+        - PKI Server
+        - SSH CA
+        - Website/Frontend
+        - API
+        - Documentation
+        - CLI Tools
+        - Deployment/Infrastructure
+        - Multiple Components
+        - New Component
+    validations:
+      required: true
+
+  - type: dropdown
+    id: feature-type
+    attributes:
+      label: Feature Type
+      description: What type of feature is this?
+      options:
+        - New Functionality
+        - Enhancement to Existing Feature
+        - Performance Improvement
+        - User Experience Improvement
+        - Security Enhancement
+        - Integration/API
+        - Developer Experience
+        - Configuration/Customization
+    validations:
+      required: true
+
+  - type: textarea
+    id: feature-summary
+    attributes:
+      label: Feature Summary
+      description: A brief, clear description of the proposed feature
+      placeholder: "In one sentence, what is this feature?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem-statement
+    attributes:
+      label: Problem Statement
+      description: What problem does this feature solve? What pain point does it address?
+      placeholder: |
+        Describe the problem you're experiencing or the gap in functionality.
+        Examples:
+        - "Currently, users cannot..."
+        - "The system lacks the ability to..."
+        - "It's difficult to..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution
+      description: Describe your proposed solution in detail
+      placeholder: |
+        How would this feature work? Include:
+        - User workflow
+        - UI/UX considerations
+        - Technical approach (if you have ideas)
+        - Integration points
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-cases
+    attributes:
+      label: Use Cases
+      description: Describe specific scenarios where this feature would be used
+      placeholder: |
+        Provide 2-3 concrete use cases:
+        1. As a [user type], I want to [action] so that [benefit]
+        2. When [situation], this feature would help by [explanation]
+        3. In the context of [scenario], this would enable [outcome]
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance Criteria
+      description: What conditions must be met for this feature to be considered complete?
+      placeholder: |
+        Define clear, testable criteria:
+        - [ ] Users can successfully [action]
+        - [ ] The system handles [edge case] correctly
+        - [ ] Performance remains within [threshold]
+        - [ ] Feature is documented and accessible
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: How important is this feature?
+      options:
+        - Critical (Blocking core functionality)
+        - High (Significantly improves user experience)
+        - Medium (Nice to have improvement)
+        - Low (Minor enhancement)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: user-impact
+    attributes:
+      label: User Impact
+      description: How many users would benefit from this feature?
+      options:
+        - All users
+        - Most users (>75%)
+        - Many users (25-75%)
+        - Some users (<25%)
+        - Power users only
+        - Administrators only
+        - Developers only
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternative Solutions
+      description: Have you considered alternative approaches?
+      placeholder: |
+        Describe other ways this problem could be solved:
+        - Alternative approach 1: [description]
+        - Alternative approach 2: [description]
+        - Why the proposed solution is preferred
+    validations:
+      required: false
+
+  - type: textarea
+    id: technical-considerations
+    attributes:
+      label: Technical Considerations
+      description: Any technical challenges or requirements you're aware of?
+      placeholder: |
+        Consider:
+        - Dependencies on other features/systems
+        - Performance implications
+        - Security considerations
+        - Backward compatibility
+        - Scalability requirements
+    validations:
+      required: false
+
+  - type: textarea
+    id: mockups-examples
+    attributes:
+      label: Mockups/Examples
+      description: Visual examples, mockups, or references to similar implementations
+      placeholder: |
+        You can attach images, link to mockups, or reference similar features in other tools.
+        Example: "Similar to how [tool] handles [feature]..."
+    validations:
+      required: false
+
+  - type: dropdown
+    id: implementation-complexity
+    attributes:
+      label: Implementation Complexity (Your Estimate)
+      description: How complex do you think this feature would be to implement?
+      options:
+        - Simple (Few hours to days)
+        - Moderate (Days to weeks)
+        - Complex (Weeks to months)
+        - Very Complex (Months+)
+        - Not sure
+    validations:
+      required: false
+
+  - type: textarea
+    id: business-value
+    attributes:
+      label: Business Value
+      description: What business or project value would this feature provide?
+      placeholder: |
+        Consider:
+        - Cost savings
+        - Time savings
+        - Risk reduction
+        - Competitive advantage
+        - User retention/acquisition
+        - Compliance requirements
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: breaking-changes
+    attributes:
+      label: Breaking Changes
+      description: Would this feature require breaking changes?
+      options:
+        - label: This feature might require breaking changes to existing APIs
+        - label: This feature might require database migrations
+        - label: This feature might require configuration changes
+        - label: This feature is fully backward compatible
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      description: Would you like to contribute to implementing this feature?
+      options:
+        - label: I would like to work on implementing this feature
+        - label: I can help with design and specification
+        - label: I can help with testing and validation
+        - label: I can help with documentation
+        - label: I can provide domain expertise
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Any other information that would help evaluate this feature request
+      placeholder: |
+        Additional information such as:
+        - Links to relevant documentation
+        - Related issues or discussions
+        - Industry standards or best practices
+        - Regulatory or compliance considerations

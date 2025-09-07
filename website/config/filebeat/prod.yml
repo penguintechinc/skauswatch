@@ -1,0 +1,128 @@
+# Filebeat configuration for SkausWatch log collection
+# This configuration collects logs from all SkausWatch services and ships them to Elasticsearch
+
+filebeat.inputs:
+  # SkausWatch Application Logs
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/manager/*.log
+    fields:
+      service: manager
+      environment: production
+      logtype: application
+    fields_under_root: true
+    multiline.pattern: '^\d{4}-\d{2}-\d{2}'
+    multiline.negate: true
+    multiline.match: after
+
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/pki-server/*.log
+    fields:
+      service: pki-server
+      environment: production
+      logtype: application
+    fields_under_root: true
+    multiline.pattern: '^\d{4}-\d{2}-\d{2}'
+    multiline.negate: true
+    multiline.match: after
+
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/ssh-ca/*.log
+    fields:
+      service: ssh-ca
+      environment: production
+      logtype: application
+    fields_under_root: true
+    multiline.pattern: '^\d{4}-\d{2}-\d{2}'
+    multiline.negate: true
+    multiline.match: after
+
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/aaa-monitor/*.log
+    fields:
+      service: aaa-monitor
+      environment: production
+      logtype: application
+    fields_under_root: true
+    multiline.pattern: '^\d{4}-\d{2}-\d{2}'
+    multiline.negate: true
+    multiline.match: after
+
+  # HAProxy Logs
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/haproxy/*.log
+    fields:
+      service: haproxy
+      environment: production
+      logtype: access
+    fields_under_root: true
+
+  # Docker Container Logs
+  - type: container
+    enabled: true
+    paths:
+      - '/var/lib/docker/containers/*/*.log'
+    processors:
+      - add_docker_metadata:
+          host: "unix:///var/run/docker.sock"
+    fields:
+      environment: production
+      logtype: container
+    fields_under_root: true
+
+# Output configuration
+output.elasticsearch:
+  hosts: ["elasticsearch:9200"]
+  index: "skauswatch-logs-%{+yyyy.MM.dd}"
+  template.enabled: true
+  template.pattern: "skauswatch-logs-*"
+  template.settings:
+    index:
+      number_of_shards: 1
+      number_of_replicas: 0
+      refresh_interval: 30s
+      max_result_window: 50000
+
+# Processors for log enrichment
+processors:
+  - add_host_metadata:
+      when.not.contains.tags: forwarded
+  - add_cloud_metadata: ~
+  - add_docker_metadata: ~
+  - add_kubernetes_metadata: ~
+  - timestamp:
+      field: json.time
+      layouts:
+        - '2006-01-02T15:04:05.000Z'
+        - '2006-01-02T15:04:05Z'
+      test:
+        - '2019-06-22T16:33:51.000Z'
+        - '2019-06-22T16:33:51Z'
+
+# Logging configuration
+logging.level: info
+logging.to_files: true
+logging.files:
+  path: /var/log/filebeat
+  name: filebeat
+  keepfiles: 7
+  permissions: 0644
+
+# Monitoring
+monitoring.enabled: true
+monitoring.elasticsearch:
+  hosts: ["elasticsearch:9200"]
+
+# HTTP endpoint for health checks
+http.enabled: true
+http.host: 0.0.0.0
+http.port: 5066

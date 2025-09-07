@@ -1,0 +1,247 @@
+name: 🔒 Security Report
+description: Report a security vulnerability (use this for non-critical security issues)
+title: "[SECURITY] "
+labels: ["security", "triage"]
+assignees:
+  - penguintechinc/security-team
+body:
+  - type: markdown
+    attributes:
+      value: |
+        # ⚠️ Security Issue Reporting
+
+        **IMPORTANT:** This form is for **non-critical** security issues only.
+        
+        For **critical security vulnerabilities**, please:
+        1. **DO NOT** create a public issue
+        2. Email us at security@skauswatch.io
+        3. Use our security disclosure process outlined in SECURITY.md
+        
+        Critical issues include:
+        - Remote code execution
+        - SQL injection
+        - Authentication bypass
+        - Privilege escalation
+        - Data exposure vulnerabilities
+
+        **Only proceed with this form if:**
+        - This is a non-critical security concern
+        - This is a security enhancement suggestion
+        - This is a security-related question or clarification
+
+  - type: checkboxes
+    id: acknowledgment
+    attributes:
+      label: Security Issue Acknowledgment
+      description: Please confirm this is appropriate for public disclosure
+      options:
+        - label: I confirm this is NOT a critical security vulnerability that could be exploited
+          required: true
+        - label: I understand that critical vulnerabilities should be reported privately to security@skauswatch.io
+          required: true
+        - label: I have read our Security Policy (SECURITY.md)
+          required: true
+
+  - type: dropdown
+    id: issue-type
+    attributes:
+      label: Issue Type
+      description: What type of security issue is this?
+      options:
+        - Security Enhancement Suggestion
+        - Non-Critical Vulnerability
+        - Security Configuration Issue
+        - Security Documentation Issue
+        - Security Question/Clarification
+        - Dependency Security Update Needed
+        - Security Best Practice Violation
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected Component
+      description: Which component is affected?
+      options:
+        - Manager Service
+        - AAA Monitor
+        - PKI Server
+        - SSH CA
+        - Website/Frontend
+        - API
+        - Documentation
+        - Deployment/Infrastructure
+        - CI/CD Pipeline
+        - Multiple Components
+        - Dependencies
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity Assessment
+      description: How would you rate the severity? (Remember: Critical issues should be reported privately)
+      options:
+        - Low (Informational, enhancement suggestion)
+        - Medium (Security hardening opportunity)
+        - High (Non-exploitable security issue)
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the security concern or suggestion
+      placeholder: "Clearly describe the security issue or enhancement..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: potential-impact
+    attributes:
+      label: Potential Impact
+      description: What could happen if this issue is not addressed?
+      placeholder: |
+        Describe the potential impact:
+        - What could an attacker potentially do?
+        - What data or systems could be affected?
+        - What are the business/operational impacts?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: Reproduction Steps (if applicable)
+      description: How can this issue be reproduced or verified?
+      placeholder: |
+        If this is a vulnerability, provide steps to reproduce:
+        1. Go to '...'
+        2. Configure '...'
+        3. Execute '...'
+        4. Observe '...'
+    validations:
+      required: false
+
+  - type: textarea
+    id: affected-versions
+    attributes:
+      label: Affected Versions
+      description: Which versions are affected by this issue?
+      placeholder: |
+        Example:
+        - All versions
+        - v1.2.0 and later
+        - v1.1.0 to v1.2.3
+        - Latest development version
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment-info
+    attributes:
+      label: Environment Information
+      description: Provide details about the environment where this was discovered
+      placeholder: |
+        Environment details:
+        - OS: [e.g. Ubuntu 22.04]
+        - Python Version: [e.g. 3.13.0]
+        - Docker Version: [e.g. 24.0.0]
+        - Deployment type: [e.g. Docker Compose, Kubernetes]
+        - Network configuration: [relevant details]
+    validations:
+      required: false
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution
+      description: Do you have suggestions for how to address this issue?
+      placeholder: |
+        Describe your suggested approach:
+        - Configuration changes
+        - Code modifications
+        - Process improvements
+        - Additional security controls
+    validations:
+      required: false
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Any relevant security references, CVE numbers, or documentation
+      placeholder: |
+        Include:
+        - CVE numbers
+        - CWE references
+        - OWASP guidelines
+        - Security advisories
+        - Documentation links
+    validations:
+      required: false
+
+  - type: dropdown
+    id: disclosure-timeline
+    attributes:
+      label: Disclosure Timeline Preference
+      description: When would you prefer this issue to be publicly disclosed?
+      options:
+        - Immediate (after triage)
+        - After fix is available
+        - After fix is deployed
+        - No preference
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: testing-consent
+    attributes:
+      label: Testing Consent
+      description: Did you perform any testing to verify this issue?
+      options:
+        - label: I performed testing in my own isolated environment only
+        - label: I did not perform any active testing or exploitation
+        - label: I only performed passive observation/analysis
+        - label: I have written proof-of-concept code (will share privately if requested)
+
+  - type: textarea
+    id: mitigation-workaround
+    attributes:
+      label: Temporary Mitigation/Workaround
+      description: Are there any temporary measures that can reduce the risk?
+      placeholder: |
+        Describe any workarounds:
+        - Configuration changes
+        - Network restrictions
+        - Access controls
+        - Monitoring adjustments
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: coordination
+    attributes:
+      label: Coordination
+      description: How would you like to coordinate on this issue?
+      options:
+        - label: I'm available for follow-up questions via GitHub
+        - label: I can be contacted via email for sensitive details
+        - label: I would like to be notified when this is resolved
+        - label: I'm interested in helping test the fix
+
+  - type: markdown
+    attributes:
+      value: |
+        ## Next Steps
+        
+        After submission:
+        1. Our security team will triage this issue within 48 hours
+        2. We'll update the issue with our assessment and timeline
+        3. For valid security issues, we'll work on a fix and coordinate disclosure
+        4. You'll be credited in our security acknowledgments (if desired)
+        
+        Thank you for helping keep SkausWatch secure!

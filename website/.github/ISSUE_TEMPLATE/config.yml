@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🚨 Critical Security Vulnerability
+    url: mailto:security@skauswatch.io
+    about: Report critical security vulnerabilities privately via email
+  - name: 📚 Documentation
+    url: https://docs.skauswatch.io
+    about: Browse our comprehensive documentation
+  - name: 💬 Discussions
+    url: https://github.com/penguintechinc/skauswatch/discussions
+    about: Ask questions and discuss ideas with the community
+  - name: 📞 Support
+    url: https://support.skauswatch.io
+    about: Get help with installation, configuration, and troubleshooting
+  - name: 💼 Enterprise Support
+    url: https://skauswatch.io/enterprise
+    about: Enterprise customers can access priority support
