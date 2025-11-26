@@ -218,9 +218,27 @@ We welcome contributions! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 ## 📄 License
 
 SkausWatch is proprietary software under commercial license.
-- **Pricing**: $7.50/month per compute node
+
+**License Highlights:**
+- **Personal & Internal Use**: Free under AGPL-3.0
+- **Commercial Use**: Requires commercial license
+- **SaaS Deployment**: Requires commercial license if providing as a service
+
+**Pricing:**
+- **Standard Rate**: $7.50/month per compute node
 - **Volume Discounts**: Available for 100+ nodes
 - **Enterprise Support**: Included with license
+
+### Contributor Employer Exception (GPL-2.0 Grant)
+
+Companies employing official contributors receive GPL-2.0 access to community features:
+
+- **Perpetual for Contributed Versions**: GPL-2.0 rights to versions where the employee contributed remain valid permanently, even after the employee leaves the company
+- **Attribution Required**: Employee must be credited in CONTRIBUTORS, AUTHORS, commit history, or release notes
+- **Future Versions**: New versions released after employment ends require standard licensing
+- **Community Only**: Enterprise features still require a commercial license
+
+This exception rewards contributors by providing lasting fair use rights to their employers.
 
 For licensing inquiries: [sales@penguintech.io](mailto:sales@penguintech.io)
 
