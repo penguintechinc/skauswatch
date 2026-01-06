@@ -1,152 +1,492 @@
-# SkausWatch Development Standards and Conventions
+# Development Standards
 
-This document defines the development standards, code quality expectations, and CI/CD requirements for SkausWatch.
+This document consolidates all development standards, patterns, and requirements for SkausWatch.
 
 ## Table of Contents
 
-1. [Code Quality Standards](#code-quality-standards)
-2. [Version Management](#version-management)
-3. [Testing Requirements](#testing-requirements)
-4. [Security Standards](#security-standards)
-5. [Documentation Standards](#documentation-standards)
-6. [Git Workflow](#git-workflow)
-7. [Commit Guidelines](#commit-guidelines)
+1. [Language Selection Criteria](#language-selection-criteria)
+2. [Flask-Security-Too Integration](#flask-security-too-integration)
+3. [Database Standards](#database-standards)
+4. [Protocol Support](#protocol-support)
+5. [API Versioning](#api-versioning)
+6. [Performance Best Practices](#performance-best-practices)
+7. [Microservices Architecture](#microservices-architecture)
+8. [Docker Standards](#docker-standards)
+9. [Testing Requirements](#testing-requirements)
+10. [Security Standards](#security-standards)
+11. [Documentation Standards](#documentation-standards)
+12. [Logging & Monitoring](#logging--monitoring)
+13. [WaddleAI Integration](#waddleai-integration)
 
-## Code Quality Standards
+---
 
-### Python Code Style
+## Language Selection Criteria
 
-**Framework**: PEP 8 with strict enforcement
+**Python 3.13** is the primary language for SkausWatch services.
 
-**Tools**:
-- **black**: Code formatter (line length: 88 characters)
-- **isort**: Import organization
-- **flake8**: Linting (configured for errors E9, F63, F7, F82)
-- **mypy**: Type checking (with ignore-missing-imports)
+### Why Python for SkausWatch
+- Rapid development and iteration for security features
+- Rich ecosystem of libraries for cryptography and security
+- Excellent for prototyping and MVPs
+- Strong support for data processing and analysis
+- Easy maintenance and debugging
 
-**Requirements**:
-- All code must pass `black --check`
-- All imports must be organized by `isort`
-- No `flake8` errors in critical categories
-- Type hints recommended for public functions
+**Go can be considered** for:
+- High-performance networking components (if requirements exceed 10K req/sec)
+- Network-intensive services with low latency requirements
+- Services with latency requirements <10ms
+- Only when performance profiling shows necessity
 
-**Example Pre-commit Check**:
-```bash
-black services/ shared/
-isort services/ shared/
-flake8 services/ shared/ --count --select=E9,F63,F7,F82
-```
+---
 
-### Python Docstrings
+## Flask-Security-Too Integration
 
-**Standard**: PEP 257
+**MANDATORY for ALL Flask applications in SkausWatch**
 
-**Minimum Requirements**:
-- All public modules, functions, and classes must have docstrings
-- Docstrings must describe purpose, parameters, and return values
-- First line is a summary (imperative mood)
-- Multi-line docstrings include detailed description after summary
+### Core Features
+- User authentication and session management
+- Role-based access control (RBAC)
+- Password hashing with bcrypt
+- Email confirmation and password reset
+- Two-factor authentication (2FA)
+- Token-based authentication for APIs
+- Login tracking and session management
 
-**Example**:
+### Default Roles
+1. **Admin**: Full access to all services and configurations
+2. **Maintainer**: Read/write access to resources, no user management
+3. **Viewer**: Read-only access to resources and audit logs
+
+### Integration Pattern
+
 ```python
-def validate_license(license_key: str) -> bool:
-    """Validate license key format and authenticity.
+from flask import Flask
+from flask_security import Security, auth_required, hash_password
+from pydal import DAL, Field
+import os
 
-    Args:
-        license_key: License key in format PENG-XXXX-XXXX-XXXX-XXXX-ABCD
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
+app.config['SECURITY_PASSWORD_SALT'] = os.getenv('SECURITY_PASSWORD_SALT')
+app.config['SECURITY_PASSWORD_HASH'] = 'bcrypt'
 
-    Returns:
-        True if license is valid, False otherwise
+# PyDAL database
+db = DAL(
+    f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}@"
+    f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
+    pool_size=10,
+    migrate=True
+)
 
-    Raises:
-        ValueError: If license_key format is invalid
-    """
+# Define tables for PyDAL
+db.define_table('users',
+    Field('email', 'string', unique=True),
+    Field('password', 'string'),
+    Field('active', 'boolean', default=True),
+    Field('fs_uniquifier', 'string', unique=True),
+)
+
+db.define_table('roles',
+    Field('name', 'string', unique=True),
+    Field('description', 'string'),
+)
+
+# Initialize Flask-Security
+from flask_security import PyDALUserDatastore
+user_datastore = PyDALUserDatastore(db, db.users, db.roles)
+security = Security(app, user_datastore)
+
+@app.route('/api/protected')
+@auth_required()
+def protected_resource():
+    return {'message': 'Access granted'}
 ```
 
-### Type Hints
+---
 
-**Standard**: PEP 484
+## Database Standards
+
+### Hybrid Approach: SQLAlchemy Init + PyDAL Operations
+
+**MANDATORY for ALL Python applications in SkausWatch**
+
+#### SQLAlchemy - Database Initialization ONLY
+
+Use SQLAlchemy exclusively for initial schema creation:
+
+```python
+from sqlalchemy import create_engine, MetaData, Table, Column, Integer, String
+import os
+
+def init_schema_sqlalchemy(engine):
+    """Create database schema using SQLAlchemy"""
+    metadata = MetaData()
+
+    Table('users', metadata,
+        Column('id', Integer, primary_key=True),
+        Column('email', String(255), unique=True),
+        Column('password', String(255)),
+        Column('active', Integer, default=1),
+    )
+
+    metadata.create_all(engine)
+```
+
+#### PyDAL - Day-to-Day Operations (Mandatory)
+
+All CRUD operations and migrations use PyDAL:
+
+```python
+from pydal import DAL, Field
+
+def get_db_connection():
+    """Initialize PyDAL for operations"""
+    db_type = os.getenv('DB_TYPE', 'postgres')
+
+    # Build connection string
+    if db_type == 'sqlite':
+        db_url = f"sqlite:///{os.getenv('DB_PATH', 'app.db')}"
+    else:
+        db_url = (f"{'postgresql' if db_type == 'postgres' else 'mysql'}://"
+                 f"{os.getenv('DB_USER')}:{os.getenv('DB_PASS')}@"
+                 f"{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/"
+                 f"{os.getenv('DB_NAME')}")
+
+    db = DAL(
+        db_url,
+        pool_size=int(os.getenv('DB_POOL_SIZE', '10')),
+        migrate_enabled=True,
+        check_reserved=['all'],
+        lazy_tables=True
+    )
+
+    return db
+
+# Usage in Flask app
+db = get_db_connection()
+
+@app.route('/api/users/<int:user_id>')
+def get_user(user_id):
+    """Fetch user using PyDAL"""
+    user = db(db.users.id == user_id).select().first()
+    return {'user': user}
+```
+
+### Environment Variables
+
+Applications MUST accept these Docker environment variables:
+- `DB_TYPE`: Database type (postgresql, mysql, sqlite)
+- `DB_HOST`: Database host/IP address
+- `DB_PORT`: Database port
+- `DB_NAME`: Database name
+- `DB_USER`: Database username
+- `DB_PASS`: Database password
+- `DB_POOL_SIZE`: Connection pool size (default: 10)
+- `DB_MAX_RETRIES`: Maximum connection retry attempts (default: 5)
+- `DB_RETRY_DELAY`: Delay between retry attempts in seconds (default: 5)
+
+### Supported Databases
+
+| Database | Status | Notes |
+|----------|--------|-------|
+| PostgreSQL | Recommended | Default choice, best for production |
+| MySQL/MariaDB | Supported | Full compatibility with SQLAlchemy and PyDAL |
+| SQLite | Supported | Development and testing only |
+
+### MariaDB Galera Cluster Support
+
+For high-availability deployments using MariaDB Galera:
+
+```python
+GALERA_MODE = os.getenv('GALERA_MODE', 'false').lower() == 'true'
+
+if GALERA_MODE and db_type == 'mysql':
+    dal_kwargs['driver_args'] = {
+        'init_command': (
+            'SET wsrep_sync_wait=1; '
+            'SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;'
+        )
+    }
+```
 
 **Requirements**:
-- Type hints for function parameters and returns
-- Type hints for class attributes
-- Use `Optional[T]` for nullable values
-- Use `Union[T1, T2]` for multiple possible types
-- Use `List`, `Dict`, `Set` from typing for generics (Python < 3.9)
+- WSREP sync wait: `wsrep_sync_wait=1` for consistency
+- Auto-increment: `innodb_autoinc_lock_mode=2`
+- Transaction isolation: `READ-COMMITTED` (not SERIALIZABLE)
+- Primary keys: ALL tables MUST have explicit primary keys
+- Connection handling: Retry logic for `WSREP_NOT_READY` errors
 
-**Example**:
+---
+
+## Protocol Support
+
+### Required Protocol Support
+
+**ALL applications MUST support multiple communication protocols:**
+
+1. **REST API**: RESTful HTTP endpoints
+   - JSON request/response format
+   - Proper HTTP status codes
+   - Resource-based URL design
+
+2. **HTTP/1.1**: Standard HTTP protocol
+   - Keep-alive connections
+   - Chunked transfer encoding
+   - Compression (gzip, deflate)
+
+3. **HTTP/2**: Modern HTTP protocol
+   - Multiplexing multiple requests
+   - Header compression (HPACK)
+   - Stream prioritization
+
+4. **HTTP/3 (QUIC)**: Next-generation protocol
+   - UDP-based transport with TLS 1.3
+   - Zero round-trip time (0-RTT)
+   - Built-in encryption
+
+### Configuration via Environment Variables
+
+Applications must accept:
+- `HTTP1_ENABLED`: Enable HTTP/1.1 (default: true)
+- `HTTP2_ENABLED`: Enable HTTP/2 (default: true)
+- `HTTP3_ENABLED`: Enable HTTP/3/QUIC (default: false)
+- `HTTP_PORT`: HTTP/REST API port (default: 8080)
+- `METRICS_PORT`: Prometheus metrics port (default: 9090)
+
+---
+
+## API Versioning
+
+**ALL REST APIs MUST use versioning in the URL path**
+
+### URL Structure
+
+**Required Format**: `/api/v{major}/endpoint`
+
+**Examples**:
+- `/api/v1/users` - User management
+- `/api/v1/auth/login` - Authentication
+- `/api/v1/certificates` - Certificate management
+
+**Key Rules**:
+1. Always include version prefix in URL path
+2. Semantic versioning for API versions: `v1`, `v2`, `v3`, etc.
+3. Major version only in URL - minor/patch versions are NOT in URL
+4. Consistent prefix across all endpoints in a service
+
+### Version Lifecycle
+
+**Version Strategy**:
+- **Current Version**: Active development and fully supported
+- **Previous Version (N-1)**: Supported with bug fixes and security patches
+- **Older Versions (N-2+)**: Deprecated with warnings
+
+**Deprecation Process**:
+1. Release new major version
+2. Support previous version for at least 12 months
+3. Add deprecation headers to older versions
+4. Include sunset date
+5. Provide migration path documentation
+
+**Example Deprecation Headers**:
+```python
+@app.route('/api/v1/users')
+def get_users_v1():
+    """Deprecated - use /api/v2/users instead"""
+    from flask import make_response, jsonify
+    response = make_response(jsonify(users))
+    response.headers['Deprecation'] = 'true'
+    response.headers['Sunset'] = 'Sun, 01 Jan 2026 00:00:00 GMT'
+    response.headers['Link'] = '</api/v2/users>; rel="successor-version"'
+    return response
+```
+
+---
+
+## Performance Best Practices
+
+### Python Performance Requirements
+
+#### Concurrency Patterns
+
+1. **asyncio** - For I/O-bound operations:
+   - Database queries and connections
+   - HTTP/REST API calls
+   - File I/O operations
+   - Network communication
+
+2. **threading.Thread** - For blocking operations:
+   - Legacy libraries without async support
+   - Blocking I/O
+   - Moderate parallelism (10-100 threads)
+
+3. **multiprocessing** - For CPU-bound operations:
+   - Data processing and transformations
+   - Cryptographic operations
+   - Heavy computational tasks
+
+#### Dataclasses with Slots - MANDATORY
+
+```python
+from dataclasses import dataclass
+
+@dataclass(slots=True, frozen=True)
+class Certificate:
+    """Certificate model with memory efficiency"""
+    id: int
+    subject: str
+    issuer: str
+    expires_at: str
+    serial_number: str
+```
+
+**Benefits**:
+- 30-50% less memory per instance
+- Faster attribute access
+- Better type safety
+
+#### Type Hints - MANDATORY
+
 ```python
 from typing import Optional, List, Dict
 
-def fetch_configuration(user_id: int) -> Optional[Dict[str, str]]:
-    """Fetch user configuration."""
+def fetch_certificate(cert_id: int) -> Optional[Dict[str, str]]:
+    """Fetch certificate by ID."""
+    pass
+
+def list_users(role: str) -> List[Dict[str, str]]:
+    """List users by role."""
     pass
 ```
 
-## Version Management
+---
 
-### Version File Format
+## Microservices Architecture
 
-**Location**: `.version` at project root
+### Four-Service Architecture
 
-**Format**: `MAJOR.MINOR.PATCH.EPOCH64`
+SkausWatch uses four independent containerized services:
 
-**Constraints**:
-- MAJOR: Non-negative integer (0-999)
-- MINOR: Non-negative integer (0-999)
-- PATCH: Non-negative integer (0-999)
-- EPOCH64: 13-digit Unix timestamp in milliseconds
+| Service | Purpose | Technology |
+|---------|---------|-----------|
+| **Manager** | Management plane and configuration | Flask + PyDAL |
+| **PKI Server** | Certificate management | Flask + PyDAL |
+| **SSH CA** | SSH certificate authority | Flask + PyDAL |
+| **AAA Monitor** | Audit and threat analysis | Flask + PyDAL |
 
-**Examples**:
-- `1.0.0.1702742400000` - Release version
-- `2.1.5.1702742500000` - Patch release
-- `0.0.0.1702742600000` - Development (skips release)
+### Service Communication
 
-### Version Increment Rules
+- **Synchronous**: REST API for request/response
+- **Data Consistency**: Shared database layer
+- **Independent Deployment**: Each service deployable independently
+- **Scaling**: Scale individual services based on demand
 
-- **Major**: Breaking API changes, major feature additions
-- **Minor**: New features, backward compatible
-- **Patch**: Bug fixes, minor improvements
-- **Epoch64**: Automatic on build (Unix timestamp * 1000)
+### Design Principles
 
-### Version Update Workflow
+1. **Single Responsibility**: Each service has one clear purpose
+2. **API-First Design**: Well-defined inter-service APIs
+3. **Data Isolation**: Services own their data models
+4. **Fault Isolation**: Failures don't cascade to other services
+5. **Independent Scaling**: Scale services independently
 
-1. Make code changes in feature branch
-2. Update `.version` file with new semantic version
-3. Commit changes with message: `chore: bump version to X.Y.Z`
-4. Push to main branch
-5. Workflow automatically creates release
+---
+
+## Docker Standards
+
+### Build Standards
+
+**All builds MUST be executed within Docker containers**:
+
+```bash
+# Python builds
+docker run --rm -v $(pwd):/app -w /app python:3.13-slim \
+    pip install -r requirements.txt
+```
+
+### Multi-Stage Builds
+
+```dockerfile
+FROM python:3.13-slim AS builder
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --user --no-cache-dir -r requirements.txt
+
+FROM debian:stable-slim
+
+WORKDIR /app
+COPY --from=builder /root/.local /root/.local
+COPY . .
+
+ENV PATH=/root/.local/bin:$PATH
+
+CMD ["python", "app.py"]
+```
+
+### Docker Compose Standards
+
+**ALWAYS create docker-compose.dev.yml for local development**
+
+```yaml
+version: '3.8'
+
+networks:
+  app-network:
+    driver: bridge
+
+services:
+  manager:
+    build: ./services/manager
+    networks:
+      - app-network
+    ports:
+      - "5000:5000"
+    environment:
+      - DATABASE_URL=postgresql://user:pass@postgres:5432/skauswatch
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16-alpine
+    networks:
+      - app-network
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=pass
+      - POSTGRES_DB=skauswatch
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:
+```
+
+---
 
 ## Testing Requirements
 
-### Unit Tests
+### Unit Testing
 
 **Framework**: pytest with async support
 
 **Coverage**: Minimum 70% code coverage
 
 **Requirements**:
-- All business logic must have unit tests
-- Edge cases and error conditions tested
-- Async functions tested with `pytest-asyncio`
-- Fixtures for common test data
+- Network isolated (no external calls)
+- Mock all external dependencies
+- Fast execution (milliseconds)
+- Independent and repeatable
 
-**Command**:
 ```bash
 pytest tests/ -v --cov=services --cov=shared --cov-report=html
 ```
 
-### Integration Tests
+### Integration Testing
 
-**Scope**:
 - Database interactions
-- External service calls
+- External service calls (mocked)
 - Multi-component workflows
-
-**Requirements**:
-- Use test database (PostgreSQL in containers)
-- Mock external services
-- Clean up test data after each test
+- Authentication and authorization
 
 ### Test Organization
 
@@ -154,51 +494,50 @@ pytest tests/ -v --cov=services --cov=shared --cov-report=html
 tests/
 ├── unit/
 │   ├── test_auth.py
-│   ├── test_models.py
-│   └── test_utils.py
+│   ├── test_certificates.py
+│   └── test_audit.py
 ├── integration/
 │   ├── test_database.py
 │   └── test_api.py
-└── conftest.py  # Pytest fixtures
+├── api/
+│   ├── manager/
+│   ├── pki-server/
+│   ├── ssh-ca/
+│   └── aaa-monitor/
+└── conftest.py
 ```
+
+---
 
 ## Security Standards
 
-### Bandit Security Scanning
+### Input Validation
 
-**Scope**: All Python code in `services/` and `shared/`
+**MANDATORY for ALL endpoints**:
 
-**Severity**: Medium level (`-ll`)
-
-**Common Issues Detected**:
-- SQL injection vulnerabilities
-- Hardcoded credentials
-- Insecure hashing (MD5, SHA1)
-- Use of exec/eval
-- Insecure random generation
-- Hardcoded passwords in code
-- Use of assert for validation
-
-**Fix Examples**:
-
-Bandit Issue: Hardcoded password
 ```python
-# BAD
-password = "admin123"
+from py_libs.validation import chain, IsNotEmpty, IsEmail, IsLength
 
-# GOOD
-password = os.environ.get('APP_PASSWORD')
+email_validator = chain(IsNotEmpty(), IsLength(3, 255), IsEmail())
+result = email_validator(user_input)
+if not result.is_valid:
+    return {"error": result.error}, 400
 ```
 
-Bandit Issue: Use of assert
-```python
-# BAD
-assert user is not None, "User must exist"
+### Authentication & Authorization
 
-# GOOD
-if user is None:
-    raise ValueError("User must exist")
-```
+- Multi-factor authentication support
+- Role-based access control (Admin, Maintainer, Viewer)
+- API key management with rotation
+- JWT token validation with proper expiration
+- Session management with secure cookies
+
+### TLS/Encryption
+
+- **TLS 1.2 minimum**, prefer TLS 1.3
+- HTTPS for all endpoints
+- HTTP/3 (QUIC) for high-performance
+- JWT and MFA as standard
 
 ### Secret Management
 
@@ -208,25 +547,15 @@ if user is None:
 - Use `.env` files (added to `.gitignore`)
 - Use GitHub Secrets for CI/CD
 
-**Environment Variables**:
-```bash
-LICENSE_KEY=PENG-XXXX-XXXX-XXXX-XXXX-ABCD
-LICENSE_SERVER_URL=https://license.penguintech.io
-DATABASE_PASSWORD=secure_password_here
-```
-
 ### Dependency Security
 
-**Requirements**:
+**MANDATORY**:
 - Regular `pip-audit` checks
 - Address high/critical vulnerabilities immediately
-- Review security advisories for dependencies
 - Keep dependencies updated
+- Monitor via Dependabot
 
-**Command**:
-```bash
-pip-audit
-```
+---
 
 ## Documentation Standards
 
@@ -234,13 +563,13 @@ pip-audit
 
 **Rule**: Comments explain WHY, not WHAT
 
-**Good Comments**:
+**Good**:
 ```python
-# Use exponential backoff to handle rate limiting from license server
+# Use exponential backoff for rate-limited API calls
 retry_delay = base_delay * (2 ** attempt)
 ```
 
-**Bad Comments**:
+**Bad**:
 ```python
 # Multiply base_delay by 2^attempt
 retry_delay = base_delay * (2 ** attempt)
@@ -250,20 +579,19 @@ retry_delay = base_delay * (2 ** attempt)
 
 **Requirement**: Each module must have a docstring
 
-**Example**:
 ```python
-"""Authentication and authorization module.
+"""Certificate management module.
 
-This module handles user authentication, session management, and
-role-based access control for SkausWatch services.
+This module handles X.509 certificate lifecycle including issuance,
+validation, revocation, and expiration tracking.
 
 Classes:
-    AuthManager: Main authentication handler
-    Session: User session management
+    CertificateManager: Main certificate handler
+    Certificate: Certificate model
 
 Functions:
-    validate_credentials: Verify user credentials
-    create_session: Initialize new user session
+    issue_certificate: Create new certificate
+    validate_certificate: Verify certificate validity
 """
 ```
 
@@ -271,172 +599,191 @@ Functions:
 
 **Standard**: Docstring for all public functions
 
-**Format**:
 ```python
-def process_audit_logs(user_id: int, start_date: str) -> List[Dict]:
-    """Process audit logs for a user within date range.
+def issue_certificate(
+    subject: str,
+    validity_days: int = 365
+) -> Dict[str, str]:
+    """Issue new X.509 certificate.
 
-    Retrieves audit logs for the specified user, validates entries,
-    and applies AI analysis for threat detection.
+    Creates a new certificate with the provided subject and
+    validity period.
 
     Args:
-        user_id: Internal user identifier
-        start_date: ISO format date (YYYY-MM-DD)
+        subject: Certificate subject (CN=...)
+        validity_days: Certificate validity period in days
 
     Returns:
-        List of processed audit log entries with threat scores
+        Dictionary with certificate data and PEM encoding
 
     Raises:
-        ValueError: If start_date is invalid format
-        PermissionError: If user lacks audit log access
-
-    Example:
-        >>> logs = process_audit_logs(123, "2024-01-01")
-        >>> for log in logs:
-        ...     print(log['threat_score'])
+        ValueError: If subject is invalid format
+        PermissionError: If user lacks issuance permission
     """
+    pass
 ```
 
-## Git Workflow
+---
 
-### Branch Naming
+## Logging & Monitoring
 
-**Format**: `type/description`
+### Logging Standards
 
-**Types**:
-- `feature/`: New feature
-- `bugfix/`: Bug fixes
-- `chore/`: Maintenance, dependencies
-- `docs/`: Documentation only
-- `refactor/`: Code refactoring
+- **Console logging**: Always implement console output
+- **Structured logging**: Use correlation IDs for tracing
+- **Logging levels**:
+  - `-v`: Warnings and criticals
+  - `-vv`: Info level (default)
+  - `-vvv`: Debug logging
 
-**Examples**:
-```
-feature/license-enforcement
-bugfix/ssh-ca-certificate-expiry
-chore/update-dependencies
-docs/api-endpoints
-refactor/auth-module
-```
+### Health Endpoints
 
-### Main Branch Protection
+**MANDATORY for all applications**:
 
-**Rules**:
-- Require pull request reviews (minimum 1)
-- Require status checks to pass (CI/CD)
-- Dismiss stale pull request approvals
-- Require branches to be up-to-date before merge
-- No forced pushes to main
-
-## Commit Guidelines
-
-### Commit Message Format
-
-**Standard**: Conventional Commits
-
-**Format**: `type(scope): subject`
-
-**Types**:
-- `feat`: New feature
-- `fix`: Bug fix
-- `chore`: Build, dependencies, tooling
-- `docs`: Documentation
-- `refactor`: Code refactoring
-- `test`: Test additions or modifications
-- `perf`: Performance improvements
-
-**Scope**: Optional, but recommended (module or feature name)
-
-**Subject**: Imperative, present tense, lowercase, no period
-
-**Examples**:
-```
-feat(auth): implement two-factor authentication
-fix(pki): correct certificate expiry calculation
-chore(deps): update dependencies to latest versions
-docs(api): add endpoint authentication examples
+```python
+@app.route('/healthz')
+def health():
+    """Health check endpoint"""
+    return {'status': 'healthy', 'timestamp': datetime.utcnow().isoformat()}
 ```
 
-### Detailed Commit Message
+### Prometheus Metrics
 
-For complex changes, include body and footer:
+```python
+from prometheus_client import Counter, Histogram, generate_latest
 
+REQUEST_COUNT = Counter(
+    'http_requests_total',
+    'Total HTTP requests',
+    ['method', 'endpoint']
+)
+REQUEST_DURATION = Histogram(
+    'http_request_duration_seconds',
+    'HTTP request duration'
+)
+
+@app.route('/metrics')
+def metrics():
+    return generate_latest(), {'Content-Type': 'text/plain'}
 ```
-feat(license): add offline mode support
 
-Implement local caching of license validation to support
-offline operation. Cache is refreshed on each network connection.
+---
 
-Adds:
-- Local SQLite cache for license status
-- Automatic sync when online detected
-- Cache expiry after 7 days
+## WaddleAI Integration
 
-Fixes #123
-Related to #456
+**Optional** - integrate only when AI features are required.
+
+### When to Use WaddleAI
+
+- Natural language processing (NLP)
+- Machine learning model inference
+- AI-powered threat detection
+- Intelligent data analysis
+- Anomaly detection in audit logs
+
+### Integration Pattern
+
+```python
+import os
+import httpx
+from typing import Dict, Any
+
+class WaddleAIClient:
+    """Client for WaddleAI service"""
+
+    def __init__(self):
+        self.base_url = os.getenv('WADDLEAI_URL', 'http://localhost:8000')
+        self.client = httpx.AsyncClient(base_url=self.base_url)
+
+    async def analyze_threat(self, log_data: Dict[str, Any]) -> Dict:
+        """Analyze audit log for threats"""
+        response = await self.client.post(
+            "/api/v1/analyze",
+            json={"data": log_data}
+        )
+        return response.json()
+
+# Flask integration
+from shared.licensing import requires_feature
+
+@app.route('/api/analyze-threat', methods=['POST'])
+@auth_required()
+@requires_feature('ai_analysis')
+async def analyze_threat():
+    """AI-powered threat analysis"""
+    ai_client = WaddleAIClient()
+    result = await ai_client.analyze_threat(request.get_json())
+    return jsonify(result)
 ```
 
-## Deployment Standards
+### License-Gating
 
-### Pre-Deployment Checklist
+**AI features MUST be license-gated as enterprise-only**:
 
-- [ ] All tests passing locally and in CI
-- [ ] Code coverage above 70%
-- [ ] Bandit security scan complete (no critical issues)
-- [ ] Version updated in `.version` file
-- [ ] Documentation updated for new features
-- [ ] No hardcoded credentials or sensitive data
-- [ ] Pull request reviewed and approved
-- [ ] Changelog/release notes prepared
+```python
+# License configuration
+AI_FEATURES = {
+    'ai_threat_analysis': 'professional',
+    'ai_anomaly_detection': 'professional',
+    'ai_custom_models': 'enterprise',
+}
 
-### Release Process
+# Feature checking
+from shared.licensing import license_client
 
-1. Create feature/bugfix branch
-2. Make changes following standards above
-3. Ensure all tests pass: `pytest tests/ -v`
-4. Ensure linting passes: `black` and `isort`
-5. Create pull request with detailed description
-6. Address code review feedback
-7. Get approval from maintainer
-8. Merge to main
-9. Update `.version` file
-10. Push to main (triggers release workflow)
-11. Verify release created on GitHub
+if license_client.has_feature('ai_threat_analysis'):
+    # AI features available
+    pass
+```
 
-## Continuous Integration
+---
 
-### Required Checks
+## CI/CD Standards
 
-All pull requests must pass:
-1. **Bandit**: Security scan (informational, no blocking)
-2. **Black**: Code formatting
-3. **isort**: Import sorting
-4. **flake8**: Linting
-5. **pytest**: Unit tests with 70%+ coverage
-6. **mypy**: Type checking
+### Workflow Monitoring
 
-### Build Artifacts
+All builds monitor `.version` file for automatic versioning.
 
-- Security reports (JSON)
-- Coverage reports (HTML, XML)
-- Docker images (multi-architecture)
+### Build Naming
 
-## Performance Expectations
+| Scenario | Tag Format |
+|----------|-----------|
+| Regular build (main) | `skauswatch:beta-<epoch64>` |
+| Regular build (other) | `skauswatch:alpha-<epoch64>` |
+| Version release (main) | `skauswatch:vX.X.X-beta` |
+| Version release (other) | `skauswatch:vX.X.X-alpha` |
+| Release tag | `skauswatch:vX.X.X` + `latest` |
 
-### Code Performance
+### Security Scanning
 
-- API endpoints: < 200ms response time
-- Database queries: < 100ms
-- License validation: < 50ms
+**MANDATORY**:
+- Bandit for Python security analysis
+- CodeQL for code analysis
+- Trivy for container scanning
 
-### Build Performance
+---
 
-- Build time: < 10 minutes
-- Test suite: < 5 minutes
-- Lint check: < 1 minute
+## Quality Checklist
+
+Before marking any task complete, verify:
+
+- ✅ All error cases handled properly
+- ✅ Unit tests cover all code paths
+- ✅ Integration tests verify interactions
+- ✅ Security requirements fully implemented
+- ✅ Performance acceptable
+- ✅ Documentation complete and accurate
+- ✅ Code review standards met
+- ✅ No hardcoded secrets or credentials
+- ✅ Logging and monitoring in place
+- ✅ Build passes in containerized environment
+- ✅ No security vulnerabilities in dependencies
+- ✅ Edge cases and boundary conditions tested
+
+---
 
 ## Related Documents
 
+- [Project Overview](../CLAUDE.md)
 - [Workflows Documentation](WORKFLOWS.md)
-- [Project README](../README.md)
-- [Version Management](../CLAUDE.md#version-management-system)
+- [README](../README.md)

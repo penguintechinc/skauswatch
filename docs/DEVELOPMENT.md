@@ -1,0 +1,699 @@
+# Local Development Guide - SkausWatch
+
+Complete guide to setting up a local development environment for SkausWatch's four-service architecture (Manager, PKI Server, SSH CA, and AAA Monitor), running the application locally, and following the development workflow.
+
+## Table of Contents
+
+1. [Prerequisites](#prerequisites)
+2. [Initial Setup](#initial-setup)
+3. [Starting Development Environment](#starting-development-environment)
+4. [Service Architecture](#service-architecture)
+5. [Development Workflow](#development-workflow)
+6. [Common Tasks](#common-tasks)
+7. [Troubleshooting](#troubleshooting)
+
+---
+
+## Prerequisites
+
+### System Requirements
+
+- **macOS 12+**, **Linux (Ubuntu 20.04+)**, or **Windows 10+ with WSL2**
+- **Docker Desktop** 4.0+ (or Docker Engine 20.10+)
+- **Docker Compose** 2.0+
+- **Git** 2.30+
+- **Python** 3.13+ (for shared libraries and service development)
+- **PostgreSQL** 16+ (or use Docker version)
+- **Redis** 7+ (or use Docker version)
+
+### Optional Tools
+
+- **Docker Buildx** (for multi-architecture builds)
+- **Helm** (for Kubernetes deployments)
+- **kubectl** (for Kubernetes clusters)
+
+### Installation
+
+**macOS (Homebrew)**:
+```bash
+brew install docker docker-compose git python postgresql redis
+brew install --cask docker
+```
+
+**Ubuntu/Debian**:
+```bash
+sudo apt-get update
+sudo apt-get install -y docker.io docker-compose git python3.13 postgresql redis-server
+sudo usermod -aG docker $USER  # Allow docker without sudo
+newgrp docker                   # Activate group change
+```
+
+**Verify Installation**:
+```bash
+docker --version              # Docker 20.10+
+docker-compose --version      # Docker Compose 2.0+
+git --version
+python3 --version             # Python 3.13+
+postgres --version            # PostgreSQL 16+
+redis-cli --version           # Redis 7+
+```
+
+---
+
+## Initial Setup
+
+### Clone Repository
+
+```bash
+git clone https://github.com/penguintechinc/skauswatch.git
+cd SkausWatch
+```
+
+### Install Dependencies
+
+```bash
+# Install all project dependencies
+make setup
+```
+
+This runs:
+1. Python virtual environment setup
+2. Shared library installation (py_libs)
+3. Per-service dependency installation
+4. Pre-commit hooks installation
+5. Database initialization
+
+### Environment Configuration
+
+Copy and customize environment files:
+
+```bash
+# Copy example environment files
+cp .env.example .env
+cp .env.local.example .env.local  # Optional: local overrides
+```
+
+**Key Environment Variables for Four Services**:
+
+```bash
+# Database Configuration
+DB_TYPE=postgres              # postgres, mysql, sqlite
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=skauswatch_dev
+DB_USER=postgres
+DB_PASSWORD=postgres
+
+# Manager Service (Port 8000)
+MANAGER_PORT=8000
+MANAGER_DEBUG=true
+MANAGER_SECRET_KEY=your-secret-key-for-dev
+
+# PKI Server (Port 8001)
+PKI_SERVER_PORT=8001
+PKI_DEBUG=true
+
+# SSH CA Server (Port 8002)
+SSH_CA_PORT=8002
+SSH_CA_DEBUG=true
+
+# AAA Monitor (Port 8003)
+AAA_MONITOR_PORT=8003
+AAA_MONITOR_DEBUG=true
+
+# Redis Cache
+REDIS_URL=redis://localhost:6379/0
+REDIS_PORT=6379
+
+# License (Development - all features available)
+RELEASE_MODE=false
+LICENSE_KEY=not-required-in-dev
+```
+
+### Database Initialization
+
+```bash
+# Create database and run migrations
+make db-init
+
+# Seed with mock data (3-4 items per entity)
+make seed-mock-data
+
+# Verify database connection
+make db-health
+```
+
+---
+
+## Starting Development Environment
+
+### Quick Start (All Four Services)
+
+```bash
+# Start all services in one command
+make dev
+
+# This runs:
+# - PostgreSQL database
+# - Redis cache
+# - Manager service (port 8000)
+# - PKI Server (port 8001)
+# - SSH CA Server (port 8002)
+# - AAA Monitor (port 8003)
+
+# Access the services:
+# Manager UI:      http://localhost:8000
+# PKI Server API:  http://localhost:8001
+# SSH CA API:      http://localhost:8002
+# AAA Monitor API: http://localhost:8003
+```
+
+### Individual Service Management
+
+**Start specific services**:
+```bash
+# Start only Manager service
+docker-compose up -d manager
+
+# Start Manager, PKI, and database
+docker-compose up -d postgres redis manager pki-server
+
+# Start without detaching (see logs)
+docker-compose up manager
+```
+
+**View service logs**:
+```bash
+# All services
+docker-compose logs -f
+
+# Specific service
+docker-compose logs -f manager
+
+# Last 100 lines, follow new entries
+docker-compose logs -f --tail=100 pki-server
+```
+
+**Stop services**:
+```bash
+# Stop all services (keep data)
+docker-compose down
+
+# Stop and remove volumes (clean slate)
+docker-compose down -v
+
+# Restart services
+docker-compose restart
+
+# Rebuild and restart (apply code changes)
+docker-compose down && docker-compose up -d --build
+```
+
+---
+
+## Service Architecture
+
+### Four-Service Design
+
+| Service | Purpose | Port | Language |
+|---------|---------|------|----------|
+| **Manager** | Configuration and management plane | 8000 | Python 3.13 + Flask |
+| **PKI Server** | X.509 certificate management | 8001 | Python 3.13 + Flask |
+| **SSH CA** | SSH certificate authority | 8002 | Python 3.13 + Flask |
+| **AAA Monitor** | Audit logging and threat analysis | 8003 | Python 3.13 + Flask |
+
+### Shared Components
+
+All services use shared security libraries:
+- **py_libs**: Input validation, security middleware, crypto operations
+- **Database layer**: SQLAlchemy (init) + PyDAL (operations)
+- **Authentication**: Flask-Security-Too (RBAC)
+
+### Service Dependencies
+
+```
+Manager ─────────── PKI Server
+   │                   │
+   ├── SSH CA Server ──┤
+   │                   │
+   └── AAA Monitor ────┘
+              │
+         Shared Libraries
+         (py_libs)
+         │
+   ┌─────┴──────────────┐
+   │                    │
+PostgreSQL Database   Redis Cache
+```
+
+---
+
+## Development Workflow
+
+### 1. Start Development Environment
+
+```bash
+make dev                      # Start all services
+make seed-mock-data          # Populate with test data
+```
+
+### 2. Make Code Changes
+
+Edit files in your favorite editor. Services with auto-reload:
+
+- **Python (Flask)**: Reload on file save (FLASK_DEBUG=true, auto-reload via Werkzeug)
+- **Shared Libraries**: Services restart on changes (`py_libs`)
+
+For services without auto-reload:
+```bash
+docker-compose restart <service-name>
+```
+
+### 3. Verify Changes
+
+```bash
+# Quick syntax checks
+python -m py_compile services/manager/*.py
+
+# Run linters
+make lint
+
+# Run unit tests (specific service)
+cd services/manager && pytest tests/unit/
+
+# Run all tests
+make test
+```
+
+### 4. Populate Mock Data for Feature Testing
+
+After implementing a new feature, create mock data scripts:
+
+```bash
+# Create mock data script for new entity (e.g., Users)
+cat > scripts/mock-data/seed-users.py << 'EOF'
+from dal import DAL
+
+def seed_users():
+    db = DAL('postgresql://user:password@localhost/dbname')
+
+    users = [
+        {"email": "admin@example.com", "role": "admin", "status": "active"},
+        {"email": "user@example.com", "role": "user", "status": "active"},
+        {"email": "viewer@example.com", "role": "viewer", "status": "active"},
+        {"email": "inactive@example.com", "role": "user", "status": "inactive"},
+    ]
+
+    for user in users:
+        db.users.insert(**user)
+
+    print(f"✓ Seeded {len(users)} users")
+
+if __name__ == "__main__":
+    seed_users()
+EOF
+
+# Run the mock data script
+python scripts/mock-data/seed-users.py
+
+# Add to seed-all.py orchestrator
+echo "from seed_users import seed_users; seed_users()" >> scripts/mock-data/seed-all.py
+```
+
+### 5. Run Pre-Commit Checklist
+
+Before committing, run the comprehensive pre-commit script:
+
+```bash
+./scripts/pre-commit/pre-commit.sh
+```
+
+**Steps**:
+1. ✅ Linters (flake8, black, mypy for Python)
+2. ✅ Security scans (bandit)
+3. ✅ Secret detection (no API keys, passwords, tokens)
+4. ✅ Build & Run (verify containers start)
+5. ✅ Smoke tests (services respond to health checks)
+6. ✅ Unit tests (isolated component testing)
+7. ✅ Integration tests (component interactions)
+
+**Troubleshooting Pre-Commit**: See [Pre-Commit Documentation](PRE_COMMIT.md)
+
+### 6. Testing & Validation
+
+Comprehensive testing guide:
+
+**Quick Test Commands**:
+```bash
+# Smoke tests only (fast, <2 min)
+make smoke-test
+
+# Unit tests only
+make test-unit
+
+# Integration tests only
+make test-integration
+
+# All tests
+make test
+
+# Specific test file
+pytest tests/unit/test_auth.py
+
+# With coverage
+make test-cov
+```
+
+### 7. Create Pull Request
+
+Once tests pass:
+
+```bash
+# Push branch
+git push origin feature-branch-name
+
+# Create PR via GitHub CLI
+gh pr create --title "Brief feature description" \
+  --body "Detailed description of changes"
+```
+
+### 8. Code Review & Merge
+
+- Address review feedback
+- Re-run tests if changes made
+- Merge when approved
+
+---
+
+## Common Tasks
+
+### Adding Python Dependency to Service
+
+```bash
+# Add to services/<service-name>/requirements.txt
+echo "new-package==1.0.0" >> services/manager/requirements.txt
+
+# Rebuild service container
+docker-compose up -d --build manager
+
+# Verify import works
+docker-compose exec manager python -c "import new_package"
+```
+
+### Adding Shared Library Dependency
+
+```bash
+# Add to shared/py_libs/setup.py extras
+# Edit setup.py and add to install_requires or extras_require
+
+# Reinstall shared libraries
+pip install -e "shared/py_libs[all]"
+
+# Rebuild all services (they use shared libs)
+docker-compose up -d --build
+```
+
+### Adding Environment Variable
+
+```bash
+# Add to .env
+echo "NEW_VAR=value" >> .env
+
+# Restart services to pick up new variable
+docker-compose restart
+
+# Verify it's set
+docker-compose exec manager printenv | grep NEW_VAR
+```
+
+### Debugging a Service
+
+**View logs in real-time**:
+```bash
+docker-compose logs -f manager
+```
+
+**Access container shell**:
+```bash
+# Python service
+docker-compose exec manager bash
+```
+
+**Execute commands in container**:
+```bash
+# Run Python script
+docker-compose exec manager python -c "print('hello')"
+
+# Check service health
+docker-compose exec manager curl http://localhost:8000/api/health
+```
+
+### Database Operations
+
+**Connect to database**:
+```bash
+# PostgreSQL
+docker-compose exec postgres psql -U postgres -d skauswatch_dev
+
+# View schema
+\dt                    # PostgreSQL tables
+```
+
+**Reset database**:
+```bash
+# Full reset (deletes all data)
+docker-compose down -v
+make db-init
+make seed-mock-data
+```
+
+**Run migrations**:
+```bash
+# Migrations run automatically on startup
+docker-compose restart manager
+
+# Or manually run migration
+docker-compose exec manager python -m migrations
+```
+
+### Working with Git Branches
+
+```bash
+# Create feature branch
+git checkout -b feature/new-feature-name
+
+# Keep branch updated with main
+git fetch origin
+git rebase origin/main
+
+# Clean commit history before PR
+git rebase -i origin/main  # Interactive rebase
+
+# Push branch
+git push origin feature/new-feature-name
+```
+
+### Database Backups
+
+```bash
+# Backup PostgreSQL
+docker-compose exec postgres pg_dump -U postgres skauswatch_dev > backup.sql
+
+# Restore from backup
+docker-compose exec -T postgres psql -U postgres skauswatch_dev < backup.sql
+```
+
+---
+
+## Troubleshooting
+
+### Services Won't Start
+
+**Check if ports are already in use**:
+```bash
+# Find what's using port 8000
+lsof -i :8000
+
+# Kill the process
+kill -9 <PID>
+
+# Or use different ports in .env
+MANAGER_PORT=8001
+```
+
+**Docker daemon not running**:
+```bash
+# macOS
+open /Applications/Docker.app
+
+# Linux
+sudo systemctl start docker
+
+# Windows (Docker Desktop)
+# Start Docker Desktop from Applications
+```
+
+### Database Connection Error
+
+```bash
+# Verify database container is running
+docker-compose ps postgres
+
+# Check database credentials in .env
+cat .env | grep DB_
+
+# Connect to database directly
+docker-compose exec postgres psql -U postgres -d postgres
+
+# View logs
+docker-compose logs postgres
+```
+
+### Manager Service Won't Start
+
+```bash
+# Check logs
+docker-compose logs manager
+
+# Verify database migration
+docker-compose exec manager python -c "from app import db; db.create_all()"
+
+# Reset and rebuild
+docker-compose down
+docker-compose up -d --build manager
+```
+
+### Shared Libraries Import Error
+
+```bash
+# Verify py_libs is installed
+pip list | grep py_libs
+
+# Reinstall with all extras
+pip install -e "shared/py_libs[all]"
+
+# Rebuild all services
+docker-compose up -d --build
+```
+
+### Git Merge Conflicts
+
+```bash
+# View conflicts
+git status
+
+# Edit conflicted files (marked with <<<<, ====, >>>>)
+# Remove conflict markers and keep desired code
+
+# Mark as resolved
+git add <resolved-file>
+
+# Complete merge
+git commit -m "Resolve merge conflicts"
+```
+
+### Slow Docker Builds
+
+```bash
+# Check Docker disk usage
+docker system df
+
+# Clean up unused images/containers
+docker system prune
+
+# Rebuild without cache (slow, but fresh)
+docker-compose build --no-cache manager
+```
+
+---
+
+## Tips & Best Practices
+
+### Hot Reload Development
+
+For fastest iteration:
+```bash
+# Start services once
+docker-compose up -d
+
+# Edit Python files → auto-reload (FLASK_DEBUG=true)
+# Edit shared libraries → restart services (docker-compose restart)
+```
+
+### Environment-Specific Configuration
+
+```bash
+# Development settings (auto-loaded)
+.env              # Default development config
+.env.local        # Local machine overrides (gitignored)
+
+# Production settings (via secret management)
+Kubernetes secrets
+AWS Secrets Manager
+HashiCorp Vault
+```
+
+### Code Organization
+
+Keep project clean:
+```bash
+# Remove old branches
+git branch -D old-branch
+
+# Clean local Docker images
+docker image prune -a
+
+# Clean unused containers
+docker container prune
+```
+
+### Performance Tips
+
+```bash
+# Use specific services to reduce memory usage
+docker-compose up postgres manager  # Skip other services
+
+# Use lightweight testing
+make smoke-test  # Instead of full test suite while developing
+
+# Cache Docker layers by building in order of frequency of change
+Dockerfile: base → dependencies → code → entrypoint
+```
+
+---
+
+## Related Documentation
+
+- **Testing**: [Testing Documentation](TESTING.md)
+  - Mock data scripts
+  - Smoke tests
+  - Unit/integration/E2E tests
+  - Performance tests
+
+- **Pre-Commit**: [Pre-Commit Checklist](PRE_COMMIT.md)
+  - Linting requirements
+  - Security scanning
+  - Build verification
+  - Test requirements
+
+- **Deployment**: [Kubernetes Guide](../k8s/README.md)
+  - Containerization
+  - Kubernetes deployment
+  - Health checks
+
+- **Standards**: [Development Standards](STANDARDS.md)
+  - Architecture decisions
+  - Code style
+  - API conventions
+  - Database patterns
+
+- **Workflows**: [CI/CD Workflows](WORKFLOWS.md)
+  - GitHub Actions pipelines
+  - Build automation
+  - Test automation
+  - Release processes
+
+---
+
+**Last Updated**: 2026-01-06
+**Maintained by**: Penguin Tech Inc
