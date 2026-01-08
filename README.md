@@ -1,233 +1,125 @@
-# SkausWatch
-
-🔒 **Commercial License** | 🌐 [skauswatch.io](https://skauswatch.io) | 📚 [Documentation](https://docs.skauswatch.io) | 💻 [GitHub](https://github.com/penguintechinc/skauswatch)
-
-![Python Version](https://img.shields.io/badge/python-3.13-blue.svg)
-![License](https://img.shields.io/badge/license-Commercial-orange.svg)
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)
-![Coverage](https://img.shields.io/badge/coverage-95%25-brightgreen.svg)
-
-**SkausWatch** is a comprehensive security monitoring and alerting system designed for enterprise environments. It provides real-time monitoring, certificate management, SSH certificate authority services, and authentication/authorization/accounting (AAA) monitoring capabilities.
-
-## 💰 Pricing
-
-- **$7.50/month** per compute node (cloud VM or hardware)
-- Volume discounts available starting at 100 nodes
-- Enterprise support included
-- Contact [sales@penguintech.io](mailto:sales@penguintech.io) for custom pricing
-
-## Features
-
-### Core Services
-
-- **Manager Service**: Central orchestration and management service
-- **PKI Server**: Public Key Infrastructure management and certificate lifecycle
-- **SSH CA**: SSH Certificate Authority for secure server access
-- **AAA Monitor**: Authentication, Authorization, and Accounting monitoring
-
-### Key Capabilities
-
-- 🔐 **Certificate Management**: Automated certificate lifecycle management
-- 🔑 **SSH CA Services**: Secure SSH certificate provisioning
-- 📊 **Real-time Monitoring**: Comprehensive system and security monitoring  
-- 🚨 **Alerting System**: Intelligent alerting with multiple notification channels
-- 📈 **Metrics & Dashboards**: Prometheus metrics with Grafana visualization
-- 🔒 **Security Auditing**: Comprehensive audit logging and compliance reporting
-- 🔄 **API-First Design**: RESTful APIs for all services
-- 🐳 **Container Ready**: Full Docker and Kubernetes support
-
-## Architecture
-
-SkausWatch follows a microservices architecture with the following components:
+[![CI](https://github.com/PenguinCloud/project-template/actions/workflows/ci.yml/badge.svg)](https://github.com/PenguinCloud/project-template/actions/workflows/ci.yml)
+[![Docker Build](https://github.com/PenguinCloud/project-template/actions/workflows/docker-build.yml/badge.svg)](https://github.com/PenguinCloud/project-template/actions/workflows/docker-build.yml)
+[![codecov](https://codecov.io/gh/PenguinCloud/project-template/branch/main/graph/badge.svg)](https://codecov.io/gh/PenguinCloud/project-template)
+[![Go Report Card](https://goreportcard.com/badge/github.com/PenguinCloud/project-template)](https://goreportcard.com/report/github.com/PenguinCloud/project-template)
+[![version](https://img.shields.io/badge/version-5.1.1-blue.svg)](https://semver.org)
+[![License](https://img.shields.io/badge/License-Limited%20AGPL3-blue.svg)](LICENSE.md)
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│  Manager        │    │  PKI Server     │    │  SSH CA         │
-│  Service        │    │  Service        │    │  Service        │
-│  (Port 8000)    │    │  (Port 8001)    │    │  (Port 8002)    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-         ┌─────────────────┐    │    ┌─────────────────┐
-         │  AAA Monitor    │    │    │  Shared         │
-         │  Service        │────┼────│  Components     │
-         │  (Port 8003)    │    │    │                 │
-         └─────────────────┘    │    └─────────────────┘
-                                │
-    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-    │  PostgreSQL  │    │    Redis     │    │ Prometheus + │
-    │   Database   │    │    Cache     │    │   Grafana    │
-    └──────────────┘    └──────────────┘    └──────────────┘
+ ____            _           _     _____                    _       _
+|  _ \ _ __ ___ (_) ___  ___| |_  |_   _|__ _ __ ___  _ __ | | __ _| |_ ___
+| |_) | '__/ _ \| |/ _ \/ __| __|   | |/ _ \ '_ ` _ \| '_ \| |/ _` | __/ _ \
+|  __/| | | (_) | |  __/ (__| |_    | |  __/ | | | | | |_) | | (_| | ||  __/
+|_|   |_|  \___/| |\___|\___|\__|   |_|\___|_| |_| |_| .__/|_|\__,_|\__\___|
+               _/ |                                  |_|
+              |__/
 ```
 
-## Quick Start
+# 🏗️ Enterprise Project Template
 
-### Prerequisites
+**The Ultimate Multi-Language Development Foundation**
 
-- Python 3.13+
-- Docker and Docker Compose
-- PostgreSQL 16+
-- Redis 7+
+This comprehensive project template provides a production-ready foundation for enterprise software development, incorporating best practices from Penguin Tech Inc projects. Built with security, scalability, and developer experience at its core, it offers standardized tooling for Go, Python, and Node.js applications with integrated licensing, monitoring, and enterprise-grade infrastructure.
+## ✨ Why Choose This Template?
 
-### Development Setup
+### 🏭 Enterprise-Ready Architecture
+Built for production from day one with multi-language support (Go 1.24+, Python 3.12/3.13, Node.js 18+), comprehensive CI/CD pipelines, and enterprise-grade security scanning.
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/SkausWatch.git
-   cd SkausWatch
-   ```
+### 🔒 Security First
+- **8-stage security validation** including Trivy, CodeQL, and Semgrep scanning
+- **TLS 1.2 minimum enforcement**, preferring TLS 1.3
+- **Automated vulnerability detection** with Dependabot and Socket.dev integration
+- **Secrets management** with environment-based configuration
 
-2. **Set up development environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   pip install -e ".[dev]"
-   ```
+### 🚀 Performance Optimized
+- **Multi-architecture Docker builds** (amd64/arm64) with Debian-slim base images
+- **Parallel CI/CD workflows** for optimized build times
+- **eBPF/XDP networking** support for high-performance applications
+- **Connection pooling** and caching strategies built-in
 
-3. **Install pre-commit hooks**
-   ```bash
-   pre-commit install
-   ```
+### 🏢 PenguinTech License Server Integration
+- **Centralized feature gating** with `https://license.penguintech.io`
+- **Universal JSON response format** across all products
+- **Multi-tier licensing** (community/professional/enterprise)
+- **Usage tracking and compliance** reporting
 
-4. **Start development services**
-   ```bash
-   docker-compose up -d
-   ```
+### 🔄 Self-Healing & Monitoring
+- **Built-in health checks** and self-healing capabilities
+- **Prometheus metrics** and Grafana dashboard integration
+- **Structured logging** with configurable verbosity levels
+- **Real-time monitoring** and alerting
 
-5. **Run database migrations**
-   ```bash
-   alembic upgrade head
-   ```
+### 🌐 Multi-Environment Support
+- **Air-gapped deployment** ready with local caching
+- **Container orchestration** with Kubernetes and Helm
+- **Environment-specific configurations** for dev/staging/production
+- **Blue-green deployment** support with automated rollbacks
 
-6. **Start the services**
-   ```bash
-   # Terminal 1 - Manager Service
-   python -m services.manager
-
-   # Terminal 2 - PKI Server
-   python -m services.pki_server
-
-   # Terminal 3 - SSH CA
-   python -m services.ssh_ca
-
-   # Terminal 4 - AAA Monitor
-   python -m services.aaa_monitor
-   ```
-
-### Using Docker (Recommended)
+## 🛠️ Quick Start
 
 ```bash
-docker-compose up -d
+# Clone and setup
+git clone <your-repository-url>
+cd your-project
+make setup                    # Install dependencies and setup environment
+make dev                      # Start development environment
 ```
 
-This will start all services with their dependencies. Access the services at:
+## 📚 Key Components
 
-- Manager Service: http://localhost:8000
-- PKI Server: http://localhost:8001
-- SSH CA: http://localhost:8002
-- AAA Monitor: http://localhost:8003
-- Prometheus: http://localhost:9090
-- Grafana: http://localhost:3000 (admin/admin)
+### Core Technologies
+- **Languages**: Go 1.24+, Python 3.12/3.13, Node.js 18+
+- **Databases**: PostgreSQL with PyDAL/GORM, Redis/Valkey caching
+- **Containers**: Docker with multi-stage builds, Kubernetes deployment
+- **Monitoring**: Prometheus, Grafana, structured logging
 
-## Project Structure
+### Security Features
+- Multi-factor authentication (MFA) and JWT tokens
+- Role-based access control (RBAC)
+- Automated security scanning and vulnerability management
+- Compliance audit logging (SOC2, ISO27001 ready)
 
-```
-SkausWatch/
-├── services/
-│   ├── manager/           # Central management service
-│   ├── pki-server/        # PKI and certificate management
-│   ├── ssh-ca/           # SSH Certificate Authority
-│   └── aaa-monitor/      # AAA monitoring service
-├── shared/
-│   ├── models/           # Shared data models
-│   ├── utils/            # Common utilities
-│   └── security/         # Security utilities
-├── deployment/           # Deployment configurations
-├── docs/                 # Project documentation
-├── website/              # Project website
-├── tests/                # Test suites
-├── pyproject.toml        # Project configuration
-├── docker-compose.yml    # Development environment
-└── requirements-dev.txt  # Development dependencies
-```
+### Development Workflow
+- Comprehensive test coverage (unit, integration, e2e)
+- Automated code quality checks (linting, formatting, type checking)
+- Version management with semantic versioning
+- Feature branch workflow with required reviews
 
-## Configuration
+## 📖 Documentation
 
-Configuration is handled through environment variables and YAML files. Key settings:
+- **Getting Started**: [docs/development/](docs/development/)
+- **API Reference**: [docs/api/](docs/api/)
+- **Deployment Guide**: [docs/deployment/](docs/deployment/)
+- **Architecture Overview**: [docs/architecture/](docs/architecture/)
+- **License Integration**: [docs/licensing/](docs/licensing/)
 
-- `DATABASE_URL`: PostgreSQL connection string
-- `REDIS_URL`: Redis connection string
-- `ENVIRONMENT`: deployment environment (development/staging/production)
-- `LOG_LEVEL`: logging level (DEBUG/INFO/WARNING/ERROR)
+## 🤝 Contributing
 
-## Testing
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-Run the test suite:
+### Maintainers
+- **Primary**: creatorsemailhere@penguintech.group
+- **General**: info@penguintech.group
+- **Company**: [www.penguintech.io](https://www.penguintech.io)
 
-```bash
-# Run all tests
-pytest
+### Community Contributors
+- *Your name could be here! Submit a PR to get started.*
 
-# Run with coverage
-pytest --cov=skauswatch --cov-report=html
+## 📞 Support & Resources
 
-# Run specific test categories
-pytest -m unit          # Unit tests only
-pytest -m integration   # Integration tests only
-```
-
-## API Documentation
-
-API documentation is available at:
-
-- Manager Service: http://localhost:8000/docs
-- PKI Server: http://localhost:8001/docs
-- SSH CA: http://localhost:8002/docs
-- AAA Monitor: http://localhost:8003/docs
-
-## Monitoring
-
-SkausWatch includes comprehensive monitoring:
-
-- **Metrics**: Prometheus metrics for all services
-- **Dashboards**: Pre-built Grafana dashboards
-- **Health Checks**: Service health endpoints
-- **Logging**: Structured logging with correlation IDs
-
-Access monitoring at:
-- Prometheus: http://localhost:9090
-- Grafana: http://localhost:3000
-
-## Security
-
-SkausWatch takes security seriously:
-
-- All communications use TLS encryption
-- Certificate-based authentication
-- Comprehensive audit logging
-- Regular security scanning
-- RBAC (Role-Based Access Control)
-
-See [SECURITY.md](SECURITY.md) for our security policy.
-
-## Contributing
-
-We welcome contributions! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+- **Documentation**: [./docs/](docs/)
+- **Premium Support**: https://support.penguintech.group
+- **Community Issues**: [GitHub Issues](../../issues)
+- **License Server Status**: https://status.penguintech.io
 
 ## 📄 License
 
-SkausWatch is proprietary software under commercial license.
+This project is licensed under the Limited AGPL3 with preamble for fair use - see [LICENSE.md](docs/LICENSE.md) for details.
 
 **License Highlights:**
 - **Personal & Internal Use**: Free under AGPL-3.0
 - **Commercial Use**: Requires commercial license
 - **SaaS Deployment**: Requires commercial license if providing as a service
-
-**Pricing:**
-- **Standard Rate**: $7.50/month per compute node
-- **Volume Discounts**: Available for 100+ nodes
-- **Enterprise Support**: Included with license
 
 ### Contributor Employer Exception (GPL-2.0 Grant)
 
@@ -238,18 +130,4 @@ Companies employing official contributors receive GPL-2.0 access to community fe
 - **Future Versions**: New versions released after employment ends require standard licensing
 - **Community Only**: Enterprise features still require a commercial license
 
-This exception rewards contributors by providing lasting fair use rights to their employers.
-
-For licensing inquiries: [sales@penguintech.io](mailto:sales@penguintech.io)
-
-## 🔗 Links & Support
-
-- **Website**: [skauswatch.io](https://skauswatch.io)
-- **Documentation**: [docs.skauswatch.io](https://docs.skauswatch.io)
-- **GitHub**: [github.com/penguintechinc/skauswatch](https://github.com/penguintechinc/skauswatch)
-- **Support**: [support@skauswatch.io](mailto:support@skauswatch.io)
-- **Sales**: [sales@penguintech.io](mailto:sales@penguintech.io)
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for version history and changes.
+This exception rewards contributors by providing lasting fair use rights to their employers. See [LICENSE.md](docs/LICENSE.md) for full terms.

@@ -1,0 +1,38 @@
+[Unit]
+Description=SkausWatch EDR Agent
+Documentation=https://github.com/penguintech/skauswatch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# Environment file for configuration
+EnvironmentFile=-/etc/skauswatch/edr-agent.env
+
+# Main executable
+ExecStart=/usr/local/bin/edr-agent --config /etc/skauswatch/edr-agent.yaml
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=edr-agent
+
+# Security hardening (comment out if causing issues)
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
+PrivateTmp=false
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

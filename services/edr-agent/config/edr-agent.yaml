@@ -1,0 +1,95 @@
+# SkausWatch EDR Agent Configuration
+
+# Manager connection settings
+manager_url: "https://manager:5000"
+api_key: ""  # Set via environment variable EDR_API_KEY
+
+# Agent identification
+agent_id: ""  # Auto-generated if empty
+
+# Heartbeat interval in seconds
+heartbeat_interval: 60
+
+# Event buffer size
+event_buffer_size: 1000
+
+# Debug mode
+debug: false
+
+# Collector settings
+collectors:
+  process:
+    enabled: true
+    poll_interval: 1s
+    # Exclude process names from monitoring
+    exclude:
+      - "edr-agent"
+      - "systemd"
+      - "init"
+    # High-priority process names to watch
+    watch:
+      - "powershell"
+      - "cmd"
+      - "bash"
+      - "nc"
+      - "netcat"
+      - "nmap"
+
+  file:
+    enabled: true
+    poll_interval: 30s
+    # Directories to monitor
+    watch_paths:
+      - "/etc"
+      - "/usr/bin"
+      - "/usr/sbin"
+      - "/var/log"
+    # File extensions to prioritize
+    priority_extensions:
+      - ".sh"
+      - ".py"
+      - ".exe"
+      - ".dll"
+      - ".so"
+    # Maximum file size to hash (bytes)
+    max_hash_size: 10485760  # 10MB
+
+  network:
+    enabled: true
+    poll_interval: 5s
+    # Monitor only established connections
+    established_only: false
+    # Suspicious ports to flag
+    suspicious_ports:
+      - 4444   # Metasploit
+      - 5555   # Android ADB
+      - 6666   # IRC backdoor
+      - 31337  # Back Orifice
+    # Trusted IP ranges (won't flag as external)
+    trusted_ranges:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+
+  registry:
+    enabled: false  # Windows only
+    poll_interval: 10s
+    # Registry paths to monitor
+    watch_keys:
+      - "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+      - "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+      - "HKLM\\SYSTEM\\CurrentControlSet\\Services"
+
+# TLS settings (optional)
+tls:
+  enabled: false
+  cert_file: ""
+  key_file: ""
+  ca_file: ""
+  skip_verify: false
+
+# Logging settings
+logging:
+  level: "info"  # debug, info, warn, error
+  format: "json"  # json or console
+  output: "stdout"  # stdout, stderr, or file path

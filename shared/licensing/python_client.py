@@ -15,6 +15,7 @@ from functools import wraps
 
 import requests
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,7 +29,6 @@ class FeatureNotAvailableError(Exception):
 
 class LicenseValidationError(Exception):
     """Raised when license validation fails."""
-
     pass
 
 
@@ -40,7 +40,7 @@ class PenguinTechLicenseClient:
         license_key: str,
         product: str,
         base_url: Optional[str] = None,
-        timeout: int = 30,
+        timeout: int = 30
     ):
         """
         Initialize the license client.
@@ -58,12 +58,10 @@ class PenguinTechLicenseClient:
         self.timeout = timeout
 
         self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "Authorization": f"Bearer {license_key}",
-                "Content-Type": "application/json",
-            }
-        )
+        self.session.headers.update({
+            "Authorization": f"Bearer {license_key}",
+            "Content-Type": "application/json"
+        })
         self.session.timeout = timeout
 
         # Feature cache
@@ -72,7 +70,7 @@ class PenguinTechLicenseClient:
         self._cache_ttl = 300  # 5 minutes
 
     @classmethod
-    def from_env(cls, timeout: int = 30) -> Optional["PenguinTechLicenseClient"]:
+    def from_env(cls, timeout: int = 30) -> Optional['PenguinTechLicenseClient']:
         """
         Create client from environment variables.
 
@@ -90,9 +88,7 @@ class PenguinTechLicenseClient:
         base_url = os.getenv("LICENSE_SERVER_URL")
 
         if not license_key or not product:
-            logger.warning(
-                "LICENSE_KEY and PRODUCT_NAME environment variables required"
-            )
+            logger.warning("LICENSE_KEY and PRODUCT_NAME environment variables required")
             return None
 
         return cls(license_key, product, base_url, timeout)
@@ -109,16 +105,15 @@ class PenguinTechLicenseClient:
         """
         try:
             response = self.session.post(
-                f"{self.base_url}/api/v2/validate", json={"product": self.product}
+                f"{self.base_url}/api/v2/validate",
+                json={"product": self.product}
             )
             response.raise_for_status()
 
             data = response.json()
 
             if not data.get("valid"):
-                raise LicenseValidationError(
-                    f"License validation failed: {data.get('message')}"
-                )
+                raise LicenseValidationError(f"License validation failed: {data.get('message')}")
 
             # Store server ID for keepalives
             if "metadata" in data and "server_id" in data["metadata"]:
@@ -152,7 +147,7 @@ class PenguinTechLicenseClient:
         try:
             response = self.session.post(
                 f"{self.base_url}/api/v2/features",
-                json={"product": self.product, "feature": feature},
+                json={"product": self.product, "feature": feature}
             )
             response.raise_for_status()
 
@@ -191,14 +186,18 @@ class PenguinTechLicenseClient:
             if not validation.get("valid"):
                 raise LicenseValidationError("Failed to validate license for keepalive")
 
-        payload = {"product": self.product, "server_id": self.server_id}
+        payload = {
+            "product": self.product,
+            "server_id": self.server_id
+        }
 
         if usage_data:
             payload.update(usage_data)
 
         try:
             response = self.session.post(
-                f"{self.base_url}/api/v2/keepalive", json=payload
+                f"{self.base_url}/api/v2/keepalive",
+                json=payload
             )
             response.raise_for_status()
 
@@ -273,9 +272,7 @@ def get_client() -> Optional[PenguinTechLicenseClient]:
     return _global_client
 
 
-def requires_feature(
-    feature_name: str, client: Optional[PenguinTechLicenseClient] = None
-):
+def requires_feature(feature_name: str, client: Optional[PenguinTechLicenseClient] = None):
     """
     Decorator to gate functionality behind license features.
 
@@ -286,7 +283,6 @@ def requires_feature(
     Raises:
         FeatureNotAvailableError: If feature is not available
     """
-
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -301,13 +297,10 @@ def requires_feature(
             return func(*args, **kwargs)
 
         return wrapper
-
     return decorator
 
 
-def initialize_licensing(
-    license_key: str = None, product: str = None
-) -> Dict[str, Any]:
+def initialize_licensing(license_key: str = None, product: str = None) -> Dict[str, Any]:
     """
     Initialize licensing system and validate license.
 
@@ -333,9 +326,7 @@ def initialize_licensing(
     _global_client = PenguinTechLicenseClient(license_key, product)
     validation = _global_client.validate()
 
-    logger.info(
-        f"License valid for {validation['customer']} ({validation['tier']} tier)"
-    )
+    logger.info(f"License valid for {validation['customer']} ({validation['tier']} tier)")
 
     # Log available features
     for feature in validation.get("features", []):
