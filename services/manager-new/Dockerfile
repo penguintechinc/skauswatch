@@ -20,13 +20,19 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Generate gRPC stubs
-COPY grpc/protos/*.proto ./grpc/protos/
-RUN python -m grpc_tools.protoc \
-    -I./grpc/protos \
-    --python_out=./grpc/generated \
-    --grpc_python_out=./grpc/generated \
-    ./grpc/protos/*.proto || true
+# Copy gRPC directory
+COPY grpc/ ./grpc/
+
+# Generate gRPC stubs if proto files exist
+RUN mkdir -p ./grpc/generated && \
+    touch ./grpc/generated/__init__.py && \
+    if ls ./grpc/protos/*.proto 1> /dev/null 2>&1; then \
+        python -m grpc_tools.protoc \
+            -I./grpc/protos \
+            --python_out=./grpc/generated \
+            --grpc_python_out=./grpc/generated \
+            ./grpc/protos/*.proto; \
+    fi
 
 # Production image
 FROM python:3.13-slim
@@ -74,4 +80,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:5000/healthz || exit 1
 
 # Run the application
-CMD ["python", "-m", "manager-new.main"]
+CMD ["python", "main.py"]

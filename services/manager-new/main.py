@@ -23,9 +23,9 @@ import structlog
 from quart import Quart, jsonify, request
 from quart_cors import cors
 
-from .config import ManagerConfig, load_config
-from .models.db import close_db, get_db, init_database_schema
-from .services.streams.redis_streams import (
+from config import ManagerConfig, load_config
+from models.db import close_db, get_db, init_database_schema
+from services.streams.redis_streams import (
     AuditLogPublisher,
     RedisStreamManager,
     create_stream_consumer,
@@ -255,7 +255,7 @@ def create_app(config_instance: ManagerConfig = None) -> Quart:
 
 def _register_blueprints(app: Quart) -> None:
     """Register API blueprints."""
-    from .api.v1 import auth, alerts, approvals, edr, threat_intel, users, research
+    from api.v1 import auth, alerts, approvals, edr, threat_intel, users, research
 
     app.register_blueprint(auth.bp, url_prefix="/api/v1/auth")
     app.register_blueprint(users.bp, url_prefix="/api/v1/users")

@@ -3,7 +3,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: flask-backend
-  namespace: project-template
+  namespace: skauswatch
   labels:
     app.kubernetes.io/name: flask-backend
     app.kubernetes.io/component: api

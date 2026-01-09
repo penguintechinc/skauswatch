@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: webui
-  namespace: project-template
+  namespace: skauswatch
   labels:
     app.kubernetes.io/name: webui
     app.kubernetes.io/component: frontend
@@ -25,11 +25,11 @@ spec:
         app.kubernetes.io/component: frontend
         app.kubernetes.io/managed-by: kustomize
     spec:
-      serviceAccountName: project-template
+      serviceAccountName: skauswatch
       containers:
       - name: webui
-        image: project-template/webui:latest
-        imagePullPolicy: IfNotPresent
+        image: registry-dal2.penguintech.io/skauswatch/webui:latest
+        imagePullPolicy: Always
         ports:
         - name: http
           containerPort: 3000
@@ -42,7 +42,7 @@ spec:
         - name: LOG_LEVEL
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: LOG_LEVEL
         livenessProbe:
           httpGet:

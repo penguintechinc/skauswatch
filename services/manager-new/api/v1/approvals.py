@@ -14,15 +14,15 @@ from typing import List, Optional
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
 
-from ...models.db import get_db
-from ...validators.pydantic_models import (
+from models.db import get_db
+from validators.pydantic_models import (
     ApprovalCreateRequest,
     ApprovalDecisionRequest,
     ApprovalResponse,
     ApprovalStatus,
     ApprovalType,
 )
-from .auth import auth_required, role_required
+from api.v1.auth import auth_required, role_required
 
 bp = Blueprint("approvals", __name__)
 

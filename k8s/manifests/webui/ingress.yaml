@@ -3,7 +3,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: webui
-  namespace: project-template
+  namespace: skauswatch
   labels:
     app.kubernetes.io/name: webui
     app.kubernetes.io/component: frontend
@@ -15,10 +15,10 @@ spec:
   ingressClassName: nginx
   tls:
   - hosts:
-    - example.com
-    secretName: project-template-tls
+    - skauswatch.penguintech.io
+    secretName: penguintech-wildcard-tls
   rules:
-  - host: example.com
+  - host: skauswatch.penguintech.io
     http:
       paths:
       - path: /

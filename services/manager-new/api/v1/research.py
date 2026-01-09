@@ -17,8 +17,8 @@ import structlog
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
 
-from ...models.db import get_db
-from ...services.research import (
+from models.db import get_db
+from services.research import (
     DNSClient,
     WhoisClient,
     ASNClient,
@@ -26,7 +26,7 @@ from ...services.research import (
     MaltegoClient,
     IndicatorClassifier,
 )
-from ...validators.pydantic_models import (
+from validators.pydantic_models import (
     ResearchLookupRequest,
     ResearchLookupResponse,
     ResearchIndicatorType,
@@ -40,7 +40,7 @@ from ...validators.pydantic_models import (
     MaltegoResultModel,
     ResearchConfigResponse,
 )
-from .auth import auth_required
+from api.v1.auth import auth_required
 
 logger = structlog.get_logger(__name__)
 

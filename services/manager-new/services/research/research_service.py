@@ -8,8 +8,8 @@ and indicator analysis. Main entry point for research operations.
 import asyncio
 import time
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Optional, Union
 
 import structlog
 
@@ -33,6 +33,38 @@ from validators.research_models import (
 )
 
 logger = structlog.get_logger()
+
+
+def _parse_iso_date(date_value: Union[str, datetime, None]) -> Optional[datetime]:
+    """Parse ISO date string or datetime to timezone-aware datetime.
+
+    Args:
+        date_value: ISO format date string, datetime, or None.
+
+    Returns:
+        Timezone-aware datetime or None.
+    """
+    if date_value is None:
+        return None
+
+    if isinstance(date_value, datetime):
+        # Make timezone-aware if naive
+        if date_value.tzinfo is None:
+            return date_value.replace(tzinfo=timezone.utc)
+        return date_value
+
+    if isinstance(date_value, str):
+        try:
+            # Parse ISO format with or without timezone
+            dt = datetime.fromisoformat(date_value.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            logger.warning("failed_to_parse_date", date_value=date_value)
+            return None
+
+    return None
 
 
 @dataclass(slots=True)
@@ -235,15 +267,19 @@ class ResearchService:
             return None
 
         try:
-            result = await self.whois_client.lookup(value)
+            if indicator_type == "Domain":
+                result = await self.whois_client.lookup_domain(value)
+            else:
+                result = await self.whois_client.lookup_ip(value)
+
             return WhoisResult(
-                registrar=result.registrar,
-                creation_date=result.creation_date,
-                expiration_date=result.expiration_date,
-                updated_date=result.updated_date,
-                nameservers=result.nameservers,
-                registrant=result.registrant,
-                raw_data=result.raw_data,
+                registrar=result.get("registrar"),
+                creation_date=_parse_iso_date(result.get("creation_date")),
+                expiration_date=_parse_iso_date(result.get("expiration_date")),
+                updated_date=_parse_iso_date(result.get("updated_date")),
+                nameservers=result.get("nameservers", []),
+                registrant=result.get("registrant"),
+                raw_data=result,
             )
         except Exception as e:
             logger.error("whois_lookup_failed", value=value, error=str(e))
@@ -303,15 +339,28 @@ class ResearchService:
             return None
 
         try:
-            result = await self.asn_client.lookup(value)
-            return AsnResult(
-                asn=result.asn,
-                organization=result.organization,
-                country=result.country,
-                network=result.network,
-                registry=result.registry,
-                description=result.description,
-            )
+            if indicator_type == "ASN":
+                # Direct ASN lookup
+                result = await self.asn_client.lookup_asn(value)
+                return AsnResult(
+                    asn=result.get("asn"),
+                    organization=result.get("description"),
+                    country=result.get("country"),
+                    network=None,
+                    registry=result.get("registry"),
+                    description=result.get("description"),
+                )
+            else:
+                # IP-based ASN lookup
+                result = await self.asn_client.lookup_ip(value)
+                return AsnResult(
+                    asn=result.get("asn"),
+                    organization=result.get("asn_description"),
+                    country=result.get("asn_country"),
+                    network=result.get("asn_cidr"),
+                    registry=result.get("asn_registry"),
+                    description=result.get("asn_description"),
+                )
         except Exception as e:
             logger.error("asn_lookup_failed", value=value, error=str(e))
             return None
@@ -456,7 +505,9 @@ class ResearchService:
         # Domain age scoring (max 15)
         whois = results.get("whois")
         if whois and whois.creation_date:
-            domain_age_days = (datetime.utcnow() - whois.creation_date).days
+            # Use timezone-aware now for comparison
+            now_utc = datetime.now(timezone.utc)
+            domain_age_days = (now_utc - whois.creation_date).days
             if domain_age_days < 30:
                 score += 15
                 logger.debug("domain_age_risk", age_days=domain_age_days, score_added=15)
@@ -523,7 +574,8 @@ class ResearchService:
         whois = results.get("whois")
         if whois:
             if whois.creation_date:
-                domain_age_days = (datetime.utcnow() - whois.creation_date).days
+                now_utc = datetime.now(timezone.utc)
+                domain_age_days = (now_utc - whois.creation_date).days
                 if domain_age_days < 30:
                     findings.append(f"Very new domain (registered {domain_age_days} days ago)")
                 elif domain_age_days < 90:

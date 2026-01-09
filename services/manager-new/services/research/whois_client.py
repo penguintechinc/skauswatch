@@ -1,12 +1,47 @@
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any, Optional, Union
 
 import structlog
 import whois
 from ipwhois import IPWhois
 
 logger = structlog.get_logger(__name__)
+
+
+def _extract_date(date_value: Union[datetime, list, None]) -> Optional[str]:
+    """Extract ISO format date string from WHOIS date field.
+
+    python-whois sometimes returns dates as lists (multiple registrar entries).
+    This helper extracts the first date and converts to ISO format.
+
+    Args:
+        date_value: Date value from WHOIS lookup (datetime, list, or None).
+
+    Returns:
+        ISO format date string or None.
+    """
+    if date_value is None:
+        return None
+
+    if isinstance(date_value, list):
+        # Take the first date from the list
+        if len(date_value) > 0 and date_value[0] is not None:
+            first_date = date_value[0]
+            if isinstance(first_date, datetime):
+                return first_date.isoformat()
+            elif isinstance(first_date, str):
+                return first_date
+        return None
+
+    if isinstance(date_value, datetime):
+        return date_value.isoformat()
+
+    if isinstance(date_value, str):
+        return date_value
+
+    return None
 
 
 @dataclass
@@ -73,26 +108,21 @@ class WhoisClient:
         try:
             whois_info = whois.whois(domain, timeout=self.timeout)
 
+            # Handle nameservers which can also be a list or None
+            nameservers = whois_info.name_servers
+            if nameservers is None:
+                nameservers = []
+            elif isinstance(nameservers, str):
+                nameservers = [nameservers]
+
             return {
                 "success": True,
                 "domain": domain,
                 "registrar": whois_info.registrar,
-                "creation_date": (
-                    whois_info.creation_date.isoformat()
-                    if whois_info.creation_date
-                    else None
-                ),
-                "expiration_date": (
-                    whois_info.expiration_date.isoformat()
-                    if whois_info.expiration_date
-                    else None
-                ),
-                "updated_date": (
-                    whois_info.updated_date.isoformat()
-                    if whois_info.updated_date
-                    else None
-                ),
-                "nameservers": whois_info.name_servers or [],
+                "creation_date": _extract_date(whois_info.creation_date),
+                "expiration_date": _extract_date(whois_info.expiration_date),
+                "updated_date": _extract_date(whois_info.updated_date),
+                "nameservers": list(nameservers),
                 "registrant_name": whois_info.registrant_name,
                 "registrant_org": whois_info.registrant_organization,
                 "registrant_country": whois_info.registrant_country,
@@ -153,18 +183,33 @@ class WhoisClient:
         """
         try:
             ipwhois_obj = IPWhois(ip, timeout=self.timeout)
-            result = ipwhois_obj.lookup()
+            # Use lookup_rdap for modern RDAP protocol, fallback to lookup_whois
+            try:
+                result = ipwhois_obj.lookup_rdap(depth=1)
+            except Exception:
+                result = ipwhois_obj.lookup_whois()
+
+            # RDAP returns slightly different structure
+            network = result.get("network", {}) or {}
+            asn_info = result.get("asn", result.get("asn_cidr", ""))
 
             return {
                 "success": True,
                 "ip": ip,
                 "asn": result.get("asn"),
                 "asn_registry": result.get("asn_registry"),
-                "network": result.get("network", {}).get("cidr"),
-                "organization": result.get("asn_organization"),
-                "country": result.get("asn_country_code"),
-                "description": result.get("network", {}).get("description"),
-                "type": result.get("network", {}).get("type"),
+                "network": network.get("cidr") or result.get("asn_cidr"),
+                "organization": (
+                    network.get("name")
+                    or result.get("asn_description")
+                    or result.get("network", {}).get("name")
+                ),
+                "country": (
+                    network.get("country")
+                    or result.get("asn_country_code")
+                ),
+                "description": network.get("remarks") or result.get("asn_description"),
+                "type": network.get("type"),
             }
 
         except Exception as e:

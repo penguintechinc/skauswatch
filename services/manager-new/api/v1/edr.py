@@ -14,8 +14,8 @@ from typing import Optional
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
 
-from ...models.db import get_db
-from ...validators.pydantic_models import (
+from models.db import get_db
+from validators.pydantic_models import (
     EDRAgentRegisterRequest,
     EDRAgentResponse,
     EDRAgentStatus,
@@ -240,7 +240,7 @@ async def get_agent_config():
 
 # Admin endpoints (require authentication)
 
-from .auth import auth_required, role_required
+from api.v1.auth import auth_required, role_required
 
 
 @bp.route("/agents", methods=["GET"])

@@ -18,8 +18,8 @@ import jwt
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
 
-from ...models.db import get_db
-from ...validators.pydantic_models import (
+from models.db import get_db
+from validators.pydantic_models import (
     LoginRequest,
     RefreshTokenRequest,
     RegisterRequest,

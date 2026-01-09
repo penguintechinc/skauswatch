@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: go-backend
-  namespace: project-template
+  namespace: skauswatch
   labels:
     app.kubernetes.io/name: go-backend
     app.kubernetes.io/component: api
@@ -29,10 +29,10 @@ spec:
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
-      serviceAccountName: project-template
+      serviceAccountName: skauswatch
       containers:
       - name: go-backend
-        image: project-template/go-backend:latest
+        image: skauswatch/go-backend:latest
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
@@ -42,47 +42,47 @@ spec:
         - name: LOG_LEVEL
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: LOG_LEVEL
         - name: DB_TYPE
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: DB_TYPE
         - name: DB_HOST
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: DB_HOST
         - name: DB_PORT
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: DB_PORT
         - name: DB_NAME
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: DB_NAME
         - name: DB_USER
           valueFrom:
             secretKeyRef:
-              name: project-template-secrets
+              name: skauswatch-secrets
               key: DB_USER
         - name: DB_PASS
           valueFrom:
             secretKeyRef:
-              name: project-template-secrets
+              name: skauswatch-secrets
               key: DB_PASS
         - name: LICENSE_SERVER_URL
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: LICENSE_SERVER_URL
         - name: RELEASE_MODE
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: RELEASE_MODE
         livenessProbe:
           httpGet:

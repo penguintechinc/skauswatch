@@ -2,8 +2,8 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: project-template
+  name: skauswatch
   labels:
-    app.kubernetes.io/name: project-template
+    app.kubernetes.io/name: skauswatch
     app.kubernetes.io/managed-by: kustomize
     environment: development

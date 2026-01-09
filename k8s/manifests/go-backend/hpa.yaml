@@ -3,7 +3,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: go-backend
-  namespace: project-template
+  namespace: skauswatch
   labels:
     app.kubernetes.io/name: go-backend
     app.kubernetes.io/component: api

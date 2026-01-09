@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: flask-backend
-  namespace: project-template
+  namespace: skauswatch
   labels:
     app.kubernetes.io/name: flask-backend
     app.kubernetes.io/component: api
@@ -29,11 +29,11 @@ spec:
         prometheus.io/port: "5000"
         prometheus.io/path: "/metrics"
     spec:
-      serviceAccountName: project-template
+      serviceAccountName: skauswatch
       containers:
       - name: flask-backend
-        image: project-template/flask-backend:latest
-        imagePullPolicy: IfNotPresent
+        image: registry-dal2.penguintech.io/skauswatch/flask-backend:latest
+        imagePullPolicy: Always
         ports:
         - name: http
           containerPort: 5000
@@ -44,67 +44,67 @@ spec:
         - name: LOG_LEVEL
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: LOG_LEVEL
         - name: DB_TYPE
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: DB_TYPE
         - name: DB_HOST
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: DB_HOST
         - name: DB_PORT
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: DB_PORT
         - name: DB_NAME
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: DB_NAME
         - name: DB_USER
           valueFrom:
             secretKeyRef:
-              name: project-template-secrets
+              name: skauswatch-secrets
               key: DB_USER
         - name: DB_PASS
           valueFrom:
             secretKeyRef:
-              name: project-template-secrets
+              name: skauswatch-secrets
               key: DB_PASS
         - name: SECRET_KEY
           valueFrom:
             secretKeyRef:
-              name: project-template-secrets
+              name: skauswatch-secrets
               key: SECRET_KEY
         - name: SECURITY_PASSWORD_SALT
           valueFrom:
             secretKeyRef:
-              name: project-template-secrets
+              name: skauswatch-secrets
               key: SECURITY_PASSWORD_SALT
         - name: REDIS_HOST
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: REDIS_HOST
         - name: REDIS_PORT
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: REDIS_PORT
         - name: LICENSE_SERVER_URL
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: LICENSE_SERVER_URL
         - name: RELEASE_MODE
           valueFrom:
             configMapKeyRef:
-              name: project-template-config
+              name: skauswatch-config
               key: RELEASE_MODE
         livenessProbe:
           httpGet:
