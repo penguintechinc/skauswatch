@@ -233,6 +233,218 @@ AZURE_CLIENT_ID=azure-oauth-client-id
 AZURE_CLIENT_SECRET=azure-oauth-client-secret
 ```
 
+### Default Admin User Creation
+
+**ALL Flask applications MUST create a default admin user on startup if it doesn't exist:**
+
+```python
+from flask_security import hash_password
+from datetime import datetime
+
+def create_default_admin_if_not_exists():
+    """Create default admin user on application startup"""
+    # Default credentials (should be changed in production)
+    default_email = 'admin@localhost.local'
+    default_password = 'admin123'
+
+    # Check if admin already exists
+    admin = user_datastore.find_user(email=default_email)
+    if admin:
+        return  # Admin already exists
+
+    # Create admin role if it doesn't exist
+    admin_role = user_datastore.find_role('admin')
+    if not admin_role:
+        admin_role = user_datastore.create_role(
+            name='admin',
+            description='Administrator with full system access'
+        )
+
+    # Create default admin user
+    admin_user = user_datastore.create_user(
+        email=default_email,
+        password=hash_password(default_password),
+        active=True,
+        confirmed_at=datetime.utcnow()
+    )
+
+    # Assign admin role
+    user_datastore.add_role_to_user(admin_user, admin_role)
+    db.commit()
+
+    print(f"✓ Default admin created: {default_email} / {default_password}")
+
+# Call during application startup (before running server)
+@app.before_first_request
+def initialize_app():
+    """Initialize application on first request"""
+    with app.app_context():
+        db.create_all()  # Create tables if they don't exist
+        create_default_admin_if_not_exists()
+```
+
+**Alternative: Run during Docker container startup:**
+
+```bash
+# In your Docker entrypoint or Dockerfile CMD
+python -c "from app import app, create_default_admin_if_not_exists; \
+           create_default_admin_if_not_exists()"
+
+python app.py  # Then start the Flask server
+```
+
+### Login Page UI Standards
+
+**Login pages MUST follow these standards:**
+
+1. **Logo Display**:
+   - Logo placed ABOVE login form fields
+   - Height: 300px (fixed)
+   - Image file naming: `[project-name]-logo.png` or `[project-name]-logo.svg`
+   - Location: `services/webui/public/images/logo.[png|svg]`
+   - Also used as favicon in `public/favicon.ico`
+   - Responsive: Scale down on mobile (<768px width)
+
+2. **Default Login Credentials NOT Displayed**:
+   - NEVER display default credentials on login page
+   - NEVER pre-fill email/password fields
+   - Default credentials only documented in README.md Quick Start section
+   - Credentials must be changed in production
+
+3. **Login Form Elements**:
+   - Email field (required)
+   - Password field (required, masked)
+   - "Remember me" checkbox (optional)
+   - Login button
+   - "Forgot password?" link
+   - Optional: SSO buttons (if enterprise features enabled)
+
+**Example React Login Component:**
+
+```jsx
+// services/webui/src/pages/Login.jsx
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { apiClient } from '../services/apiClient';
+
+export function Login() {
+  const navigate = useNavigate();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+
+    try {
+      const response = await apiClient.post('/api/v1/auth/login', {
+        email,
+        password,
+      });
+
+      // Store token and redirect
+      localStorage.setItem('access_token', response.data.access_token);
+      navigate('/dashboard');
+    } catch (err) {
+      setError(err.response?.data?.message || 'Login failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="login-container">
+      {/* Logo: 300px height */}
+      <img
+        src="/images/logo.png"
+        alt="Logo"
+        className="login-logo"
+        style={{ height: '300px' }}
+      />
+
+      <form onSubmit={handleLogin} className="login-form">
+        {error && <div className="error-message">{error}</div>}
+
+        <div className="form-group">
+          <label htmlFor="email">Email</label>
+          <input
+            id="email"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="Enter your email"
+            required
+          />
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="password">Password</label>
+          <input
+            id="password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Enter your password"
+            required
+          />
+        </div>
+
+        <button type="submit" disabled={loading}>
+          {loading ? 'Logging in...' : 'Login'}
+        </button>
+
+        <a href="/forgot-password" className="forgot-password">
+          Forgot password?
+        </a>
+      </form>
+    </div>
+  );
+}
+```
+
+**CSS Styling (300px logo, responsive):**
+
+```css
+.login-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  padding: 20px;
+}
+
+.login-logo {
+  height: 300px;
+  width: auto;
+  margin-bottom: 40px;
+  max-width: 90vw;
+}
+
+.login-form {
+  background: white;
+  padding: 40px;
+  border-radius: 8px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+  width: 100%;
+  max-width: 400px;
+}
+
+@media (max-width: 768px) {
+  .login-logo {
+    height: 200px;
+  }
+
+  .login-form {
+    padding: 20px;
+  }
+}
+```
+
 ---
 
 ## ReactJS Frontend Standards
@@ -997,37 +1209,150 @@ if __name__ == '__main__':
 
 ---
 
+## API Design Best Practices
+
+**All APIs MUST follow these core design principles:**
+
+### 1. Keep APIs Simple and Focused
+
+- Single responsibility: One endpoint per logical action
+- Consistent naming conventions across all endpoints
+- Predictable URL structure
+- Clear parameter names without abbreviations
+- Minimize endpoint complexity with nested resources
+
+**Good:**
+```
+GET /api/v1/users/{id}
+POST /api/v1/users
+PUT /api/v1/users/{id}
+DELETE /api/v1/users/{id}
+GET /api/v1/users/{id}/orders
+```
+
+**Avoid:**
+```
+GET /api/v1/get_user_info?uid=123
+POST /api/v1/create_new_usr
+GET /api/v1/usr/123/ord/get_all
+```
+
+### 2. Build Extensible and Backward-Compatible APIs
+
+**Input Flexibility:**
+- Accept additional fields in request bodies without breaking
+- Use optional parameters with sensible defaults
+- Implement request filtering via query parameters (e.g., `?status=active&limit=10`)
+- Support different content types (JSON, form-data)
+
+**Response Compatibility:**
+- Add new fields to responses without breaking existing clients
+- Use consistent response envelope structure
+- Never remove fields, only deprecate them
+- Include metadata (version, timestamp, links) in responses
+
+**Example:**
+```python
+@app.route('/api/v2/users', methods=['POST'])
+def create_user():
+    data = request.get_json()
+    # Accept new fields without breaking
+    user = {
+        'id': generate_id(),
+        'name': data.get('name'),
+        'email': data.get('email'),
+        'phone': data.get('phone'),  # New field, optional
+        'preferences': data.get('preferences', {}),  # New field, optional
+    }
+    return jsonify({
+        'status': 'success',
+        'data': user,
+        'meta': {'version': 2, 'timestamp': datetime.utcnow().isoformat()}
+    }), 201
+```
+
+### 3. Reuse and Leverage Existing APIs
+
+- Search for existing endpoints before creating new ones
+- Create single endpoint for multiple use cases when possible
+- Use query parameters for filtering instead of separate endpoints
+- Document common API patterns and encourage reuse
+
+**Instead of multiple endpoints:**
+```
+GET /api/v1/active-users
+GET /api/v1/inactive-users
+GET /api/v1/admin-users
+```
+
+**Use single versioned endpoint with filtering:**
+```
+GET /api/v1/users?status=active
+GET /api/v1/users?status=inactive
+GET /api/v1/users?role=admin
+GET /api/v1/users?status=active&role=admin
+```
+
+### 4. Consistent Versioning Strategy
+
+- Use path-based versioning: `/api/v1/`, `/api/v2/`
+- Version at major version level only (breaking changes)
+- Maintain N-2 versions minimum (current + 2 previous)
+- Never increment patch/minor versions in API URLs
+- Include version in response metadata for clarity
+
+---
+
 ## Protocol Support
 
-**ALL applications MUST support multiple communication protocols:**
+**ALL applications MUST use appropriate protocols for inter-service and external communication:**
 
-### Required Protocol Support
+### API Design Principles
 
-1. **REST API**: RESTful HTTP endpoints (GET, POST, PUT, DELETE, PATCH)
-   - JSON request/response format
-   - Proper HTTP status codes
-   - Resource-based URL design
+**Keep APIs Simple, Extensible, and Versioned:**
+1. **Simple**: Minimize endpoint complexity, use clear resource-based design
+2. **Extensible**: Support flexible input structures and backward-compatible responses for easy future expansion
+3. **Reuse**: Leverage existing APIs where possible - avoid creating duplicate endpoints
+4. **Versioned**: All APIs must support multiple versions with clear deprecation paths
 
-2. **gRPC**: High-performance RPC protocol
-   - Protocol Buffers for message serialization
-   - Bi-directional streaming support
-   - Service definitions in .proto files
-   - Health checking via gRPC health protocol
+### Communication Protocol Selection
 
-3. **HTTP/1.1**: Standard HTTP protocol support
-   - Keep-alive connections
-   - Chunked transfer encoding
-   - Compression (gzip, deflate)
+**External Communication** (clients, third-party integrations):
+- **REST API over HTTPS**: Client-facing and external APIs
+  - RESTful HTTP endpoints (GET, POST, PUT, DELETE, PATCH)
+  - JSON request/response format
+  - Proper HTTP status codes (200, 201, 400, 404, 500, etc.)
+  - Resource-based URL design with version prefix: `/api/v{major}/resource`
+  - Support HTTP/1.1 minimum, HTTP/2 preferred
+  - Fully documented with OpenAPI/Swagger specs
 
-4. **HTTP/2**: Modern HTTP protocol
-   - Multiplexing multiple requests over single connection
-   - Header compression (HPACK)
-   - Stream prioritization
+**Inter-Container Communication** (within Kubernetes namespace/cluster):
+- **gRPC**: High-performance service-to-service calls (PREFERRED)
+  - Protocol Buffers for message serialization
+  - Binary protocol for lower latency and bandwidth
+  - Bi-directional streaming support
+  - Service definitions in .proto files
+  - Health checking via gRPC health protocol
+  - Use for internal APIs between microservices
+  - Fallback to REST over HTTP/2 only if gRPC unavailable
 
-5. **HTTP/3 (QUIC)**: Next-generation HTTP protocol
-   - UDP-based transport with TLS 1.3
-   - Zero round-trip time (0-RTT) connection establishment
-   - Built-in encryption
+**HTTP Protocol Support:**
+- **HTTP/1.1**: Standard HTTP protocol (minimum requirement)
+  - Keep-alive connections
+  - Chunked transfer encoding
+  - Compression (gzip, deflate)
+
+- **HTTP/2**: Modern HTTP protocol (recommended)
+  - Multiplexing multiple requests over single connection
+  - Header compression (HPACK)
+  - Stream prioritization
+  - Better performance than HTTP/1.1
+
+- **HTTP/3 (QUIC)**: Next-generation protocol (optional for high-performance scenarios)
+  - UDP-based transport with TLS 1.3
+  - Zero round-trip time (0-RTT) connection establishment
+  - Built-in encryption
+  - Consider for inter-container scenarios >10K req/sec
 
 ### Protocol Configuration via Environment Variables
 
@@ -1106,17 +1431,20 @@ protobuf>=4.25.0
 
 ### Version Lifecycle
 
-**Version Strategy:**
+**Version Strategy (N-2 Support Model):**
 - **Current Version**: Active development and fully supported
 - **Previous Version (N-1)**: Supported with bug fixes and security patches
-- **Older Versions (N-2+)**: Deprecated with deprecation warning headers
+- **Two Versions Back (N-2)**: Supported with critical security patches only
+- **Older Versions (N-3+)**: Deprecated with deprecation warning headers, no support
 
 **Deprecation Process:**
 1. Release new major version with improvements/breaking changes
-2. Support previous version for at least 12 months
-3. Add deprecation header to older versions: `Deprecation: true`
-4. Include sunset date header: `Sunset: 2026-01-01`
-5. Return `Link` header pointing to new version documentation
+2. Support current and 2 previous versions (N-2 minimum)
+3. Communicate deprecation timeline 6 months in advance
+4. Add deprecation header to N-3+ versions: `Deprecation: true`
+5. Include sunset date header: `Sunset: <ISO 8601 date>`
+6. Return `Link` header pointing to new version documentation
+7. Provide migration guide for all deprecated versions
 
 **Example Deprecation Headers:**
 ```python
@@ -2095,11 +2423,220 @@ GitHub Actions should use multi-arch builds:
 
 ### Authentication & Authorization
 
+**Core Requirements:**
 - Multi-factor authentication support
-- Role-based access control (RBAC)
+- Role-based access control (RBAC) with OAuth2-style scopes
 - API key management with rotation
 - JWT token validation with proper expiration
 - Session management with secure cookies
+
+**OAuth2-Style Scopes Model:**
+- All APIs and user permissions MUST be scopable similar to OAuth2 scopes
+- Scopes define granular permissions (e.g., `users:read`, `users:write`, `reports:read`, `analytics:admin`)
+- Users and API clients receive tokens with specific scope sets
+- Endpoints check requested operation against available scopes
+- Scopes are hierarchical and composable
+
+**Role-Based Access Control with Scopes:**
+
+Implement three-tier role system at multiple levels:
+
+1. **Global Level** - Organization-wide roles:
+   - **Admin**: Full system access, user management, all scopes
+   - **Maintainer**: Read/write access to resources, no user management, limited scopes
+   - **Viewer**: Read-only access, minimal scopes (e.g., `:read` only)
+   - **Custom Roles**: User-defined with selected scopes
+
+2. **Container/Team Level** - Per service/team access:
+   - **Team Admin**: Full access within container/team
+   - **Team Maintainer**: Read/write within container/team
+   - **Team Viewer**: Read-only within container/team
+   - **Custom Roles**: Selected scopes for container context
+
+3. **Resource Level** - Per-resource permissions:
+   - **Owner**: Full control over specific resource
+   - **Editor**: Read/write on specific resource
+   - **Viewer**: Read-only on specific resource
+   - **Custom Roles**: Specific scopes for resource
+
+**Implementation Pattern:**
+
+```python
+# Define scopes for API endpoints
+SCOPES = {
+    'users:read': 'Read user data',
+    'users:write': 'Create/update users',
+    'users:admin': 'Delete users, manage roles',
+    'reports:read': 'Read reports',
+    'reports:write': 'Create/update reports',
+    'analytics:read': 'Read analytics',
+    'analytics:admin': 'Configure analytics',
+}
+
+# Role definitions with scope mappings
+ROLE_SCOPES = {
+    'global': {
+        'admin': ['users:read', 'users:write', 'users:admin', 'reports:read', 'reports:write', 'analytics:read', 'analytics:admin'],
+        'maintainer': ['users:read', 'users:write', 'reports:read', 'reports:write', 'analytics:read'],
+        'viewer': ['users:read', 'reports:read', 'analytics:read'],
+    },
+    'container': {
+        'admin': ['users:read', 'users:write', 'reports:read', 'reports:write'],
+        'maintainer': ['users:read', 'reports:read', 'reports:write'],
+        'viewer': ['users:read', 'reports:read'],
+    },
+}
+
+from flask import Flask, request
+from functools import wraps
+
+app = Flask(__name__)
+
+def require_scope(*required_scopes):
+    """Decorator to check if user has required scopes"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Get user from request context (from JWT token)
+            user = request.user  # Set by authentication middleware
+            user_scopes = user.get_scopes()
+
+            # Check if user has at least one of required scopes
+            has_scope = any(scope in user_scopes for scope in required_scopes)
+            if not has_scope:
+                return {'error': 'Insufficient permissions', 'required_scopes': required_scopes}, 403
+
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+@app.route('/api/v1/users', methods=['GET'])
+@require_scope('users:read')
+def list_users():
+    """List users - requires users:read scope"""
+    users = db.users.select().fetchall()
+    return jsonify({'data': users})
+
+@app.route('/api/v1/users', methods=['POST'])
+@require_scope('users:write')
+def create_user():
+    """Create user - requires users:write scope"""
+    data = request.get_json()
+    user = db.users.insert(**data)
+    return jsonify({'data': user}), 201
+
+@app.route('/api/v1/users/<int:user_id>', methods=['DELETE'])
+@require_scope('users:admin')
+def delete_user(user_id):
+    """Delete user - requires users:admin scope"""
+    db.users.delete(db.users.id == user_id)
+    return '', 204
+```
+
+**Custom Roles with Scope Selection:**
+
+```python
+# Allow users to create custom roles
+@app.route('/api/v1/roles/custom', methods=['POST'])
+@require_scope('users:admin')
+def create_custom_role():
+    """Create custom role with selected scopes"""
+    data = request.get_json()
+    role_name = data.get('name')
+    selected_scopes = data.get('scopes', [])
+
+    # Validate requested scopes
+    available_scopes = set(SCOPES.keys())
+    if not set(selected_scopes).issubset(available_scopes):
+        return {'error': 'Invalid scopes requested'}, 400
+
+    # Create custom role
+    custom_role = {
+        'name': role_name,
+        'scopes': selected_scopes,
+        'level': data.get('level', 'container'),  # global, container, or resource
+        'created_by': request.user.id,
+    }
+    db.custom_roles.insert(**custom_role)
+    return jsonify({'data': custom_role}), 201
+
+# Assign custom role to user
+@app.route('/api/v1/users/<int:user_id>/roles', methods=['POST'])
+@require_scope('users:admin')
+def assign_role_to_user(user_id):
+    """Assign role (standard or custom) to user"""
+    data = request.get_json()
+    role_id = data.get('role_id')
+    scope = data.get('scope', 'global')  # global, container_id, or resource_id
+
+    assignment = {
+        'user_id': user_id,
+        'role_id': role_id,
+        'scope': scope,
+    }
+    db.role_assignments.insert(**assignment)
+    return jsonify({'data': assignment}), 201
+```
+
+**JWT Token with Scopes:**
+
+```python
+import jwt
+from datetime import datetime, timedelta
+
+def create_access_token(user, scopes, expires_in=3600):
+    """Create JWT token with scopes"""
+    payload = {
+        'sub': user.id,
+        'user_email': user.email,
+        'scopes': scopes,  # Include scopes in token
+        'iat': datetime.utcnow(),
+        'exp': datetime.utcnow() + timedelta(seconds=expires_in),
+    }
+    token = jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
+    return token
+
+def verify_token(token):
+    """Verify token and extract scopes"""
+    try:
+        payload = jwt.decode(token, app.config['SECRET_KEY'], algorithms=['HS256'])
+        return payload
+    except jwt.InvalidTokenError:
+        return None
+```
+
+**API Client Scopes:**
+
+API clients (service accounts, third-party integrations) should also have scope-based permissions:
+
+```python
+# Create API client with specific scopes
+@app.route('/api/v1/clients', methods=['POST'])
+@require_scope('users:admin')
+def create_api_client():
+    """Create API client with selected scopes"""
+    data = request.get_json()
+    client_name = data.get('name')
+    client_scopes = data.get('scopes', [])
+
+    # Generate API key
+    api_key = generate_secure_key()
+
+    client = {
+        'name': client_name,
+        'api_key': hash_api_key(api_key),
+        'scopes': client_scopes,
+        'created_by': request.user.id,
+        'created_at': datetime.utcnow(),
+    }
+    db.api_clients.insert(**client)
+
+    # Return plaintext API key only once
+    return jsonify({
+        'data': client,
+        'api_key': api_key,  # Only shown once
+    }), 201
+```
 
 ### TLS/Encryption
 
@@ -2141,6 +2678,52 @@ GitHub Actions should use multi-arch builds:
 **ALWAYS include catchy ASCII art** below badges
 
 **Company homepage**: Point to **www.penguintech.io**
+
+**Quick Start Section - DEFAULT CREDENTIALS DOCUMENTATION:**
+
+The README.md MUST include a Quick Start section documenting default credentials for development:
+
+```markdown
+## Quick Start
+
+### Prerequisites
+- Docker & Docker Compose
+- Git
+
+### Development Environment
+
+Start all services:
+```bash
+make dev
+```
+
+Access the application at `http://localhost:3000`
+
+**Default Development Credentials:**
+- **Email**: `admin@localhost.local`
+- **Password**: `admin123`
+
+⚠️ **IMPORTANT**: Change these credentials in production. The default admin user is automatically created on first startup.
+
+### Login
+1. Navigate to `http://localhost:3000`
+2. Enter default email: `admin@localhost.local`
+3. Enter default password: `admin123`
+4. Click Login
+
+### Change Default Password
+After first login, immediately change the admin password in Settings → Security.
+
+### Production Deployment
+See [Deployment Guide](docs/DEPLOYMENT.md) for production setup without default credentials.
+```
+
+**Key Points:**
+- Default credentials MUST be documented in README Quick Start
+- Default credentials MUST NOT be displayed on the login page itself
+- Clearly mark credentials as for development only
+- Warn about changing passwords in production
+- Link to production deployment guide
 
 ### CLAUDE.md File Management
 
@@ -3540,6 +4123,48 @@ LICENSE_KEY=PENG-XXXX-XXXX-XXXX-XXXX-ABCD
 - Advanced analytics
 - Custom integrations
 - Priority support
+
+---
+
+## Development Practices & Assumptions
+
+### Code Changes & Container Rebuilds
+
+**After any code changes, rebuild and restart containers:**
+
+```bash
+# All services
+docker compose down && docker compose up -d --build
+
+# Single service
+docker compose up -d --build <service-name>
+```
+
+**IMPORTANT:** `docker compose restart` and `docker restart` do NOT apply code changes. Always use `--build` to rebuild images.
+
+### Browser Cache & Hard Reload
+
+**Developers will routinely perform hard reloads and cache clearing during development:**
+- Hard reload (Ctrl+Shift+R / Cmd+Shift+R) clears browser cache
+- Cache is explicitly cleared between development iterations
+- DO NOT assume browser cache contains stale assets
+- DO NOT blame caching when the issue is actual code
+
+**Implementation Guidance:**
+- Implement proper cache headers for assets
+- Use content-based cache busting (filename hashing: `app.abc123.js`)
+- Consider `Cache-Control: no-cache, must-revalidate` for development
+- Version static assets in production builds
+
+### Cache Dumping
+
+**Developers will clear various caches during development:**
+- Redis/Valkey cache flushes
+- Docker layer cache clearing
+- Browser local storage clearing
+- Build artifact clearing
+
+**DO NOT assume cache state is preserved between development sessions.**
 
 ---
 
