@@ -5,7 +5,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 import structlog
 
-from ...models.db import get_db, db_session
+from services.models.db import get_db, db_session
 
 logger = structlog.get_logger()
 

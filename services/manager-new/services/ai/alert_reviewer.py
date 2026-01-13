@@ -4,7 +4,7 @@ from typing import Optional, Dict, Any, List
 
 import structlog
 
-from .provider import AIProvider, AIProviderFactory
+from services.ai.provider import AIProvider, AIProviderFactory
 
 logger = structlog.get_logger()
 

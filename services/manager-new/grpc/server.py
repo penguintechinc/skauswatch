@@ -13,8 +13,8 @@ from typing import Optional
 import grpc
 from google.protobuf import empty_pb2, timestamp_pb2
 
-from ..config import ManagerConfig
-from ..models.db import get_db
+from config import ManagerConfig
+from models.db import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class ManagerServiceServicer:
 
     async def HealthCheck(self, request, context):
         """Health check endpoint."""
-        from .generated import manager_pb2
+        from grpc.generated import manager_pb2
 
         try:
             db = get_db(self.config.database.uri)
@@ -55,7 +55,7 @@ class ManagerServiceServicer:
 
     async def CreateAlert(self, request, context):
         """Create a new alert."""
-        from .generated import manager_pb2
+        from grpc.generated import manager_pb2
 
         db = get_db(self.config.database.uri)
 
@@ -95,7 +95,7 @@ class ManagerServiceServicer:
 
     async def GetAlert(self, request, context):
         """Get alert by ID."""
-        from .generated import manager_pb2
+        from grpc.generated import manager_pb2
 
         db = get_db(self.config.database.uri)
 
@@ -139,7 +139,7 @@ class ManagerServiceServicer:
 
     async def UpdateAlertStatus(self, request, context):
         """Update alert status."""
-        from .generated import manager_pb2
+        from grpc.generated import manager_pb2
 
         db = get_db(self.config.database.uri)
 
@@ -175,7 +175,7 @@ class ManagerServiceServicer:
 
     async def CreateIOC(self, request, context):
         """Create a new IOC."""
-        from .generated import manager_pb2
+        from grpc.generated import manager_pb2
 
         db = get_db(self.config.database.uri)
 
@@ -225,7 +225,7 @@ class ManagerServiceServicer:
 
     async def LookupIndicator(self, request, context):
         """Lookup an indicator in the IOC database."""
-        from .generated import manager_pb2
+        from grpc.generated import manager_pb2
 
         db = get_db(self.config.database.uri)
 
@@ -273,7 +273,7 @@ class ManagerServiceServicer:
 
     async def LogAuditEvent(self, request, context):
         """Log an audit event."""
-        from .generated import manager_pb2
+        from grpc.generated import manager_pb2
 
         db = get_db(self.config.database.uri)
 
@@ -302,7 +302,7 @@ class ManagerServiceServicer:
 async def serve(config: ManagerConfig) -> None:
     """Start the gRPC server."""
     try:
-        from .generated import manager_pb2_grpc
+        from grpc.generated import manager_pb2_grpc
     except ImportError:
         logger.warning(
             "gRPC stubs not generated. Run: "

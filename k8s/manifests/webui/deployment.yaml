@@ -9,7 +9,7 @@ metadata:
     app.kubernetes.io/component: frontend
     app.kubernetes.io/managed-by: kustomize
 spec:
-  replicas: 2
+  replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -35,8 +35,10 @@ spec:
           containerPort: 3000
           protocol: TCP
         env:
-        - name: REACT_APP_API_URL
+        - name: FLASK_API_URL
           value: "http://flask-backend:5000"
+        - name: GO_API_URL
+          value: "http://go-backend:8080"
         - name: NODE_ENV
           value: "production"
         - name: LOG_LEVEL

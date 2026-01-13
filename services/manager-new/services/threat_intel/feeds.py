@@ -5,13 +5,13 @@ from typing import Optional, List, Dict, Any
 
 import structlog
 
-from .sources.dns_blacklist import DNSBlacklistSource
-from .sources.ip_blacklist import IPBlacklistSource
-from .sources.otx import OTXSource
-from .sources.virustotal import VirusTotalSource
-from .sources.stix_taxii import TAXIISource
-from .sources.openioc import OpenIOCSource
-from .sources.yara_rules import YARASource
+from services.threat_intel.sources.dns_blacklist import DNSBlacklistSource
+from services.threat_intel.sources.ip_blacklist import IPBlacklistSource
+from services.threat_intel.sources.otx import OTXSource
+from services.threat_intel.sources.virustotal import VirusTotalSource
+from services.threat_intel.sources.stix_taxii import TAXIISource
+from services.threat_intel.sources.openioc import OpenIOCSource
+from services.threat_intel.sources.yara_rules import YARASource
 
 logger = structlog.get_logger()
 

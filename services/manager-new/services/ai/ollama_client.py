@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any, List
 import httpx
 import structlog
 
-from .provider import AIProvider
+from services.ai.provider import AIProvider
 
 logger = structlog.get_logger()
 

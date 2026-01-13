@@ -9,7 +9,7 @@ metadata:
     app.kubernetes.io/component: api
     app.kubernetes.io/managed-by: kustomize
 spec:
-  replicas: 3
+  replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -96,6 +96,11 @@ spec:
             configMapKeyRef:
               name: skauswatch-config
               key: REDIS_PORT
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: skauswatch-secrets
+              key: REDIS_PASSWORD
         - name: LICENSE_SERVER_URL
           valueFrom:
             configMapKeyRef:

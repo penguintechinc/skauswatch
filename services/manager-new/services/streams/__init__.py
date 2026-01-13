@@ -1,6 +1,6 @@
 """Streams package."""
 
-from .redis_streams import (
+from services.streams.redis_streams import (
     RedisStreamManager,
     StreamMessage,
     EDREventPublisher,

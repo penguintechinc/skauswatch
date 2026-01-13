@@ -313,7 +313,7 @@ async def run_grpc_server(config: ManagerConfig) -> None:
         return
 
     # Import here to avoid circular imports
-    from .grpc.server import serve
+    from grpc.server import serve
 
     logger.info(
         "Starting gRPC server",

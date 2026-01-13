@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './hooks/useAuth';
 import Layout from './components/Layout';
@@ -12,7 +13,21 @@ import Settings from './pages/Settings';
 import ThreatIntel from './pages/ThreatIntel';
 
 function App() {
-  const { isAuthenticated, isLoading } = useAuth();
+  const { isAuthenticated, isLoading, checkAuth } = useAuth();
+
+  useEffect(() => {
+    console.log('[App] Starting auth check, isLoading:', isLoading);
+    // Check auth with a fallback timeout
+    const authPromise = checkAuth();
+
+    authPromise
+      .then((result) => {
+        console.log('[App] Auth check completed, result:', result);
+      })
+      .catch((error) => {
+        console.error('[App] Auth check failed:', error);
+      });
+  }, []);
 
   if (isLoading) {
     return (

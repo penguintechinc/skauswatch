@@ -227,7 +227,7 @@ def load_config() -> ManagerConfig:
             port=int(os.getenv("DB_PORT", "5432")),
             name=os.getenv("DB_NAME", "skauswatch"),
             user=os.getenv("DB_USER", "skauswatch"),
-            password=os.getenv("DB_PASSWORD", ""),
+            password=os.getenv("DB_PASS", os.getenv("DB_PASSWORD", "")),
             pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
         ),
         redis=RedisConfig(

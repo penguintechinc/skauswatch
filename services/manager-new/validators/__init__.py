@@ -1,3 +1,3 @@
 """Validators package."""
 
-from .pydantic_models import *
+from validators.pydantic_models import *

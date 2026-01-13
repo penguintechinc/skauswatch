@@ -1,5 +1,5 @@
 """Threat Intelligence services."""
-from .manager import ThreatIntelManager
-from .feeds import FeedAggregator
+from services.threat_intel.manager import ThreatIntelManager
+from services.threat_intel.feeds import FeedAggregator
 
 __all__ = ["ThreatIntelManager", "FeedAggregator"]
