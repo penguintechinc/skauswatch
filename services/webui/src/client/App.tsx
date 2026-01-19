@@ -11,6 +11,7 @@ import UserDetail from './pages/UserDetail';
 import Profile from './pages/Profile';
 import Settings from './pages/Settings';
 import ThreatIntel from './pages/ThreatIntel';
+import S3Scan from './pages/S3Scan';
 
 function App() {
   const { isAuthenticated, isLoading, checkAuth } = useAuth();
@@ -59,6 +60,9 @@ function App() {
 
         {/* Threat Intelligence - all authenticated users */}
         <Route path="/threat-intel" element={<ThreatIntel />} />
+
+        {/* S3 Malware Scanning - all authenticated users */}
+        <Route path="/s3-scan" element={<S3Scan />} />
 
         {/* Profile - all authenticated users */}
         <Route path="/profile" element={<Profile />} />

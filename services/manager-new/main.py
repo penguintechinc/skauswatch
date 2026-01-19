@@ -146,6 +146,16 @@ def create_app(config_instance: ManagerConfig = None) -> Quart:
                 f"{config.redis.consumer_group_prefix}-ai",
             )
 
+            # Create S3 scan consumer groups
+            await stream_manager.create_consumer_group(
+                RedisStreamManager.STREAM_S3_SCAN_TASKS,
+                f"{config.redis.consumer_group_prefix}-s3scan",
+            )
+            await stream_manager.create_consumer_group(
+                RedisStreamManager.STREAM_S3_SCAN_RESULTS,
+                f"{config.redis.consumer_group_prefix}-s3scan-results",
+            )
+
             # Start background tasks
             await _start_background_tasks()
 
@@ -255,7 +265,7 @@ def create_app(config_instance: ManagerConfig = None) -> Quart:
 
 def _register_blueprints(app: Quart) -> None:
     """Register API blueprints."""
-    from api.v1 import auth, alerts, approvals, edr, threat_intel, users, research
+    from api.v1 import auth, alerts, approvals, edr, threat_intel, users, research, s3_scan
 
     app.register_blueprint(auth.bp, url_prefix="/api/v1/auth")
     app.register_blueprint(users.bp, url_prefix="/api/v1/users")
@@ -264,6 +274,7 @@ def _register_blueprints(app: Quart) -> None:
     app.register_blueprint(research.research_bp, url_prefix="/api/v1/research")
     app.register_blueprint(approvals.bp, url_prefix="/api/v1/approvals")
     app.register_blueprint(edr.bp, url_prefix="/api/v1/edr")
+    app.register_blueprint(s3_scan.bp, url_prefix="/api/v1/s3-scan")
 
 
 async def _start_background_tasks() -> None:

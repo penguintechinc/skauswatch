@@ -32,6 +32,17 @@ protobuf>=4.25.0
 httpx>=0.26.0
 aiohttp>=3.9.0
 
+# S3/Minio support
+aiobotocore>=2.9.0
+botocore>=1.34.0
+
+# Encryption for S3 credentials
+cryptography>=41.0.0
+
+# Cron scheduling
+croniter>=2.0.0
+pytz>=2024.1
+
 # Research feature dependencies
 python-whois>=0.9.1
 dnspython>=2.4.0

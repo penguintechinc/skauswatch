@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -134,6 +132,151 @@ services:
     networks:
       - app-network
 
+  # Manager Service (Quart API + gRPC)
+  manager:
+    build:
+      context: ./services/manager-new
+      dockerfile: Dockerfile
+    container_name: skauswatch-manager
+    environment:
+      - QUART_ENV=${QUART_ENV:-production}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-jwt-secret}
+      - DB_TYPE=${DB_TYPE:-postgres}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB:-app_db}
+      - DB_USER=${POSTGRES_USER:-app_user}
+      - DB_PASS=${POSTGRES_PASSWORD:-password}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/0
+      - REDIS_KEY_PREFIX=skauswatch
+      - GRPC_ENABLED=true
+      - GRPC_PORT=50051
+      # S3 Scan Config
+      - S3_SCAN_ENABLED=${S3_SCAN_ENABLED:-true}
+      - S3_SCAN_MAX_FILE_SIZE_MB=${S3_SCAN_MAX_FILE_SIZE_MB:-100}
+      - S3_CRED_ENCRYPTION_KEY=${S3_CRED_ENCRYPTION_KEY:-change-me-encryption-key-32b}
+      # Internal Minio for adhoc uploads
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      # TI Integration
+      - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY:-}
+      - OTX_API_KEY=${OTX_API_KEY:-}
+    ports:
+      - "${MANAGER_PORT:-5004}:5000"
+      - "${MANAGER_GRPC_PORT:-50054}:50051"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Minio Object Storage (S3-compatible, for adhoc uploads)
+  minio:
+    image: minio/minio:latest
+    container_name: skauswatch-minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_SECRET_KEY:-minioadmin}
+    ports:
+      - "${MINIO_API_PORT:-9020}:9000"
+      - "${MINIO_CONSOLE_PORT:-9021}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ClamAV Virus Definition Updater (shared volume)
+  clamav-freshclam:
+    image: clamav/clamav:stable
+    container_name: skauswatch-freshclam
+    entrypoint: /usr/bin/freshclam
+    command: ["--daemon", "--foreground", "--checks=1"]
+    volumes:
+      - clamav_db:/var/lib/clamav
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Worker-S3 Service (Malware Scanning Workers)
+  worker-s3:
+    build:
+      context: ./services/worker-s3
+      dockerfile: Dockerfile
+    # Note: No container_name when using replicas
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+    environment:
+      # Redis connection
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/0
+      - REDIS_KEY_PREFIX=skauswatch
+      - CONSUMER_GROUP=s3scan-workers
+      - CONSUMER_NAME=worker-${HOSTNAME:-1}
+      # Database (for result writes)
+      - DB_TYPE=${DB_TYPE:-postgres}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB:-app_db}
+      - DB_USER=${POSTGRES_USER:-app_user}
+      - DB_PASS=${POSTGRES_PASSWORD:-password}
+      # Worker tuning
+      - THREAD_POOL_SIZE=${WORKER_THREAD_POOL_SIZE:-4}
+      - MAX_CONCURRENT_TASKS=${WORKER_MAX_CONCURRENT_TASKS:-10}
+      - MAX_FILE_SIZE_MB=${S3_SCAN_MAX_FILE_SIZE_MB:-100}
+      - SCAN_TIMEOUT_SEC=${WORKER_SCAN_TIMEOUT_SEC:-120}
+      # ClamAV
+      - CLAMD_SOCKET=/var/run/clamav/clamd.sock
+      # YARA (optional)
+      - YARA_ENABLED=${YARA_ENABLED:-false}
+      - YARA_RULES_PATH=/yara_rules
+      # TI enrichment
+      - TI_ENABLED=${TI_ENABLED:-true}
+      - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY:-}
+      - OTX_API_KEY=${OTX_API_KEY:-}
+      # gRPC to manager
+      - MANAGER_GRPC_ADDR=manager:50051
+    volumes:
+      - clamav_db:/var/lib/clamav:ro
+      - ./config/yara_rules:/yara_rules:ro
+      - /tmp/s3-scan-workspace:/workspace
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      clamav-freshclam:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import redis; r=redis.from_url('redis://:${REDIS_PASSWORD:-password}@redis:6379/0'); r.ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - app-network
+
   # Prometheus Monitoring
   prometheus:
     image: prom/prometheus:latest
@@ -206,6 +349,10 @@ volumes:
   grafana_data:
     driver: local
   nginx_logs:
+    driver: local
+  minio_data:
+    driver: local
+  clamav_db:
     driver: local
 
 networks:

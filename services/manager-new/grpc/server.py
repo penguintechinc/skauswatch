@@ -299,8 +299,17 @@ class ManagerServiceServicer:
         return response
 
 
-async def serve(config: ManagerConfig) -> None:
-    """Start the gRPC server."""
+async def serve(config: ManagerConfig, job_manager=None, results_manager=None, adhoc_manager=None, bucket_manager=None) -> None:
+    """
+    Start the gRPC server.
+
+    Args:
+        config: Manager configuration
+        job_manager: Optional ScanJobManager instance for S3 scan operations
+        results_manager: Optional ScanResultsManager instance for S3 scan operations
+        adhoc_manager: Optional AdhocScanManager instance for S3 scan operations
+        bucket_manager: Optional BucketConfigManager instance for S3 scan operations
+    """
     try:
         from grpc.generated import manager_pb2_grpc
     except ImportError:
@@ -312,6 +321,19 @@ async def serve(config: ManagerConfig) -> None:
         )
         return
 
+    # Check if S3 scan stubs are available
+    s3_scan_available = False
+    try:
+        from grpc.generated import s3_scan_pb2_grpc
+        s3_scan_available = True
+    except ImportError:
+        logger.warning(
+            "S3 scan gRPC stubs not generated. Run: "
+            "python -m grpc_tools.protoc -I./grpc/proto "
+            "--python_out=./grpc/generated --grpc_python_out=./grpc/generated "
+            "./grpc/proto/s3_scan.proto"
+        )
+
     server = grpc.aio.server(
         futures.ThreadPoolExecutor(max_workers=config.grpc.max_workers),
         options=[
@@ -320,10 +342,28 @@ async def serve(config: ManagerConfig) -> None:
         ],
     )
 
+    # Register ManagerService
     manager_pb2_grpc.add_ManagerServiceServicer_to_server(
         ManagerServiceServicer(config),
         server,
     )
+
+    # Register S3ScanService if managers are provided and stubs available
+    if s3_scan_available and all([job_manager, results_manager, adhoc_manager, bucket_manager]):
+        from grpc.s3_scan_server import S3ScanServicer
+
+        s3_scan_pb2_grpc.add_S3ScanServiceServicer_to_server(
+            S3ScanServicer(
+                job_manager=job_manager,
+                results_manager=results_manager,
+                adhoc_manager=adhoc_manager,
+                bucket_manager=bucket_manager,
+            ),
+            server,
+        )
+        logger.info("S3ScanService registered")
+    elif s3_scan_available:
+        logger.warning("S3ScanService stubs available but managers not provided")
 
     listen_addr = f"{config.grpc.host}:{config.grpc.port}"
     server.add_insecure_port(listen_addr)

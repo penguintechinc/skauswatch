@@ -44,6 +44,8 @@ class RedisStreamManager:
     STREAM_THREAT_UPDATES = "threatintel:updates"
     STREAM_APPROVALS = "approvals:pending"
     STREAM_AUDIT_LOG = "audit:log"
+    STREAM_S3_SCAN_TASKS = "s3scan:tasks"
+    STREAM_S3_SCAN_RESULTS = "s3scan:results"
 
     def __init__(
         self,
@@ -399,6 +401,29 @@ class AuditLogPublisher:
         return await self.manager.publish_event(
             RedisStreamManager.STREAM_AUDIT_LOG,
             event,
+        )
+
+
+class S3ScanPublisher:
+    """Publisher for S3 scan tasks."""
+
+    def __init__(self, stream_manager: RedisStreamManager):
+        self.manager = stream_manager
+
+    async def publish_scan_task(self, task: Dict[str, Any]) -> str:
+        """Publish an S3 scan task."""
+        task["submitted_at"] = datetime.utcnow().isoformat()
+        return await self.manager.publish_event(
+            RedisStreamManager.STREAM_S3_SCAN_TASKS,
+            task,
+        )
+
+    async def publish_scan_result(self, result: Dict[str, Any]) -> str:
+        """Publish a scan result."""
+        result["completed_at"] = datetime.utcnow().isoformat()
+        return await self.manager.publish_event(
+            RedisStreamManager.STREAM_S3_SCAN_RESULTS,
+            result,
         )
 
 
