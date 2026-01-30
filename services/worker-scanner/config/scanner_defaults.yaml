@@ -1,0 +1,98 @@
+# Default Scanner Configurations for SkausWatch Worker-Scanner
+
+nuclei:
+  severity_filter:
+    - critical
+    - high
+    - medium
+    - low
+    - info
+  rate_limit: 150
+  concurrency: 25
+  timeout: 300  # seconds per scan
+  max_duration: 3600  # max total scan duration
+  retries: 2
+  templates:
+    - cves
+    - vulnerabilities
+    - misconfiguration
+    - exposures
+    - technologies
+  exclude_templates:
+    - dos
+  output_format: json
+  follow_redirects: true
+  max_redirects: 10
+
+zap:
+  scan_types:
+    baseline:
+      description: "Quick passive scan for common vulnerabilities"
+      ajax_spider: false
+      active_scan: false
+      timeout: 300
+    full:
+      description: "Complete active + passive scan"
+      ajax_spider: true
+      active_scan: true
+      timeout: 3600
+    api:
+      description: "API-focused scan using OpenAPI/Swagger spec"
+      ajax_spider: false
+      active_scan: true
+      timeout: 1800
+  default_scan_type: baseline
+  alert_threshold: low
+  attack_strength: medium
+  max_depth: 5
+  thread_count: 5
+
+openvas:
+  scan_configs:
+    discovery:
+      name: "Discovery"
+      description: "Network discovery scan"
+      openvas_config_id: "8715c877-47a0-438d-98a3-27c7a6ab2196"
+    full_and_fast:
+      name: "Full and fast"
+      description: "Full vulnerability scan optimized for speed"
+      openvas_config_id: "daba56c8-73ec-11df-a475-002264764cea"
+    full_and_deep:
+      name: "Full and very deep"
+      description: "Thorough vulnerability assessment"
+      openvas_config_id: "708f25c4-7489-11df-8094-002264764cea"
+  default_scan_config: full_and_fast
+  max_hosts: 20
+  max_checks: 4
+  port_range: "T:1-65535"
+  alive_test: "ICMP, TCP-ACK Service & ARP Ping"
+
+# Severity mapping (normalize across scanners)
+severity_mapping:
+  critical:
+    cvss_min: 9.0
+    cvss_max: 10.0
+  high:
+    cvss_min: 7.0
+    cvss_max: 8.9
+  medium:
+    cvss_min: 4.0
+    cvss_max: 6.9
+  low:
+    cvss_min: 0.1
+    cvss_max: 3.9
+  info:
+    cvss_min: 0.0
+    cvss_max: 0.0
+
+# Finding status options
+finding_statuses:
+  - open
+  - acknowledged
+  - false_positive
+  - fixed
+
+# Export formats
+export_formats:
+  - json
+  - csv

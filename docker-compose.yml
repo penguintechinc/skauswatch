@@ -1,0 +1,197 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-bookworm
+    container_name: skauswatch-postgres
+    environment:
+      POSTGRES_DB: skauswatch
+      POSTGRES_USER: skauswatch
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - scanner-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skauswatch"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis - Celery broker and result backend
+  redis:
+    image: redis:7-bookworm
+    container_name: skauswatch-redis
+    volumes:
+      - redis_data:/data
+    networks:
+      - scanner-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Worker-Scanner API Service (development mode with hot reload)
+  worker-scanner:
+    build:
+      context: ./services/worker-scanner
+      dockerfile: Dockerfile
+    container_name: skauswatch-worker-scanner
+    ports:
+      - "5051:5001"
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=true
+      - SECRET_KEY=${SECRET_KEY:-dev-secret-key}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-dev-jwt-secret}
+      - DB_TYPE=${DB_TYPE:-postgres}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-skauswatch}
+      - DB_USER=${DB_USER:-skauswatch}
+      - DB_PASSWORD=${DB_PASSWORD:-changeme}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - SCANNER_NUCLEI_ENABLED=${SCANNER_NUCLEI_ENABLED:-true}
+      - SCANNER_ZAP_ENABLED=${SCANNER_ZAP_ENABLED:-true}
+      - SCANNER_OPENVAS_ENABLED=${SCANNER_OPENVAS_ENABLED:-true}
+      - SCANNER_ZAP_URL=http://zap:8080
+      - SCANNER_ZAP_API_KEY=${SCANNER_ZAP_API_KEY:-}
+      - SCANNER_OPENVAS_HOST=openvas
+      - SCANNER_OPENVAS_PORT=9390
+      - SCANNER_OPENVAS_USER=${SCANNER_OPENVAS_USER:-admin}
+      - SCANNER_OPENVAS_PASSWORD=${SCANNER_OPENVAS_PASSWORD:-changeme}
+      - LOG_LEVEL=DEBUG
+      - LOG_FORMAT=console
+    volumes:
+      - ./services/worker-scanner:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - scanner-network
+    command: python -m flask --app app:create_app run --host 0.0.0.0 --port 5001 --reload --debug
+    restart: unless-stopped
+
+  # Celery Worker - Async scan execution (same image, different command)
+  scanner-worker:
+    build:
+      context: ./services/worker-scanner
+      dockerfile: Dockerfile
+    container_name: skauswatch-scanner-worker
+    command: celery -A workers.celery_app worker --loglevel=debug -c 1
+    environment:
+      - DB_TYPE=${DB_TYPE:-postgres}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-skauswatch}
+      - DB_USER=${DB_USER:-skauswatch}
+      - DB_PASSWORD=${DB_PASSWORD:-changeme}
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - SCANNER_NUCLEI_ENABLED=${SCANNER_NUCLEI_ENABLED:-true}
+      - SCANNER_ZAP_ENABLED=${SCANNER_ZAP_ENABLED:-true}
+      - SCANNER_OPENVAS_ENABLED=${SCANNER_OPENVAS_ENABLED:-true}
+      - SCANNER_ZAP_URL=http://zap:8080
+      - SCANNER_ZAP_API_KEY=${SCANNER_ZAP_API_KEY:-}
+      - SCANNER_OPENVAS_HOST=openvas
+      - SCANNER_OPENVAS_PORT=9390
+      - SCANNER_OPENVAS_USER=${SCANNER_OPENVAS_USER:-admin}
+      - SCANNER_OPENVAS_PASSWORD=${SCANNER_OPENVAS_PASSWORD:-changeme}
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./services/worker-scanner:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - scanner-network
+    restart: unless-stopped
+
+  # Celery Beat - Schedule processor
+  scanner-beat:
+    build:
+      context: ./services/worker-scanner
+      dockerfile: Dockerfile
+    container_name: skauswatch-scanner-beat
+    command: celery -A workers.celery_app beat --loglevel=debug
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DB_TYPE=${DB_TYPE:-postgres}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-skauswatch}
+      - DB_USER=${DB_USER:-skauswatch}
+      - DB_PASSWORD=${DB_PASSWORD:-changeme}
+      - LOG_LEVEL=DEBUG
+    volumes:
+      - ./services/worker-scanner:/app
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - scanner-network
+    restart: unless-stopped
+
+  # OWASP ZAP Scanner (set SCANNER_ZAP_SCALE=0 to disable)
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    container_name: skauswatch-zap
+    command: zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.addrs.addr.name=.* -config api.addrs.addr.regex=true -config api.disablekey=true
+    networks:
+      - scanner-network
+    deploy:
+      replicas: ${SCANNER_ZAP_SCALE:-1}
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # OpenVAS Scanner (set SCANNER_OPENVAS_SCALE=0 to disable)
+  openvas:
+    image: immauss/openvas:latest
+    container_name: skauswatch-openvas
+    environment:
+      - USERNAME=${SCANNER_OPENVAS_USER:-admin}
+      - PASSWORD=${SCANNER_OPENVAS_PASSWORD:-changeme}
+    networks:
+      - scanner-network
+    deploy:
+      replicas: ${SCANNER_OPENVAS_SCALE:-1}
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-k", "-f", "https://localhost:9392"]
+      interval: 60s
+      timeout: 15s
+      retries: 10
+      start_period: 300s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  scanner-network:
+    driver: bridge

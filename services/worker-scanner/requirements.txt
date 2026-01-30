@@ -1,0 +1,31 @@
+# Core Framework
+Flask==3.1.2
+Flask-CORS==6.0.2
+gunicorn==23.0.0
+
+# Database
+PyDAL==20260118.1
+SQLAlchemy==2.0.46
+alembic==1.18.3
+psycopg2-binary==2.9.11
+pymysql==1.1.0
+
+# Async/Workers
+celery==5.4.0
+redis==5.0.1
+
+# HTTP Clients
+httpx==0.28.1
+
+# Scanners
+python-gvm==24.12.0
+
+# Validation & Security
+PyJWT==2.10.1
+marshmallow==3.26.2
+
+# Utilities
+pyyaml==6.0.1
+croniter==6.0.0
+python-dotenv==1.0.0
+structlog==25.5.0
