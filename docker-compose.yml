@@ -122,7 +122,7 @@ services:
       context: ./services/worker-scanner
       dockerfile: Dockerfile
     container_name: skauswatch-scanner-beat
-    command: celery -A workers.celery_app beat --loglevel=debug
+    command: celery -A workers.celery_app beat --loglevel=debug --schedule=/tmp/celerybeat/celerybeat-schedule
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/1
@@ -135,6 +135,7 @@ services:
       - LOG_LEVEL=DEBUG
     volumes:
       - ./services/worker-scanner:/app
+      - celerybeat_data:/tmp/celerybeat
     depends_on:
       redis:
         condition: service_healthy
@@ -191,6 +192,7 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  celerybeat_data:
 
 networks:
   scanner-network:

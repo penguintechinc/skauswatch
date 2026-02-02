@@ -64,8 +64,10 @@ RUN chown -R scanner:scanner /app
 # Create writable directories for scanner user
 RUN mkdir -p /home/scanner/.config/nuclei && \
     mkdir -p /app/databases && \
+    mkdir -p /tmp/celerybeat && \
     chown -R scanner:scanner /home/scanner && \
-    chown -R scanner:scanner /app/databases
+    chown -R scanner:scanner /app/databases && \
+    chown -R scanner:scanner /tmp/celerybeat
 
 USER scanner
 
