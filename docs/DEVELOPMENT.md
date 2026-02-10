@@ -78,10 +78,55 @@ make setup
 
 This runs:
 1. Python virtual environment setup
-2. Shared library installation (py_libs)
+2. **Penguin-libs package installation** (centralized common libraries)
 3. Per-service dependency installation
 4. Pre-commit hooks installation
 5. Database initialization
+
+#### Penguin-Libs (Centralized Packages)
+
+SkausWatch uses published packages from the [penguin-libs monorepo](https://github.com/penguintechinc/penguin-libs) for common functionality.
+
+**Python Packages (PyPI):**
+- `penguin-libs>=0.1.0` - Validation, HTTP, gRPC utilities
+- `penguin-licensing>=0.1.0` - License server client
+- `penguintechinc-utils>=0.1.0` - Sanitized logging, Flask utils
+
+**React Packages (GitHub Packages):**
+- `@penguintechinc/react-libs@^1.1.1` - UI components
+
+**Installation is automatic via `make setup`**, but for manual installation:
+
+Python services:
+```bash
+pip install penguin-libs penguin-licensing penguintechinc-utils
+```
+
+React/WebUI service:
+```bash
+cd services/webui
+
+# Create .npmrc for GitHub Packages access
+cat > .npmrc << EOF
+@penguintechinc:registry=https://npm.pkg.github.com
+//npm.pkg.github.com/:_authToken=\${GITHUB_TOKEN}
+EOF
+
+# Set GitHub token (required for @penguintechinc packages)
+export GITHUB_TOKEN=your_github_personal_access_token
+
+# Install dependencies
+npm install
+```
+
+**GitHub Token Setup:**
+1. Go to https://github.com/settings/tokens
+2. Generate new token with `read:packages` scope
+3. Set `GITHUB_TOKEN` environment variable
+4. Run `npm install`
+
+**Application-Specific Libraries:**
+See `shared/README.md` for utilities kept in `shared/` (performance, database, go_libs, node_libs)
 
 ### Environment Configuration
 

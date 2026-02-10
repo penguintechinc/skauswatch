@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { FormModalBuilder } from '@penguintechinc/react-libs';
 import { usersApi } from '../hooks/useApi';
 import Card from '../components/Card';
 import Button from '../components/Button';
@@ -10,20 +11,6 @@ export default function Users() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
-
-  // Create user form state
-  const [newUser, setNewUser] = useState<{
-    email: string;
-    password: string;
-    full_name: string;
-    role: 'admin' | 'maintainer' | 'viewer';
-  }>({
-    email: '',
-    password: '',
-    full_name: '',
-    role: 'viewer',
-  });
-  const [createLoading, setCreateLoading] = useState(false);
 
   const fetchUsers = async () => {
     setIsLoading(true);
@@ -42,18 +29,15 @@ export default function Users() {
     fetchUsers();
   }, []);
 
-  const handleCreateUser = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setCreateLoading(true);
+  const handleCreateUser = async (data: Record<string, unknown>) => {
     try {
-      await usersApi.create(newUser);
+      await usersApi.create(data);
       setShowCreateModal(false);
-      setNewUser({ email: '', password: '', full_name: '', role: 'viewer' });
       fetchUsers();
+      setError(null);
     } catch (err) {
       setError('Failed to create user');
-    } finally {
-      setCreateLoading(false);
+      throw err;  // Re-throw so FormModalBuilder can handle it
     }
   };
 
@@ -141,73 +125,51 @@ export default function Users() {
       </Card>
 
       {/* Create User Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="card w-full max-w-md">
-            <h2 className="text-xl font-bold text-gold-400 mb-4">Create New User</h2>
-            <form onSubmit={handleCreateUser} className="space-y-4">
-              <div>
-                <label className="block text-sm text-dark-400 mb-1">Full Name</label>
-                <input
-                  type="text"
-                  value={newUser.full_name}
-                  onChange={(e) => setNewUser({ ...newUser, full_name: e.target.value })}
-                  className="input"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-dark-400 mb-1">Email</label>
-                <input
-                  type="email"
-                  value={newUser.email}
-                  onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
-                  className="input"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-dark-400 mb-1">Password</label>
-                <input
-                  type="password"
-                  value={newUser.password}
-                  onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
-                  className="input"
-                  required
-                  minLength={8}
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-dark-400 mb-1">Role</label>
-                <select
-                  value={newUser.role}
-                  onChange={(e) => {
-                    const role = e.target.value as 'admin' | 'maintainer' | 'viewer';
-                    setNewUser({ ...newUser, role });
-                  }}
-                  className="input"
-                >
-                  <option value="viewer">Viewer</option>
-                  <option value="maintainer">Maintainer</option>
-                  <option value="admin">Admin</option>
-                </select>
-              </div>
-              <div className="flex justify-end gap-3 mt-6">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => setShowCreateModal(false)}
-                >
-                  Cancel
-                </Button>
-                <Button type="submit" isLoading={createLoading}>
-                  Create User
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <FormModalBuilder
+        isOpen={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        title="Create New User"
+        fields={[
+          {
+            name: 'full_name',
+            label: 'Full Name',
+            type: 'text',
+            required: true,
+            placeholder: 'Enter full name',
+          },
+          {
+            name: 'email',
+            label: 'Email',
+            type: 'email',
+            required: true,
+            placeholder: 'user@example.com',
+          },
+          {
+            name: 'password',
+            label: 'Password',
+            type: 'password',
+            required: true,
+            placeholder: 'Minimum 8 characters',
+            validation: {
+              minLength: 8,
+            },
+          },
+          {
+            name: 'role',
+            label: 'Role',
+            type: 'select',
+            required: true,
+            options: [
+              { value: 'viewer', label: 'Viewer' },
+              { value: 'maintainer', label: 'Maintainer' },
+              { value: 'admin', label: 'Admin' },
+            ],
+            defaultValue: 'viewer',
+          },
+        ]}
+        onSubmit={handleCreateUser}
+        submitText="Create User"
+      />
     </div>
   );
 }

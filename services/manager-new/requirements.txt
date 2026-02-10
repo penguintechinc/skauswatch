@@ -59,6 +59,11 @@ pyyaml>=6.0.1
 # Utilities
 python-dateutil>=2.8.0
 
+# Penguin Tech Libraries
+penguin-libs>=0.1.0          # Validation, HTTP, gRPC utilities
+penguin-licensing>=0.1.0     # License server client
+penguintechinc-utils>=0.1.0  # Sanitized logging, Flask utils
+
 # Development only (not included in production)
 # pytest>=7.4.0
 # pytest-asyncio>=0.23.0

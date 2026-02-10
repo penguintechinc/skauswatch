@@ -49,3 +49,8 @@ mypy==1.14.0
 
 # License Server Integration
 # (Using requests for HTTP client - already included above)
+
+# Penguin Tech Libraries
+penguin-libs>=0.1.0          # Validation, HTTP, gRPC utilities
+penguin-licensing>=0.1.0     # License server client
+penguintechinc-utils>=0.1.0  # Sanitized logging, Flask utils

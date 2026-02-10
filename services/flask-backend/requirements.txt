@@ -31,3 +31,8 @@ pytest-cov==6.0.0
 black==24.10.0
 flake8==7.1.1
 mypy==1.14.0
+
+# Penguin Tech Libraries
+penguin-libs>=0.1.0          # Validation, HTTP, gRPC utilities
+penguin-licensing>=0.1.0     # License server client
+penguintechinc-utils>=0.1.0  # Sanitized logging, Flask utils

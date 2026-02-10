@@ -17,6 +17,7 @@
     "screenshots": "node ../../scripts/capture-screenshots.cjs"
   },
   "dependencies": {
+    "@penguintechinc/react-libs": "^1.1.1",
     "axios": "^1.7.9",
     "express": "^4.21.2",
     "http-proxy-middleware": "^3.0.3",
