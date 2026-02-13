@@ -35,11 +35,11 @@ ingress:
   enabled: true
   className: "nginx"
   hosts:
-    - host: go-api.penguintech.io
+    - host: go-api.penguintech.cloud
       paths:
         - path: /api/v1
           pathType: Prefix
   tls:
     - secretName: penguintech-wildcard-tls
       hosts:
-        - go-api.penguintech.io
+        - go-api.penguintech.cloud

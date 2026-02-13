@@ -35,11 +35,11 @@ ingress:
   enabled: true
   className: "nginx"
   hosts:
-    - host: skauswatch.penguintech.io
+    - host: skauswatch.penguintech.cloud
       paths:
         - path: /
           pathType: Prefix
   tls:
     - secretName: penguintech-wildcard-tls
       hosts:
-        - skauswatch.penguintech.io
+        - skauswatch.penguintech.cloud

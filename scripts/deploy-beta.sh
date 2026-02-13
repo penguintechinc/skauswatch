@@ -16,7 +16,7 @@ KUSTOMIZE_PATH="${PROJECT_ROOT}/k8s/kustomize/overlays/beta"
 # Registry and cluster configuration
 IMAGE_REGISTRY="registry-dal2.penguintech.io"
 KUBE_CONTEXT="dal2-beta"
-APP_HOST="skauswatch.penguintech.io"
+APP_HOST="skauswatch.penguintech.cloud"
 
 # Services configuration (from docker-compose.yml and helm charts)
 SERVICES=(
@@ -454,8 +454,8 @@ main() {
     echo ""
     echo "Access your applications:"
     echo "  WebUI:            https://${APP_HOST}"
-    echo "  Flask API:        https://flask-api.penguintech.io/api/v1"
-    echo "  Go API:           https://go-api.penguintech.io/api/v1"
+    echo "  Flask API:        https://flask-api.penguintech.cloud/api/v1"
+    echo "  Go API:           https://go-api.penguintech.cloud/api/v1"
     echo ""
     echo "View deployment logs:"
     echo "  kubectl logs -n ${NAMESPACE} -l app=skauswatch-flask-backend"
