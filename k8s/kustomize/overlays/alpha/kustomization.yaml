@@ -1,0 +1,43 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: skauswatch-alpha
+
+namespace: skauswatch-alpha
+
+namePrefix: alpha-
+
+commonLabels:
+  environment: alpha
+  app.kubernetes.io/version: alpha
+
+bases:
+- ../../base
+
+replicas:
+- name: flask-backend
+  count: 1
+- name: go-backend
+  count: 1
+- name: webui
+  count: 1
+
+configMapGenerator:
+- name: skauswatch-config
+  behavior: merge
+  literals:
+  - LOG_LEVEL=DEBUG
+  - RELEASE_MODE=false
+
+secretGenerator:
+- name: skauswatch-secrets
+  behavior: merge
+  literals:
+  - DB_USER=alphauser
+  - DB_PASS=alphapass
+  - SECRET_KEY=alphasecretkey
+  - SECURITY_PASSWORD_SALT=alphasalt
+  - LICENSE_KEY=PENG-ALPHA-XXXX-XXXX-XXXX-ABCD
+  - REDIS_PASSWORD=alpharedis
