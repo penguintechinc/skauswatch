@@ -15,10 +15,10 @@ spec:
   ingressClassName: nginx
   tls:
   - hosts:
-    - skauswatch.penguintech.io
+    - skauswatch.penguintech.cloud
     secretName: penguintech-wildcard-tls
   rules:
-  - host: skauswatch.penguintech.io
+  - host: skauswatch.penguintech.cloud
     http:
       paths:
       - path: /

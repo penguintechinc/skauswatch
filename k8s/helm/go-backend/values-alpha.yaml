@@ -25,3 +25,16 @@ resources:
   requests:
     cpu: 100m
     memory: 256Mi
+
+ingress:
+  enabled: true
+  className: "nginx"
+  hosts:
+    - host: go-api.localhost.local
+      paths:
+        - path: /api/v1
+          pathType: Prefix
+  tls:
+    - secretName: localhost-tls
+      hosts:
+        - go-api.localhost.local

@@ -25,3 +25,16 @@ resources:
   requests:
     cpu: 50m
     memory: 128Mi
+
+ingress:
+  enabled: true
+  className: "nginx"
+  hosts:
+    - host: flask-api.localhost.local
+      paths:
+        - path: /api/v1
+          pathType: Prefix
+  tls:
+    - secretName: localhost-tls
+      hosts:
+        - flask-api.localhost.local
