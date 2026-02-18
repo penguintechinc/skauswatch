@@ -3,9 +3,9 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 metadata:
-  name: project-template-prod
+  name: skauswatch-prod
 
-namespace: project-template-prod
+namespace: skauswatch-prod
 
 namePrefix: prod-
 
@@ -16,22 +16,26 @@ bases:
 - ../../base
 
 replicas:
-- name: flask-backend
+- name: manager
   count: 3
-- name: go-backend
+- name: pki-server
   count: 3
-- name: webui
+- name: ssh-ca
   count: 2
+- name: aaa-monitor
+  count: 2
+- name: worker-s3
+  count: 3
 
 configMapGenerator:
-- name: project-template-config
+- name: skauswatch-config
   behavior: merge
   literals:
   - LOG_LEVEL=WARN
   - RELEASE_MODE=true
 
 secretGenerator:
-- name: project-template-secrets
+- name: skauswatch-secrets
   behavior: merge
   literals:
   - DB_USER=produser

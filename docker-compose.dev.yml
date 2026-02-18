@@ -14,39 +14,42 @@ services:
     ports:
       - "6379:6379"
 
-  # Flask Backend - development mode with hot reload
-  flask-backend:
-    build:
-      context: ./services/flask-backend
-      dockerfile: Dockerfile
-      target: builder  # Use non-gunicorn for development
+  # Manager - development mode with hot reload
+  manager:
+    environment:
+      - QUART_ENV=development
+      - QUART_DEBUG=true
+    volumes:
+      - ./services/manager-new:/app
+
+  # PKI Server - development mode with hot reload
+  pki-server:
     environment:
       - FLASK_ENV=development
-      - FLASK_DEBUG=1
+      - FLASK_DEBUG=true
     volumes:
-      - ./services/flask-backend/app:/app/app:ro
-    command: python -m flask run --host=0.0.0.0 --port=5000 --reload
+      - ./services/pki-server-new:/app
 
-  # Go Backend - development mode
-  go-backend:
+  # SSH CA - development mode with hot reload
+  ssh-ca:
     environment:
-      - GO_ENV=development
-    # For development, you might want to mount source and use air for hot reload
-    # volumes:
-    #   - ./services/go-backend:/app
-
-  # WebUI - development mode with Vite dev server
-  webui:
-    build:
-      context: ./services/webui
-      dockerfile: Dockerfile
-      target: builder
-    environment:
-      - NODE_ENV=development
+      - FLASK_ENV=development
+      - FLASK_DEBUG=true
     volumes:
-      - ./services/webui/src:/app/src:ro
-      - ./services/webui/index.html:/app/index.html:ro
-    command: npm run dev
-    ports:
-      - "3000:3000"
-      - "5173:5173"  # Vite dev server
+      - ./services/ssh-ca:/app
+
+  # AAA Monitor - development mode with hot reload
+  aaa-monitor:
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=true
+    volumes:
+      - ./services/aaa-monitor:/app
+
+  # Worker S3 - development mode with hot reload
+  worker-s3:
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=true
+    volumes:
+      - ./services/worker-s3:/app

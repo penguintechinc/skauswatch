@@ -17,11 +17,15 @@ bases:
 - ../../base
 
 replicas:
-- name: flask-backend
+- name: manager
   count: 2
-- name: go-backend
+- name: pki-server
   count: 2
-- name: webui
+- name: ssh-ca
+  count: 2
+- name: aaa-monitor
+  count: 2
+- name: worker-s3
   count: 2
 
 configMapGenerator:
