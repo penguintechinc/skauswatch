@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import structlog
+
 from services.threat_intel.sources.dns_blacklist import DNSBlacklistSource
 from services.threat_intel.sources.ip_blacklist import IPBlacklistSource
 from services.threat_intel.sources.openioc import OpenIOCSource

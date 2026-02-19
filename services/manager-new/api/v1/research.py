@@ -18,14 +18,6 @@ from api.v1.auth import auth_required
 from models.db import get_db
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
-from services.research import (
-    ASNClient,
-    DNSClient,
-    IndicatorClassifier,
-    MaltegoClient,
-    ShodanClient,
-    WhoisClient,
-)
 from validators.pydantic_models import (
     AsnLookupRequest,
     AsnResultModel,
@@ -39,6 +31,15 @@ from validators.pydantic_models import (
     ShodanResultModel,
     WhoisLookupRequest,
     WhoisResultModel,
+)
+
+from services.research import (
+    ASNClient,
+    DNSClient,
+    IndicatorClassifier,
+    MaltegoClient,
+    ShodanClient,
+    WhoisClient,
 )
 
 logger = structlog.get_logger(__name__)

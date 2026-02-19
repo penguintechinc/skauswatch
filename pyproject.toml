@@ -123,6 +123,11 @@ extend-exclude = '''
 )/
 '''
 
+[tool.isort]
+profile = "black"
+line_length = 88
+known_first_party = ["skauswatch", "services", "shared"]
+
 [tool.ruff]
 target-version = "py313"
 line-length = 88

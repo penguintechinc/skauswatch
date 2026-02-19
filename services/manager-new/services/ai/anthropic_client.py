@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 import structlog
+
 from services.ai.provider import AIProvider
 
 logger = structlog.get_logger()

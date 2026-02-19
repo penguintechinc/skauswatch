@@ -12,12 +12,6 @@ from datetime import datetime, timezone
 from typing import Optional, Union
 
 import structlog
-from services.research.asn_client import ASNClient
-from services.research.dns_client import DNSClient
-from services.research.indicator_classifier import IndicatorClassifier
-from services.research.maltego_client import MaltegoClient
-from services.research.shodan_client import ShodanClient
-from services.research.whois_client import WhoisClient
 from validators.research_models import (
     AsnResult,
     DnsResult,
@@ -30,6 +24,13 @@ from validators.research_models import (
     ThreatIntelResult,
     WhoisResult,
 )
+
+from services.research.asn_client import ASNClient
+from services.research.dns_client import DNSClient
+from services.research.indicator_classifier import IndicatorClassifier
+from services.research.maltego_client import MaltegoClient
+from services.research.shodan_client import ShodanClient
+from services.research.whois_client import WhoisClient
 
 logger = structlog.get_logger()
 

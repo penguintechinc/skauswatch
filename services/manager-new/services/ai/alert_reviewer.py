@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import structlog
+
 from services.ai.provider import AIProvider, AIProviderFactory
 
 logger = structlog.get_logger()

@@ -23,13 +23,13 @@ import structlog
 from models.db import close_db, get_db, init_database_schema
 from quart import Quart, jsonify, request
 from quart_cors import cors
+
+from config import ManagerConfig, load_config
 from services.streams.redis_streams import (
     AuditLogPublisher,
     RedisStreamManager,
     create_stream_consumer,
 )
-
-from config import ManagerConfig, load_config
 
 # Configure structured logging
 structlog.configure(

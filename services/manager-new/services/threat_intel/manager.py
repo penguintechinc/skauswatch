@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
+
 from services.models.db import db_session, get_db
 
 logger = structlog.get_logger()
