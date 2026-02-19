@@ -2,8 +2,8 @@
 
 from datetime import datetime, timedelta
 
-from quart import Blueprint, jsonify, current_app
 import structlog
+from quart import Blueprint, current_app, jsonify
 
 logger = structlog.get_logger()
 

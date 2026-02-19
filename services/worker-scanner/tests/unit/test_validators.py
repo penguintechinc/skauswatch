@@ -2,16 +2,16 @@
 
 import pytest
 from utils.validators import (
-    validate_target_value,
-    validate_severity,
-    validate_scanner_type,
-    validate_scan_type,
-    validate_finding_status,
-    validate_cron_expression,
-    validate_job_status,
-    validate_priority,
     sanitize_string,
+    validate_cron_expression,
+    validate_finding_status,
+    validate_job_status,
     validate_pagination,
+    validate_priority,
+    validate_scan_type,
+    validate_scanner_type,
+    validate_severity,
+    validate_target_value,
 )
 
 

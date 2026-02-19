@@ -7,28 +7,28 @@ sliding window, fixed window, and distributed rate limiting with Redis backend.
 
 import asyncio
 import logging
+import math
+import threading
 import time
 from abc import ABC, abstractmethod
-from collections import deque, defaultdict
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
 from typing import (
     Any,
+    AsyncContextManager,
     Callable,
     Dict,
     List,
+    NamedTuple,
     Optional,
+    Set,
     Tuple,
     Union,
-    AsyncContextManager,
-    Set,
-    NamedTuple,
 )
 from uuid import uuid4
-import threading
-import math
 
 # Third-party imports (conditional)
 try:

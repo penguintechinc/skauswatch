@@ -2,7 +2,7 @@
 
 import asyncio
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Set
+from typing import Any, Dict, List, Optional, Set
 
 import httpx
 import structlog

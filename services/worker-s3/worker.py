@@ -13,7 +13,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 
-from config import WorkerConfig
+import redis.asyncio as redis
 from models import ScanResultMessage, ScanTaskMessage
 from s3.client import S3Client
 from s3.downloader import S3Downloader
@@ -26,7 +26,7 @@ from streams.consumer import StreamConsumer
 from streams.publisher import ResultPublisher
 from ti.enricher import TIEnricher
 
-import redis.asyncio as redis
+from config import WorkerConfig
 
 logger = logging.getLogger(__name__)
 

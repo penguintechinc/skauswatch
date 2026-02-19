@@ -2,12 +2,12 @@
 
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 
-from ..models.db import get_db, db_session
-from ..ca import X509CertificateAuthority, SSHCertificateAuthority
+from ..ca import SSHCertificateAuthority, X509CertificateAuthority
+from ..models.db import db_session, get_db
 
 logger = structlog.get_logger()
 

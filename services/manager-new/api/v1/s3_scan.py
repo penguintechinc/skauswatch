@@ -13,11 +13,10 @@ Provides:
 from datetime import datetime
 from typing import Optional
 
-from pydantic import ValidationError
-from quart import Blueprint, current_app, g, jsonify, request
-
 from api.v1.auth import auth_required, role_required
 from models.db import get_db
+from pydantic import ValidationError
+from quart import Blueprint, current_app, g, jsonify, request
 from validators.s3_scan_models import (
     AdhocScanResponse,
     BucketConfigCreateRequest,

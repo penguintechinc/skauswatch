@@ -17,13 +17,12 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from flask import Blueprint, jsonify, request
-from marshmallow import ValidationError
-
 from api.middleware.auth import get_current_user_id, jwt_required
 from api.schemas.job import CreateJobSchema, JobFilterSchema, JobResponseSchema
 from config.settings import settings
 from database.models import get_configured_db
+from flask import Blueprint, jsonify, request
+from marshmallow import ValidationError
 
 # Configure logging
 logger = logging.getLogger(__name__)

@@ -7,33 +7,33 @@ tiered caching with intelligent eviction, metrics, and performance optimization.
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import pickle
+import threading
 import time
 import weakref
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import wraps
 from typing import (
     Any,
-    Dict,
-    List,
-    Optional,
-    Union,
-    Callable,
-    TypeVar,
-    Generic,
     AsyncIterator,
+    Callable,
+    Dict,
+    Generic,
+    List,
+    NamedTuple,
+    Optional,
     Set,
     Tuple,
-    NamedTuple,
+    TypeVar,
+    Union,
 )
 from uuid import uuid4
-import threading
-from functools import wraps
-import inspect
 
 # Third-party imports (conditional)
 try:

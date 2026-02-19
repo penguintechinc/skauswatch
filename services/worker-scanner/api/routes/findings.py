@@ -17,18 +17,17 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from flask import Blueprint, jsonify, request, Response
-from marshmallow import ValidationError
-
 from api.middleware.auth import jwt_required
 from api.schemas.finding import (
-    FindingResponseSchema,
-    UpdateFindingSchema,
-    FindingFilterSchema,
-    FindingStatsSchema,
     FindingExportSchema,
+    FindingFilterSchema,
+    FindingResponseSchema,
+    FindingStatsSchema,
+    UpdateFindingSchema,
 )
 from database.models import get_configured_db
+from flask import Blueprint, Response, jsonify, request
+from marshmallow import ValidationError
 
 # Configure logging
 logger = logging.getLogger(__name__)

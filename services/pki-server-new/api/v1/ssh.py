@@ -4,15 +4,15 @@ from datetime import datetime
 from functools import wraps
 from typing import Callable
 
-from pydantic import ValidationError
-from quart import Blueprint, request, jsonify, g, current_app
 import structlog
+from pydantic import ValidationError
+from quart import Blueprint, current_app, g, jsonify, request
 
 from ...validators.pydantic_models import (
-    SSHCertificateRequest,
-    RevokeRequest,
-    SSHConfigRequest,
     AuthorizedKeysRequest,
+    RevokeRequest,
+    SSHCertificateRequest,
+    SSHConfigRequest,
 )
 
 logger = structlog.get_logger()

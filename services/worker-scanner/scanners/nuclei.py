@@ -17,7 +17,7 @@ import subprocess
 import time
 from datetime import datetime
 
-from scanners.base import BaseScanner, NormalizedFinding, ScanResult, ScannerStatus
+from scanners.base import BaseScanner, NormalizedFinding, ScannerStatus, ScanResult
 from scanners.parsers.nuclei_parser import parse_nuclei_finding
 
 

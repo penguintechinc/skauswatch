@@ -5,9 +5,9 @@ Manages scan results from S3 bucket scans, including storage, retrieval,
 querying, and statistics generation.
 """
 
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime
 import logging
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 

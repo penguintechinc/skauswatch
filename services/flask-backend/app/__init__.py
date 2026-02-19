@@ -6,7 +6,7 @@ from prometheus_client import make_wsgi_app
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
 from .config import Config
-from .models import init_db, get_db
+from .models import get_db, init_db
 
 
 def create_app(config_class: type = Config) -> Flask:
@@ -32,8 +32,8 @@ def create_app(config_class: type = Config) -> Flask:
 
     # Register blueprints
     from .auth import auth_bp
-    from .users import users_bp
     from .hello import hello_bp
+    from .users import users_bp
 
     app.register_blueprint(auth_bp, url_prefix="/api/v1/auth")
     app.register_blueprint(users_bp, url_prefix="/api/v1/users")

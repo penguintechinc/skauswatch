@@ -9,18 +9,18 @@ import signal
 from datetime import datetime
 from typing import List, Set
 
+import structlog
 from hypercorn.asyncio import serve
 from hypercorn.config import Config as HypercornConfig
 from quart import Quart
 from quart_cors import cors
-import structlog
 
-from .config import get_settings, Settings
-from .models.db import init_database_schema, get_db, close_db
-from .ca import X509CertificateAuthority, SSHCertificateAuthority
-from .services.certificate_manager import CertificateManager
 from .api.v1 import api_v1
+from .ca import SSHCertificateAuthority, X509CertificateAuthority
+from .config import Settings, get_settings
 from .grpc.server import serve_grpc
+from .models.db import close_db, get_db, init_database_schema
+from .services.certificate_manager import CertificateManager
 
 logger = structlog.get_logger()
 

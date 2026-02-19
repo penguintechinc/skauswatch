@@ -12,8 +12,9 @@ import signal
 import sys
 from typing import Optional
 
-from config import load_worker_config
 from worker import S3ScanWorker
+
+from config import load_worker_config
 
 # Configure logging
 logging.basicConfig(

@@ -12,58 +12,57 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
 
+import redis.asyncio as redis
 import structlog
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-import redis.asyncio as redis
+from slowapi.util import get_remote_address
 
-from .models import *
-from .config import AAAMonitorConfig
-from .log_processor import LogProcessor
-from .event_classifier import EventClassifier
-from .buffer_manager import BufferManager
-from .analysis_engine import AnalysisEngine
-from .pattern_detector import PatternDetector
-from .anomaly_detector import AnomalyDetector
+# AI Integration imports
+from .ai_integration.ai_provider import (
+    AIAnalysisRequest,
+    AIAnalysisResponse,
+    AIAnalysisType,
+    AIProviderManager,
+)
+from .ai_integration.analysis_engine import AIAnalysisEngine
+from .ai_integration.prompt_templates import PromptTemplateManager
 from .alert_manager import AlertManager
-from .escalation import EscalationManager
-from .health import HealthChecker
-from .utils import setup_logging, get_version
+from .analysis_engine import AnalysisEngine
+from .anomaly_detector import AnomalyDetector
+from .buffer_manager import BufferManager
+from .collectors.auditd_collector import AuditdCollector
+from .collectors.database_collector import DatabaseCollector
+from .collectors.file_collector import FileCollector
+from .collectors.journald_collector import JournaldCollector
 
 # Collector imports
 from .collectors.kubernetes_collector import KubernetesCollector
 from .collectors.lxc_collector import LXCCollector
-from .collectors.auditd_collector import AuditdCollector
 from .collectors.syslog_collector import SyslogCollector
-from .collectors.journald_collector import JournaldCollector
-from .collectors.file_collector import FileCollector
-from .collectors.database_collector import DatabaseCollector
+from .config import AAAMonitorConfig
+from .escalation import EscalationManager
+from .event_classifier import EventClassifier
+from .health import HealthChecker
+from .log_processor import LogProcessor
+from .models import *
+from .pattern_detector import PatternDetector
+from .threat_intel.indicator_matcher import IndicatorMatcher
+from .threat_intel.stix_parser import STIXParser
 
 # Threat Intelligence imports
 from .threat_intel.taxii_client import TAXIIClient
-from .threat_intel.stix_parser import STIXParser
-from .threat_intel.indicator_matcher import IndicatorMatcher
 from .threat_intel.threat_database import ThreatDatabase
-
-# AI Integration imports
-from .ai_integration.ai_provider import (
-    AIProviderManager,
-    AIAnalysisRequest,
-    AIAnalysisResponse,
-    AIAnalysisType,
-)
-from .ai_integration.analysis_engine import AIAnalysisEngine
-from .ai_integration.prompt_templates import PromptTemplateManager
+from .utils import get_version, setup_logging
 
 # Configure structured logging
 structlog.configure(
@@ -1180,8 +1179,8 @@ def _add_routes(app: FastAPI):
                     )
                 else:  # CSV
                     # Convert to CSV format
-                    import io
                     import csv
+                    import io
 
                     output = io.StringIO()
                     if iocs:

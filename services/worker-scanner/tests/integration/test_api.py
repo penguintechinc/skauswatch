@@ -20,7 +20,6 @@ from unittest.mock import MagicMock, patch
 
 import jwt
 import pytest
-
 from app import create_app
 
 

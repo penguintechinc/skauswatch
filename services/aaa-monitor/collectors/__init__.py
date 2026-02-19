@@ -5,13 +5,13 @@ Completely clientless log collection infrastructure for various sources.
 All collectors operate without agents or log forwarding infrastructure.
 """
 
+from .auditd_collector import AuditdCollector
+from .database_collector import DatabaseCollector
+from .file_collector import FileCollector
+from .journald_collector import JournaldCollector
 from .kubernetes_collector import KubernetesCollector
 from .lxc_collector import LXCCollector
-from .auditd_collector import AuditdCollector
 from .syslog_collector import SyslogCollector
-from .journald_collector import JournaldCollector
-from .file_collector import FileCollector
-from .database_collector import DatabaseCollector
 
 __all__ = [
     "KubernetesCollector",

@@ -9,19 +9,19 @@ This module provides:
 - Session management and security
 """
 
+import base64
 import datetime
 import hashlib
-import secrets
-import logging
 import json
-from typing import Dict, Any, Optional, List, Tuple
+import logging
+import secrets
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Tuple
+
 import bcrypt
 import pyotp
 import qrcode
-from io import BytesIO
-import base64
-
-from py4web import Session, request, redirect, URL, Field
+from py4web import URL, Field, Session, redirect, request
 from py4web.utils.auth import Auth
 from pydal import DAL
 from pydal.objects import Row

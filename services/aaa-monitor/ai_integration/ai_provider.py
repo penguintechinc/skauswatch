@@ -10,11 +10,12 @@ import hashlib
 import json
 import time
 from abc import ABC, abstractmethod
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Dict, List, Optional, Any, Union, AsyncGenerator
-from collections import defaultdict, deque
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
+
 import aioredis
 import structlog
 

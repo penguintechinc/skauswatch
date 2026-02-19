@@ -5,17 +5,17 @@ STIX 2.1 parser for processing threat intelligence objects and
 converting them to internal IOC format.
 """
 
+import ipaddress
 import json
 import logging
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
-from typing import Dict, List, Optional, Any, Union, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
-import ipaddress
 
-import structlog
 import stix2
+import structlog
 from stix2 import MemoryStore
 from stix2.utils import new_version
 

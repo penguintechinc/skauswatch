@@ -7,31 +7,31 @@ through direct API calls. No agents or log forwarding required.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import re
+import ssl
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any, AsyncGenerator
-import traceback
-import ssl
-from urllib.parse import urljoin, urlencode
-import websockets
-import base64
+from typing import Any, AsyncGenerator, Dict, List, Optional
+from urllib.parse import urlencode, urljoin
 
-import structlog
 import aiohttp
+import structlog
+import websockets
 
 from ..models import (
-    BaseEvent,
     AuthenticationEvent,
     AuthorizationEvent,
+    BaseEvent,
     ContainerEvent,
-    ProcessEvent,
-    NetworkEvent,
-    FileAccessEvent,
     EventType,
+    FileAccessEvent,
     LogSource,
+    NetworkEvent,
+    ProcessEvent,
     Severity,
 )
 

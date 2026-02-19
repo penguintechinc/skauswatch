@@ -10,7 +10,7 @@ for code review and security analysis.
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
 import structlog
 

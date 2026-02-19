@@ -12,9 +12,9 @@ Per project standards:
 
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql, mysql
+from alembic import op
+from sqlalchemy.dialects import mysql, postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "001"

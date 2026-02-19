@@ -1,7 +1,7 @@
 """AI Provider base class and factory."""
 
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
 import structlog
 
@@ -81,8 +81,8 @@ class AIProviderFactory:
         Returns:
             AIProvider instance or None if creation fails
         """
-        from .ollama_client import OllamaClient
         from .anthropic_client import AnthropicClient
+        from .ollama_client import OllamaClient
         from .openai_client import OpenAIClient
 
         provider_type = provider_type.lower()

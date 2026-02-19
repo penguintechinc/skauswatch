@@ -7,30 +7,31 @@ tasks with intelligent sizing, health monitoring, and graceful shutdown.
 
 import asyncio
 import logging
+import multiprocessing
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, Future, as_completed
+import weakref
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
 from typing import (
     Any,
+    Awaitable,
     Callable,
     Dict,
+    Generic,
     List,
     Optional,
-    TypeVar,
-    Union,
-    Generic,
-    Awaitable,
     Set,
     Tuple,
+    TypeVar,
+    Union,
 )
 from uuid import uuid4
-import multiprocessing
+
 import psutil
-import weakref
 
 logger = logging.getLogger(__name__)
 

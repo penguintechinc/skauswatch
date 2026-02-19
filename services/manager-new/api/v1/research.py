@@ -14,33 +14,32 @@ from datetime import datetime
 from typing import Optional
 
 import structlog
+from api.v1.auth import auth_required
+from models.db import get_db
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
-
-from models.db import get_db
 from services.research import (
-    DNSClient,
-    WhoisClient,
     ASNClient,
-    ShodanClient,
-    MaltegoClient,
+    DNSClient,
     IndicatorClassifier,
+    MaltegoClient,
+    ShodanClient,
+    WhoisClient,
 )
 from validators.pydantic_models import (
-    ResearchLookupRequest,
-    ResearchLookupResponse,
-    ResearchIndicatorType,
-    WhoisLookupRequest,
-    WhoisResultModel,
-    DnsLookupRequest,
-    DnsResultModel,
     AsnLookupRequest,
     AsnResultModel,
-    ShodanResultModel,
+    DnsLookupRequest,
+    DnsResultModel,
     MaltegoResultModel,
     ResearchConfigResponse,
+    ResearchIndicatorType,
+    ResearchLookupRequest,
+    ResearchLookupResponse,
+    ShodanResultModel,
+    WhoisLookupRequest,
+    WhoisResultModel,
 )
-from api.v1.auth import auth_required
 
 logger = structlog.get_logger(__name__)
 

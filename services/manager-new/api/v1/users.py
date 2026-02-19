@@ -12,12 +12,11 @@ Provides:
 from datetime import datetime
 from typing import Optional
 
+from api.v1.auth import auth_required, hash_password, role_required
+from models.db import get_db
 from pydantic import BaseModel, EmailStr, Field, ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
-
-from models.db import get_db
 from validators.pydantic_models import UserResponse, UserRole
-from api.v1.auth import auth_required, hash_password, role_required
 
 bp = Blueprint("users", __name__)
 

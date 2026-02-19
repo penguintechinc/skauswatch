@@ -9,11 +9,11 @@ import asyncio
 import json
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+from typing import Any, Dict, List, Optional
 
-import structlog
 import psutil
 import redis.asyncio as redis
+import structlog
 
 logger = structlog.get_logger(__name__)
 

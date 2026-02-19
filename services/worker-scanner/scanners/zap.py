@@ -11,8 +11,7 @@ import time
 from datetime import datetime
 
 import httpx
-
-from scanners.base import BaseScanner, NormalizedFinding, ScanResult, ScannerStatus
+from scanners.base import BaseScanner, NormalizedFinding, ScannerStatus, ScanResult
 from scanners.parsers.zap_parser import parse_zap_alert
 
 

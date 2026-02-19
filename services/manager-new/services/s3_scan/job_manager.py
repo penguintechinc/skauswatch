@@ -12,8 +12,8 @@ from typing import Dict, List, Optional, Tuple
 
 from aiobotocore.session import get_session
 from pydal import DAL
-
 from services.streams.redis_streams import RedisStreamManager, S3ScanPublisher
+
 from .bucket_manager import BucketConfigManager
 
 logger = logging.getLogger(__name__)

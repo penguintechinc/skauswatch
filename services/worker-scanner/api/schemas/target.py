@@ -1,7 +1,6 @@
 """Marshmallow schemas for scan target validation and serialization."""
 
-from marshmallow import Schema, fields, validate, validates_schema, ValidationError
-
+from marshmallow import Schema, ValidationError, fields, validate, validates_schema
 from utils.validators import validate_target_value
 
 

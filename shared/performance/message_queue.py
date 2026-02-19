@@ -8,6 +8,7 @@ Redis backend, routing, retry logic, and dead letter queues.
 import asyncio
 import json
 import logging
+import pickle
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -15,7 +16,6 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Union
 from uuid import uuid4
-import pickle
 
 # Redis imports (conditional)
 try:
@@ -27,8 +27,8 @@ except ImportError:
     aioredis = None
 
 from .async_utils import async_retry, async_timeout
+from .cache_manager import CacheConfig, CacheManager
 from .connection_pool import ConnectionPoolManager, PoolConfig
-from .cache_manager import CacheManager, CacheConfig
 
 logger = logging.getLogger(__name__)
 

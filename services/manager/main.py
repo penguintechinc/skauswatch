@@ -9,21 +9,21 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 import structlog
-from py4web import DAL, Session, Cache, Translator, Flash, action, redirect, URL
+from py4web import DAL, URL, Cache, Flash, Session, Translator, action, redirect
 from py4web.core import Fixture
 from py4web.utils.auth import Auth
 from py4web.utils.publisher import Publisher
 from pydal.tools.tags import Tags
 
-from .models import get_database, close_database
-from .config import ManagerConfig
 from .auth import SkausWatchAuth
-from .security import SecurityManager
+from .config import ManagerConfig
 from .health import HealthChecker
-from .utils import setup_logging, get_version
+from .models import close_database, get_database
+from .security import SecurityManager
+from .utils import get_version, setup_logging
 
 # Configure structured logging
 structlog.configure(
@@ -328,6 +328,7 @@ def metrics():
 def main():
     """Main entry point for running the application"""
     import argparse
+
     import uvicorn
     from py4web import start_server
 

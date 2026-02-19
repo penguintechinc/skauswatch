@@ -7,33 +7,33 @@ incremental updates, pagination, and comprehensive error handling.
 """
 
 import asyncio
-import json
-import logging
 import base64
 import hashlib
+import json
+import logging
 import ssl
 import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Union, Tuple, Set
 import uuid
-from urllib.parse import urljoin, urlparse
-from pathlib import Path
 import weakref
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from urllib.parse import urljoin, urlparse
 
-import structlog
 import aiohttp
 import certifi
-from cabby import create_client
 import stix2
+import structlog
 from aiohttp.client_exceptions import ClientError, ClientTimeout
+from cabby import create_client
 from tenacity import (
     retry,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
 )
 
-from ..models import ThreatFeed, IOC, ThreatLevel
+from ..models import IOC, ThreatFeed, ThreatLevel
 
 logger = structlog.get_logger(__name__)
 

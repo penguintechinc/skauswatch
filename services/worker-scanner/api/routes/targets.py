@@ -8,9 +8,6 @@ Supports pagination, filtering, and full CRUD operations on scan targets.
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 
-from flask import Blueprint, g, jsonify, request
-from marshmallow import ValidationError
-
 from api.middleware.auth import get_current_user_id, jwt_required
 from api.schemas.target import (
     CreateTargetSchema,
@@ -18,6 +15,8 @@ from api.schemas.target import (
     UpdateTargetSchema,
 )
 from database.models import define_tables, get_configured_db
+from flask import Blueprint, g, jsonify, request
+from marshmallow import ValidationError
 
 targets_bp = Blueprint("targets", __name__)
 

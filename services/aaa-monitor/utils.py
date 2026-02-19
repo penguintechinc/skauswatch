@@ -152,6 +152,7 @@ def get_service_info() -> Dict[str, Any]:
         Dictionary containing service info
     """
     import platform
+
     import psutil
 
     try:

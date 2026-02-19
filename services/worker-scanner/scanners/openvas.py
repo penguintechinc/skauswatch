@@ -13,8 +13,7 @@ from datetime import datetime
 from gvm.connections import TLSConnection
 from gvm.errors import GvmError
 from gvm.protocols.gmp import Gmp
-
-from scanners.base import BaseScanner, NormalizedFinding, ScanResult, ScannerStatus
+from scanners.base import BaseScanner, NormalizedFinding, ScannerStatus, ScanResult
 from scanners.parsers.openvas_parser import parse_openvas_report
 
 

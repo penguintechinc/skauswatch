@@ -6,19 +6,19 @@ implements backpressure control, and provides efficient batch processing.
 """
 
 import asyncio
+import gzip
 import json
 import logging
+import tempfile
+import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Set
-import time
-import gzip
-import tempfile
+from typing import Any, Dict, List, Optional, Set
 
-import structlog
 import redis.asyncio as redis
+import structlog
 
-from .models import BaseEvent, LogSource, EventType, Severity
+from .models import BaseEvent, EventType, LogSource, Severity
 
 logger = structlog.get_logger(__name__)
 

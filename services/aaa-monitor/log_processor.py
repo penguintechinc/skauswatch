@@ -6,29 +6,29 @@ enrichment, and routing to analysis engines and storage.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, AsyncGenerator, Set
-import hashlib
-import time
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
 import structlog
 from elasticsearch import AsyncElasticsearch
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from .ai_integration.ai_provider import AIAnalysisType
+from .ai_integration.analysis_engine import AIAnalysisEngine
 from .models import (
     BaseEvent,
     EventSearchRequest,
     EventSearchResponse,
-    LogSource,
     EventType,
+    LogSource,
     Severity,
     ThreatLevel,
 )
-from .ai_integration.analysis_engine import AIAnalysisEngine
-from .ai_integration.ai_provider import AIAnalysisType
 
 logger = structlog.get_logger(__name__)
 

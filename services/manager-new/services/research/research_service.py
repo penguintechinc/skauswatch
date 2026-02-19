@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from typing import Optional, Union
 
 import structlog
-
 from services.research.asn_client import ASNClient
 from services.research.dns_client import DNSClient
 from services.research.indicator_classifier import IndicatorClassifier

@@ -11,10 +11,10 @@ Provides:
 from datetime import datetime
 from typing import List, Optional
 
+from api.v1.auth import auth_required, role_required
+from models.db import get_db
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
-
-from models.db import get_db
 from validators.pydantic_models import (
     AlertCreateRequest,
     AlertResponse,
@@ -23,7 +23,6 @@ from validators.pydantic_models import (
     AlertStatus,
     AlertUpdateRequest,
 )
-from api.v1.auth import auth_required, role_required
 
 bp = Blueprint("alerts", __name__)
 

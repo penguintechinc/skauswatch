@@ -5,13 +5,14 @@ This module handles loading and validation of configuration settings
 from files, environment variables, and defaults.
 """
 
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
+
 import yaml
-import logging
 
 logger = logging.getLogger(__name__)
 

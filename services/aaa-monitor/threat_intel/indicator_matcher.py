@@ -6,16 +6,16 @@ events against IOC database for threat detection.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Set
-import ipaddress
+from typing import Any, Dict, List, Optional, Set
 
 import structlog
 
-from ..models import BaseEvent, ThreatMatch, IOC, ThreatLevel
+from ..models import IOC, BaseEvent, ThreatLevel, ThreatMatch
 
 logger = structlog.get_logger(__name__)
 

@@ -5,9 +5,10 @@ Uses origin.asn.cymru.com and asn.cymru.com for ASN information lookups.
 """
 
 import asyncio
+from typing import Optional
+
 import dns.asyncresolver
 import structlog
-from typing import Optional
 
 logger = structlog.get_logger(__name__)
 

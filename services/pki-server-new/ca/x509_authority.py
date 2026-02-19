@@ -5,21 +5,21 @@ import os
 import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 
+import structlog
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.x509 import (
     CertificateBuilder,
     CertificateRevocationListBuilder,
-    RevokedCertificateBuilder,
-    NameOID,
     ExtensionOID,
+    NameOID,
+    RevokedCertificateBuilder,
 )
 from cryptography.x509.oid import ExtendedKeyUsageOID
-import structlog
 
 from ..config import X509CAConfig
 

@@ -6,29 +6,30 @@ and performance profiling across all SkausWatch services.
 """
 
 import asyncio
+import json
 import logging
-import psutil
-import time
+import statistics
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
-import json
-import statistics
+
+import psutil
 
 # Prometheus metrics (conditional)
 try:
     from prometheus_client import (
-        Counter,
-        Histogram,
-        Gauge,
-        Summary,
         CollectorRegistry,
+        Counter,
+        Gauge,
+        Histogram,
+        Summary,
         generate_latest,
     )
 
@@ -37,7 +38,7 @@ except ImportError:
     HAS_PROMETHEUS = False
 
 from .async_utils import AsyncTaskManager
-from .cache_manager import CacheManager, CacheConfig
+from .cache_manager import CacheConfig, CacheManager
 from .connection_pool import ConnectionPoolManager
 
 logger = logging.getLogger(__name__)

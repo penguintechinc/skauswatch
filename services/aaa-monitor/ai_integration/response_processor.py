@@ -11,14 +11,15 @@ import json
 import re
 import time
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, Tuple, Set
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 import structlog
 
+from ..models import AIProvider, Severity, ThreatLevel
 from .ai_provider import AIAnalysisResponse, AIAnalysisType
-from ..models import AIProvider, ThreatLevel, Severity
 
 logger = structlog.get_logger(__name__)
 

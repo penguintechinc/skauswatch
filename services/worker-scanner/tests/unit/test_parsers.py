@@ -8,7 +8,6 @@ import json
 from datetime import datetime
 
 import pytest
-
 from scanners.base import NormalizedFinding
 from scanners.parsers.nuclei_parser import parse_nuclei_finding
 from scanners.parsers.openvas_parser import parse_openvas_report

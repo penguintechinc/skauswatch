@@ -20,16 +20,16 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import structlog
+from models.db import close_db, get_db, init_database_schema
 from quart import Quart, jsonify, request
 from quart_cors import cors
-
-from config import ManagerConfig, load_config
-from models.db import close_db, get_db, init_database_schema
 from services.streams.redis_streams import (
     AuditLogPublisher,
     RedisStreamManager,
     create_stream_consumer,
 )
+
+from config import ManagerConfig, load_config
 
 # Configure structured logging
 structlog.configure(
@@ -277,14 +277,14 @@ def create_app(config_instance: ManagerConfig = None) -> Quart:
 def _register_blueprints(app: Quart) -> None:
     """Register API blueprints."""
     from api.v1 import (
-        auth,
         alerts,
         approvals,
+        auth,
         edr,
-        threat_intel,
-        users,
         research,
         s3_scan,
+        threat_intel,
+        users,
     )
 
     app.register_blueprint(auth.bp, url_prefix="/api/v1/auth")
@@ -363,6 +363,7 @@ async def run_grpc_server(config: ManagerConfig) -> None:
 def main():
     """Main entry point for the Manager service."""
     import argparse
+
     import hypercorn.asyncio
     from hypercorn.config import Config as HypercornConfig
 

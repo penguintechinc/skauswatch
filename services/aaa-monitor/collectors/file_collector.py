@@ -6,31 +6,31 @@ Supports inotify for real-time monitoring and polling for remote mounts.
 """
 
 import asyncio
+import fnmatch
 import json
 import logging
 import re
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any, AsyncGenerator
-import traceback
-import fnmatch
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
-import structlog
 import aiofiles
-from watchdog.observers import Observer
+import structlog
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 from ..models import (
-    BaseEvent,
     AuthenticationEvent,
     AuthorizationEvent,
-    SystemCallEvent,
-    ProcessEvent,
-    NetworkEvent,
-    FileAccessEvent,
+    BaseEvent,
     EventType,
+    FileAccessEvent,
     LogSource,
+    NetworkEvent,
+    ProcessEvent,
     Severity,
+    SystemCallEvent,
 )
 
 logger = structlog.get_logger(__name__)

@@ -4,9 +4,9 @@ YARA rule-based scanner for pattern matching and malware detection.
 This module provides synchronous YARA scanning capabilities.
 """
 
-from dataclasses import dataclass
 import logging
 import os
+from dataclasses import dataclass
 from typing import Optional
 
 try:

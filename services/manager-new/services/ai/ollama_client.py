@@ -3,11 +3,10 @@
 Supports both local and remote Ollama instances.
 """
 
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
 import httpx
 import structlog
-
 from services.ai.provider import AIProvider
 
 logger = structlog.get_logger()

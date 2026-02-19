@@ -2,16 +2,15 @@
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
 import structlog
-
 from services.threat_intel.sources.dns_blacklist import DNSBlacklistSource
 from services.threat_intel.sources.ip_blacklist import IPBlacklistSource
-from services.threat_intel.sources.otx import OTXSource
-from services.threat_intel.sources.virustotal import VirusTotalSource
-from services.threat_intel.sources.stix_taxii import TAXIISource
 from services.threat_intel.sources.openioc import OpenIOCSource
+from services.threat_intel.sources.otx import OTXSource
+from services.threat_intel.sources.stix_taxii import TAXIISource
+from services.threat_intel.sources.virustotal import VirusTotalSource
 from services.threat_intel.sources.yara_rules import YARASource
 
 logger = structlog.get_logger()

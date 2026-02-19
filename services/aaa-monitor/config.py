@@ -5,14 +5,14 @@ Configuration management for the AAA monitor service supporting
 environment variables, YAML, and JSON configuration files.
 """
 
-import os
-import yaml
 import json
-from pathlib import Path
-from typing import Dict, Any, Optional, List
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import structlog
+import yaml
 
 logger = structlog.get_logger(__name__)
 

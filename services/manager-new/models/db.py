@@ -5,8 +5,8 @@ SQLAlchemy is used ONLY for database schema initialization.
 PyDAL is used for ALL runtime database operations.
 """
 
-import os
 import logging
+import os
 from contextlib import contextmanager
 from datetime import datetime
 from threading import local

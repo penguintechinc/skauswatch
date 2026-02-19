@@ -7,10 +7,11 @@ prompt generation and custom prompt builder.
 
 import json
 import re
-from datetime import datetime
-from typing import Dict, List, Optional, Any, Union
-from enum import Enum
 from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Union
+
 import structlog
 
 from .ai_provider import AIAnalysisType

@@ -5,8 +5,8 @@ This module provides synchronous ClamAV scanning capabilities.
 Designed to be called via executor for async/threading integration.
 """
 
-from dataclasses import dataclass
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 try:

@@ -6,38 +6,38 @@ revocation, KRL management, and SSH configuration generation with caching.
 """
 
 import asyncio
-import logging
-import time
 import base64
+import json
+import logging
 import struct
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
-import json
 
 # SSH key handling
 import paramiko
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, ed25519
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
 from ...shared.performance import (
     AsyncTaskManager,
-    async_retry,
-    async_timeout,
-    async_batch_processor,
-    ThreadPoolManager,
-    TaskType,
+    CacheConfig,
+    CacheManager,
     CPUBoundTaskManager,
     IOBoundTaskManager,
-    CacheManager,
-    CacheConfig,
-    cache_decorator,
-    RateLimiter,
     RateLimitConfig,
+    RateLimiter,
     RateLimitStrategy,
+    TaskType,
+    ThreadPoolManager,
+    async_batch_processor,
+    async_retry,
+    async_timeout,
+    cache_decorator,
 )
 
 logger = logging.getLogger(__name__)
@@ -531,8 +531,8 @@ class AsyncSSHProcessor:
         # - reserved
         # - signature key
 
-        import struct
         import os
+        import struct
 
         cert_data = b""
 

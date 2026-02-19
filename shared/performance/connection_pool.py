@@ -7,8 +7,10 @@ and other network resources with health monitoring, auto-scaling, and metrics.
 
 import asyncio
 import logging
+import ssl
 import time
 import urllib.parse
+import weakref
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -22,14 +24,12 @@ from typing import (
     Generic,
     List,
     Optional,
+    Set,
+    Tuple,
     TypeVar,
     Union,
-    Tuple,
-    Set,
 )
 from uuid import uuid4
-import weakref
-import ssl
 
 # Third-party imports (conditional)
 try:

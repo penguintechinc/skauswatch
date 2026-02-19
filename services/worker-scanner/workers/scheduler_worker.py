@@ -16,7 +16,6 @@ from datetime import datetime
 from typing import Any
 
 from croniter import croniter
-
 from database.models import get_configured_db
 from utils.logger import get_logger
 from workers.celery_app import celery_app

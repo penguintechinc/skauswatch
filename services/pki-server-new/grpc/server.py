@@ -6,8 +6,8 @@ from datetime import datetime
 from typing import Optional
 
 import grpc
-from grpc import aio
 import structlog
+from grpc import aio
 
 from ..config import Settings
 from ..services.certificate_manager import CertificateManager

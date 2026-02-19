@@ -11,10 +11,9 @@ Provides REST API for external EDR agents to:
 from datetime import datetime, timedelta
 from typing import Optional
 
+from models.db import get_db
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
-
-from models.db import get_db
 from validators.pydantic_models import (
     EDRAgentRegisterRequest,
     EDRAgentResponse,

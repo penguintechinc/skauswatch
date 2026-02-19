@@ -2,9 +2,9 @@
 
 from quart import Blueprint
 
-from .x509 import x509_bp
-from .ssh import ssh_bp
 from .common import common_bp
+from .ssh import ssh_bp
+from .x509 import x509_bp
 
 api_v1 = Blueprint("api_v1", __name__, url_prefix="/api/v1")
 

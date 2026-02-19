@@ -9,26 +9,26 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, AsyncGenerator
 import traceback
+from datetime import datetime, timedelta
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
-import structlog
-import aiopg
 import aiomysql
+import aiopg
 import aiosqlite
+import structlog
 
 from ..models import (
-    BaseEvent,
     AuthenticationEvent,
     AuthorizationEvent,
-    SystemCallEvent,
-    ProcessEvent,
-    NetworkEvent,
-    FileAccessEvent,
+    BaseEvent,
     EventType,
+    FileAccessEvent,
     LogSource,
+    NetworkEvent,
+    ProcessEvent,
     Severity,
+    SystemCallEvent,
 )
 
 logger = structlog.get_logger(__name__)

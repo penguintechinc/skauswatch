@@ -15,10 +15,9 @@ from typing import Optional
 
 import bcrypt
 import jwt
+from models.db import get_db
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
-
-from models.db import get_db
 from validators.pydantic_models import (
     LoginRequest,
     RefreshTokenRequest,

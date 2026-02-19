@@ -12,10 +12,9 @@ Endpoints:
 import logging
 from typing import Any, Dict, List, Tuple
 
-from flask import Blueprint, jsonify
-
 from api.middleware.auth import jwt_required
 from config.settings import settings
+from flask import Blueprint, jsonify
 from scanners.nuclei import NucleiScanner
 from scanners.openvas import OpenvasScanner
 from scanners.zap import ZapScanner

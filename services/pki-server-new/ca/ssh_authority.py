@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
 

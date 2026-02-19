@@ -9,26 +9,26 @@ import asyncio
 import functools
 import logging
 import time
+import weakref
 from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import (
     Any,
+    AsyncIterator,
     Awaitable,
     Callable,
     Dict,
     Generic,
     List,
     Optional,
+    Set,
+    Tuple,
     TypeVar,
     Union,
-    AsyncIterator,
-    Tuple,
-    Set,
 )
 from uuid import uuid4
-import weakref
 
 logger = logging.getLogger(__name__)
 

@@ -12,9 +12,9 @@ from typing import Optional
 
 import grpc
 from google.protobuf import empty_pb2, timestamp_pb2
+from models.db import get_db
 
 from config import ManagerConfig
-from models.db import get_db
 
 logger = logging.getLogger(__name__)
 

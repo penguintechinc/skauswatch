@@ -11,22 +11,23 @@ import json
 import time
 import uuid
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, AsyncGenerator, Set, Tuple
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Tuple
+
 import structlog
 
+from ..models import AIProvider, BaseEvent, Severity, ThreatLevel
 from .ai_provider import (
-    AIProviderManager,
     AIAnalysisRequest,
     AIAnalysisResponse,
     AIAnalysisType,
+    AIProviderManager,
     BaseAIProvider,
 )
-from .prompt_templates import PromptTemplateManager, PromptComplexity
+from .prompt_templates import PromptComplexity, PromptTemplateManager
 from .response_processor import ResponseProcessor
-from ..models import BaseEvent, Severity, ThreatLevel, AIProvider
 
 logger = structlog.get_logger(__name__)
 

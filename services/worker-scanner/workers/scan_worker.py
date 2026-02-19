@@ -11,7 +11,6 @@ from typing import Any, Dict
 
 from celery.exceptions import Reject
 from celery.utils.log import get_task_logger
-
 from database.models import get_configured_db
 from scanners.nuclei import NucleiScanner
 from scanners.openvas import OpenvasScanner

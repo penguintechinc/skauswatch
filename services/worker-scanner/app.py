@@ -28,13 +28,12 @@ Usage:
 
 import logging
 import sys
-from typing import Dict, Any, Tuple
-
-from flask import Flask, jsonify, Response
-from flask_cors import CORS
+from typing import Any, Dict, Tuple
 
 from config.settings import settings
 from database.connection import init_app as init_db
+from flask import Flask, Response, jsonify
+from flask_cors import CORS
 
 # Configure logging based on settings
 logging.basicConfig(
@@ -116,11 +115,11 @@ def create_app() -> Flask:
     # Register API blueprints
     # Import blueprints here to avoid circular imports
     try:
-        from api.routes.targets import targets_bp
-        from api.routes.jobs import jobs_bp
         from api.routes.findings import findings_bp
-        from api.routes.schedules import schedules_bp
+        from api.routes.jobs import jobs_bp
         from api.routes.scanners import scanners_bp
+        from api.routes.schedules import schedules_bp
+        from api.routes.targets import targets_bp
 
         # Register all blueprints under /api/v1/scanner prefix with resource sub-paths
         app.register_blueprint(targets_bp, url_prefix="/api/v1/scanner/targets")

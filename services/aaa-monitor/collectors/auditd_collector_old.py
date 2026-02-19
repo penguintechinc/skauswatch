@@ -10,25 +10,25 @@ import json
 import logging
 import re
 import subprocess
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any, AsyncGenerator
-import traceback
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
-import structlog
 import aiofiles
+import structlog
 
 from ..models import (
-    BaseEvent,
     AuthenticationEvent,
     AuthorizationEvent,
-    SystemCallEvent,
-    ProcessEvent,
-    NetworkEvent,
-    FileAccessEvent,
+    BaseEvent,
     EventType,
+    FileAccessEvent,
     LogSource,
+    NetworkEvent,
+    ProcessEvent,
     Severity,
+    SystemCallEvent,
 )
 
 logger = structlog.get_logger(__name__)

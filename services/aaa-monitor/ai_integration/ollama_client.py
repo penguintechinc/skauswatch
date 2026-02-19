@@ -8,18 +8,18 @@ import asyncio
 import json
 import time
 from datetime import datetime
-from typing import Dict, List, Optional, Any
-import structlog
+from typing import Any, Dict, List, Optional
 
 import aiohttp
+import structlog
 
+from ..models import AIProvider
 from .ai_provider import (
-    BaseAIProvider,
     AIAnalysisRequest,
     AIAnalysisResponse,
     AIProviderStatus,
+    BaseAIProvider,
 )
-from ..models import AIProvider
 
 logger = structlog.get_logger(__name__)
 

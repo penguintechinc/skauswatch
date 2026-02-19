@@ -11,19 +11,19 @@ OpenAI GPT, Anthropic Claude, and local Ollama models with advanced features:
 """
 
 from .ai_provider import (
-    BaseAIProvider,
-    AIProviderManager,
     AIAnalysisRequest,
     AIAnalysisResponse,
     AIAnalysisType,
+    AIProviderManager,
     AIProviderStatus,
+    BaseAIProvider,
 )
-from .openai_client import OpenAIProvider
+from .analysis_engine import AIAnalysisEngine, AnalysisResult
 from .anthropic_client import AnthropicProvider
 from .ollama_client import OllamaProvider
-from .prompt_templates import PromptTemplateManager, PromptCategory, PromptComplexity
-from .analysis_engine import AIAnalysisEngine, AnalysisResult
-from .response_processor import ResponseProcessor, ProcessedResponse
+from .openai_client import OpenAIProvider
+from .prompt_templates import PromptCategory, PromptComplexity, PromptTemplateManager
+from .response_processor import ProcessedResponse, ResponseProcessor
 
 __all__ = [
     # Core AI provider system

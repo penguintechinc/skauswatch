@@ -7,24 +7,24 @@ No agents or log forwarding required.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import re
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any, AsyncGenerator
-import traceback
-import base64
 import ssl
-from urllib.parse import urljoin, urlencode
+import traceback
+from datetime import datetime, timedelta
+from typing import Any, AsyncGenerator, Dict, List, Optional
+from urllib.parse import urlencode, urljoin
 
-import structlog
 import aiohttp
+import structlog
 import yaml
 
 from ..models import (
-    BaseEvent,
     AuthenticationEvent,
     AuthorizationEvent,
+    BaseEvent,
     ContainerEvent,
     EventType,
     LogSource,

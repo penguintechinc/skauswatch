@@ -10,29 +10,29 @@ import asyncio
 import json
 import logging
 import re
+import socket
+import ssl
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Any, AsyncGenerator
-import traceback
-import ssl
-from urllib.parse import urljoin, urlencode
-import socket
+from typing import Any, AsyncGenerator, Dict, List, Optional
+from urllib.parse import urlencode, urljoin
 
-import structlog
 import aiohttp
 import asyncssh
+import structlog
 
 from ..models import (
-    BaseEvent,
     AuthenticationEvent,
     AuthorizationEvent,
-    SystemCallEvent,
-    ProcessEvent,
-    NetworkEvent,
-    FileAccessEvent,
+    BaseEvent,
     EventType,
+    FileAccessEvent,
     LogSource,
+    NetworkEvent,
+    ProcessEvent,
     Severity,
+    SystemCallEvent,
 )
 
 logger = structlog.get_logger(__name__)

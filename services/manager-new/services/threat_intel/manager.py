@@ -2,11 +2,10 @@
 
 import uuid
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import structlog
-
-from services.models.db import get_db, db_session
+from services.models.db import db_session, get_db
 
 logger = structlog.get_logger()
 

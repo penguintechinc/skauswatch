@@ -5,11 +5,11 @@ Manages ad-hoc file scanning operations where users upload files directly
 for scanning through the web UI or API.
 """
 
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime
-import uuid
-import logging
 import io
+import logging
+import uuid
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
