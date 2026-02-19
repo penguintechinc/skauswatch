@@ -1027,7 +1027,6 @@ async def initialize_global_monitor(
 
 def get_global_monitor() -> PerformanceMonitor:
     """Get global performance monitor"""
-    global _global_monitor
     if _global_monitor is None:
         raise RuntimeError("Global performance monitor not initialized")
     return _global_monitor

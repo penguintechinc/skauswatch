@@ -122,7 +122,7 @@ def create_app() -> Quart:
 
 async def startup() -> None:
     """Application startup tasks."""
-    global config, x509_ca, ssh_ca, cert_manager, grpc_server
+    global x509_ca, ssh_ca, cert_manager, grpc_server
 
     logger.info("Starting PKI Server", version=config.version)
 
@@ -166,8 +166,6 @@ async def startup() -> None:
 
 async def shutdown() -> None:
     """Application shutdown tasks."""
-    global grpc_server, background_tasks
-
     logger.info("Shutting down PKI Server")
 
     # Cancel background tasks

@@ -711,7 +711,6 @@ _global_message_queue: Optional[MessageQueueManager] = None
 
 def get_global_message_queue() -> MessageQueueManager:
     """Get global message queue manager"""
-    global _global_message_queue
     if _global_message_queue is None:
         raise RuntimeError("Message queue manager not initialized")
     return _global_message_queue

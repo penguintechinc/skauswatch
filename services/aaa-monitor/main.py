@@ -144,7 +144,7 @@ async def lifespan(app: FastAPI):
 
 async def startup():
     """Application startup"""
-    global config, redis_client, log_processor, event_classifier, buffer_manager, analysis_engine, pattern_detector, anomaly_detector, alert_manager, escalation_manager, health_checker, kubernetes_collector, lxc_collector, auditd_collector, syslog_collector, journald_collector, file_collector, database_collector, taxii_client, stix_parser, indicator_matcher, threat_database, ai_provider_manager, ai_analysis_engine, ai_prompt_manager
+    global config, redis_client, log_processor, event_classifier, buffer_manager, analysis_engine, pattern_detector, anomaly_detector, alert_manager, escalation_manager, health_checker, kubernetes_collector, lxc_collector, auditd_collector, syslog_collector, journald_collector, file_collector, database_collector, taxii_client, stix_parser, indicator_matcher, threat_database, ai_provider_manager
 
     try:
         # Initialize Redis connection
@@ -201,8 +201,6 @@ async def startup():
 
 async def shutdown():
     """Application shutdown"""
-    global background_tasks
-
     try:
         # Stop background tasks
         logger.info("Stopping background tasks...")
@@ -388,8 +386,6 @@ async def _init_log_collectors():
 
 async def _start_background_services():
     """Start background services"""
-    global background_tasks
-
     # Start log collectors
     if kubernetes_collector:
         task = asyncio.create_task(kubernetes_collector.start_collection())
@@ -1727,8 +1723,6 @@ def create_aaa_monitor_app(config_path: Optional[str] = None) -> AAAMonitorApp:
 
 def get_aaa_monitor_app() -> AAAMonitorApp:
     """Get current AAA Monitor application instance"""
-    global app_instance
-
     if app_instance is None:
         raise RuntimeError(
             "AAA Monitor application not initialized. Call create_aaa_monitor_app() first."

@@ -70,8 +70,7 @@ class SkausWatchManagerApp:
         Args:
             config_path: Path to configuration file
         """
-        global config, db, auth, security, health_checker
-        global session, cache, translator, flash, tags
+        global config
 
         # Load configuration
         config = ManagerConfig(config_path)
@@ -267,8 +266,6 @@ def create_app(config_path: Optional[str] = None) -> SkausWatchManagerApp:
 
 def get_app() -> SkausWatchManagerApp:
     """Get the current application instance"""
-    global app
-
     if app is None:
         raise RuntimeError("Application not initialized. Call create_app() first.")
 

@@ -283,7 +283,8 @@ class ThreatDatabase:
         try:
             async with aiosqlite.connect(self.database_path) as db:
                 # Indicators table
-                await db.execute("""
+                await db.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS indicators (
                         id TEXT PRIMARY KEY,
                         type TEXT NOT NULL,
@@ -302,31 +303,41 @@ class ThreatDatabase:
                         last_seen TEXT,
                         hit_count INTEGER DEFAULT 0
                     )
-                """)
+                """
+                )
 
                 # Create indexes for performance
-                await db.execute("""
+                await db.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_indicators_type_value 
                     ON indicators (type, value)
-                """)
+                """
+                )
 
-                await db.execute("""
+                await db.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_indicators_threat_level 
                     ON indicators (threat_level)
-                """)
+                """
+                )
 
-                await db.execute("""
+                await db.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_indicators_source 
                     ON indicators (source)
-                """)
+                """
+                )
 
-                await db.execute("""
+                await db.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_indicators_created_at 
                     ON indicators (created_at)
-                """)
+                """
+                )
 
                 # Feeds table
-                await db.execute("""
+                await db.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS feeds (
                         id TEXT PRIMARY KEY,
                         name TEXT NOT NULL,
@@ -340,10 +351,12 @@ class ThreatDatabase:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     )
-                """)
+                """
+                )
 
                 # Matches table for tracking IOC hits
-                await db.execute("""
+                await db.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS matches (
                         id TEXT PRIMARY KEY,
                         indicator_id TEXT NOT NULL,
@@ -354,17 +367,22 @@ class ThreatDatabase:
                         timestamp TEXT NOT NULL,
                         FOREIGN KEY (indicator_id) REFERENCES indicators (id)
                     )
-                """)
+                """
+                )
 
-                await db.execute("""
+                await db.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_matches_indicator_id 
                     ON matches (indicator_id)
-                """)
+                """
+                )
 
-                await db.execute("""
+                await db.execute(
+                    """
                     CREATE INDEX IF NOT EXISTS idx_matches_timestamp 
                     ON matches (timestamp)
-                """)
+                """
+                )
 
                 await db.commit()
 
@@ -395,16 +413,20 @@ class ThreatDatabase:
                 self.stats["total_indicators"] = row[0] if row else 0
 
                 # Indicators by type
-                cursor = await db.execute("""
+                cursor = await db.execute(
+                    """
                     SELECT type, COUNT(*) FROM indicators GROUP BY type
-                """)
+                """
+                )
                 async for row in cursor:
                     self.stats["indicators_by_type"][row[0]] = row[1]
 
                 # Indicators by threat level
-                cursor = await db.execute("""
+                cursor = await db.execute(
+                    """
                     SELECT threat_level, COUNT(*) FROM indicators GROUP BY threat_level
-                """)
+                """
+                )
                 async for row in cursor:
                     self.stats["indicators_by_threat_level"][row[0]] = row[1]
 
@@ -881,10 +903,12 @@ class ThreatDatabase:
                     )
 
                     # Delete related matches
-                    await db.execute("""
+                    await db.execute(
+                        """
                         DELETE FROM matches 
                         WHERE indicator_id NOT IN (SELECT id FROM indicators)
-                    """)
+                    """
+                    )
 
                     await db.commit()
 
@@ -959,11 +983,13 @@ class ThreatDatabase:
             feeds = []
 
             async with aiosqlite.connect(self.database_path) as db:
-                cursor = await db.execute("""
+                cursor = await db.execute(
+                    """
                     SELECT id, name, url, feed_type, enabled, last_update, 
                            last_success, last_error, indicator_count
                     FROM feeds
-                """)
+                """
+                )
 
                 async for row in cursor:
                     feeds.append(
@@ -1079,7 +1105,8 @@ class ThreatDatabase:
                 await db.execute("PRAGMA mmap_size=268435456")  # 256MB
 
                 # Create enhanced indicators table
-                await db.execute("""
+                await db.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS indicators (
                         id TEXT PRIMARY KEY,
                         type TEXT NOT NULL,
@@ -1101,7 +1128,8 @@ class ThreatDatabase:
                         hash_signature TEXT,  -- For deduplication
                         metadata TEXT  -- JSON for additional data
                     )
-                """)
+                """
+                )
 
                 # Create all other enhanced tables and indexes
                 await self._create_enhanced_tables(db)
@@ -1116,7 +1144,8 @@ class ThreatDatabase:
     async def _create_enhanced_tables(self, db: aiosqlite.Connection):
         """Create all enhanced tables"""
         # Enhanced matches table
-        await db.execute("""
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS matches (
                 id TEXT PRIMARY KEY,
                 indicator_id TEXT NOT NULL,
@@ -1128,10 +1157,12 @@ class ThreatDatabase:
                 context TEXT,  -- JSON for match context
                 FOREIGN KEY (indicator_id) REFERENCES indicators (id)
             )
-        """)
+        """
+        )
 
         # Create deduplication table
-        await db.execute("""
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS duplicates (
                 id TEXT PRIMARY KEY,
                 primary_indicator_id TEXT NOT NULL,
@@ -1140,7 +1171,8 @@ class ThreatDatabase:
                 merge_timestamp TEXT NOT NULL,
                 FOREIGN KEY (primary_indicator_id) REFERENCES indicators (id)
             )
-        """)
+        """
+        )
 
     async def _create_performance_indexes(self):
         """Create performance-optimized indexes"""

@@ -79,7 +79,7 @@ def create_app(config_instance: ManagerConfig = None) -> Quart:
     Returns:
         Configured Quart application
     """
-    global config, stream_manager, audit_publisher
+    global config
 
     # Load configuration
     config = config_instance or load_config()
@@ -168,8 +168,6 @@ def create_app(config_instance: ManagerConfig = None) -> Quart:
     @app.after_serving
     async def shutdown():
         """Application shutdown."""
-        global background_tasks, stream_manager
-
         logger.info("Shutting down SkausWatch Manager Service...")
 
         # Cancel background tasks
@@ -299,7 +297,6 @@ def _register_blueprints(app: Quart) -> None:
 
 async def _start_background_tasks() -> None:
     """Start background processing tasks."""
-    global background_tasks
 
     # EDR event processor
     async def process_edr_event(message):
