@@ -254,10 +254,11 @@ def get_scanners_status() -> Tuple[Dict[str, Any], int]:
     )
     scanners_list.append(openvas_status)
 
-    logger.info(f"Scanner status check completed: {len(scanners_list)} scanners checked")
+    logger.info(
+        f"Scanner status check completed: {len(scanners_list)} scanners checked"
+    )
 
     return jsonify({"scanners": scanners_list}), 200
-
 
 
 # NOTE: The /healthz endpoint is registered directly in app.py (not via blueprint)

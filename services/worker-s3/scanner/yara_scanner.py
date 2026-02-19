@@ -53,8 +53,10 @@ class YaraScanner:
             yara.Error: If rules file has compilation errors
         """
         if yara is None:
-            raise ImportError("yara-python library is required for YARA scanning. "
-                            "Install it with: pip install yara-python")
+            raise ImportError(
+                "yara-python library is required for YARA scanning. "
+                "Install it with: pip install yara-python"
+            )
 
         if not os.path.exists(rules_path):
             raise FileNotFoundError(f"YARA rules file not found: {rules_path}")
@@ -128,7 +130,7 @@ class YaraScanner:
                     rule_name=match.rule,
                     namespace=match.namespace,
                     tags=list(match.tags) if match.tags else [],
-                    matched_strings=match.strings if match.strings else []
+                    matched_strings=match.strings if match.strings else [],
                 )
                 results.append(yara_match)
 
@@ -176,7 +178,7 @@ class YaraScanner:
                     rule_name=match.rule,
                     namespace=match.namespace,
                     tags=list(match.tags) if match.tags else [],
-                    matched_strings=match.strings if match.strings else []
+                    matched_strings=match.strings if match.strings else [],
                 )
                 results.append(yara_match)
 

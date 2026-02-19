@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, validator
 
-
 # ============================================
 # Enums
 # ============================================
@@ -156,7 +155,11 @@ class BucketConfigResponse(BaseModel):
         """Return masked secret access key."""
         if len(self.secret_access_key) <= 4:
             return "****"
-        return self.secret_access_key[:4] + "*" * (len(self.secret_access_key) - 8) + self.secret_access_key[-4:]
+        return (
+            self.secret_access_key[:4]
+            + "*" * (len(self.secret_access_key) - 8)
+            + self.secret_access_key[-4:]
+        )
 
 
 # ============================================
@@ -209,7 +212,9 @@ class ScheduleSetRequest(BaseModel):
         v = v.strip()
         parts = v.split()
         if len(parts) not in (5, 6):
-            raise ValueError("Cron expression must have 5 or 6 parts (minute hour day month dow [year])")
+            raise ValueError(
+                "Cron expression must have 5 or 6 parts (minute hour day month dow [year])"
+            )
 
         # Validate each part has valid characters
         allowed_chars = set("0123456789,-/*L?WC# ")

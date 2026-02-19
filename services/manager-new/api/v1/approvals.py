@@ -66,26 +66,37 @@ async def list_approvals():
     # Convert to response format
     approval_list = []
     for approval in approvals:
-        approval_list.append({
-            "id": approval.id,
-            "request_type": approval.request_type,
-            "resource_id": approval.resource_id,
-            "resource_type": approval.resource_type,
-            "requester_id": approval.requester_id,
-            "status": approval.status,
-            "required_approvals": approval.required_approvals,
-            "current_approvals": approval.current_approvals,
-            "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
-            "created_at": approval.created_at.isoformat() if approval.created_at else None,
-        })
+        approval_list.append(
+            {
+                "id": approval.id,
+                "request_type": approval.request_type,
+                "resource_id": approval.resource_id,
+                "resource_type": approval.resource_type,
+                "requester_id": approval.requester_id,
+                "status": approval.status,
+                "required_approvals": approval.required_approvals,
+                "current_approvals": approval.current_approvals,
+                "expires_at": (
+                    approval.expires_at.isoformat() if approval.expires_at else None
+                ),
+                "created_at": (
+                    approval.created_at.isoformat() if approval.created_at else None
+                ),
+            }
+        )
 
-    return jsonify({
-        "items": approval_list,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
-    }), 200
+    return (
+        jsonify(
+            {
+                "items": approval_list,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "pages": (total + per_page - 1) // per_page,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/pending", methods=["GET"])
@@ -98,10 +109,10 @@ async def list_pending_approvals():
 
     # Get pending approvals that haven't expired
     approvals = db(
-        (db.approval_requests.status == "pending") &
-        (
-            (db.approval_requests.expires_at == None) |
-            (db.approval_requests.expires_at > datetime.utcnow())
+        (db.approval_requests.status == "pending")
+        & (
+            (db.approval_requests.expires_at == None)
+            | (db.approval_requests.expires_at > datetime.utcnow())
         )
     ).select(orderby=~db.approval_requests.created_at)
 
@@ -110,24 +121,29 @@ async def list_pending_approvals():
         # Check if current user hasn't already approved
         approval_history = approval.approval_history or []
         already_approved = any(
-            h.get("user_id") == g.current_user_id
-            for h in approval_history
+            h.get("user_id") == g.current_user_id for h in approval_history
         )
 
         if not already_approved:
-            approval_list.append({
-                "id": approval.id,
-                "request_type": approval.request_type,
-                "resource_id": approval.resource_id,
-                "resource_type": approval.resource_type,
-                "requester_id": approval.requester_id,
-                "status": approval.status,
-                "required_approvals": approval.required_approvals,
-                "current_approvals": approval.current_approvals,
-                "metadata": approval.metadata or {},
-                "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
-                "created_at": approval.created_at.isoformat() if approval.created_at else None,
-            })
+            approval_list.append(
+                {
+                    "id": approval.id,
+                    "request_type": approval.request_type,
+                    "resource_id": approval.resource_id,
+                    "resource_type": approval.resource_type,
+                    "requester_id": approval.requester_id,
+                    "status": approval.status,
+                    "required_approvals": approval.required_approvals,
+                    "current_approvals": approval.current_approvals,
+                    "metadata": approval.metadata or {},
+                    "expires_at": (
+                        approval.expires_at.isoformat() if approval.expires_at else None
+                    ),
+                    "created_at": (
+                        approval.created_at.isoformat() if approval.created_at else None
+                    ),
+                }
+            )
 
     return jsonify({"items": approval_list, "count": len(approval_list)}), 200
 
@@ -143,23 +159,36 @@ async def get_approval(approval_id: int):
     if not approval:
         return jsonify({"error": "Approval request not found"}), 404
 
-    return jsonify({
-        "id": approval.id,
-        "request_type": approval.request_type,
-        "resource_id": approval.resource_id,
-        "resource_type": approval.resource_type,
-        "requester_id": approval.requester_id,
-        "status": approval.status,
-        "required_approvals": approval.required_approvals,
-        "current_approvals": approval.current_approvals,
-        "approvers": approval.approvers or [],
-        "approval_history": approval.approval_history or [],
-        "metadata": approval.metadata or {},
-        "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
-        "completed_at": approval.completed_at.isoformat() if approval.completed_at else None,
-        "created_at": approval.created_at.isoformat() if approval.created_at else None,
-        "updated_at": approval.updated_at.isoformat() if approval.updated_at else None,
-    }), 200
+    return (
+        jsonify(
+            {
+                "id": approval.id,
+                "request_type": approval.request_type,
+                "resource_id": approval.resource_id,
+                "resource_type": approval.resource_type,
+                "requester_id": approval.requester_id,
+                "status": approval.status,
+                "required_approvals": approval.required_approvals,
+                "current_approvals": approval.current_approvals,
+                "approvers": approval.approvers or [],
+                "approval_history": approval.approval_history or [],
+                "metadata": approval.metadata or {},
+                "expires_at": (
+                    approval.expires_at.isoformat() if approval.expires_at else None
+                ),
+                "completed_at": (
+                    approval.completed_at.isoformat() if approval.completed_at else None
+                ),
+                "created_at": (
+                    approval.created_at.isoformat() if approval.created_at else None
+                ),
+                "updated_at": (
+                    approval.updated_at.isoformat() if approval.updated_at else None
+                ),
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("", methods=["POST"])
@@ -197,17 +226,26 @@ async def create_approval():
 
     approval = db(db.approval_requests.id == approval_id).select().first()
 
-    return jsonify({
-        "message": "Approval request created",
-        "approval": {
-            "id": approval.id,
-            "request_type": approval.request_type,
-            "resource_id": approval.resource_id,
-            "status": approval.status,
-            "expires_at": approval.expires_at.isoformat() if approval.expires_at else None,
-            "created_at": approval.created_at.isoformat() if approval.created_at else None,
-        },
-    }), 201
+    return (
+        jsonify(
+            {
+                "message": "Approval request created",
+                "approval": {
+                    "id": approval.id,
+                    "request_type": approval.request_type,
+                    "resource_id": approval.resource_id,
+                    "status": approval.status,
+                    "expires_at": (
+                        approval.expires_at.isoformat() if approval.expires_at else None
+                    ),
+                    "created_at": (
+                        approval.created_at.isoformat() if approval.created_at else None
+                    ),
+                },
+            }
+        ),
+        201,
+    )
 
 
 @bp.route("/<int:approval_id>/decide", methods=["POST"])
@@ -246,7 +284,10 @@ async def decide_approval(approval_id: int):
     # Check if user already decided
     approval_history = approval.approval_history or []
     if any(h.get("user_id") == g.current_user_id for h in approval_history):
-        return jsonify({"error": "You have already made a decision on this request"}), 400
+        return (
+            jsonify({"error": "You have already made a decision on this request"}),
+            400,
+        )
 
     # Add decision to history
     decision_record = {
@@ -288,16 +329,25 @@ async def decide_approval(approval_id: int):
     # Fetch updated approval
     approval = db(db.approval_requests.id == approval_id).select().first()
 
-    return jsonify({
-        "message": "Decision recorded",
-        "approval": {
-            "id": approval.id,
-            "status": approval.status,
-            "current_approvals": approval.current_approvals,
-            "required_approvals": approval.required_approvals,
-            "completed_at": approval.completed_at.isoformat() if approval.completed_at else None,
-        },
-    }), 200
+    return (
+        jsonify(
+            {
+                "message": "Decision recorded",
+                "approval": {
+                    "id": approval.id,
+                    "status": approval.status,
+                    "current_approvals": approval.current_approvals,
+                    "required_approvals": approval.required_approvals,
+                    "completed_at": (
+                        approval.completed_at.isoformat()
+                        if approval.completed_at
+                        else None
+                    ),
+                },
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/<int:approval_id>/cancel", methods=["POST"])
@@ -354,19 +404,24 @@ async def get_statistics():
 
     # Count expired (pending but past expiration)
     expired_count = db(
-        (db.approval_requests.status == "pending") &
-        (db.approval_requests.expires_at != None) &
-        (db.approval_requests.expires_at <= datetime.utcnow())
+        (db.approval_requests.status == "pending")
+        & (db.approval_requests.expires_at != None)
+        & (db.approval_requests.expires_at <= datetime.utcnow())
     ).count()
 
     # Recent activity (last 7 days)
     week_ago = datetime.utcnow() - timedelta(days=7)
     recent_count = db(db.approval_requests.created_at >= week_ago).count()
 
-    return jsonify({
-        "total": db(db.approval_requests).count(),
-        "by_status": status_counts,
-        "by_type": type_counts,
-        "expired_pending": expired_count,
-        "last_7_days": recent_count,
-    }), 200
+    return (
+        jsonify(
+            {
+                "total": db(db.approval_requests).count(),
+                "by_status": status_counts,
+                "by_type": type_counts,
+                "expired_pending": expired_count,
+                "last_7_days": recent_count,
+            }
+        ),
+        200,
+    )

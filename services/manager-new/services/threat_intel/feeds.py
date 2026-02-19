@@ -1,4 +1,5 @@
 """Threat Intelligence Feed Aggregator."""
+
 import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -40,7 +41,9 @@ class FeedAggregator:
         if self.config.get("otx_api_key"):
             self.sources["otx"] = OTXSource(
                 api_key=self.config["otx_api_key"],
-                base_url=self.config.get("otx_base_url", "https://otx.alienvault.com/api/v1")
+                base_url=self.config.get(
+                    "otx_base_url", "https://otx.alienvault.com/api/v1"
+                ),
             )
             self._update_intervals["otx"] = 1800  # 30 minutes
 
@@ -75,16 +78,10 @@ class FeedAggregator:
             self.sources["yara"] = YARASource(rule_paths=yara_paths)
             self._update_intervals["yara"] = 3600
 
-        logger.info(
-            "Feed aggregator initialized",
-            sources=list(self.sources.keys())
-        )
+        logger.info("Feed aggregator initialized", sources=list(self.sources.keys()))
 
     async def check_indicator(
-        self,
-        indicator_type: str,
-        value: str,
-        sources: List[str] = None
+        self, indicator_type: str, value: str, sources: List[str] = None
     ) -> Dict[str, Any]:
         """Check an indicator against all or specified sources."""
         results = {
@@ -107,16 +104,14 @@ class FeedAggregator:
             try:
                 match = await source.check_indicator(indicator_type, value)
                 if match:
-                    results["matches"].append({
-                        "source": source_name,
-                        "data": match,
-                    })
+                    results["matches"].append(
+                        {
+                            "source": source_name,
+                            "data": match,
+                        }
+                    )
             except Exception as e:
-                logger.error(
-                    "Source check failed",
-                    source=source_name,
-                    error=str(e)
-                )
+                logger.error("Source check failed", source=source_name, error=str(e))
 
         results["is_malicious"] = len(results["matches"]) > 0
         results["match_count"] = len(results["matches"])
@@ -156,28 +151,26 @@ class FeedAggregator:
             try:
                 indicators = await source.fetch_indicators()
                 results["new_indicators"] += len(indicators)
-                results["updated_sources"].append({
-                    "name": source_name,
-                    "indicators": len(indicators),
-                })
+                results["updated_sources"].append(
+                    {
+                        "name": source_name,
+                        "indicators": len(indicators),
+                    }
+                )
                 self._last_update[source_name] = now
 
             except Exception as e:
-                logger.error(
-                    "Source update failed",
-                    source=source_name,
-                    error=str(e)
+                logger.error("Source update failed", source=source_name, error=str(e))
+                results["failed_sources"].append(
+                    {
+                        "name": source_name,
+                        "error": str(e),
+                    }
                 )
-                results["failed_sources"].append({
-                    "name": source_name,
-                    "error": str(e),
-                })
 
         return results
 
-    async def enrich_indicator(
-        self, indicator_type: str, value: str
-    ) -> Dict[str, Any]:
+    async def enrich_indicator(self, indicator_type: str, value: str) -> Dict[str, Any]:
         """Enrich an indicator with data from all sources."""
         enrichment = {
             "indicator_type": indicator_type,
@@ -211,11 +204,7 @@ class FeedAggregator:
         return enrichment
 
     async def _enrich_from_source(
-        self,
-        source_name: str,
-        source: Any,
-        indicator_type: str,
-        value: str
+        self, source_name: str, source: Any, indicator_type: str, value: str
     ) -> Optional[tuple]:
         """Enrich indicator from a single source."""
         try:
@@ -223,11 +212,7 @@ class FeedAggregator:
             if data:
                 return (source_name, data)
         except Exception as e:
-            logger.error(
-                "Enrichment failed",
-                source=source_name,
-                error=str(e)
-            )
+            logger.error("Enrichment failed", source=source_name, error=str(e))
         return None
 
     def _calculate_risk_score(self, enrichment: Dict[str, Any]) -> float:

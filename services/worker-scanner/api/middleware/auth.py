@@ -33,17 +33,24 @@ def jwt_required(f: Callable) -> Callable:
             user_id = get_current_user_id()
             return jsonify({"message": f"Hello {user_id}"})
     """
+
     @wraps(f)
     def decorated_function(*args: Any, **kwargs: Any) -> Any:
         # Extract token from Authorization header
         auth_header = request.headers.get("Authorization")
         if not auth_header:
-            return jsonify({"error": "No authorization token provided", "code": 401}), 401
+            return (
+                jsonify({"error": "No authorization token provided", "code": 401}),
+                401,
+            )
 
         # Parse Bearer token
         parts = auth_header.split()
         if len(parts) != 2 or parts[0].lower() != "bearer":
-            return jsonify({"error": "Invalid authorization header format", "code": 401}), 401
+            return (
+                jsonify({"error": "Invalid authorization header format", "code": 401}),
+                401,
+            )
 
         token = parts[1]
 
@@ -60,7 +67,7 @@ def jwt_required(f: Callable) -> Callable:
                 options={
                     "verify_exp": True,  # Verify expiration
                     "verify_iat": True,  # Verify issued-at
-                }
+                },
             )
             # Store decoded payload in flask.g for route access
             g.current_user = payload
@@ -73,7 +80,10 @@ def jwt_required(f: Callable) -> Callable:
             return jsonify({"error": f"Invalid token: {str(e)}", "code": 401}), 401
 
         except Exception as e:
-            return jsonify({"error": f"Token decoding failed: {str(e)}", "code": 401}), 401
+            return (
+                jsonify({"error": f"Token decoding failed: {str(e)}", "code": 401}),
+                401,
+            )
 
     return decorated_function
 
@@ -99,6 +109,7 @@ def optional_jwt(f: Callable) -> Callable:
                 return jsonify({"message": f"Hello {user['sub']}"})
             return jsonify({"message": "Hello anonymous"})
     """
+
     @wraps(f)
     def decorated_function(*args: Any, **kwargs: Any) -> Any:
         # Extract token from Authorization header
@@ -128,7 +139,7 @@ def optional_jwt(f: Callable) -> Callable:
                 options={
                     "verify_exp": True,  # Verify expiration
                     "verify_iat": True,  # Verify issued-at
-                }
+                },
             )
             # Store decoded payload in flask.g for route access
             g.current_user = payload

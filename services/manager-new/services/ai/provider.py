@@ -1,4 +1,5 @@
 """AI Provider base class and factory."""
+
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
 
@@ -11,9 +12,7 @@ class AIProvider(ABC):
     """Abstract base class for AI providers."""
 
     @abstractmethod
-    async def analyze(
-        self, prompt: str, system: str = None, **kwargs
-    ) -> str:
+    async def analyze(self, prompt: str, system: str = None, **kwargs) -> str:
         """
         Send analysis request to AI provider.
 
@@ -29,10 +28,7 @@ class AIProvider(ABC):
 
     @abstractmethod
     async def chat(
-        self,
-        messages: List[Dict[str, str]],
-        system: str = None,
-        **kwargs
+        self, messages: List[Dict[str, str]], system: str = None, **kwargs
     ) -> str:
         """
         Multi-turn chat with AI provider.
@@ -74,10 +70,7 @@ class AIProviderFactory:
     """Factory for creating AI providers."""
 
     @staticmethod
-    def create(
-        provider_type: str,
-        config: Dict[str, Any]
-    ) -> Optional[AIProvider]:
+    def create(provider_type: str, config: Dict[str, Any]) -> Optional[AIProvider]:
         """
         Create an AI provider instance.
 
@@ -132,8 +125,6 @@ class AIProviderFactory:
 
         except Exception as e:
             logger.error(
-                "Failed to create AI provider",
-                provider=provider_type,
-                error=str(e)
+                "Failed to create AI provider", provider=provider_type, error=str(e)
             )
             return None

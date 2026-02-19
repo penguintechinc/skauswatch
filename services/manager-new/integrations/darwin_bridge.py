@@ -6,6 +6,7 @@ to analyze pull requests for security vulnerabilities.
 This bridge allows SkausWatch to leverage Darwin's scanning capabilities
 for code review and security analysis.
 """
+
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -44,10 +45,7 @@ class DarwinBridge:
         """Initialize Darwin integration."""
         # Check if Darwin submodule exists
         if not DARWIN_PATH.exists():
-            logger.warning(
-                "Darwin submodule not found",
-                path=str(DARWIN_PATH)
-            )
+            logger.warning("Darwin submodule not found", path=str(DARWIN_PATH))
             return
 
         # Add Darwin to Python path
@@ -57,10 +55,7 @@ class DarwinBridge:
             self._darwin_available = True
             logger.info("Darwin integration initialized")
         else:
-            logger.warning(
-                "Darwin backend not found",
-                expected=str(darwin_backend)
-            )
+            logger.warning("Darwin backend not found", expected=str(darwin_backend))
 
     async def initialize_clients(self) -> None:
         """Initialize GitHub and AI clients."""
@@ -81,9 +76,11 @@ class DarwinBridge:
 
             if provider == "claude":
                 from app.providers.claude import ClaudeProvider
+
                 self._ai_provider = ClaudeProvider(self.config)
             else:
                 from app.providers.ollama import OllamaProvider
+
                 self._ai_provider = OllamaProvider(self.config)
 
             logger.info("Darwin AI provider initialized", provider=provider)
@@ -99,10 +96,7 @@ class DarwinBridge:
         return self._darwin_available
 
     async def scan_pull_request(
-        self,
-        repo: str,
-        pr_number: int,
-        scan_types: List[str] = None
+        self, repo: str, pr_number: int, scan_types: List[str] = None
     ) -> Dict[str, Any]:
         """
         Scan a GitHub pull request for security issues.
@@ -170,12 +164,7 @@ class DarwinBridge:
             }
 
         except Exception as e:
-            logger.error(
-                "PR scan failed",
-                repo=repo,
-                pr_number=pr_number,
-                error=str(e)
-            )
+            logger.error("PR scan failed", repo=repo, pr_number=pr_number, error=str(e))
             return {
                 "error": str(e),
                 "repository": repo,
@@ -187,7 +176,7 @@ class DarwinBridge:
         code: str,
         language: str,
         filename: str = "code.txt",
-        scan_types: List[str] = None
+        scan_types: List[str] = None,
     ) -> Dict[str, Any]:
         """
         Scan code snippet for security issues.
@@ -356,9 +345,7 @@ If no issues found, respond with "No security issues found."
 
         return findings
 
-    def _scan_for_secrets(
-        self, code: str, filename: str
-    ) -> List[Dict[str, Any]]:
+    def _scan_for_secrets(self, code: str, filename: str) -> List[Dict[str, Any]]:
         """Scan code for hardcoded secrets."""
         import re
 
@@ -370,25 +357,33 @@ If no issues found, respond with "No security issues found."
             (r'(?i)secret[_-]?key\s*[=:]\s*["\']([^"\']+)["\']', "Secret Key"),
             (r'(?i)password\s*[=:]\s*["\']([^"\']+)["\']', "Password"),
             (r'(?i)token\s*[=:]\s*["\']([^"\']+)["\']', "Token"),
-            (r'(?i)aws[_-]?access[_-]?key[_-]?id\s*[=:]\s*["\']?([A-Z0-9]{20})["\']?', "AWS Access Key"),
-            (r'(?i)aws[_-]?secret[_-]?access[_-]?key\s*[=:]\s*["\']?([A-Za-z0-9/+=]{40})["\']?', "AWS Secret Key"),
-            (r'ghp_[A-Za-z0-9]{36}', "GitHub Personal Access Token"),
-            (r'sk-[A-Za-z0-9]{48}', "OpenAI API Key"),
-            (r'-----BEGIN (?:RSA |DSA |EC )?PRIVATE KEY-----', "Private Key"),
+            (
+                r'(?i)aws[_-]?access[_-]?key[_-]?id\s*[=:]\s*["\']?([A-Z0-9]{20})["\']?',
+                "AWS Access Key",
+            ),
+            (
+                r'(?i)aws[_-]?secret[_-]?access[_-]?key\s*[=:]\s*["\']?([A-Za-z0-9/+=]{40})["\']?',
+                "AWS Secret Key",
+            ),
+            (r"ghp_[A-Za-z0-9]{36}", "GitHub Personal Access Token"),
+            (r"sk-[A-Za-z0-9]{48}", "OpenAI API Key"),
+            (r"-----BEGIN (?:RSA |DSA |EC )?PRIVATE KEY-----", "Private Key"),
         ]
 
         for pattern, secret_type in patterns:
             matches = re.finditer(pattern, code)
             for match in matches:
-                findings.append({
-                    "severity": "critical",
-                    "type": "hardcoded_secret",
-                    "secret_type": secret_type,
-                    "file": filename,
-                    "line_content": match.group(0)[:50] + "...",
-                    "description": f"Potential hardcoded {secret_type} detected",
-                    "source": "darwin_secrets",
-                })
+                findings.append(
+                    {
+                        "severity": "critical",
+                        "type": "hardcoded_secret",
+                        "secret_type": secret_type,
+                        "file": filename,
+                        "line_content": match.group(0)[:50] + "...",
+                        "description": f"Potential hardcoded {secret_type} detected",
+                        "source": "darwin_secrets",
+                    }
+                )
 
         return findings
 
@@ -403,12 +398,30 @@ If no issues found, respond with "No security issues found."
 
         # Scannable extensions
         scannable_exts = {
-            ".py", ".js", ".ts", ".jsx", ".tsx",
-            ".java", ".go", ".rb", ".php",
-            ".c", ".cpp", ".h", ".hpp",
-            ".cs", ".rs", ".swift", ".kt",
-            ".sh", ".bash", ".yaml", ".yml",
-            ".json", ".xml", ".sql",
+            ".py",
+            ".js",
+            ".ts",
+            ".jsx",
+            ".tsx",
+            ".java",
+            ".go",
+            ".rb",
+            ".php",
+            ".c",
+            ".cpp",
+            ".h",
+            ".hpp",
+            ".cs",
+            ".rs",
+            ".swift",
+            ".kt",
+            ".sh",
+            ".bash",
+            ".yaml",
+            ".yml",
+            ".json",
+            ".xml",
+            ".sql",
         }
 
         ext = Path(filename).suffix.lower()

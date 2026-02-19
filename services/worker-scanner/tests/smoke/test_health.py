@@ -25,6 +25,7 @@ import pytest
 
 try:
     import httpx
+
     HAS_HTTPX = True
 except ImportError:
     HAS_HTTPX = False
@@ -98,9 +99,7 @@ else:
 class TestHealthEndpoint:
     """Tests for health check endpoint."""
 
-    def test_health_endpoint_returns_200(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_health_endpoint_returns_200(self, client: Any, auth_token: str) -> None:
         """Test that GET /api/v1/scanner/healthz returns 200 OK with auth.
 
         Verifies the health endpoint is accessible and responds with
@@ -118,9 +117,7 @@ class TestHealthEndpoint:
             f"Response: {response.text if hasattr(response, 'text') else response.data}"
         )
 
-    def test_health_response_has_status(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_health_response_has_status(self, client: Any, auth_token: str) -> None:
         """Test that health response contains 'status' field set to 'healthy'.
 
         Verifies the response JSON includes a status field indicating
@@ -136,13 +133,11 @@ class TestHealthEndpoint:
             data = json.loads(response.data)
 
         assert "status" in data, "Response missing 'status' field"
-        assert data["status"] == "healthy", (
-            f"Expected status='healthy', got '{data['status']}'"
-        )
+        assert (
+            data["status"] == "healthy"
+        ), f"Expected status='healthy', got '{data['status']}'"
 
-    def test_health_response_has_service(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_health_response_has_service(self, client: Any, auth_token: str) -> None:
         """Test that health response contains 'service' field set to 'worker-scanner'.
 
         Verifies the response JSON identifies this as the worker-scanner service.
@@ -157,13 +152,11 @@ class TestHealthEndpoint:
             data = json.loads(response.data)
 
         assert "service" in data, "Response missing 'service' field"
-        assert data["service"] == "worker-scanner", (
-            f"Expected service='worker-scanner', got '{data['service']}'"
-        )
+        assert (
+            data["service"] == "worker-scanner"
+        ), f"Expected service='worker-scanner', got '{data['service']}'"
 
-    def test_health_content_type_json(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_health_content_type_json(self, client: Any, auth_token: str) -> None:
         """Test that health response Content-Type is application/json.
 
         Verifies proper HTTP headers for JSON response.
@@ -177,9 +170,9 @@ class TestHealthEndpoint:
             response = client.get("/api/v1/scanner/healthz", headers=headers)
             content_type = response.headers.get("Content-Type", "")
 
-        assert "application/json" in content_type, (
-            f"Expected Content-Type to contain 'application/json', got '{content_type}'"
-        )
+        assert (
+            "application/json" in content_type
+        ), f"Expected Content-Type to contain 'application/json', got '{content_type}'"
 
 
 class TestAPIEndpointsRegistered:
@@ -199,9 +192,7 @@ class TestAPIEndpointsRegistered:
 
         return response.status_code
 
-    def test_targets_endpoint_registered(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_targets_endpoint_registered(self, client: Any, auth_token: str) -> None:
         """Test that targets endpoint is registered and not a 404.
 
         Verifies the targets GET endpoint is registered by checking
@@ -211,9 +202,7 @@ class TestAPIEndpointsRegistered:
         status = self._get_response_status(client, "/api/v1/scanner", headers)
 
         # Should not be 404 (endpoint exists, may have errors like 500)
-        assert status != 404, (
-            f"Targets endpoint returned 404 - endpoint not registered"
-        )
+        assert status != 404, f"Targets endpoint returned 404 - endpoint not registered"
 
     def test_targets_create_endpoint_registered(
         self, client: Any, auth_token: str
@@ -224,7 +213,7 @@ class TestAPIEndpointsRegistered:
         """
         headers = {
             "Authorization": f"Bearer {auth_token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
 
         if isinstance(client, httpx.Client):
@@ -233,13 +222,11 @@ class TestAPIEndpointsRegistered:
             response = client.post("/api/v1/scanner", headers=headers, json={})
 
         # Should not be 404 (endpoint exists)
-        assert response.status_code != 404, (
-            "Create targets endpoint returned 404 - endpoint not registered"
-        )
+        assert (
+            response.status_code != 404
+        ), "Create targets endpoint returned 404 - endpoint not registered"
 
-    def test_findings_endpoint_registered(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_findings_endpoint_registered(self, client: Any, auth_token: str) -> None:
         """Test that findings endpoint exists.
 
         Verifies GET /api/v1/scanner (findings GET) is registered.
@@ -250,13 +237,11 @@ class TestAPIEndpointsRegistered:
         status = self._get_response_status(client, "/api/v1/scanner", headers)
 
         # Base endpoint should exist
-        assert status != 404, (
-            "Findings endpoint not found - base API endpoint not registered"
-        )
+        assert (
+            status != 404
+        ), "Findings endpoint not found - base API endpoint not registered"
 
-    def test_schedules_endpoint_registered(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_schedules_endpoint_registered(self, client: Any, auth_token: str) -> None:
         """Test that schedules endpoint exists.
 
         Verifies GET /api/v1/scanner (schedules list) is registered.
@@ -265,13 +250,11 @@ class TestAPIEndpointsRegistered:
         status = self._get_response_status(client, "/api/v1/scanner", headers)
 
         # Base endpoint should exist
-        assert status != 404, (
-            "Schedules endpoint not found - base API endpoint not registered"
-        )
+        assert (
+            status != 404
+        ), "Schedules endpoint not found - base API endpoint not registered"
 
-    def test_scanners_endpoint_not_404(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_scanners_endpoint_not_404(self, client: Any, auth_token: str) -> None:
         """Test that GET /api/v1/scanner/scanners does not return 404.
 
         Verifies the scanners endpoint is registered. May return 401 (auth required)
@@ -280,17 +263,13 @@ class TestAPIEndpointsRegistered:
         headers = {"Authorization": f"Bearer {auth_token}"}
         status = self._get_response_status(client, "/api/v1/scanner/scanners", headers)
 
-        assert status != 404, (
-            "Scanners endpoint returned 404 - endpoint not registered"
-        )
+        assert status != 404, "Scanners endpoint returned 404 - endpoint not registered"
 
 
 class TestAuthenticationMiddleware:
     """Tests that verify authentication middleware is active."""
 
-    def test_auth_required_on_base_endpoint(
-        self, client: Any
-    ) -> None:
+    def test_auth_required_on_base_endpoint(self, client: Any) -> None:
         """Test that GET /api/v1/scanner without auth returns 401.
 
         Verifies JWT authentication middleware is active on protected endpoints.
@@ -300,13 +279,11 @@ class TestAuthenticationMiddleware:
         else:
             response = client.get("/api/v1/scanner")
 
-        assert response.status_code == 401, (
-            f"Expected 401 Unauthorized without auth, got {response.status_code}"
-        )
+        assert (
+            response.status_code == 401
+        ), f"Expected 401 Unauthorized without auth, got {response.status_code}"
 
-    def test_auth_required_on_resource_endpoint(
-        self, client: Any
-    ) -> None:
+    def test_auth_required_on_resource_endpoint(self, client: Any) -> None:
         """Test that GET /api/v1/scanner/<id> without auth returns 401.
 
         Verifies JWT authentication middleware is active on resource endpoints.
@@ -316,13 +293,11 @@ class TestAuthenticationMiddleware:
         else:
             response = client.get("/api/v1/scanner/1")
 
-        assert response.status_code == 401, (
-            f"Expected 401 Unauthorized without auth, got {response.status_code}"
-        )
+        assert (
+            response.status_code == 401
+        ), f"Expected 401 Unauthorized without auth, got {response.status_code}"
 
-    def test_auth_required_on_nested_endpoint(
-        self, client: Any
-    ) -> None:
+    def test_auth_required_on_nested_endpoint(self, client: Any) -> None:
         """Test that nested endpoints require auth.
 
         Verifies JWT authentication middleware is active on nested endpoints
@@ -333,17 +308,15 @@ class TestAuthenticationMiddleware:
         else:
             response = client.get("/api/v1/scanner/1/findings")
 
-        assert response.status_code == 401, (
-            f"Expected 401 Unauthorized without auth, got {response.status_code}"
-        )
+        assert (
+            response.status_code == 401
+        ), f"Expected 401 Unauthorized without auth, got {response.status_code}"
 
 
 class TestErrorHandling:
     """Tests for error handling and response formats."""
 
-    def test_invalid_endpoint_returns_404(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_invalid_endpoint_returns_404(self, client: Any, auth_token: str) -> None:
         """Test that GET /api/v1/scanner/nonexistent returns 404.
 
         Verifies proper 404 error handling for undefined routes.
@@ -355,13 +328,11 @@ class TestErrorHandling:
         else:
             response = client.get("/api/v1/scanner/nonexistent", headers=headers)
 
-        assert response.status_code == 404, (
-            f"Expected 404 for nonexistent endpoint, got {response.status_code}"
-        )
+        assert (
+            response.status_code == 404
+        ), f"Expected 404 for nonexistent endpoint, got {response.status_code}"
 
-    def test_error_response_format(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_error_response_format(self, client: Any, auth_token: str) -> None:
         """Test that 404 response has proper JSON error format.
 
         Verifies error responses include required fields like 'error', 'message',
@@ -377,21 +348,19 @@ class TestErrorHandling:
             data = json.loads(response.data)
 
         assert "error" in data, "Error response missing 'error' field"
-        assert data["error"] == "Not Found", (
-            f"Expected error='Not Found', got '{data['error']}'"
-        )
+        assert (
+            data["error"] == "Not Found"
+        ), f"Expected error='Not Found', got '{data['error']}'"
         assert "status_code" in data, "Error response missing 'status_code' field"
-        assert data["status_code"] == 404, (
-            f"Expected status_code=404, got {data['status_code']}"
-        )
+        assert (
+            data["status_code"] == 404
+        ), f"Expected status_code=404, got {data['status_code']}"
 
 
 class TestCORSHeaders:
     """Tests for CORS header presence."""
 
-    def test_cors_headers_present(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_cors_headers_present(self, client: Any, auth_token: str) -> None:
         """Test that CORS headers are present in response with Origin header.
 
         Verifies CORS is configured by sending an Origin header and checking
@@ -399,7 +368,7 @@ class TestCORSHeaders:
         """
         headers = {
             "Authorization": f"Bearer {auth_token}",
-            "Origin": "http://localhost:3000"
+            "Origin": "http://localhost:3000",
         }
 
         if isinstance(client, httpx.Client):
@@ -417,9 +386,7 @@ class TestCORSHeaders:
             "CORS may not be properly configured."
         )
 
-    def test_cors_allow_methods(
-        self, client: Any, auth_token: str
-    ) -> None:
+    def test_cors_allow_methods(self, client: Any, auth_token: str) -> None:
         """Test that CORS Allow-Methods header is configured.
 
         Verifies CORS preflight response includes allowed HTTP methods.
@@ -435,6 +402,6 @@ class TestCORSHeaders:
 
         # Allow methods header may not be present on OPTIONS for simple endpoints,
         # but should be on other endpoints
-        assert allow_methods is None or len(allow_methods) > 0, (
-            "CORS Allow-Methods header should be present or empty"
-        )
+        assert (
+            allow_methods is None or len(allow_methods) > 0
+        ), "CORS Allow-Methods header should be present or empty"

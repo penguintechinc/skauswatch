@@ -10,9 +10,4 @@ from .stix_parser import STIXParser
 from .indicator_matcher import IndicatorMatcher
 from .threat_database import ThreatDatabase
 
-__all__ = [
-    'TAXIIClient',
-    'STIXParser',
-    'IndicatorMatcher',
-    'ThreatDatabase'
-]
+__all__ = ["TAXIIClient", "STIXParser", "IndicatorMatcher", "ThreatDatabase"]

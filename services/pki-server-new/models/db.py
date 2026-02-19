@@ -3,6 +3,7 @@
 SQLAlchemy: Used ONLY for database initialization and schema creation.
 PyDAL: Used for ALL runtime database operations.
 """
+
 import os
 import threading
 from contextlib import contextmanager
@@ -10,16 +11,23 @@ from datetime import datetime
 from typing import Generator, Optional
 
 from pydal import DAL, Field
-from pydal.validators import (
-    IS_IN_SET, IS_NOT_EMPTY, IS_DATETIME, IS_INT_IN_RANGE
-)
+from pydal.validators import IS_IN_SET, IS_NOT_EMPTY, IS_DATETIME, IS_INT_IN_RANGE
 from sqlalchemy import (
-    create_engine, MetaData, Table, Column, String, Boolean, DateTime,
-    Integer, Text, LargeBinary, ForeignKey, Index
+    create_engine,
+    MetaData,
+    Table,
+    Column,
+    String,
+    Boolean,
+    DateTime,
+    Integer,
+    Text,
+    LargeBinary,
+    ForeignKey,
+    Index,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 import uuid
-
 
 # Thread-local storage for PyDAL connections
 _thread_local = threading.local()
@@ -39,7 +47,8 @@ def init_database_schema(database_url: str) -> None:
 
     # X.509 Certificates table
     Table(
-        "x509_certificates", metadata,
+        "x509_certificates",
+        metadata,
         Column("id", UUID, primary_key=True, default=uuid.uuid4),
         Column("serial_number", String(64), unique=True, nullable=False),
         Column("subject", String(512), nullable=False),
@@ -78,7 +87,8 @@ def init_database_schema(database_url: str) -> None:
 
     # SSH Certificates table
     Table(
-        "ssh_certificates", metadata,
+        "ssh_certificates",
+        metadata,
         Column("id", UUID, primary_key=True, default=uuid.uuid4),
         Column("serial_number", String(64), unique=True, nullable=False),
         Column("key_id", String(256), nullable=False),
@@ -112,7 +122,8 @@ def init_database_schema(database_url: str) -> None:
 
     # Certificate Revocation List (CRL) entries
     Table(
-        "crl_entries", metadata,
+        "crl_entries",
+        metadata,
         Column("id", UUID, primary_key=True, default=uuid.uuid4),
         Column("certificate_id", UUID, nullable=False),
         Column("serial_number", String(64), nullable=False),
@@ -128,7 +139,8 @@ def init_database_schema(database_url: str) -> None:
 
     # Audit log for PKI operations
     Table(
-        "pki_audit_log", metadata,
+        "pki_audit_log",
+        metadata,
         Column("id", UUID, primary_key=True, default=uuid.uuid4),
         Column("event_type", String(50), nullable=False),
         Column("certificate_type", String(10)),  # x509/ssh
@@ -150,7 +162,8 @@ def init_database_schema(database_url: str) -> None:
 
     # CA Configuration and state
     Table(
-        "ca_state", metadata,
+        "ca_state",
+        metadata,
         Column("id", UUID, primary_key=True, default=uuid.uuid4),
         Column("ca_type", String(10), nullable=False),  # x509/ssh
         Column("serial_counter", Integer, default=1),
@@ -177,13 +190,10 @@ def get_db() -> DAL:
     """Get thread-local PyDAL connection for runtime operations."""
     if not hasattr(_thread_local, "db"):
         db_url = os.getenv(
-            "DATABASE_URL",
-            "postgresql://skauswatch:password@localhost:5432/skauswatch"
+            "DATABASE_URL", "postgresql://skauswatch:password@localhost:5432/skauswatch"
         )
         _thread_local.db = DAL(
-            db_url,
-            migrate=False,  # Schema managed by SQLAlchemy init
-            pool_size=10
+            db_url, migrate=False, pool_size=10  # Schema managed by SQLAlchemy init
         )
         define_pydal_tables(_thread_local.db)
     return _thread_local.db
@@ -200,8 +210,12 @@ def define_pydal_tables(db: DAL) -> None:
         Field("issuer", "string", length=512, required=True),
         Field("not_before", "datetime", required=True),
         Field("not_after", "datetime", required=True),
-        Field("key_algorithm", "string", length=20,
-              requires=IS_IN_SET(["RSA", "ECDSA", "ED25519"])),
+        Field(
+            "key_algorithm",
+            "string",
+            length=20,
+            requires=IS_IN_SET(["RSA", "ECDSA", "ED25519"]),
+        ),
         Field("key_size", "integer"),
         Field("signature_algorithm", "string", length=50),
         Field("fingerprint_sha256", "string", length=64, required=True),
@@ -215,8 +229,13 @@ def define_pydal_tables(db: DAL) -> None:
         Field("extended_key_usage", "list:string"),
         Field("is_ca", "boolean", default=False),
         Field("path_length", "integer"),
-        Field("status", "string", length=20, default="active",
-              requires=IS_IN_SET(["active", "revoked", "expired", "pending"])),
+        Field(
+            "status",
+            "string",
+            length=20,
+            default="active",
+            requires=IS_IN_SET(["active", "revoked", "expired", "pending"]),
+        ),
         Field("revoked_at", "datetime"),
         Field("revocation_reason", "string", length=50),
         Field("requester_id", "string", length=36),
@@ -225,7 +244,7 @@ def define_pydal_tables(db: DAL) -> None:
         Field("metadata", "json", default={}),
         Field("created_at", "datetime", default=datetime.utcnow),
         Field("updated_at", "datetime", default=datetime.utcnow),
-        migrate=False
+        migrate=False,
     )
 
     # SSH Certificates
@@ -233,21 +252,34 @@ def define_pydal_tables(db: DAL) -> None:
         "ssh_certificates",
         Field("serial_number", "string", length=64, required=True),
         Field("key_id", "string", length=256, required=True),
-        Field("certificate_type", "string", length=10,
-              requires=IS_IN_SET(["user", "host"])),
+        Field(
+            "certificate_type",
+            "string",
+            length=10,
+            requires=IS_IN_SET(["user", "host"]),
+        ),
         Field("principals", "list:string", required=True),
         Field("valid_after", "datetime", required=True),
         Field("valid_before", "datetime", required=True),
-        Field("key_type", "string", length=20,
-              requires=IS_IN_SET(["rsa", "ecdsa", "ed25519"])),
+        Field(
+            "key_type",
+            "string",
+            length=20,
+            requires=IS_IN_SET(["rsa", "ecdsa", "ed25519"]),
+        ),
         Field("public_key", "text", required=True),
         Field("certificate", "text", required=True),
         Field("critical_options", "json", default={}),
         Field("extensions", "json", default={}),
         Field("source_address", "list:string"),
         Field("force_command", "string", length=512),
-        Field("status", "string", length=20, default="active",
-              requires=IS_IN_SET(["active", "revoked", "expired"])),
+        Field(
+            "status",
+            "string",
+            length=20,
+            default="active",
+            requires=IS_IN_SET(["active", "revoked", "expired"]),
+        ),
         Field("revoked_at", "datetime"),
         Field("revocation_reason", "string", length=50),
         Field("requester_id", "string", length=36),
@@ -257,7 +289,7 @@ def define_pydal_tables(db: DAL) -> None:
         Field("metadata", "json", default={}),
         Field("created_at", "datetime", default=datetime.utcnow),
         Field("updated_at", "datetime", default=datetime.utcnow),
-        migrate=False
+        migrate=False,
     )
 
     # CRL Entries
@@ -265,19 +297,32 @@ def define_pydal_tables(db: DAL) -> None:
         "crl_entries",
         Field("certificate_id", "string", length=36, required=True),
         Field("serial_number", "string", length=64, required=True),
-        Field("certificate_type", "string", length=10,
-              requires=IS_IN_SET(["x509", "ssh"])),
+        Field(
+            "certificate_type", "string", length=10, requires=IS_IN_SET(["x509", "ssh"])
+        ),
         Field("revoked_at", "datetime", required=True),
-        Field("revocation_reason", "string", length=50,
-              requires=IS_IN_SET([
-                  "unspecified", "key_compromise", "ca_compromise",
-                  "affiliation_changed", "superseded", "cessation_of_operation",
-                  "certificate_hold", "remove_from_crl", "privilege_withdrawn"
-              ])),
+        Field(
+            "revocation_reason",
+            "string",
+            length=50,
+            requires=IS_IN_SET(
+                [
+                    "unspecified",
+                    "key_compromise",
+                    "ca_compromise",
+                    "affiliation_changed",
+                    "superseded",
+                    "cessation_of_operation",
+                    "certificate_hold",
+                    "remove_from_crl",
+                    "privilege_withdrawn",
+                ]
+            ),
+        ),
         Field("invalidity_date", "datetime"),
         Field("crl_number", "integer"),
         Field("created_at", "datetime", default=datetime.utcnow),
-        migrate=False
+        migrate=False,
     )
 
     # PKI Audit Log
@@ -291,20 +336,20 @@ def define_pydal_tables(db: DAL) -> None:
         Field("actor_id", "string", length=36),
         Field("actor_ip", "string", length=45),
         Field("action", "string", length=50, required=True),
-        Field("status", "string", length=20,
-              requires=IS_IN_SET(["success", "failure"])),
+        Field(
+            "status", "string", length=20, requires=IS_IN_SET(["success", "failure"])
+        ),
         Field("error_message", "text"),
         Field("request_data", "json"),
         Field("response_data", "json"),
         Field("timestamp", "datetime", default=datetime.utcnow),
-        migrate=False
+        migrate=False,
     )
 
     # CA State
     db.define_table(
         "ca_state",
-        Field("ca_type", "string", length=10,
-              requires=IS_IN_SET(["x509", "ssh"])),
+        Field("ca_type", "string", length=10, requires=IS_IN_SET(["x509", "ssh"])),
         Field("serial_counter", "integer", default=1),
         Field("crl_number", "integer", default=0),
         Field("last_crl_update", "datetime"),
@@ -315,7 +360,7 @@ def define_pydal_tables(db: DAL) -> None:
         Field("ca_not_after", "datetime"),
         Field("created_at", "datetime", default=datetime.utcnow),
         Field("updated_at", "datetime", default=datetime.utcnow),
-        migrate=False
+        migrate=False,
     )
 
 

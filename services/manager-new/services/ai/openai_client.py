@@ -1,4 +1,5 @@
 """OpenAI AI provider client."""
+
 from typing import Optional, Dict, Any, List
 
 import httpx
@@ -71,7 +72,7 @@ class OpenAIClient(AIProvider):
         model: str = None,
         max_tokens: int = None,
         temperature: float = 0.7,
-        **kwargs
+        **kwargs,
     ) -> str:
         """
         Send analysis request to OpenAI.
@@ -89,15 +90,19 @@ class OpenAIClient(AIProvider):
         messages = []
 
         if system:
-            messages.append({
-                "role": "system",
-                "content": system,
-            })
+            messages.append(
+                {
+                    "role": "system",
+                    "content": system,
+                }
+            )
 
-        messages.append({
-            "role": "user",
-            "content": prompt,
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        )
 
         payload = {
             "model": model or self._model,
@@ -107,9 +112,7 @@ class OpenAIClient(AIProvider):
         }
 
         try:
-            response = await self._client.post(
-                "/chat/completions", json=payload
-            )
+            response = await self._client.post("/chat/completions", json=payload)
             response.raise_for_status()
             data = response.json()
 
@@ -120,9 +123,7 @@ class OpenAIClient(AIProvider):
 
         except httpx.HTTPStatusError as e:
             logger.error(
-                "OpenAI API error",
-                status=e.response.status_code,
-                error=str(e)
+                "OpenAI API error", status=e.response.status_code, error=str(e)
             )
             raise
         except Exception as e:
@@ -136,7 +137,7 @@ class OpenAIClient(AIProvider):
         model: str = None,
         max_tokens: int = None,
         temperature: float = 0.7,
-        **kwargs
+        **kwargs,
     ) -> str:
         """
         Multi-turn chat with OpenAI.
@@ -154,16 +155,20 @@ class OpenAIClient(AIProvider):
         openai_messages = []
 
         if system:
-            openai_messages.append({
-                "role": "system",
-                "content": system,
-            })
+            openai_messages.append(
+                {
+                    "role": "system",
+                    "content": system,
+                }
+            )
 
         for msg in messages:
-            openai_messages.append({
-                "role": msg["role"],
-                "content": msg["content"],
-            })
+            openai_messages.append(
+                {
+                    "role": msg["role"],
+                    "content": msg["content"],
+                }
+            )
 
         payload = {
             "model": model or self._model,
@@ -173,9 +178,7 @@ class OpenAIClient(AIProvider):
         }
 
         try:
-            response = await self._client.post(
-                "/chat/completions", json=payload
-            )
+            response = await self._client.post("/chat/completions", json=payload)
             response.raise_for_status()
             data = response.json()
 
@@ -208,9 +211,7 @@ class OpenAIClient(AIProvider):
             return []
 
     async def generate_embeddings(
-        self,
-        text: str,
-        model: str = "text-embedding-ada-002"
+        self, text: str, model: str = "text-embedding-ada-002"
     ) -> List[float]:
         """Generate embeddings for text."""
         try:

@@ -1,4 +1,5 @@
 """X.509 Certificate Authority implementation."""
+
 import hashlib
 import os
 import secrets
@@ -11,8 +12,11 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, ed25519
 from cryptography.x509 import (
-    CertificateBuilder, CertificateRevocationListBuilder,
-    RevokedCertificateBuilder, NameOID, ExtensionOID
+    CertificateBuilder,
+    CertificateRevocationListBuilder,
+    RevokedCertificateBuilder,
+    NameOID,
+    ExtensionOID,
 )
 from cryptography.x509.oid import ExtendedKeyUsageOID
 import structlog
@@ -77,7 +81,7 @@ class X509CertificateAuthority:
 
         logger.info(
             "X.509 CA initialized",
-            subject=self._ca_cert.subject.rfc4514_string() if self._ca_cert else None
+            subject=self._ca_cert.subject.rfc4514_string() if self._ca_cert else None,
         )
 
     async def _load_ca(self) -> None:
@@ -100,17 +104,17 @@ class X509CertificateAuthority:
         """Generate new CA key and self-signed certificate."""
         # Generate CA private key
         self._ca_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=4096,
-            backend=default_backend()
+            public_exponent=65537, key_size=4096, backend=default_backend()
         )
 
         # Build CA certificate
-        subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "SkausWatch"),
-            x509.NameAttribute(NameOID.COMMON_NAME, "SkausWatch Root CA"),
-        ])
+        subject = issuer = x509.Name(
+            [
+                x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, "SkausWatch"),
+                x509.NameAttribute(NameOID.COMMON_NAME, "SkausWatch Root CA"),
+            ]
+        )
 
         self._ca_cert = (
             CertificateBuilder()
@@ -139,9 +143,7 @@ class X509CertificateAuthority:
                 critical=True,
             )
             .add_extension(
-                x509.SubjectKeyIdentifier.from_public_key(
-                    self._ca_key.public_key()
-                ),
+                x509.SubjectKeyIdentifier.from_public_key(self._ca_key.public_key()),
                 critical=False,
             )
             .sign(self._ca_key, hashes.SHA256(), backend=default_backend())
@@ -165,11 +167,13 @@ class X509CertificateAuthority:
             )
 
         with open(ca_key_path, "wb") as f:
-            f.write(self._ca_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=encryption
-            ))
+            f.write(
+                self._ca_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=encryption,
+                )
+            )
 
         with open(ca_cert_path, "wb") as f:
             f.write(self._ca_cert.public_bytes(serialization.Encoding.PEM))
@@ -178,17 +182,13 @@ class X509CertificateAuthority:
         os.chmod(ca_key_path, 0o600)
         os.chmod(ca_cert_path, 0o644)
 
-    def _generate_key(
-        self, algorithm: str, key_size: int
-    ) -> Any:
+    def _generate_key(self, algorithm: str, key_size: int) -> Any:
         """Generate a private key."""
         algorithm = algorithm.upper()
 
         if algorithm == "RSA":
             return rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=key_size,
-                backend=default_backend()
+                public_exponent=65537, key_size=key_size, backend=default_backend()
             )
         elif algorithm == "ECDSA":
             if key_size <= 256:
@@ -276,9 +276,7 @@ class X509CertificateAuthority:
 
         if csr_pem:
             # Parse CSR
-            csr = x509.load_pem_x509_csr(
-                csr_pem.encode(), backend=default_backend()
-            )
+            csr = x509.load_pem_x509_csr(csr_pem.encode(), backend=default_backend())
             public_key = csr.public_key()
         else:
             # Generate new key pair
@@ -287,7 +285,7 @@ class X509CertificateAuthority:
             private_key_pem = private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption()
+                encryption_algorithm=serialization.NoEncryption(),
             ).decode()
 
         # Build certificate
@@ -342,6 +340,7 @@ class X509CertificateAuthority:
             san_list.append(x509.DNSName(dns))
         for ip in san_ip:
             from ipaddress import ip_address
+
             san_list.append(x509.IPAddress(ip_address(ip)))
         for email in san_email:
             san_list.append(x509.RFC822Name(email))
@@ -368,17 +367,13 @@ class X509CertificateAuthority:
 
         # Sign the certificate
         if key_algorithm.upper() == "ED25519":
-            certificate = builder.sign(
-                self._ca_key, None, backend=default_backend()
-            )
+            certificate = builder.sign(self._ca_key, None, backend=default_backend())
         else:
             certificate = builder.sign(
                 self._ca_key, hashes.SHA256(), backend=default_backend()
             )
 
-        cert_pem = certificate.public_bytes(
-            serialization.Encoding.PEM
-        ).decode()
+        cert_pem = certificate.public_bytes(serialization.Encoding.PEM).decode()
 
         # Calculate fingerprint
         fingerprint = hashlib.sha256(
@@ -404,14 +399,13 @@ class X509CertificateAuthority:
             "Certificate issued",
             serial=metadata["serial_number"],
             subject=subject,
-            validity_days=validity_days
+            validity_days=validity_days,
         )
 
         return cert_pem, metadata["serial_number"], private_key_pem, metadata
 
     async def generate_crl(
-        self,
-        revoked_entries: List[Dict[str, Any]]
+        self, revoked_entries: List[Dict[str, Any]]
     ) -> Tuple[str, int]:
         """
         Generate a Certificate Revocation List.
@@ -445,29 +439,25 @@ class X509CertificateAuthority:
 
             if reason in self.REVOCATION_REASONS:
                 revoked_builder = revoked_builder.add_extension(
-                    x509.CRLReason(self.REVOCATION_REASONS[reason]),
-                    critical=False
+                    x509.CRLReason(self.REVOCATION_REASONS[reason]), critical=False
                 )
 
             builder = builder.add_revoked_certificate(revoked_builder.build())
 
         # Add CRL Number extension
         builder = builder.add_extension(
-            x509.CRLNumber(self._crl_number),
-            critical=False
+            x509.CRLNumber(self._crl_number), critical=False
         )
 
         # Sign the CRL
-        crl = builder.sign(
-            self._ca_key, hashes.SHA256(), backend=default_backend()
-        )
+        crl = builder.sign(self._ca_key, hashes.SHA256(), backend=default_backend())
 
         crl_pem = crl.public_bytes(serialization.Encoding.PEM).decode()
 
         logger.info(
             "CRL generated",
             crl_number=self._crl_number,
-            revoked_count=len(revoked_entries)
+            revoked_count=len(revoked_entries),
         )
 
         return crl_pem, self._crl_number
@@ -505,7 +495,7 @@ class X509CertificateAuthority:
             self._ca_key.public_key().verify(
                 cert.signature,
                 cert.tbs_certificate_bytes,
-                cert.signature_algorithm_parameters
+                cert.signature_algorithm_parameters,
             )
             return True
         except Exception:

@@ -76,7 +76,9 @@ class ScanJobManager:
         """
         # Validate job type
         if job_type not in self.VALID_JOB_TYPES:
-            raise ValueError(f"Invalid job_type: {job_type}. Must be one of {self.VALID_JOB_TYPES}")
+            raise ValueError(
+                f"Invalid job_type: {job_type}. Must be one of {self.VALID_JOB_TYPES}"
+            )
 
         # Validate bucket config exists
         config = await self.bucket_manager.get_bucket_config(bucket_config_id)
@@ -126,14 +128,18 @@ class ScanJobManager:
             return False
 
         if job.status != "pending":
-            logger.error(f"Job {job_id} is not in pending state (current: {job.status})")
+            logger.error(
+                f"Job {job_id} is not in pending state (current: {job.status})"
+            )
             return False
 
         # Get bucket config with decrypted credentials
         config = await self.bucket_manager.get_bucket_config(job.bucket_config_id)
         if not config:
             logger.error(f"Bucket config {job.bucket_config_id} not found")
-            await self.complete_job(job_id, error_message="Bucket configuration not found")
+            await self.complete_job(
+                job_id, error_message="Bucket configuration not found"
+            )
             return False
 
         # Update job status to running
@@ -185,7 +191,11 @@ class ScanJobManager:
 
         # Determine prefix filter
         prefix_filter = ""
-        if job.job_type == "prefix_scan" and job.metadata and "prefix_filter" in job.metadata:
+        if (
+            job.job_type == "prefix_scan"
+            and job.metadata
+            and "prefix_filter" in job.metadata
+        ):
             prefix_filter = job.metadata["prefix_filter"]
         elif config.get("prefix_filter"):
             prefix_filter = config["prefix_filter"]
@@ -221,16 +231,24 @@ class ScanJobManager:
                     # Check file size limit
                     max_size_bytes = config.get("max_file_size_mb", 100) * 1024 * 1024
                     if object_size > max_size_bytes:
-                        logger.debug(f"Skipping {object_key}: size {object_size} exceeds limit {max_size_bytes}")
+                        logger.debug(
+                            f"Skipping {object_key}: size {object_size} exceeds limit {max_size_bytes}"
+                        )
                         await self.update_job_progress(job_id, skipped=1)
                         continue
 
                     # Check file type filter
                     file_types_filter = config.get("file_types_filter", [])
                     if file_types_filter:
-                        extension = object_key.split(".")[-1].lower() if "." in object_key else ""
+                        extension = (
+                            object_key.split(".")[-1].lower()
+                            if "." in object_key
+                            else ""
+                        )
                         if extension not in file_types_filter:
-                            logger.debug(f"Skipping {object_key}: extension {extension} not in filter")
+                            logger.debug(
+                                f"Skipping {object_key}: extension {extension} not in filter"
+                            )
                             await self.update_job_progress(job_id, skipped=1)
                             continue
 
@@ -250,7 +268,9 @@ class ScanJobManager:
 
                     # Log progress every 100 objects
                     if total_objects % 100 == 0:
-                        logger.info(f"Job {job_id}: Published {total_objects} scan tasks")
+                        logger.info(
+                            f"Job {job_id}: Published {total_objects} scan tasks"
+                        )
 
         return total_objects
 
@@ -296,7 +316,9 @@ class ScanJobManager:
 
         if status is not None:
             if status not in self.VALID_STATUSES:
-                raise ValueError(f"Invalid status: {status}. Must be one of {self.VALID_STATUSES}")
+                raise ValueError(
+                    f"Invalid status: {status}. Must be one of {self.VALID_STATUSES}"
+                )
             query &= self.db.s3_scan_jobs.status == status
 
         # Get total count

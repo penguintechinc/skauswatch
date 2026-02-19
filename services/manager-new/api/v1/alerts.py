@@ -67,29 +67,42 @@ async def list_alerts():
     # Convert to response format
     alert_list = []
     for alert in alerts:
-        alert_list.append({
-            "id": alert.id,
-            "title": alert.title,
-            "description": alert.description,
-            "severity": alert.severity,
-            "status": alert.status,
-            "source": alert.source,
-            "indicators": alert.indicators or [],
-            "ai_review": alert.ai_review,
-            "assigned_to": alert.assigned_to,
-            "resolved_at": alert.resolved_at.isoformat() if alert.resolved_at else None,
-            "resolution_notes": alert.resolution_notes,
-            "created_at": alert.created_at.isoformat() if alert.created_at else None,
-            "updated_at": alert.updated_at.isoformat() if alert.updated_at else None,
-        })
+        alert_list.append(
+            {
+                "id": alert.id,
+                "title": alert.title,
+                "description": alert.description,
+                "severity": alert.severity,
+                "status": alert.status,
+                "source": alert.source,
+                "indicators": alert.indicators or [],
+                "ai_review": alert.ai_review,
+                "assigned_to": alert.assigned_to,
+                "resolved_at": (
+                    alert.resolved_at.isoformat() if alert.resolved_at else None
+                ),
+                "resolution_notes": alert.resolution_notes,
+                "created_at": (
+                    alert.created_at.isoformat() if alert.created_at else None
+                ),
+                "updated_at": (
+                    alert.updated_at.isoformat() if alert.updated_at else None
+                ),
+            }
+        )
 
-    return jsonify({
-        "items": alert_list,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
-    }), 200
+    return (
+        jsonify(
+            {
+                "items": alert_list,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "pages": (total + per_page - 1) // per_page,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/<int:alert_id>", methods=["GET"])
@@ -103,21 +116,32 @@ async def get_alert(alert_id: int):
     if not alert:
         return jsonify({"error": "Alert not found"}), 404
 
-    return jsonify({
-        "id": alert.id,
-        "title": alert.title,
-        "description": alert.description,
-        "severity": alert.severity,
-        "status": alert.status,
-        "source": alert.source,
-        "indicators": alert.indicators or [],
-        "ai_review": alert.ai_review,
-        "assigned_to": alert.assigned_to,
-        "resolved_at": alert.resolved_at.isoformat() if alert.resolved_at else None,
-        "resolution_notes": alert.resolution_notes,
-        "created_at": alert.created_at.isoformat() if alert.created_at else None,
-        "updated_at": alert.updated_at.isoformat() if alert.updated_at else None,
-    }), 200
+    return (
+        jsonify(
+            {
+                "id": alert.id,
+                "title": alert.title,
+                "description": alert.description,
+                "severity": alert.severity,
+                "status": alert.status,
+                "source": alert.source,
+                "indicators": alert.indicators or [],
+                "ai_review": alert.ai_review,
+                "assigned_to": alert.assigned_to,
+                "resolved_at": (
+                    alert.resolved_at.isoformat() if alert.resolved_at else None
+                ),
+                "resolution_notes": alert.resolution_notes,
+                "created_at": (
+                    alert.created_at.isoformat() if alert.created_at else None
+                ),
+                "updated_at": (
+                    alert.updated_at.isoformat() if alert.updated_at else None
+                ),
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("", methods=["POST"])
@@ -151,16 +175,23 @@ async def create_alert():
     # Publish to alert stream for processing
     # TODO: Publish to Redis Stream
 
-    return jsonify({
-        "message": "Alert created successfully",
-        "alert": {
-            "id": alert.id,
-            "title": alert.title,
-            "severity": alert.severity,
-            "status": alert.status,
-            "created_at": alert.created_at.isoformat() if alert.created_at else None,
-        },
-    }), 201
+    return (
+        jsonify(
+            {
+                "message": "Alert created successfully",
+                "alert": {
+                    "id": alert.id,
+                    "title": alert.title,
+                    "severity": alert.severity,
+                    "status": alert.status,
+                    "created_at": (
+                        alert.created_at.isoformat() if alert.created_at else None
+                    ),
+                },
+            }
+        ),
+        201,
+    )
 
 
 @bp.route("/<int:alert_id>", methods=["PUT"])
@@ -208,16 +239,23 @@ async def update_alert(alert_id: int):
     # Fetch updated alert
     alert = db(db.alerts.id == alert_id).select().first()
 
-    return jsonify({
-        "message": "Alert updated successfully",
-        "alert": {
-            "id": alert.id,
-            "title": alert.title,
-            "severity": alert.severity,
-            "status": alert.status,
-            "updated_at": alert.updated_at.isoformat() if alert.updated_at else None,
-        },
-    }), 200
+    return (
+        jsonify(
+            {
+                "message": "Alert updated successfully",
+                "alert": {
+                    "id": alert.id,
+                    "title": alert.title,
+                    "severity": alert.severity,
+                    "status": alert.status,
+                    "updated_at": (
+                        alert.updated_at.isoformat() if alert.updated_at else None
+                    ),
+                },
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/<int:alert_id>/status", methods=["PUT"])
@@ -244,11 +282,16 @@ async def update_alert_status(alert_id: int):
     db(db.alerts.id == alert_id).update(**updates)
     db.commit()
 
-    return jsonify({
-        "message": "Status updated",
-        "alert_id": alert_id,
-        "new_status": new_status,
-    }), 200
+    return (
+        jsonify(
+            {
+                "message": "Status updated",
+                "alert_id": alert_id,
+                "new_status": new_status,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/<int:alert_id>/ai-review", methods=["POST"])
@@ -274,14 +317,19 @@ async def request_ai_review(alert_id: int):
     # For now, return a placeholder response
     job_id = f"ai-{alert_id}-{datetime.utcnow().timestamp()}"
 
-    return jsonify({
-        "message": "AI review requested",
-        "job_id": job_id,
-        "alert_id": alert_id,
-        "provider": provider,
-        "priority": priority,
-        "submitted_at": datetime.utcnow().isoformat(),
-    }), 202
+    return (
+        jsonify(
+            {
+                "message": "AI review requested",
+                "job_id": job_id,
+                "alert_id": alert_id,
+                "provider": provider,
+                "priority": priority,
+                "submitted_at": datetime.utcnow().isoformat(),
+            }
+        ),
+        202,
+    )
 
 
 @bp.route("/search", methods=["POST"])
@@ -305,13 +353,17 @@ async def search_alerts():
 
     if search_data.query:
         query = query & (
-            db.alerts.title.contains(search_data.query) |
-            db.alerts.description.contains(search_data.query)
+            db.alerts.title.contains(search_data.query)
+            | db.alerts.description.contains(search_data.query)
         )
     if search_data.severity:
-        query = query & (db.alerts.severity.belongs([s.value for s in search_data.severity]))
+        query = query & (
+            db.alerts.severity.belongs([s.value for s in search_data.severity])
+        )
     if search_data.status:
-        query = query & (db.alerts.status.belongs([s.value for s in search_data.status]))
+        query = query & (
+            db.alerts.status.belongs([s.value for s in search_data.status])
+        )
     if search_data.source:
         query = query & (db.alerts.source == search_data.source)
     if search_data.assigned_to:
@@ -331,23 +383,32 @@ async def search_alerts():
     # Convert to response format
     alert_list = []
     for alert in alerts:
-        alert_list.append({
-            "id": alert.id,
-            "title": alert.title,
-            "description": alert.description,
-            "severity": alert.severity,
-            "status": alert.status,
-            "source": alert.source,
-            "created_at": alert.created_at.isoformat() if alert.created_at else None,
-        })
+        alert_list.append(
+            {
+                "id": alert.id,
+                "title": alert.title,
+                "description": alert.description,
+                "severity": alert.severity,
+                "status": alert.status,
+                "source": alert.source,
+                "created_at": (
+                    alert.created_at.isoformat() if alert.created_at else None
+                ),
+            }
+        )
 
-    return jsonify({
-        "items": alert_list,
-        "total": total,
-        "page": search_data.page,
-        "per_page": search_data.per_page,
-        "pages": (total + search_data.per_page - 1) // search_data.per_page,
-    }), 200
+    return (
+        jsonify(
+            {
+                "items": alert_list,
+                "total": total,
+                "page": search_data.page,
+                "per_page": search_data.per_page,
+                "pages": (total + search_data.per_page - 1) // search_data.per_page,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/statistics", methods=["GET"])
@@ -371,12 +432,18 @@ async def get_alert_statistics():
 
     # Recent alerts (last 24 hours)
     from datetime import timedelta
+
     yesterday = datetime.utcnow() - timedelta(days=1)
     recent_count = db(db.alerts.created_at >= yesterday).count()
 
-    return jsonify({
-        "total": db(db.alerts).count(),
-        "by_severity": severity_counts,
-        "by_status": status_counts,
-        "last_24_hours": recent_count,
-    }), 200
+    return (
+        jsonify(
+            {
+                "total": db(db.alerts).count(),
+                "by_severity": severity_counts,
+                "by_status": status_counts,
+                "last_24_hours": recent_count,
+            }
+        ),
+        200,
+    )

@@ -34,15 +34,20 @@ def get_users():
     for user in users:
         user.pop("password_hash", None)
 
-    return jsonify({
-        "users": users,
-        "pagination": {
-            "page": page,
-            "per_page": per_page,
-            "total": total,
-            "pages": (total + per_page - 1) // per_page,
-        },
-    }), 200
+    return (
+        jsonify(
+            {
+                "users": users,
+                "pagination": {
+                    "page": page,
+                    "per_page": per_page,
+                    "total": total,
+                    "pages": (total + per_page - 1) // per_page,
+                },
+            }
+        ),
+        200,
+    )
 
 
 @users_bp.route("/<int:user_id>", methods=["GET"])
@@ -84,9 +89,12 @@ def create_new_user():
         return jsonify({"error": "Password must be at least 8 characters"}), 400
 
     if role not in VALID_ROLES:
-        return jsonify({
-            "error": f"Invalid role. Must be one of: {', '.join(VALID_ROLES)}"
-        }), 400
+        return (
+            jsonify(
+                {"error": f"Invalid role. Must be one of: {', '.join(VALID_ROLES)}"}
+            ),
+            400,
+        )
 
     # Check if user exists
     existing = get_user_by_email(email)
@@ -105,10 +113,15 @@ def create_new_user():
     # Remove password hash from response
     user.pop("password_hash", None)
 
-    return jsonify({
-        "message": "User created successfully",
-        "user": user,
-    }), 201
+    return (
+        jsonify(
+            {
+                "message": "User created successfully",
+                "user": user,
+            }
+        ),
+        201,
+    )
 
 
 @users_bp.route("/<int:user_id>", methods=["PUT"])
@@ -145,9 +158,12 @@ def update_existing_user(user_id: int):
     if "role" in data:
         role = data["role"]
         if role not in VALID_ROLES:
-            return jsonify({
-                "error": f"Invalid role. Must be one of: {', '.join(VALID_ROLES)}"
-            }), 400
+            return (
+                jsonify(
+                    {"error": f"Invalid role. Must be one of: {', '.join(VALID_ROLES)}"}
+                ),
+                400,
+            )
         update_data["role"] = role
 
     # Active status update
@@ -169,10 +185,15 @@ def update_existing_user(user_id: int):
     # Remove password hash from response
     updated_user.pop("password_hash", None)
 
-    return jsonify({
-        "message": "User updated successfully",
-        "user": updated_user,
-    }), 200
+    return (
+        jsonify(
+            {
+                "message": "User updated successfully",
+                "user": updated_user,
+            }
+        ),
+        200,
+    )
 
 
 @users_bp.route("/<int:user_id>", methods=["DELETE"])
@@ -206,11 +227,16 @@ def delete_existing_user(user_id: int):
 @admin_required
 def get_roles():
     """Get list of valid roles (Admin only)."""
-    return jsonify({
-        "roles": VALID_ROLES,
-        "descriptions": {
-            "admin": "Full access: user CRUD, settings, all features",
-            "maintainer": "Read/write access to resources, no user management",
-            "viewer": "Read-only access to resources",
-        },
-    }), 200
+    return (
+        jsonify(
+            {
+                "roles": VALID_ROLES,
+                "descriptions": {
+                    "admin": "Full access: user CRUD, settings, all features",
+                    "maintainer": "Read/write access to resources, no user management",
+                    "viewer": "Read-only access to resources",
+                },
+            }
+        ),
+        200,
+    )

@@ -12,7 +12,9 @@ class CreateTargetSchema(Schema):
     target_type = fields.String(
         required=True, validate=validate.OneOf(["domain", "ip", "url", "cidr"])
     )
-    target_value = fields.String(required=True, validate=validate.Length(min=1, max=2048))
+    target_value = fields.String(
+        required=True, validate=validate.Length(min=1, max=2048)
+    )
     description = fields.String(load_default="", validate=validate.Length(max=5000))
     enabled = fields.Boolean(load_default=True)
     tags = fields.List(fields.String(), load_default=[])

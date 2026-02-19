@@ -86,9 +86,7 @@ class MaltegoClient:
                 response.raise_for_status()
                 data = response.text
 
-                logger.info(
-                    "maltego_domain_transforms_public_success", domain=domain
-                )
+                logger.info("maltego_domain_transforms_public_success", domain=domain)
                 return {
                     "related_domains": data.split("\n") if data else [],
                     "emails": [],
@@ -172,7 +170,5 @@ class MaltegoClient:
             logger.error("maltego_ip_transforms_public_error", ip=ip, error=str(e))
             return {}
         except Exception as e:
-            logger.error(
-                "maltego_ip_transforms_public_exception", ip=ip, error=str(e)
-            )
+            logger.error("maltego_ip_transforms_public_exception", ip=ip, error=str(e))
             return {}

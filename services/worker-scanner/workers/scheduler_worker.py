@@ -58,8 +58,8 @@ def process_due_schedules() -> dict[str, Any]:
         # Find all enabled schedules that are due to run
         current_time = datetime.utcnow()
         due_schedules = db(
-            (db.scan_schedules.enabled == True) &  # noqa: E712
-            (db.scan_schedules.next_run <= current_time)
+            (db.scan_schedules.enabled == True)  # noqa: E712
+            & (db.scan_schedules.next_run <= current_time)
         ).select()
 
         logger.info(f"Found {len(due_schedules)} due schedules to process")
@@ -109,6 +109,7 @@ def process_due_schedules() -> dict[str, Any]:
                     )
                     # Default to 1 hour from now if cron parsing fails
                     from datetime import timedelta
+
                     next_run = current_time + timedelta(hours=1)
                     logger.warning(
                         f"Defaulting next_run to 1 hour from now: {next_run}"
@@ -116,8 +117,7 @@ def process_due_schedules() -> dict[str, Any]:
 
                 # Update schedule with last_run and next_run
                 db(db.scan_schedules.id == schedule.id).update(
-                    last_run=current_time,
-                    next_run=next_run
+                    last_run=current_time, next_run=next_run
                 )
                 db.commit()
 
@@ -132,7 +132,7 @@ def process_due_schedules() -> dict[str, Any]:
                 error_count += 1
                 logger.error(
                     f"Error processing schedule {schedule.id}: {schedule_error}",
-                    exc_info=True
+                    exc_info=True,
                 )
                 # Rollback this schedule's transaction but continue processing others
                 db.rollback()
@@ -145,15 +145,14 @@ def process_due_schedules() -> dict[str, Any]:
 
     except Exception as global_error:
         logger.error(
-            f"Critical error in process_due_schedules: {global_error}",
-            exc_info=True
+            f"Critical error in process_due_schedules: {global_error}", exc_info=True
         )
         error_count += 1
 
     return {
         "processed": processed_count,
         "errors": error_count,
-        "jobs_created": jobs_created
+        "jobs_created": jobs_created,
     }
 
 
@@ -194,14 +193,10 @@ def recalculate_next_runs() -> int:
                 next_run = cron.get_next(datetime)
 
                 # Update schedule with new next_run
-                db(db.scan_schedules.id == schedule.id).update(
-                    next_run=next_run
-                )
+                db(db.scan_schedules.id == schedule.id).update(next_run=next_run)
                 db.commit()
 
-                logger.info(
-                    f"Recalculated schedule {schedule.id}: next_run={next_run}"
-                )
+                logger.info(f"Recalculated schedule {schedule.id}: next_run={next_run}")
 
                 updated_count += 1
 
@@ -210,7 +205,7 @@ def recalculate_next_runs() -> int:
                 logger.error(
                     f"Error recalculating next_run for schedule {schedule.id}: "
                     f"{schedule_error}",
-                    exc_info=True
+                    exc_info=True,
                 )
                 # Rollback this schedule's transaction but continue processing others
                 db.rollback()
@@ -223,8 +218,7 @@ def recalculate_next_runs() -> int:
 
     except Exception as global_error:
         logger.error(
-            f"Critical error in recalculate_next_runs: {global_error}",
-            exc_info=True
+            f"Critical error in recalculate_next_runs: {global_error}", exc_info=True
         )
         error_count += 1
 

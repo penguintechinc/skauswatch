@@ -462,9 +462,9 @@ def export_findings() -> tuple[Any, int]:
 
         # Return as CSV attachment response
         response = Response(csv_content, mimetype="text/csv")
-        response.headers[
-            "Content-Disposition"
-        ] = "attachment; filename=findings_export.csv"
+        response.headers["Content-Disposition"] = (
+            "attachment; filename=findings_export.csv"
+        )
 
         return response, 200
 

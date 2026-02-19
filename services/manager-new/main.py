@@ -235,16 +235,25 @@ def create_app(config_instance: ManagerConfig = None) -> Quart:
         except Exception as e:
             redis_status = f"error: {str(e)}"
 
-        status = "healthy" if db_status == "connected" and redis_status == "connected" else "unhealthy"
+        status = (
+            "healthy"
+            if db_status == "connected" and redis_status == "connected"
+            else "unhealthy"
+        )
         status_code = 200 if status == "healthy" else 503
 
-        return jsonify({
-            "status": status,
-            "version": get_version(),
-            "database": db_status,
-            "redis": redis_status,
-            "timestamp": datetime.utcnow().isoformat(),
-        }), status_code
+        return (
+            jsonify(
+                {
+                    "status": status,
+                    "version": get_version(),
+                    "database": db_status,
+                    "redis": redis_status,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            ),
+            status_code,
+        )
 
     @app.route("/readyz")
     async def readiness_check():
@@ -254,18 +263,29 @@ def create_app(config_instance: ManagerConfig = None) -> Quart:
     @app.route("/version")
     async def version_info():
         """Version information endpoint."""
-        return jsonify({
-            "name": "SkausWatch Manager Service",
-            "version": get_version(),
-            "environment": config.environment,
-        })
+        return jsonify(
+            {
+                "name": "SkausWatch Manager Service",
+                "version": get_version(),
+                "environment": config.environment,
+            }
+        )
 
     return app
 
 
 def _register_blueprints(app: Quart) -> None:
     """Register API blueprints."""
-    from api.v1 import auth, alerts, approvals, edr, threat_intel, users, research, s3_scan
+    from api.v1 import (
+        auth,
+        alerts,
+        approvals,
+        edr,
+        threat_intel,
+        users,
+        research,
+        s3_scan,
+    )
 
     app.register_blueprint(auth.bp, url_prefix="/api/v1/auth")
     app.register_blueprint(users.bp, url_prefix="/api/v1/users")

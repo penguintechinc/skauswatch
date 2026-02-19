@@ -36,7 +36,7 @@ structlog.configure(
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer()
+        structlog.processors.JSONRenderer(),
     ],
     context_class=dict,
     logger_factory=structlog.stdlib.LoggerFactory(),
@@ -66,7 +66,7 @@ class SkausWatchManagerApp:
 
     def __init__(self, config_path: Optional[str] = None):
         """Initialize the application
-        
+
         Args:
             config_path: Path to configuration file
         """
@@ -75,14 +75,14 @@ class SkausWatchManagerApp:
 
         # Load configuration
         config = ManagerConfig(config_path)
-        
+
         # Setup logging
         setup_logging(config.logging)
-        
+
         logger.info(
             "Initializing SkausWatch Manager Service",
             version=get_version(),
-            config_path=config_path
+            config_path=config_path,
         )
 
         try:
@@ -107,13 +107,15 @@ class SkausWatchManagerApp:
             logger.info("SkausWatch Manager Service initialized successfully")
 
         except Exception as e:
-            logger.error("Failed to initialize SkausWatch Manager Service", error=str(e))
+            logger.error(
+                "Failed to initialize SkausWatch Manager Service", error=str(e)
+            )
             raise
 
     def _init_database(self) -> None:
         """Initialize database connection"""
         global db
-        
+
         try:
             # Get database instance
             db_manager = get_database(
@@ -121,7 +123,7 @@ class SkausWatchManagerApp:
                 migrate=config.database.migrate,
                 fake_migrate=config.database.fake_migrate,
             )
-            
+
             db = db_manager.db
 
             # Initialize default data if requested
@@ -144,19 +146,17 @@ class SkausWatchManagerApp:
                 secret=config.security.secret_key,
                 expiration=config.auth.session_timeout,
                 secure=config.security.secure_cookies,
-                same_site="Lax"
+                same_site="Lax",
             )
 
             # Caching
             cache = Cache(
                 default_expiration=config.cache.default_expiration,
-                redis=config.cache.redis_url if config.cache.redis_url else None
+                redis=config.cache.redis_url if config.cache.redis_url else None,
             )
 
             # Internationalization
-            translator = Translator(
-                path=Path(__file__).parent / "translations"
-            )
+            translator = Translator(path=Path(__file__).parent / "translations")
 
             # Flash messages
             flash = Flash()
@@ -175,11 +175,7 @@ class SkausWatchManagerApp:
         global auth
 
         try:
-            auth = SkausWatchAuth(
-                db=db,
-                config=config.auth,
-                session=session
-            )
+            auth = SkausWatchAuth(db=db, config=config.auth, session=session)
 
             logger.info("Authentication system initialized successfully")
 
@@ -192,11 +188,7 @@ class SkausWatchManagerApp:
         global security
 
         try:
-            security = SecurityManager(
-                db=db,
-                config=config.security,
-                auth=auth
-            )
+            security = SecurityManager(db=db, config=config.security, auth=auth)
 
             logger.info("Security manager initialized successfully")
 
@@ -209,10 +201,7 @@ class SkausWatchManagerApp:
         global health_checker
 
         try:
-            health_checker = HealthChecker(
-                db=db,
-                config=config.health_check
-            )
+            health_checker = HealthChecker(db=db, config=config.health_check)
 
             logger.info("Health checker initialized successfully")
 
@@ -261,28 +250,28 @@ app: Optional[SkausWatchManagerApp] = None
 
 def create_app(config_path: Optional[str] = None) -> SkausWatchManagerApp:
     """Create and configure the SkausWatch Manager application
-    
+
     Args:
         config_path: Optional path to configuration file
-        
+
     Returns:
         Configured application instance
     """
     global app
-    
+
     if app is None:
         app = SkausWatchManagerApp(config_path)
-    
+
     return app
 
 
 def get_app() -> SkausWatchManagerApp:
     """Get the current application instance"""
     global app
-    
+
     if app is None:
         raise RuntimeError("Application not initialized. Call create_app() first.")
-    
+
     return app
 
 
@@ -293,24 +282,20 @@ def health_check():
     try:
         app = get_app()
         health_status = app.health_checker.check_all()
-        
+
         # Return appropriate HTTP status
         status_code = 200 if health_status["status"] == "healthy" else 503
-        
+
         return {
             "status": health_status["status"],
             "timestamp": health_status["timestamp"],
             "version": get_version(),
-            "checks": health_status["checks"]
+            "checks": health_status["checks"],
         }, status_code
 
     except Exception as e:
         logger.error("Health check failed", error=str(e))
-        return {
-            "status": "error",
-            "error": str(e),
-            "version": get_version()
-        }, 500
+        return {"status": "error", "error": str(e), "version": get_version()}, 500
 
 
 @action("version", method="GET")
@@ -320,7 +305,7 @@ def version_info():
     return {
         "name": "SkausWatch Manager Service",
         "version": get_version(),
-        "status": "running"
+        "status": "running",
     }
 
 
@@ -330,7 +315,9 @@ def metrics():
     """Prometheus metrics endpoint (requires authentication)"""
     try:
         # TODO: Implement metrics collection
-        return "# Prometheus metrics not yet implemented", {"Content-Type": "text/plain"}
+        return "# Prometheus metrics not yet implemented", {
+            "Content-Type": "text/plain"
+        }
 
     except Exception as e:
         logger.error("Failed to generate metrics", error=str(e))
@@ -345,34 +332,18 @@ def main():
     from py4web import start_server
 
     parser = argparse.ArgumentParser(description="SkausWatch Manager Service")
+    parser.add_argument("--config", "-c", type=str, help="Configuration file path")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--port", "-p", type=int, default=8000, help="Port to bind to")
     parser.add_argument(
-        "--config", "-c",
-        type=str,
-        help="Configuration file path"
-    )
-    parser.add_argument(
-        "--host",
-        type=str,
-        default="0.0.0.0",
-        help="Host to bind to"
-    )
-    parser.add_argument(
-        "--port", "-p",
-        type=int,
-        default=8000,
-        help="Port to bind to"
-    )
-    parser.add_argument(
-        "--reload",
-        action="store_true",
-        help="Enable auto-reload for development"
+        "--reload", action="store_true", help="Enable auto-reload for development"
     )
     parser.add_argument(
         "--log-level",
         type=str,
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         default="INFO",
-        help="Log level"
+        help="Log level",
     )
 
     args = parser.parse_args()
@@ -380,13 +351,13 @@ def main():
     try:
         # Create application
         app = create_app(args.config)
-        
+
         # Start py4web server
         start_server(
             host=args.host,
             port=args.port,
             reload=args.reload,
-            logging_level=getattr(logging, args.log_level)
+            logging_level=getattr(logging, args.log_level),
         )
 
     except KeyboardInterrupt:

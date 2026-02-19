@@ -12,6 +12,7 @@ logger = structlog.get_logger()
 @dataclass
 class DnsResult:
     """DNS lookup result containing all record types."""
+
     a_records: List[str]
     aaaa_records: List[str]
     mx_records: List[str]
@@ -23,13 +24,13 @@ class DnsResult:
     def to_dict(self) -> Dict[str, any]:
         """Convert to dictionary format."""
         return {
-            'A': self.a_records,
-            'AAAA': self.aaaa_records,
-            'MX': self.mx_records,
-            'NS': self.ns_records,
-            'TXT': self.txt_records,
-            'CNAME': self.cname_record,
-            'SOA': self.soa_record,
+            "A": self.a_records,
+            "AAAA": self.aaaa_records,
+            "MX": self.mx_records,
+            "NS": self.ns_records,
+            "TXT": self.txt_records,
+            "CNAME": self.cname_record,
+            "SOA": self.soa_record,
         }
 
 
@@ -101,7 +102,7 @@ class DNSClient:
     async def _query_a_records(self, domain: str) -> List[str]:
         """Query A records."""
         try:
-            response = await self.resolver.resolve(domain, 'A')
+            response = await self.resolver.resolve(domain, "A")
             return [str(rdata) for rdata in response]
         except Exception as e:
             logger.warning("a_records_query_failed", domain=domain, error=str(e))
@@ -110,7 +111,7 @@ class DNSClient:
     async def _query_aaaa_records(self, domain: str) -> List[str]:
         """Query AAAA records."""
         try:
-            response = await self.resolver.resolve(domain, 'AAAA')
+            response = await self.resolver.resolve(domain, "AAAA")
             return [str(rdata) for rdata in response]
         except Exception as e:
             logger.warning("aaaa_records_query_failed", domain=domain, error=str(e))
@@ -119,7 +120,7 @@ class DNSClient:
     async def _query_mx_records(self, domain: str) -> List[str]:
         """Query MX records."""
         try:
-            response = await self.resolver.resolve(domain, 'MX')
+            response = await self.resolver.resolve(domain, "MX")
             return [str(rdata.exchange) for rdata in response]
         except Exception as e:
             logger.warning("mx_records_query_failed", domain=domain, error=str(e))
@@ -128,7 +129,7 @@ class DNSClient:
     async def _query_ns_records(self, domain: str) -> List[str]:
         """Query NS records."""
         try:
-            response = await self.resolver.resolve(domain, 'NS')
+            response = await self.resolver.resolve(domain, "NS")
             return [str(rdata) for rdata in response]
         except Exception as e:
             logger.warning("ns_records_query_failed", domain=domain, error=str(e))
@@ -137,7 +138,7 @@ class DNSClient:
     async def _query_txt_records(self, domain: str) -> List[str]:
         """Query TXT records."""
         try:
-            response = await self.resolver.resolve(domain, 'TXT')
+            response = await self.resolver.resolve(domain, "TXT")
             return [str(rdata) for rdata in response]
         except Exception as e:
             logger.warning("txt_records_query_failed", domain=domain, error=str(e))
@@ -146,7 +147,7 @@ class DNSClient:
     async def _query_cname_record(self, domain: str) -> Optional[str]:
         """Query CNAME record."""
         try:
-            response = await self.resolver.resolve(domain, 'CNAME')
+            response = await self.resolver.resolve(domain, "CNAME")
             return str(response[0])
         except Exception as e:
             logger.warning("cname_record_query_failed", domain=domain, error=str(e))
@@ -155,7 +156,7 @@ class DNSClient:
     async def _query_soa_record(self, domain: str) -> Optional[str]:
         """Query SOA record."""
         try:
-            response = await self.resolver.resolve(domain, 'SOA')
+            response = await self.resolver.resolve(domain, "SOA")
             return str(response[0])
         except Exception as e:
             logger.warning("soa_record_query_failed", domain=domain, error=str(e))
@@ -174,7 +175,7 @@ class DNSClient:
 
         try:
             response = await self.resolver.resolve_address(ip, raise_on_no_answer=False)
-            hostname = str(response[0]).rstrip('.')
+            hostname = str(response[0]).rstrip(".")
             logger.info("reverse_lookup_completed", ip=ip, hostname=hostname)
             return hostname
         except Exception as e:

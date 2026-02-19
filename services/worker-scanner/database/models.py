@@ -43,79 +43,101 @@ def define_tables(db: DAL) -> None:
     """
     # scan_targets table: Security scan target definitions
     db.define_table(
-        'scan_targets',
-        db.Field('name', 'string', length=255, notnull=True),
-        db.Field('target_type', 'string', length=50, notnull=True),
-        db.Field('target_value', 'string', length=2048, notnull=True),
-        db.Field('description', 'text'),
-        db.Field('enabled', 'boolean', default=True, notnull=True),
-        db.Field('tags', 'json'),
-        db.Field('scan_metadata', 'json'),  # Renamed from 'metadata_' for PyDAL compatibility
-        db.Field('created_at', 'datetime', default=datetime.utcnow, notnull=True),
-        db.Field('updated_at', 'datetime', default=datetime.utcnow, update=datetime.utcnow, notnull=True),
-        db.Field('created_by', 'string', length=255),
-        migrate=False
+        "scan_targets",
+        db.Field("name", "string", length=255, notnull=True),
+        db.Field("target_type", "string", length=50, notnull=True),
+        db.Field("target_value", "string", length=2048, notnull=True),
+        db.Field("description", "text"),
+        db.Field("enabled", "boolean", default=True, notnull=True),
+        db.Field("tags", "json"),
+        db.Field(
+            "scan_metadata", "json"
+        ),  # Renamed from 'metadata_' for PyDAL compatibility
+        db.Field("created_at", "datetime", default=datetime.utcnow, notnull=True),
+        db.Field(
+            "updated_at",
+            "datetime",
+            default=datetime.utcnow,
+            update=datetime.utcnow,
+            notnull=True,
+        ),
+        db.Field("created_by", "string", length=255),
+        migrate=False,
     )
 
     # scan_jobs table: Scan job execution records
     db.define_table(
-        'scan_jobs',
-        db.Field('target_id', 'reference scan_targets', notnull=True, ondelete='CASCADE'),
-        db.Field('scanner_type', 'string', length=50, notnull=True),
-        db.Field('scan_type', 'string', length=50, notnull=True),
-        db.Field('status', 'string', length=50, default='pending', notnull=True),
-        db.Field('priority', 'integer', default=5, notnull=True),
-        db.Field('config', 'json'),
-        db.Field('started_at', 'datetime'),
-        db.Field('completed_at', 'datetime'),
-        db.Field('duration_seconds', 'integer'),
-        db.Field('error_message', 'text'),
-        db.Field('result_summary', 'json'),
-        db.Field('created_at', 'datetime', default=datetime.utcnow, notnull=True),
-        db.Field('created_by', 'string', length=255),
-        migrate=False
+        "scan_jobs",
+        db.Field(
+            "target_id", "reference scan_targets", notnull=True, ondelete="CASCADE"
+        ),
+        db.Field("scanner_type", "string", length=50, notnull=True),
+        db.Field("scan_type", "string", length=50, notnull=True),
+        db.Field("status", "string", length=50, default="pending", notnull=True),
+        db.Field("priority", "integer", default=5, notnull=True),
+        db.Field("config", "json"),
+        db.Field("started_at", "datetime"),
+        db.Field("completed_at", "datetime"),
+        db.Field("duration_seconds", "integer"),
+        db.Field("error_message", "text"),
+        db.Field("result_summary", "json"),
+        db.Field("created_at", "datetime", default=datetime.utcnow, notnull=True),
+        db.Field("created_by", "string", length=255),
+        migrate=False,
     )
 
     # scan_findings table: Security findings from scans
     db.define_table(
-        'scan_findings',
-        db.Field('job_id', 'reference scan_jobs', notnull=True, ondelete='CASCADE'),
-        db.Field('target_id', 'reference scan_targets', notnull=True, ondelete='CASCADE'),
-        db.Field('finding_id', 'string', length=512, notnull=True),
-        db.Field('severity', 'string', length=50, notnull=True),
-        db.Field('title', 'string', length=1024, notnull=True),
-        db.Field('description', 'text'),
-        db.Field('remediation', 'text'),
-        db.Field('affected_url', 'string', length=2048),
-        db.Field('cvss_score', 'double'),
-        db.Field('cve_ids', 'json'),
-        db.Field('cwe_ids', 'json'),
-        db.Field('evidence', 'text'),
-        db.Field('raw_finding', 'json'),
-        db.Field('status', 'string', length=50, default='open', notnull=True),
-        db.Field('discovered_at', 'datetime', default=datetime.utcnow, notnull=True),
-        db.Field('updated_at', 'datetime', default=datetime.utcnow, update=datetime.utcnow, notnull=True),
-        migrate=False
+        "scan_findings",
+        db.Field("job_id", "reference scan_jobs", notnull=True, ondelete="CASCADE"),
+        db.Field(
+            "target_id", "reference scan_targets", notnull=True, ondelete="CASCADE"
+        ),
+        db.Field("finding_id", "string", length=512, notnull=True),
+        db.Field("severity", "string", length=50, notnull=True),
+        db.Field("title", "string", length=1024, notnull=True),
+        db.Field("description", "text"),
+        db.Field("remediation", "text"),
+        db.Field("affected_url", "string", length=2048),
+        db.Field("cvss_score", "double"),
+        db.Field("cve_ids", "json"),
+        db.Field("cwe_ids", "json"),
+        db.Field("evidence", "text"),
+        db.Field("raw_finding", "json"),
+        db.Field("status", "string", length=50, default="open", notnull=True),
+        db.Field("discovered_at", "datetime", default=datetime.utcnow, notnull=True),
+        db.Field(
+            "updated_at",
+            "datetime",
+            default=datetime.utcnow,
+            update=datetime.utcnow,
+            notnull=True,
+        ),
+        migrate=False,
     )
 
     # scan_schedules table: Scheduled scan configurations
     db.define_table(
-        'scan_schedules',
-        db.Field('name', 'string', length=255, notnull=True),
-        db.Field('target_id', 'reference scan_targets', notnull=True, ondelete='CASCADE'),
-        db.Field('scanner_type', 'string', length=50, notnull=True),
-        db.Field('scan_type', 'string', length=50, notnull=True),
-        db.Field('cron_expression', 'string', length=255, notnull=True),
-        db.Field('config', 'json'),
-        db.Field('enabled', 'boolean', default=True, notnull=True),
-        db.Field('last_run', 'datetime'),
-        db.Field('next_run', 'datetime'),
-        db.Field('created_at', 'datetime', default=datetime.utcnow, notnull=True),
-        db.Field('created_by', 'string', length=255),
-        migrate=False
+        "scan_schedules",
+        db.Field("name", "string", length=255, notnull=True),
+        db.Field(
+            "target_id", "reference scan_targets", notnull=True, ondelete="CASCADE"
+        ),
+        db.Field("scanner_type", "string", length=50, notnull=True),
+        db.Field("scan_type", "string", length=50, notnull=True),
+        db.Field("cron_expression", "string", length=255, notnull=True),
+        db.Field("config", "json"),
+        db.Field("enabled", "boolean", default=True, notnull=True),
+        db.Field("last_run", "datetime"),
+        db.Field("next_run", "datetime"),
+        db.Field("created_at", "datetime", default=datetime.utcnow, notnull=True),
+        db.Field("created_by", "string", length=255),
+        migrate=False,
     )
 
-    logger.info('PyDAL tables defined: scan_targets, scan_jobs, scan_findings, scan_schedules')
+    logger.info(
+        "PyDAL tables defined: scan_targets, scan_jobs, scan_findings, scan_schedules"
+    )
 
 
 def get_configured_db() -> DAL:

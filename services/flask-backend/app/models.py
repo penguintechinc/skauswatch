@@ -28,19 +28,33 @@ def init_db(app: Flask) -> DAL:
     # Define users table
     db.define_table(
         "users",
-        Field("email", "string", length=255, unique=True, requires=[
-            IS_NOT_EMPTY(error_message="Email is required"),
-            IS_EMAIL(error_message="Invalid email format"),
-        ]),
+        Field(
+            "email",
+            "string",
+            length=255,
+            unique=True,
+            requires=[
+                IS_NOT_EMPTY(error_message="Email is required"),
+                IS_EMAIL(error_message="Invalid email format"),
+            ],
+        ),
         Field("password_hash", "string", length=255, requires=IS_NOT_EMPTY()),
         Field("full_name", "string", length=255),
-        Field("role", "string", length=50, default="viewer", requires=IS_IN_SET(
-            VALID_ROLES,
-            error_message=f"Role must be one of: {', '.join(VALID_ROLES)}"
-        )),
+        Field(
+            "role",
+            "string",
+            length=50,
+            default="viewer",
+            requires=IS_IN_SET(
+                VALID_ROLES,
+                error_message=f"Role must be one of: {', '.join(VALID_ROLES)}",
+            ),
+        ),
         Field("is_active", "boolean", default=True),
         Field("created_at", "datetime", default=datetime.utcnow),
-        Field("updated_at", "datetime", default=datetime.utcnow, update=datetime.utcnow),
+        Field(
+            "updated_at", "datetime", default=datetime.utcnow, update=datetime.utcnow
+        ),
     )
 
     # Define refresh tokens table for token invalidation
@@ -85,8 +99,9 @@ def get_user_by_id(user_id: int) -> Optional[dict]:
     return user.as_dict() if user else None
 
 
-def create_user(email: str, password_hash: str, full_name: str = "",
-                role: str = "viewer") -> dict:
+def create_user(
+    email: str, password_hash: str, full_name: str = "", role: str = "viewer"
+) -> dict:
     """Create a new user."""
     db = get_db()
     user_id = db.users.insert(
@@ -161,11 +176,15 @@ def revoke_refresh_token(token_hash: str) -> bool:
 def is_refresh_token_valid(token_hash: str) -> bool:
     """Check if refresh token is valid (not revoked and not expired)."""
     db = get_db()
-    token = db(
-        (db.refresh_tokens.token_hash == token_hash) &
-        (db.refresh_tokens.revoked == False) &
-        (db.refresh_tokens.expires_at > datetime.utcnow())
-    ).select().first()
+    token = (
+        db(
+            (db.refresh_tokens.token_hash == token_hash)
+            & (db.refresh_tokens.revoked == False)
+            & (db.refresh_tokens.expires_at > datetime.utcnow())
+        )
+        .select()
+        .first()
+    )
     return token is not None
 
 

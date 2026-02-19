@@ -422,9 +422,7 @@ class S3ScanWorker:
             )
 
         except Exception as e:
-            logger.error(
-                f"Error processing task {task.task_id}: {e}", exc_info=True
-            )
+            logger.error(f"Error processing task {task.task_id}: {e}", exc_info=True)
             scan_result["scan_status"] = "failed"
             scan_result["error_message"] = str(e)
             scan_result["scan_duration_ms"] = int((time.time() - start_time) * 1000)
@@ -468,7 +466,9 @@ class S3ScanWorker:
                 )
                 # Test connectivity
                 if self.clamav_scanner.ping():
-                    logger.info(f"ClamAV scanner initialized: {self.config.clamd_socket}")
+                    logger.info(
+                        f"ClamAV scanner initialized: {self.config.clamd_socket}"
+                    )
                 else:
                     raise RuntimeError("ClamAV daemon not responding to ping")
             except Exception as e:

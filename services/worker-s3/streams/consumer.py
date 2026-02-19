@@ -11,9 +11,7 @@ logger = logging.getLogger(__name__)
 class StreamConsumer:
     """Async Redis Streams consumer with consumer groups support."""
 
-    def __init__(
-        self, redis_url: str, prefix: str, group: str, consumer_name: str
-    ):
+    def __init__(self, redis_url: str, prefix: str, group: str, consumer_name: str):
         """Initialize Redis Streams consumer.
 
         Args:
@@ -33,9 +31,7 @@ class StreamConsumer:
         try:
             self.client = await redis.from_url(self.redis_url, decode_responses=True)
             await self.client.ping()
-            logger.info(
-                f"Connected to Redis: {self.group}/{self.consumer_name}"
-            )
+            logger.info(f"Connected to Redis: {self.group}/{self.consumer_name}")
         except Exception as e:
             logger.error(f"Failed to connect to Redis: {e}")
             raise

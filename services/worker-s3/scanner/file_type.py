@@ -31,8 +31,10 @@ class FileTypeDetector:
             ImportError: If python-magic library is not installed
         """
         if magic is None:
-            raise ImportError("python-magic library is required for file type detection. "
-                            "Install it with: pip install python-magic")
+            raise ImportError(
+                "python-magic library is required for file type detection. "
+                "Install it with: pip install python-magic"
+            )
 
         self._mime_detector: Optional[magic.Magic] = None
         self._type_detector: Optional[magic.Magic] = None
@@ -141,9 +143,9 @@ class FileTypeDetector:
                 return True
 
             # Wildcard match (e.g., 'application/*' matches 'application/pdf')
-            if allowed_lower.endswith('/*'):
+            if allowed_lower.endswith("/*"):
                 prefix = allowed_lower[:-2]
-                if mime_type_lower.startswith(prefix + '/'):
+                if mime_type_lower.startswith(prefix + "/"):
                     return True
 
         logger.debug(f"MIME type {mime_type} not in allowed list: {allowed_types}")

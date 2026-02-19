@@ -27,7 +27,7 @@ task_logger = get_task_logger(__name__)
     bind=True,
     name="workers.scan_worker.execute_scan",
     max_retries=2,
-    default_retry_delay=60
+    default_retry_delay=60,
 )
 def execute_scan(self, job_id: int) -> Dict[str, Any]:
     """
@@ -83,14 +83,13 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                 "job_id": job_id,
                 "status": "cancelled",
                 "findings_count": 0,
-                "error": "Job was cancelled"
+                "error": "Job was cancelled",
             }
 
         # Update job status to running
         logger.info(f"Starting execution of job {job_id}")
         db(db.scan_jobs.id == job_id).update(
-            status="running",
-            started_at=datetime.utcnow()
+            status="running", started_at=datetime.utcnow()
         )
         db.commit()
 
@@ -103,7 +102,7 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                 status="failed",
                 error_message=error_msg,
                 completed_at=datetime.utcnow(),
-                duration_seconds=(datetime.utcnow() - start_time).total_seconds()
+                duration_seconds=(datetime.utcnow() - start_time).total_seconds(),
             )
             db.commit()
             return {
@@ -111,7 +110,7 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                 "job_id": job_id,
                 "status": "failed",
                 "findings_count": 0,
-                "error": error_msg
+                "error": error_msg,
             }
 
         # Select scanner based on scanner_type
@@ -123,15 +122,13 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
 
         scanner_class = scanner_map.get(job.scanner_type)
         if scanner_class is None:
-            error_msg = (
-                f"Unknown scanner type '{job.scanner_type}' for job {job_id}"
-            )
+            error_msg = f"Unknown scanner type '{job.scanner_type}' for job {job_id}"
             logger.error(error_msg)
             db(db.scan_jobs.id == job_id).update(
                 status="failed",
                 error_message=error_msg,
                 completed_at=datetime.utcnow(),
-                duration_seconds=(datetime.utcnow() - start_time).total_seconds()
+                duration_seconds=(datetime.utcnow() - start_time).total_seconds(),
             )
             db.commit()
             return {
@@ -139,26 +136,20 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                 "job_id": job_id,
                 "status": "failed",
                 "findings_count": 0,
-                "error": error_msg
+                "error": error_msg,
             }
 
         # Parse job config (stored as JSON in database)
         job_config = job.config if job.config else {}
 
         # Instantiate scanner
-        logger.info(
-            f"Instantiating {job.scanner_type} scanner for job {job_id}"
-        )
+        logger.info(f"Instantiating {job.scanner_type} scanner for job {job_id}")
         scanner = scanner_class(config=job_config)
 
         # Execute scan
-        logger.info(
-            f"Executing {job.scan_type} scan on target {target.target_value}"
-        )
+        logger.info(f"Executing {job.scan_type} scan on target {target.target_value}")
         result = scanner.scan(
-            target=target.target_value,
-            scan_type=job.scan_type,
-            config=job_config
+            target=target.target_value, scan_type=job.scan_type, config=job_config
         )
 
         # Calculate duration
@@ -179,7 +170,7 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                 "high": 0,
                 "medium": 0,
                 "low": 0,
-                "info": 0
+                "info": 0,
             }
 
             for finding in result.findings:
@@ -223,7 +214,7 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                 "scanner": job.scanner_type,
                 "scan_type": job.scan_type,
                 "duration_seconds": duration_seconds,
-                "raw_summary": result.summary if result.summary else {}
+                "raw_summary": result.summary if result.summary else {},
             }
 
             # Update job to completed
@@ -231,7 +222,7 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                 status="completed",
                 completed_at=end_time,
                 duration_seconds=duration_seconds,
-                result_summary=result_summary
+                result_summary=result_summary,
             )
             db.commit()
 
@@ -245,7 +236,7 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                 "job_id": job_id,
                 "status": "completed",
                 "findings_count": findings_count,
-                "severity_counts": severity_counts
+                "severity_counts": severity_counts,
             }
 
         else:
@@ -257,7 +248,7 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                 status="failed",
                 error_message=error_msg,
                 completed_at=end_time,
-                duration_seconds=duration_seconds
+                duration_seconds=duration_seconds,
             )
             db.commit()
 
@@ -266,7 +257,7 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                 "job_id": job_id,
                 "status": "failed",
                 "findings_count": 0,
-                "error": error_msg
+                "error": error_msg,
             }
 
     except Reject:
@@ -288,41 +279,31 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                     status="failed",
                     error_message=str(exc),
                     completed_at=end_time,
-                    duration_seconds=duration_seconds
+                    duration_seconds=duration_seconds,
                 )
                 db.commit()
             except Exception as db_error:
                 logger.error(
-                    f"Failed to update job {job_id} status after error: "
-                    f"{db_error}"
+                    f"Failed to update job {job_id} status after error: " f"{db_error}"
                 )
 
         # Determine if error is retryable
-        retryable_errors = (
-            "connection",
-            "timeout",
-            "network",
-            "temporary"
-        )
+        retryable_errors = ("connection", "timeout", "network", "temporary")
         error_str = str(exc).lower()
 
         if any(keyword in error_str for keyword in retryable_errors):
             # Retry on connection/network errors
-            logger.info(
-                f"Retrying job {job_id} due to retryable error: {exc}"
-            )
+            logger.info(f"Retrying job {job_id} due to retryable error: {exc}")
             try:
                 raise self.retry(exc=exc)
             except self.MaxRetriesExceededError:
-                logger.error(
-                    f"Max retries exceeded for job {job_id}"
-                )
+                logger.error(f"Max retries exceeded for job {job_id}")
                 return {
                     "success": False,
                     "job_id": job_id,
                     "status": "failed",
                     "findings_count": 0,
-                    "error": "Max retries exceeded"
+                    "error": "Max retries exceeded",
                 }
         else:
             # Non-retryable error
@@ -331,7 +312,7 @@ def execute_scan(self, job_id: int) -> Dict[str, Any]:
                 "job_id": job_id,
                 "status": "failed",
                 "findings_count": 0,
-                "error": str(exc)
+                "error": str(exc),
             }
 
 
@@ -369,7 +350,7 @@ def cancel_scan(job_id: int) -> Dict[str, Any]:
                 "success": False,
                 "job_id": job_id,
                 "status": "unknown",
-                "message": error_msg
+                "message": error_msg,
             }
 
         # Load job from database
@@ -381,7 +362,7 @@ def cancel_scan(job_id: int) -> Dict[str, Any]:
                 "success": False,
                 "job_id": job_id,
                 "status": "unknown",
-                "message": error_msg
+                "message": error_msg,
             }
 
         # Check current status
@@ -393,7 +374,7 @@ def cancel_scan(job_id: int) -> Dict[str, Any]:
             db(db.scan_jobs.id == job_id).update(
                 status="cancelled",
                 completed_at=datetime.utcnow(),
-                error_message="Job cancelled by user"
+                error_message="Job cancelled by user",
             )
             db.commit()
 
@@ -401,7 +382,7 @@ def cancel_scan(job_id: int) -> Dict[str, Any]:
                 "success": True,
                 "job_id": job_id,
                 "status": "cancelled",
-                "message": "Job cancelled successfully"
+                "message": "Job cancelled successfully",
             }
 
         elif current_status == "cancelled":
@@ -410,14 +391,12 @@ def cancel_scan(job_id: int) -> Dict[str, Any]:
                 "success": True,
                 "job_id": job_id,
                 "status": "cancelled",
-                "message": "Job was already cancelled"
+                "message": "Job was already cancelled",
             }
 
         else:
             # Job is completed or failed, cannot cancel
-            logger.warning(
-                f"Cannot cancel job {job_id} with status '{current_status}'"
-            )
+            logger.warning(f"Cannot cancel job {job_id} with status '{current_status}'")
             return {
                 "success": False,
                 "job_id": job_id,
@@ -425,7 +404,7 @@ def cancel_scan(job_id: int) -> Dict[str, Any]:
                 "message": (
                     f"Cannot cancel job with status '{current_status}'. "
                     "Only pending or running jobs can be cancelled."
-                )
+                ),
             }
 
     except Exception as exc:
@@ -435,5 +414,5 @@ def cancel_scan(job_id: int) -> Dict[str, Any]:
             "success": False,
             "job_id": job_id,
             "status": "unknown",
-            "message": error_msg
+            "message": error_msg,
         }

@@ -15,7 +15,6 @@ import structlog
 from structlog.processors import JSONRenderer
 from structlog.dev import ConsoleRenderer
 
-
 # Environment configuration (read directly, avoid circular imports)
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 LOG_FORMAT = os.environ.get("LOG_FORMAT", "console").lower()

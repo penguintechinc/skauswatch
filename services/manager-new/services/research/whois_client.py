@@ -77,9 +77,7 @@ class WhoisClient:
         try:
             self.logger.debug("domain_lookup_start", domain=domain)
 
-            result = await asyncio.to_thread(
-                self._blocking_domain_lookup, domain
-            )
+            result = await asyncio.to_thread(self._blocking_domain_lookup, domain)
 
             self.logger.debug("domain_lookup_success", domain=domain)
             return result
@@ -153,9 +151,7 @@ class WhoisClient:
         try:
             self.logger.debug("ip_lookup_start", ip=ip)
 
-            result = await asyncio.to_thread(
-                self._blocking_ip_lookup, ip
-            )
+            result = await asyncio.to_thread(self._blocking_ip_lookup, ip)
 
             self.logger.debug("ip_lookup_success", ip=ip)
             return result
@@ -204,10 +200,7 @@ class WhoisClient:
                     or result.get("asn_description")
                     or result.get("network", {}).get("name")
                 ),
-                "country": (
-                    network.get("country")
-                    or result.get("asn_country_code")
-                ),
+                "country": (network.get("country") or result.get("asn_country_code")),
                 "description": network.get("remarks") or result.get("asn_description"),
                 "type": network.get("type"),
             }

@@ -14,11 +14,11 @@ from .file_collector import FileCollector
 from .database_collector import DatabaseCollector
 
 __all__ = [
-    'KubernetesCollector',
-    'LXCCollector', 
-    'AuditdCollector',
-    'SyslogCollector',
-    'JournaldCollector',
-    'FileCollector',
-    'DatabaseCollector'
+    "KubernetesCollector",
+    "LXCCollector",
+    "AuditdCollector",
+    "SyslogCollector",
+    "JournaldCollector",
+    "FileCollector",
+    "DatabaseCollector",
 ]

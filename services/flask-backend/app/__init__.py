@@ -15,13 +15,16 @@ def create_app(config_class: type = Config) -> Flask:
     app.config.from_object(config_class)
 
     # Initialize CORS
-    CORS(app, resources={
-        r"/api/*": {
-            "origins": app.config.get("CORS_ORIGINS", "*"),
-            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"],
-        }
-    })
+    CORS(
+        app,
+        resources={
+            r"/api/*": {
+                "origins": app.config.get("CORS_ORIGINS", "*"),
+                "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+                "allow_headers": ["Content-Type", "Authorization"],
+            }
+        },
+    )
 
     # Initialize database
     with app.app_context():
@@ -54,9 +57,6 @@ def create_app(config_class: type = Config) -> Flask:
         return {"status": "ready"}, 200
 
     # Add Prometheus metrics endpoint
-    app.wsgi_app = DispatcherMiddleware(
-        app.wsgi_app,
-        {"/metrics": make_wsgi_app()}
-    )
+    app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/metrics": make_wsgi_app()})
 
     return app

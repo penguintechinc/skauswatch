@@ -3,6 +3,7 @@
 This service provides both REST API and gRPC endpoints for managing
 X.509 and SSH certificates.
 """
+
 import asyncio
 import signal
 from datetime import datetime
@@ -144,6 +145,7 @@ async def startup() -> None:
 
     # Store cert_manager in app config for API access
     from quart import current_app
+
     current_app.config["cert_manager"] = cert_manager
 
     # Start gRPC server
@@ -194,28 +196,28 @@ async def cleanup_expired_certificates() -> None:
             await asyncio.sleep(3600)  # Run every hour
 
             from .models.db import db_session
+
             now = datetime.utcnow()
             updated_count = 0
 
             with db_session() as db:
                 # Update expired X.509 certificates
                 x509_updated = db(
-                    (db.x509_certificates.status == "active") &
-                    (db.x509_certificates.not_after < now)
+                    (db.x509_certificates.status == "active")
+                    & (db.x509_certificates.not_after < now)
                 ).update(status="expired", updated_at=now)
                 updated_count += x509_updated
 
                 # Update expired SSH certificates
                 ssh_updated = db(
-                    (db.ssh_certificates.status == "active") &
-                    (db.ssh_certificates.valid_before < now)
+                    (db.ssh_certificates.status == "active")
+                    & (db.ssh_certificates.valid_before < now)
                 ).update(status="expired", updated_at=now)
                 updated_count += ssh_updated
 
             if updated_count > 0:
                 logger.info(
-                    "Cleaned up expired certificates",
-                    updated_count=updated_count
+                    "Cleaned up expired certificates", updated_count=updated_count
                 )
 
         except asyncio.CancelledError:

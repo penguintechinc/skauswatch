@@ -58,7 +58,9 @@ def create_default_admin():
         else:
             print("Admin user already exists")
     else:
-        print(f"Database has {user_count} existing user(s), skipping default admin creation")
+        print(
+            f"Database has {user_count} existing user(s), skipping default admin creation"
+        )
 
 
 def main():

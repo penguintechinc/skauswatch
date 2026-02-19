@@ -9,7 +9,6 @@ import hashlib
 import logging
 import os
 
-
 logger = logging.getLogger(__name__)
 
 # Chunk size for streaming file reads (1 MB)
@@ -55,7 +54,7 @@ class FileHasher:
             sha256_hash = hashlib.sha256()
 
             # Read file in chunks and update hashes
-            with open(file_path, 'rb') as f:
+            with open(file_path, "rb") as f:
                 while True:
                     chunk = f.read(CHUNK_SIZE)
                     if not chunk:
@@ -66,13 +65,15 @@ class FileHasher:
                     sha256_hash.update(chunk)
 
             # Get hex digests
-            hashes['md5'] = md5_hash.hexdigest()
-            hashes['sha1'] = sha1_hash.hexdigest()
-            hashes['sha256'] = sha256_hash.hexdigest()
+            hashes["md5"] = md5_hash.hexdigest()
+            hashes["sha1"] = sha1_hash.hexdigest()
+            hashes["sha256"] = sha256_hash.hexdigest()
 
-            logger.debug(f"Computed hashes for {file_path}: "
-                        f"md5={hashes['md5']}, sha1={hashes['sha1']}, "
-                        f"sha256={hashes['sha256']}")
+            logger.debug(
+                f"Computed hashes for {file_path}: "
+                f"md5={hashes['md5']}, sha1={hashes['sha1']}, "
+                f"sha256={hashes['sha256']}"
+            )
 
             return hashes
 
@@ -84,7 +85,7 @@ class FileHasher:
             raise
 
     @staticmethod
-    def compute_hash(file_path: str, hash_type: str = 'sha256') -> str:
+    def compute_hash(file_path: str, hash_type: str = "sha256") -> str:
         """
         Compute a single hash type for a file.
 
@@ -100,9 +101,11 @@ class FileHasher:
             ValueError: If hash_type is not supported
             OSError: If file cannot be read
         """
-        if hash_type not in ('md5', 'sha1', 'sha256'):
-            raise ValueError(f"Unsupported hash type: {hash_type}. "
-                           f"Supported types: md5, sha1, sha256")
+        if hash_type not in ("md5", "sha1", "sha256"):
+            raise ValueError(
+                f"Unsupported hash type: {hash_type}. "
+                f"Supported types: md5, sha1, sha256"
+            )
 
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -113,7 +116,7 @@ class FileHasher:
         try:
             hash_obj = hashlib.new(hash_type)
 
-            with open(file_path, 'rb') as f:
+            with open(file_path, "rb") as f:
                 while True:
                     chunk = f.read(CHUNK_SIZE)
                     if not chunk:
@@ -128,12 +131,15 @@ class FileHasher:
             logger.error(f"Failed to read file {file_path} for hashing: {e}")
             raise OSError(f"Cannot read file for hashing: {e}") from e
         except Exception as e:
-            logger.error(f"Unexpected error computing {hash_type} hash for {file_path}: {e}")
+            logger.error(
+                f"Unexpected error computing {hash_type} hash for {file_path}: {e}"
+            )
             raise
 
     @staticmethod
-    def verify_hash(file_path: str, expected_hash: str,
-                   hash_type: str = 'sha256') -> bool:
+    def verify_hash(
+        file_path: str, expected_hash: str, hash_type: str = "sha256"
+    ) -> bool:
         """
         Verify a file hash against an expected value.
 
@@ -156,7 +162,9 @@ class FileHasher:
         if matches:
             logger.debug(f"Hash verification passed for {file_path}")
         else:
-            logger.warning(f"Hash mismatch for {file_path}: "
-                         f"expected={expected_hash}, computed={computed}")
+            logger.warning(
+                f"Hash mismatch for {file_path}: "
+                f"expected={expected_hash}, computed={computed}"
+            )
 
         return matches

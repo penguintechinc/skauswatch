@@ -87,9 +87,7 @@ class S3Tagger:
         """
         try:
             async with self.session.client("s3") as client:
-                response = await client.get_object_tagging(
-                    Bucket=bucket, Key=key
-                )
+                response = await client.get_object_tagging(Bucket=bucket, Key=key)
                 return {tag["Key"]: tag["Value"] for tag in response["TagSet"]}
         except Exception:
             return {}

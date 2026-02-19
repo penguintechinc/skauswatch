@@ -81,11 +81,16 @@ async def register_agent():
         )
         db.commit()
 
-        return jsonify({
-            "message": "Agent re-registered",
-            "agent_id": register_data.agent_id,
-            "status": "active",
-        }), 200
+        return (
+            jsonify(
+                {
+                    "message": "Agent re-registered",
+                    "agent_id": register_data.agent_id,
+                    "status": "active",
+                }
+            ),
+            200,
+        )
 
     # Create new agent
     db.edr_agents.insert(
@@ -101,11 +106,16 @@ async def register_agent():
     )
     db.commit()
 
-    return jsonify({
-        "message": "Agent registered successfully",
-        "agent_id": register_data.agent_id,
-        "status": "active",
-    }), 201
+    return (
+        jsonify(
+            {
+                "message": "Agent registered successfully",
+                "agent_id": register_data.agent_id,
+                "status": "active",
+            }
+        ),
+        201,
+    )
 
 
 @bp.route("/heartbeat", methods=["POST"])
@@ -135,11 +145,16 @@ async def heartbeat():
     )
     db.commit()
 
-    return jsonify({
-        "status": "ok",
-        "agent_id": heartbeat_data.agent_id,
-        "timestamp": datetime.utcnow().isoformat(),
-    }), 200
+    return (
+        jsonify(
+            {
+                "status": "ok",
+                "agent_id": heartbeat_data.agent_id,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/events", methods=["POST"])
@@ -196,12 +211,17 @@ async def report_events():
 
     # TODO: Publish events to Redis Stream for processing
 
-    return jsonify({
-        "status": "accepted",
-        "events_received": len(events),
-        "events_stored": created_count,
-        "errors": errors[:10] if errors else [],
-    }), 202
+    return (
+        jsonify(
+            {
+                "status": "accepted",
+                "events_received": len(events),
+                "events_stored": created_count,
+                "errors": errors[:10] if errors else [],
+            }
+        ),
+        202,
+    )
 
 
 @bp.route("/config", methods=["GET"])
@@ -222,20 +242,25 @@ async def get_agent_config():
 
     # Return agent configuration
     # TODO: Implement configurable agent settings
-    return jsonify({
-        "agent_id": agent_id,
-        "config": {
-            "reporting_interval": 60,  # seconds
-            "heartbeat_interval": 30,  # seconds
-            "event_batch_size": 50,
-            "enabled_collectors": [
-                "process",
-                "network",
-                "file",
-            ],
-            "severity_threshold": "low",
-        },
-    }), 200
+    return (
+        jsonify(
+            {
+                "agent_id": agent_id,
+                "config": {
+                    "reporting_interval": 60,  # seconds
+                    "heartbeat_interval": 30,  # seconds
+                    "event_batch_size": 50,
+                    "enabled_collectors": [
+                        "process",
+                        "network",
+                        "file",
+                    ],
+                    "severity_threshold": "low",
+                },
+            }
+        ),
+        200,
+    )
 
 
 # Admin endpoints (require authentication)
@@ -280,26 +305,37 @@ async def list_agents():
     # Convert to response format
     agent_list = []
     for agent in agents:
-        agent_list.append({
-            "id": agent.id,
-            "agent_id": agent.agent_id,
-            "hostname": agent.hostname,
-            "ip_address": agent.ip_address,
-            "os_type": agent.os_type,
-            "os_version": agent.os_version,
-            "agent_version": agent.agent_version,
-            "status": agent.status,
-            "last_heartbeat": agent.last_heartbeat.isoformat() if agent.last_heartbeat else None,
-            "created_at": agent.created_at.isoformat() if agent.created_at else None,
-        })
+        agent_list.append(
+            {
+                "id": agent.id,
+                "agent_id": agent.agent_id,
+                "hostname": agent.hostname,
+                "ip_address": agent.ip_address,
+                "os_type": agent.os_type,
+                "os_version": agent.os_version,
+                "agent_version": agent.agent_version,
+                "status": agent.status,
+                "last_heartbeat": (
+                    agent.last_heartbeat.isoformat() if agent.last_heartbeat else None
+                ),
+                "created_at": (
+                    agent.created_at.isoformat() if agent.created_at else None
+                ),
+            }
+        )
 
-    return jsonify({
-        "items": agent_list,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
-    }), 200
+    return (
+        jsonify(
+            {
+                "items": agent_list,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "pages": (total + per_page - 1) // per_page,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/agents/<agent_id>", methods=["GET"])
@@ -313,20 +349,31 @@ async def get_agent(agent_id: str):
     if not agent:
         return jsonify({"error": "Agent not found"}), 404
 
-    return jsonify({
-        "id": agent.id,
-        "agent_id": agent.agent_id,
-        "hostname": agent.hostname,
-        "ip_address": agent.ip_address,
-        "os_type": agent.os_type,
-        "os_version": agent.os_version,
-        "agent_version": agent.agent_version,
-        "status": agent.status,
-        "last_heartbeat": agent.last_heartbeat.isoformat() if agent.last_heartbeat else None,
-        "metadata": agent.metadata or {},
-        "created_at": agent.created_at.isoformat() if agent.created_at else None,
-        "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
-    }), 200
+    return (
+        jsonify(
+            {
+                "id": agent.id,
+                "agent_id": agent.agent_id,
+                "hostname": agent.hostname,
+                "ip_address": agent.ip_address,
+                "os_type": agent.os_type,
+                "os_version": agent.os_version,
+                "agent_version": agent.agent_version,
+                "status": agent.status,
+                "last_heartbeat": (
+                    agent.last_heartbeat.isoformat() if agent.last_heartbeat else None
+                ),
+                "metadata": agent.metadata or {},
+                "created_at": (
+                    agent.created_at.isoformat() if agent.created_at else None
+                ),
+                "updated_at": (
+                    agent.updated_at.isoformat() if agent.updated_at else None
+                ),
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/agents/<agent_id>/events", methods=["GET"])
@@ -357,23 +404,32 @@ async def get_agent_events(agent_id: str):
 
     event_list = []
     for event in events:
-        event_list.append({
-            "id": event.id,
-            "event_type": event.event_type,
-            "severity": event.severity,
-            "process_name": event.process_name,
-            "process_path": event.process_path,
-            "command_line": event.command_line,
-            "created_at": event.created_at.isoformat() if event.created_at else None,
-        })
+        event_list.append(
+            {
+                "id": event.id,
+                "event_type": event.event_type,
+                "severity": event.severity,
+                "process_name": event.process_name,
+                "process_path": event.process_path,
+                "command_line": event.command_line,
+                "created_at": (
+                    event.created_at.isoformat() if event.created_at else None
+                ),
+            }
+        )
 
-    return jsonify({
-        "items": event_list,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
-    }), 200
+    return (
+        jsonify(
+            {
+                "items": event_list,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "pages": (total + per_page - 1) // per_page,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/agents/<agent_id>/deactivate", methods=["POST"])
@@ -421,15 +477,20 @@ async def get_statistics():
     # Stale agents (no heartbeat in last 5 minutes)
     stale_threshold = datetime.utcnow() - timedelta(minutes=5)
     stale_count = db(
-        (db.edr_agents.status == "active") &
-        (db.edr_agents.last_heartbeat < stale_threshold)
+        (db.edr_agents.status == "active")
+        & (db.edr_agents.last_heartbeat < stale_threshold)
     ).count()
 
-    return jsonify({
-        "total_agents": db(db.edr_agents).count(),
-        "agents_by_status": status_counts,
-        "agents_by_os": os_counts,
-        "stale_agents": stale_count,
-        "total_events": db(db.edr_events).count(),
-        "events_last_24h": recent_events,
-    }), 200
+    return (
+        jsonify(
+            {
+                "total_agents": db(db.edr_agents).count(),
+                "agents_by_status": status_counts,
+                "agents_by_os": os_counts,
+                "stale_agents": stale_count,
+                "total_events": db(db.edr_events).count(),
+                "events_last_24h": recent_events,
+            }
+        ),
+        200,
+    )

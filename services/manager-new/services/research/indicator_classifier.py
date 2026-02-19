@@ -11,9 +11,7 @@ class IndicatorClassifier:
         r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}"
         r"(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
     )
-    IPV6_PATTERN = re.compile(
-        r"^(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$"
-    )
+    IPV6_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$")
     DOMAIN_PATTERN = re.compile(
         r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*"
         r"[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$"
@@ -101,7 +99,11 @@ class IndicatorClassifier:
 
     def is_valid_hash(self, query: str) -> bool:
         """Check if query is valid MD5, SHA1, or SHA256 hash."""
-        return self.is_valid_md5(query) or self.is_valid_sha1(query) or self.is_valid_sha256(query)
+        return (
+            self.is_valid_md5(query)
+            or self.is_valid_sha1(query)
+            or self.is_valid_sha256(query)
+        )
 
     def is_valid_md5(self, query: str) -> bool:
         """Check if query is valid MD5 hash."""

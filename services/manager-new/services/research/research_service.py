@@ -147,7 +147,9 @@ class ResearchService:
             indicator_type_str = request.indicator_type.value
             normalized_value = request.query
         else:
-            indicator_type_str, normalized_value = self.classifier.classify(request.query)
+            indicator_type_str, normalized_value = self.classifier.classify(
+                request.query
+            )
 
         if indicator_type_str == "Unknown":
             logger.warning("unknown_indicator_type", query=request.query)
@@ -203,7 +205,9 @@ class ResearchService:
         asn_result = results[2] if not isinstance(results[2], Exception) else None
         shodan_result = results[3] if not isinstance(results[3], Exception) else None
         maltego_result = results[4] if not isinstance(results[4], Exception) else None
-        threat_intel_result = results[5] if not isinstance(results[5], Exception) else None
+        threat_intel_result = (
+            results[5] if not isinstance(results[5], Exception) else None
+        )
 
         # Step 3: Build results dictionary
         all_results = {
@@ -510,10 +514,14 @@ class ResearchService:
             domain_age_days = (now_utc - whois.creation_date).days
             if domain_age_days < 30:
                 score += 15
-                logger.debug("domain_age_risk", age_days=domain_age_days, score_added=15)
+                logger.debug(
+                    "domain_age_risk", age_days=domain_age_days, score_added=15
+                )
             elif domain_age_days < 90:
                 score += 10
-                logger.debug("domain_age_risk", age_days=domain_age_days, score_added=10)
+                logger.debug(
+                    "domain_age_risk", age_days=domain_age_days, score_added=10
+                )
 
         # Shodan dangerous ports scoring (max 20)
         shodan = results.get("shodan")
@@ -577,9 +585,13 @@ class ResearchService:
                 now_utc = datetime.now(timezone.utc)
                 domain_age_days = (now_utc - whois.creation_date).days
                 if domain_age_days < 30:
-                    findings.append(f"Very new domain (registered {domain_age_days} days ago)")
+                    findings.append(
+                        f"Very new domain (registered {domain_age_days} days ago)"
+                    )
                 elif domain_age_days < 90:
-                    findings.append(f"Recent domain (registered {domain_age_days} days ago)")
+                    findings.append(
+                        f"Recent domain (registered {domain_age_days} days ago)"
+                    )
 
             if whois.registrar:
                 findings.append(f"Registrar: {whois.registrar}")
@@ -598,7 +610,9 @@ class ResearchService:
             dangerous_ports = {3389, 5900, 5901, 23, 445, 139}
             found_dangerous = set(shodan.ports) & dangerous_ports
             if found_dangerous:
-                findings.append(f"Dangerous ports exposed: {', '.join(map(str, found_dangerous))}")
+                findings.append(
+                    f"Dangerous ports exposed: {', '.join(map(str, found_dangerous))}"
+                )
 
             if shodan.vulns:
                 findings.append(f"Known vulnerabilities: {len(shodan.vulns)}")

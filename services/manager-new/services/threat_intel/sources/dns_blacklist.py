@@ -1,4 +1,5 @@
 """DNS Blacklist threat intelligence source."""
+
 import asyncio
 from datetime import datetime
 from typing import Optional, List, Dict, Any
@@ -45,11 +46,14 @@ class DNSBlacklistSource:
         if self._resolver is None:
             try:
                 import dns.asyncresolver
+
                 self._resolver = dns.asyncresolver.Resolver()
                 self._resolver.timeout = 5.0
                 self._resolver.lifetime = 10.0
             except ImportError:
-                logger.warning("dnspython not installed, DNS blacklist checks unavailable")
+                logger.warning(
+                    "dnspython not installed, DNS blacklist checks unavailable"
+                )
                 return None
         return self._resolver
 
@@ -84,10 +88,12 @@ class DNSBlacklistSource:
             query = f"{reversed_ip}.{zone}"
             try:
                 await resolver.resolve(query, "A")
-                listed_on.append({
-                    "blacklist": name,
-                    "zone": zone,
-                })
+                listed_on.append(
+                    {
+                        "blacklist": name,
+                        "zone": zone,
+                    }
+                )
             except Exception:
                 # Not listed or query failed
                 pass
@@ -123,10 +129,12 @@ class DNSBlacklistSource:
             query = f"{domain}.{zone}"
             try:
                 await resolver.resolve(query, "A")
-                listed_on.append({
-                    "blacklist": name,
-                    "zone": zone,
-                })
+                listed_on.append(
+                    {
+                        "blacklist": name,
+                        "zone": zone,
+                    }
+                )
             except Exception:
                 pass
 

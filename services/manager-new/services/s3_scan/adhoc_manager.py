@@ -29,7 +29,7 @@ class AdhocScanManager:
         self.db = db
         self.minio_client = minio_client
         self.scan_service = scan_service
-        self.adhoc_bucket = 'adhoc-scans'
+        self.adhoc_bucket = "adhoc-scans"
 
         # Ensure the adhoc bucket exists
         self._ensure_bucket_exists()
@@ -44,10 +44,7 @@ class AdhocScanManager:
             logger.error(f"Error ensuring ad-hoc bucket exists: {str(e)}")
 
     async def upload_and_scan(
-        self,
-        file_content: bytes,
-        filename: str,
-        user_id: int
+        self, file_content: bytes, filename: str, user_id: int
     ) -> dict:
         """
         Upload a file and initiate a scan
@@ -72,10 +69,7 @@ class AdhocScanManager:
             file_stream = io.BytesIO(file_content)
 
             self.minio_client.put_object(
-                self.adhoc_bucket,
-                object_key,
-                file_stream,
-                file_size
+                self.adhoc_bucket, object_key, file_stream, file_size
             )
 
             logger.info(
@@ -90,19 +84,19 @@ class AdhocScanManager:
                 filename=filename,
                 object_key=object_key,
                 file_size=file_size,
-                scan_status='pending',
-                uploaded_at=datetime.utcnow()
+                scan_status="pending",
+                uploaded_at=datetime.utcnow(),
             )
             self.db.commit()
 
-            logger.info(f"Created ad-hoc scan record {record_id} with scan_id {scan_id}")
+            logger.info(
+                f"Created ad-hoc scan record {record_id} with scan_id {scan_id}"
+            )
 
             # Trigger scan asynchronously
             try:
                 scan_result = await self.scan_service.scan_s3_object(
-                    self.adhoc_bucket,
-                    object_key,
-                    file_size
+                    self.adhoc_bucket, object_key, file_size
                 )
 
                 # Update the scan result
@@ -112,17 +106,16 @@ class AdhocScanManager:
                 logger.error(f"Error scanning ad-hoc file {scan_id}: {str(scan_error)}")
                 # Update status to failed
                 self.db(self.db.adhoc_scan_results.scan_id == scan_id).update(
-                    scan_status='failed',
-                    error_message=str(scan_error)
+                    scan_status="failed", error_message=str(scan_error)
                 )
                 self.db.commit()
 
             # Return initial response
             return {
-                'scan_id': scan_id,
-                'status': 'pending',
-                'filename': filename,
-                'file_size': file_size
+                "scan_id": scan_id,
+                "status": "pending",
+                "filename": filename,
+                "file_size": file_size,
             }
 
         except Exception as e:
@@ -141,9 +134,9 @@ class AdhocScanManager:
             Dictionary containing scan result, or None if not found
         """
         try:
-            row = self.db(
-                self.db.adhoc_scan_results.scan_id == scan_id
-            ).select().first()
+            row = (
+                self.db(self.db.adhoc_scan_results.scan_id == scan_id).select().first()
+            )
 
             if not row:
                 return None
@@ -155,10 +148,7 @@ class AdhocScanManager:
             raise
 
     async def list_user_scans(
-        self,
-        user_id: int,
-        page: int = 1,
-        per_page: int = 20
+        self, user_id: int, page: int = 1, per_page: int = 20
     ) -> Tuple[List[dict], int]:
         """
         List a user's ad-hoc scans with pagination
@@ -183,7 +173,7 @@ class AdhocScanManager:
             # Fetch results
             rows = self.db(query).select(
                 orderby=~self.db.adhoc_scan_results.uploaded_at,
-                limitby=(offset, offset + per_page)
+                limitby=(offset, offset + per_page),
             )
 
             results = [row.as_dict() for row in rows]
@@ -210,16 +200,22 @@ class AdhocScanManager:
         try:
             # Prepare update data
             update_data = {
-                'scan_status': result.get('status', 'completed'),
-                'scanned_at': datetime.utcnow()
+                "scan_status": result.get("status", "completed"),
+                "scanned_at": datetime.utcnow(),
             }
 
             # Add optional fields if present
             optional_fields = [
-                'scan_engine', 'engine_version', 'file_hash',
-                'detected_file_type', 'is_malware', 'is_pup',
-                'is_threat', 'threat_details', 'scan_duration_ms',
-                'error_message'
+                "scan_engine",
+                "engine_version",
+                "file_hash",
+                "detected_file_type",
+                "is_malware",
+                "is_pup",
+                "is_threat",
+                "threat_details",
+                "scan_duration_ms",
+                "error_message",
             ]
 
             for field in optional_fields:
@@ -227,14 +223,14 @@ class AdhocScanManager:
                     update_data[field] = result[field]
 
             # Handle status mapping
-            if result.get('infected', False):
-                update_data['is_malware'] = True
-                update_data['is_threat'] = True
+            if result.get("infected", False):
+                update_data["is_malware"] = True
+                update_data["is_threat"] = True
 
             # Update the record
-            updated = self.db(
-                self.db.adhoc_scan_results.scan_id == scan_id
-            ).update(**update_data)
+            updated = self.db(self.db.adhoc_scan_results.scan_id == scan_id).update(
+                **update_data
+            )
 
             self.db.commit()
 
@@ -260,9 +256,9 @@ class AdhocScanManager:
         """
         try:
             # Fetch the scan record
-            scan = self.db(
-                self.db.adhoc_scan_results.scan_id == scan_id
-            ).select().first()
+            scan = (
+                self.db(self.db.adhoc_scan_results.scan_id == scan_id).select().first()
+            )
 
             if not scan:
                 return False
@@ -274,9 +270,7 @@ class AdhocScanManager:
                 self.minio_client.remove_object(self.adhoc_bucket, object_key)
                 logger.info(f"Deleted ad-hoc scan object: {object_key}")
             except Exception as minio_error:
-                logger.warning(
-                    f"Error deleting object from Minio: {str(minio_error)}"
-                )
+                logger.warning(f"Error deleting object from Minio: {str(minio_error)}")
 
             # Delete from database
             self.db(self.db.adhoc_scan_results.scan_id == scan_id).delete()
@@ -314,10 +308,7 @@ class AdhocScanManager:
             for scan in old_scans:
                 try:
                     # Delete from Minio
-                    self.minio_client.remove_object(
-                        self.adhoc_bucket,
-                        scan.object_key
-                    )
+                    self.minio_client.remove_object(self.adhoc_bucket, scan.object_key)
                     count += 1
                 except Exception as minio_error:
                     logger.warning(
@@ -359,16 +350,14 @@ class AdhocScanManager:
             from datetime import timedelta
 
             # Total scans for user
-            total_scans = self.db(
-                self.db.adhoc_scan_results.user_id == user_id
-            ).count()
+            total_scans = self.db(self.db.adhoc_scan_results.user_id == user_id).count()
 
             # Total bytes for user
-            rows = self.db(
-                self.db.adhoc_scan_results.user_id == user_id
-            ).select(self.db.adhoc_scan_results.file_size.sum())
+            rows = self.db(self.db.adhoc_scan_results.user_id == user_id).select(
+                self.db.adhoc_scan_results.file_size.sum()
+            )
 
-            total_bytes = rows[0]['_extra']['SUM(adhoc_scan_results.file_size)'] or 0
+            total_bytes = rows[0]["_extra"]["SUM(adhoc_scan_results.file_size)"] or 0
 
             # Scans today
             today_start = datetime.utcnow().replace(
@@ -376,23 +365,23 @@ class AdhocScanManager:
             )
 
             scans_today = self.db(
-                (self.db.adhoc_scan_results.user_id == user_id) &
-                (self.db.adhoc_scan_results.uploaded_at >= today_start)
+                (self.db.adhoc_scan_results.user_id == user_id)
+                & (self.db.adhoc_scan_results.uploaded_at >= today_start)
             ).count()
 
             # Bytes today
             rows = self.db(
-                (self.db.adhoc_scan_results.user_id == user_id) &
-                (self.db.adhoc_scan_results.uploaded_at >= today_start)
+                (self.db.adhoc_scan_results.user_id == user_id)
+                & (self.db.adhoc_scan_results.uploaded_at >= today_start)
             ).select(self.db.adhoc_scan_results.file_size.sum())
 
-            bytes_today = rows[0]['_extra']['SUM(adhoc_scan_results.file_size)'] or 0
+            bytes_today = rows[0]["_extra"]["SUM(adhoc_scan_results.file_size)"] or 0
 
             quota = {
-                'total_scans': total_scans,
-                'scans_today': scans_today,
-                'total_bytes': total_bytes,
-                'bytes_today': bytes_today
+                "total_scans": total_scans,
+                "scans_today": scans_today,
+                "total_bytes": total_bytes,
+                "bytes_today": bytes_today,
             }
 
             logger.debug(f"User {user_id} quota: {quota}")

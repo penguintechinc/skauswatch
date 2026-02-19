@@ -1,4 +1,5 @@
 """SSH Certificate Authority implementation."""
+
 import base64
 import hashlib
 import os
@@ -50,10 +51,7 @@ class SSHCertificateAuthority:
             logger.warning("SSH CA key not found, generating new CA")
             await self._generate_ca()
 
-        logger.info(
-            "SSH CA initialized",
-            fingerprint=self._ca_fingerprint
-        )
+        logger.info("SSH CA initialized", fingerprint=self._ca_fingerprint)
 
     async def _load_ca(self) -> None:
         """Load existing SSH CA key."""
@@ -67,7 +65,7 @@ class SSHCertificateAuthority:
             result = subprocess.run(
                 ["ssh-keygen", "-y", "-f", self.config.ca_key_path],
                 capture_output=True,
-                text=True
+                text=True,
             )
             if result.returncode == 0:
                 self._ca_public_key = result.stdout.strip()
@@ -78,7 +76,7 @@ class SSHCertificateAuthority:
         result = subprocess.run(
             ["ssh-keygen", "-lf", self.config.ca_key_path],
             capture_output=True,
-            text=True
+            text=True,
         )
         if result.returncode == 0:
             parts = result.stdout.split()
@@ -97,10 +95,14 @@ class SSHCertificateAuthority:
         key_type = self.config.default_key_type
         cmd = [
             "ssh-keygen",
-            "-t", key_type,
-            "-f", str(ca_key_path),
-            "-N", self.config.ca_key_password or "",
-            "-C", "SkausWatch SSH CA"
+            "-t",
+            key_type,
+            "-f",
+            str(ca_key_path),
+            "-N",
+            self.config.ca_key_password or "",
+            "-C",
+            "SkausWatch SSH CA",
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True)
@@ -169,10 +171,14 @@ class SSHCertificateAuthority:
             # Build ssh-keygen command
             cmd = [
                 "ssh-keygen",
-                "-s", self.config.ca_key_path,
-                "-I", key_id,
-                "-z", str(serial),
-                "-V", f"+{validity_seconds}s",
+                "-s",
+                self.config.ca_key_path,
+                "-I",
+                key_id,
+                "-z",
+                str(serial),
+                "-V",
+                f"+{validity_seconds}s",
             ]
 
             # Add certificate type flag
@@ -256,14 +262,13 @@ class SSHCertificateAuthority:
             key_id=key_id,
             type=certificate_type,
             principals=principals,
-            validity_seconds=validity_seconds
+            validity_seconds=validity_seconds,
         )
 
         return certificate, str(serial), metadata
 
     async def generate_krl(
-        self,
-        revoked_entries: List[Dict[str, Any]]
+        self, revoked_entries: List[Dict[str, Any]]
     ) -> Tuple[bytes, int]:
         """
         Generate a Key Revocation List.
@@ -295,9 +300,11 @@ class SSHCertificateAuthority:
             cmd = [
                 "ssh-keygen",
                 "-k",
-                "-f", str(krl_file),
-                "-s", self.config.ca_key_path,
-                str(spec_file)
+                "-f",
+                str(krl_file),
+                "-s",
+                self.config.ca_key_path,
+                str(spec_file),
             ]
 
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -317,7 +324,7 @@ class SSHCertificateAuthority:
         logger.info(
             "KRL generated",
             version=self._krl_version,
-            revoked_count=len(revoked_entries)
+            revoked_count=len(revoked_entries),
         )
 
         return krl_binary, self._krl_version
@@ -344,8 +351,10 @@ class SSHCertificateAuthority:
             cmd = [
                 "ssh-keygen",
                 "-c",
-                "-f", str(cert_file),
-                "-I", self.config.ca_public_key_path
+                "-f",
+                str(cert_file),
+                "-I",
+                self.config.ca_public_key_path,
             ]
             verify_result = subprocess.run(cmd, capture_output=True, text=True)
             info["verified"] = verify_result.returncode == 0
@@ -417,9 +426,7 @@ class SSHCertificateAuthority:
         }
 
     def generate_known_hosts_entry(
-        self,
-        hostnames: List[str],
-        cert_authority: bool = True
+        self, hostnames: List[str], cert_authority: bool = True
     ) -> str:
         """Generate known_hosts entry for host certificate verification."""
         hosts = ",".join(hostnames)
@@ -427,9 +434,7 @@ class SSHCertificateAuthority:
         return f"{prefix}{hosts} {self._ca_public_key}"
 
     def generate_authorized_keys_entry(
-        self,
-        principals: List[str],
-        options: Dict[str, str] = None
+        self, principals: List[str], options: Dict[str, str] = None
     ) -> str:
         """Generate authorized_keys entry for user certificate verification."""
         options = options or {}
@@ -447,7 +452,7 @@ class SSHCertificateAuthority:
         principals_str = ",".join(principals)
         return (
             f'{option_str}cert-authority,principals="{principals_str}" '
-            f'{self._ca_public_key}'
+            f"{self._ca_public_key}"
         )
 
     def generate_ssh_config(
@@ -455,7 +460,7 @@ class SSHCertificateAuthority:
         hostname: str,
         port: int = 22,
         user: Optional[str] = None,
-        identity_file: Optional[str] = None
+        identity_file: Optional[str] = None,
     ) -> str:
         """Generate SSH config snippet for a host."""
         config_lines = [

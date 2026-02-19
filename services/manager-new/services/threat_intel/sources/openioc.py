@@ -1,4 +1,5 @@
 """OpenIOC threat intelligence source."""
+
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
@@ -48,7 +49,10 @@ class OpenIOCSource:
             await self.fetch_indicators()
 
         for ind in self._indicators_cache:
-            if ind.get("indicator_type") == indicator_type and ind.get("value") == value:
+            if (
+                ind.get("indicator_type") == indicator_type
+                and ind.get("value") == value
+            ):
                 return ind
 
         return None
@@ -72,7 +76,7 @@ class OpenIOCSource:
         logger.info(
             "OpenIOC files parsed",
             paths=len(self.paths),
-            indicators=len(self._indicators_cache)
+            indicators=len(self._indicators_cache),
         )
 
         return self._indicators_cache
@@ -116,21 +120,15 @@ class OpenIOCSource:
                     indicators.append(parsed)
 
         except ET.ParseError as e:
-            logger.error(
-                "OpenIOC parse error",
-                file=str(filepath),
-                error=str(e)
-            )
+            logger.error("OpenIOC parse error", file=str(filepath), error=str(e))
         except Exception as e:
-            logger.error(
-                "OpenIOC processing error",
-                file=str(filepath),
-                error=str(e)
-            )
+            logger.error("OpenIOC processing error", file=str(filepath), error=str(e))
 
         return indicators
 
-    def _find_indicator_items(self, root: ET.Element, ns: Dict[str, str]) -> List[ET.Element]:
+    def _find_indicator_items(
+        self, root: ET.Element, ns: Dict[str, str]
+    ) -> List[ET.Element]:
         """Find all IndicatorItem elements."""
         items = []
 

@@ -41,17 +41,26 @@ class ScanResultsManager:
         try:
             # Prepare record data
             record_data = {
-                'bucket_config_id': result['bucket_config_id'],
-                'object_key': result['object_key'],
-                'scan_status': result['scan_status'],
-                'scanned_at': datetime.utcnow()
+                "bucket_config_id": result["bucket_config_id"],
+                "object_key": result["object_key"],
+                "scan_status": result["scan_status"],
+                "scanned_at": datetime.utcnow(),
             }
 
             # Add optional fields if present
             optional_fields = [
-                'job_id', 'scan_engine', 'engine_version', 'file_size',
-                'file_hash', 'detected_file_type', 'is_malware', 'is_pup',
-                'is_threat', 'threat_details', 'scan_duration_ms', 'error_message'
+                "job_id",
+                "scan_engine",
+                "engine_version",
+                "file_size",
+                "file_hash",
+                "detected_file_type",
+                "is_malware",
+                "is_pup",
+                "is_threat",
+                "threat_details",
+                "scan_duration_ms",
+                "error_message",
             ]
 
             for field in optional_fields:
@@ -97,9 +106,7 @@ class ScanResultsManager:
             raise
 
     async def get_result_by_object(
-        self,
-        bucket_config_id: int,
-        object_key: str
+        self, bucket_config_id: int, object_key: str
     ) -> Optional[dict]:
         """
         Fetch the most recent scan result for a specific object
@@ -112,15 +119,15 @@ class ScanResultsManager:
             Dictionary containing the most recent scan result, or None if not found
         """
         try:
-            query = (
-                (self.db.s3_scan_results.bucket_config_id == bucket_config_id) &
-                (self.db.s3_scan_results.object_key == object_key)
+            query = (self.db.s3_scan_results.bucket_config_id == bucket_config_id) & (
+                self.db.s3_scan_results.object_key == object_key
             )
 
-            row = self.db(query).select(
-                orderby=~self.db.s3_scan_results.scanned_at,
-                limitby=(0, 1)
-            ).first()
+            row = (
+                self.db(query)
+                .select(orderby=~self.db.s3_scan_results.scanned_at, limitby=(0, 1))
+                .first()
+            )
 
             if not row:
                 return None
@@ -135,10 +142,7 @@ class ScanResultsManager:
             raise
 
     async def query_results(
-        self,
-        filters: dict,
-        page: int = 1,
-        per_page: int = 50
+        self, filters: dict, page: int = 1, per_page: int = 50
     ) -> Tuple[List[dict], int]:
         """
         Query scan results with filters and pagination
@@ -165,49 +169,51 @@ class ScanResultsManager:
             # Build query from filters
             query_conditions = []
 
-            if 'bucket_config_id' in filters:
+            if "bucket_config_id" in filters:
                 query_conditions.append(
-                    self.db.s3_scan_results.bucket_config_id == filters['bucket_config_id']
+                    self.db.s3_scan_results.bucket_config_id
+                    == filters["bucket_config_id"]
                 )
 
-            if 'scan_status' in filters:
+            if "scan_status" in filters:
                 query_conditions.append(
-                    self.db.s3_scan_results.scan_status == filters['scan_status']
+                    self.db.s3_scan_results.scan_status == filters["scan_status"]
                 )
 
-            if 'is_malware' in filters:
+            if "is_malware" in filters:
                 query_conditions.append(
-                    self.db.s3_scan_results.is_malware == filters['is_malware']
+                    self.db.s3_scan_results.is_malware == filters["is_malware"]
                 )
 
-            if 'is_pup' in filters:
+            if "is_pup" in filters:
                 query_conditions.append(
-                    self.db.s3_scan_results.is_pup == filters['is_pup']
+                    self.db.s3_scan_results.is_pup == filters["is_pup"]
                 )
 
-            if 'is_threat' in filters:
+            if "is_threat" in filters:
                 query_conditions.append(
-                    self.db.s3_scan_results.is_threat == filters['is_threat']
+                    self.db.s3_scan_results.is_threat == filters["is_threat"]
                 )
 
-            if 'detected_file_type' in filters:
+            if "detected_file_type" in filters:
                 query_conditions.append(
-                    self.db.s3_scan_results.detected_file_type == filters['detected_file_type']
+                    self.db.s3_scan_results.detected_file_type
+                    == filters["detected_file_type"]
                 )
 
-            if 'date_from' in filters:
+            if "date_from" in filters:
                 query_conditions.append(
-                    self.db.s3_scan_results.scanned_at >= filters['date_from']
+                    self.db.s3_scan_results.scanned_at >= filters["date_from"]
                 )
 
-            if 'date_to' in filters:
+            if "date_to" in filters:
                 query_conditions.append(
-                    self.db.s3_scan_results.scanned_at <= filters['date_to']
+                    self.db.s3_scan_results.scanned_at <= filters["date_to"]
                 )
 
-            if 'job_id' in filters:
+            if "job_id" in filters:
                 query_conditions.append(
-                    self.db.s3_scan_results.job_id == filters['job_id']
+                    self.db.s3_scan_results.job_id == filters["job_id"]
                 )
 
             # Combine conditions
@@ -227,7 +233,7 @@ class ScanResultsManager:
             # Fetch results
             rows = self.db(query).select(
                 orderby=~self.db.s3_scan_results.scanned_at,
-                limitby=(offset, offset + per_page)
+                limitby=(offset, offset + per_page),
             )
 
             results = [row.as_dict() for row in rows]
@@ -279,13 +285,13 @@ class ScanResultsManager:
             ).count()
 
             total_clean = self.db(
-                query &
-                (self.db.s3_scan_results.scan_status == 'completed') &
-                (self.db.s3_scan_results.is_threat == False)
+                query
+                & (self.db.s3_scan_results.scan_status == "completed")
+                & (self.db.s3_scan_results.is_threat == False)
             ).count()
 
             total_error = self.db(
-                query & (self.db.s3_scan_results.scan_status == 'failed')
+                query & (self.db.s3_scan_results.scan_status == "failed")
             ).count()
 
             # Get file type distribution
@@ -293,13 +299,13 @@ class ScanResultsManager:
             file_type_rows = self.db(query).select(
                 self.db.s3_scan_results.detected_file_type,
                 self.db.s3_scan_results.id.count(),
-                groupby=self.db.s3_scan_results.detected_file_type
+                groupby=self.db.s3_scan_results.detected_file_type,
             )
 
             for row in file_type_rows:
                 file_type = row.s3_scan_results.detected_file_type
                 if file_type:
-                    by_file_type[file_type] = row['_extra']['COUNT(s3_scan_results.id)']
+                    by_file_type[file_type] = row["_extra"]["COUNT(s3_scan_results.id)"]
 
             # Get bucket distribution (if not filtered by bucket)
             by_bucket = {}
@@ -307,48 +313,50 @@ class ScanResultsManager:
                 bucket_rows = self.db(query).select(
                     self.db.s3_scan_results.bucket_config_id,
                     self.db.s3_scan_results.id.count(),
-                    groupby=self.db.s3_scan_results.bucket_config_id
+                    groupby=self.db.s3_scan_results.bucket_config_id,
                 )
 
                 for row in bucket_rows:
                     config_id = row.s3_scan_results.bucket_config_id
                     if config_id:
                         # Get bucket name
-                        config = self.db(
-                            self.db.s3_bucket_configs.id == config_id
-                        ).select().first()
+                        config = (
+                            self.db(self.db.s3_bucket_configs.id == config_id)
+                            .select()
+                            .first()
+                        )
 
                         if config:
                             bucket_name = config.bucket_name
-                            total = row['_extra']['COUNT(s3_scan_results.id)']
+                            total = row["_extra"]["COUNT(s3_scan_results.id)"]
 
                             # Get infected count for this bucket
                             infected = self.db(
-                                (self.db.s3_scan_results.bucket_config_id == config_id) &
-                                (self.db.s3_scan_results.is_malware == True)
+                                (self.db.s3_scan_results.bucket_config_id == config_id)
+                                & (self.db.s3_scan_results.is_malware == True)
                             ).count()
 
                             # Get clean count for this bucket
                             clean = self.db(
-                                (self.db.s3_scan_results.bucket_config_id == config_id) &
-                                (self.db.s3_scan_results.scan_status == 'completed') &
-                                (self.db.s3_scan_results.is_threat == False)
+                                (self.db.s3_scan_results.bucket_config_id == config_id)
+                                & (self.db.s3_scan_results.scan_status == "completed")
+                                & (self.db.s3_scan_results.is_threat == False)
                             ).count()
 
                             by_bucket[bucket_name] = {
-                                'total': total,
-                                'infected': infected,
-                                'clean': clean
+                                "total": total,
+                                "infected": infected,
+                                "clean": clean,
                             }
 
             statistics = {
-                'total_scanned': total_scanned,
-                'total_infected': total_infected,
-                'total_pup': total_pup,
-                'total_clean': total_clean,
-                'total_error': total_error,
-                'by_file_type': by_file_type,
-                'by_bucket': by_bucket
+                "total_scanned": total_scanned,
+                "total_infected": total_infected,
+                "total_pup": total_pup,
+                "total_clean": total_clean,
+                "total_error": total_error,
+                "by_file_type": by_file_type,
+                "by_bucket": by_bucket,
             }
 
             logger.debug(f"Generated statistics: {statistics}")

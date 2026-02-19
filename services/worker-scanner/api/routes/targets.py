@@ -103,25 +103,26 @@ def list_targets() -> Tuple[Dict[str, Any], int]:
 
         # Execute query with pagination
         rows = db(query).select(
-            orderby=~db.scan_targets.created_at,
-            limitby=(offset, offset + per_page)
+            orderby=~db.scan_targets.created_at, limitby=(offset, offset + per_page)
         )
 
         # Convert rows to dictionaries
         targets = [_row_to_dict(row) for row in rows]
 
-        return jsonify({
-            "targets": targets,
-            "total": total_count,
-            "page": page,
-            "per_page": per_page
-        }), 200
+        return (
+            jsonify(
+                {
+                    "targets": targets,
+                    "total": total_count,
+                    "page": page,
+                    "per_page": per_page,
+                }
+            ),
+            200,
+        )
 
     except Exception as e:
-        return jsonify({
-            "error": f"Failed to list targets: {str(e)}",
-            "code": 500
-        }), 500
+        return jsonify({"error": f"Failed to list targets: {str(e)}", "code": 500}), 500
 
 
 @targets_bp.route("", methods=["POST"])
@@ -156,34 +157,32 @@ def create_target() -> Tuple[Dict[str, Any], int]:
         # Get request JSON
         data = request.get_json()
         if not data:
-            return jsonify({
-                "error": "Request body is required",
-                "code": 400
-            }), 400
+            return jsonify({"error": "Request body is required", "code": 400}), 400
 
         # Validate request with schema
         schema = CreateTargetSchema()
         try:
             validated_data = schema.load(data)
         except ValidationError as e:
-            return jsonify({
-                "error": "Validation failed",
-                "details": e.messages,
-                "code": 400
-            }), 400
+            return (
+                jsonify(
+                    {"error": "Validation failed", "details": e.messages, "code": 400}
+                ),
+                400,
+            )
 
         # Get database connection
         db = get_configured_db()
 
         # Check for duplicate name
-        duplicate_count = db(
-            db.scan_targets.name == validated_data["name"]
-        ).count()
+        duplicate_count = db(db.scan_targets.name == validated_data["name"]).count()
         if duplicate_count > 0:
-            return jsonify({
-                "error": "A target with this name already exists",
-                "code": 409
-            }), 409
+            return (
+                jsonify(
+                    {"error": "A target with this name already exists", "code": 409}
+                ),
+                409,
+            )
 
         # Get current user ID
         user_id = get_current_user_id()
@@ -213,16 +212,15 @@ def create_target() -> Tuple[Dict[str, Any], int]:
         return jsonify(target_dict), 201
 
     except ValidationError as e:
-        return jsonify({
-            "error": "Validation failed",
-            "details": e.messages,
-            "code": 400
-        }), 400
+        return (
+            jsonify({"error": "Validation failed", "details": e.messages, "code": 400}),
+            400,
+        )
     except Exception as e:
-        return jsonify({
-            "error": f"Failed to create target: {str(e)}",
-            "code": 500
-        }), 500
+        return (
+            jsonify({"error": f"Failed to create target: {str(e)}", "code": 500}),
+            500,
+        )
 
 
 @targets_bp.route("/<int:target_id>", methods=["GET"])
@@ -254,10 +252,7 @@ def get_target(target_id: int) -> Tuple[Dict[str, Any], int]:
         # Fetch target
         row = db.scan_targets[target_id]
         if not row:
-            return jsonify({
-                "error": "Target not found",
-                "code": 404
-            }), 404
+            return jsonify({"error": "Target not found", "code": 404}), 404
 
         # Convert to dictionary
         target_dict = _row_to_dict(row)
@@ -265,10 +260,10 @@ def get_target(target_id: int) -> Tuple[Dict[str, Any], int]:
         return jsonify(target_dict), 200
 
     except Exception as e:
-        return jsonify({
-            "error": f"Failed to retrieve target: {str(e)}",
-            "code": 500
-        }), 500
+        return (
+            jsonify({"error": f"Failed to retrieve target: {str(e)}", "code": 500}),
+            500,
+        )
 
 
 @targets_bp.route("/<int:target_id>", methods=["PUT"])
@@ -304,21 +299,19 @@ def update_target(target_id: int) -> Tuple[Dict[str, Any], int]:
         # Get request JSON
         data = request.get_json()
         if not data:
-            return jsonify({
-                "error": "Request body is required",
-                "code": 400
-            }), 400
+            return jsonify({"error": "Request body is required", "code": 400}), 400
 
         # Validate request with schema
         schema = UpdateTargetSchema()
         try:
             validated_data = schema.load(data)
         except ValidationError as e:
-            return jsonify({
-                "error": "Validation failed",
-                "details": e.messages,
-                "code": 400
-            }), 400
+            return (
+                jsonify(
+                    {"error": "Validation failed", "details": e.messages, "code": 400}
+                ),
+                400,
+            )
 
         # Get database connection
         db = get_configured_db()
@@ -326,10 +319,7 @@ def update_target(target_id: int) -> Tuple[Dict[str, Any], int]:
         # Check target exists
         row = db.scan_targets[target_id]
         if not row:
-            return jsonify({
-                "error": "Target not found",
-                "code": 404
-            }), 404
+            return jsonify({"error": "Target not found", "code": 404}), 404
 
         # Prepare update data
         update_data = {}
@@ -362,16 +352,15 @@ def update_target(target_id: int) -> Tuple[Dict[str, Any], int]:
         return jsonify(target_dict), 200
 
     except ValidationError as e:
-        return jsonify({
-            "error": "Validation failed",
-            "details": e.messages,
-            "code": 400
-        }), 400
+        return (
+            jsonify({"error": "Validation failed", "details": e.messages, "code": 400}),
+            400,
+        )
     except Exception as e:
-        return jsonify({
-            "error": f"Failed to update target: {str(e)}",
-            "code": 500
-        }), 500
+        return (
+            jsonify({"error": f"Failed to update target: {str(e)}", "code": 500}),
+            500,
+        )
 
 
 @targets_bp.route("/<int:target_id>", methods=["DELETE"])
@@ -401,22 +390,24 @@ def delete_target(target_id: int) -> Tuple[Dict[str, Any], int]:
         # Check target exists
         row = db.scan_targets[target_id]
         if not row:
-            return jsonify({
-                "error": "Target not found",
-                "code": 404
-            }), 404
+            return jsonify({"error": "Target not found", "code": 404}), 404
 
         # Check for active jobs
         active_jobs_count = db(
-            (db.scan_jobs.target_id == target_id) &
-            (db.scan_jobs.status.belongs(["pending", "running"]))
+            (db.scan_jobs.target_id == target_id)
+            & (db.scan_jobs.status.belongs(["pending", "running"]))
         ).count()
 
         if active_jobs_count > 0:
-            return jsonify({
-                "error": f"Cannot delete target with {active_jobs_count} active job(s)",
-                "code": 409
-            }), 409
+            return (
+                jsonify(
+                    {
+                        "error": f"Cannot delete target with {active_jobs_count} active job(s)",
+                        "code": 409,
+                    }
+                ),
+                409,
+            )
 
         # Delete related schedules (will cascade to jobs and findings)
         db(db.scan_schedules.target_id == target_id).delete()
@@ -436,10 +427,10 @@ def delete_target(target_id: int) -> Tuple[Dict[str, Any], int]:
         return "", 204
 
     except Exception as e:
-        return jsonify({
-            "error": f"Failed to delete target: {str(e)}",
-            "code": 500
-        }), 500
+        return (
+            jsonify({"error": f"Failed to delete target: {str(e)}", "code": 500}),
+            500,
+        )
 
 
 @targets_bp.route("/<int:target_id>/history", methods=["GET"])
@@ -479,28 +470,22 @@ def get_target_history(target_id: int) -> Tuple[Dict[str, Any], int]:
         # Check target exists
         row = db.scan_targets[target_id]
         if not row:
-            return jsonify({
-                "error": "Target not found",
-                "code": 404
-            }), 404
+            return jsonify({"error": "Target not found", "code": 404}), 404
 
         # Fetch all jobs for this target, ordered by created_at descending
-        job_rows = db(
-            db.scan_jobs.target_id == target_id
-        ).select(
+        job_rows = db(db.scan_jobs.target_id == target_id).select(
             orderby=~db.scan_jobs.created_at
         )
 
         # Convert jobs to dictionaries
         jobs = [_row_to_dict(job) for job in job_rows]
 
-        return jsonify({
-            "target_id": target_id,
-            "jobs": jobs
-        }), 200
+        return jsonify({"target_id": target_id, "jobs": jobs}), 200
 
     except Exception as e:
-        return jsonify({
-            "error": f"Failed to retrieve target history: {str(e)}",
-            "code": 500
-        }), 500
+        return (
+            jsonify(
+                {"error": f"Failed to retrieve target history: {str(e)}", "code": 500}
+            ),
+            500,
+        )

@@ -1,4 +1,5 @@
 """STIX/TAXII threat intelligence source."""
+
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
@@ -129,14 +130,12 @@ class TAXIISource:
                 "TAXII collection fetched",
                 collection=self.collection_id,
                 objects=len(objects),
-                indicators=len(indicators)
+                indicators=len(indicators),
             )
 
         except Exception as e:
             logger.error(
-                "TAXII fetch failed",
-                collection=self.collection_id,
-                error=str(e)
+                "TAXII fetch failed", collection=self.collection_id, error=str(e)
             )
 
         return indicators
@@ -194,7 +193,9 @@ class TAXIISource:
         if md5_match:
             return ("hash", md5_match.group(1))
 
-        sha256_match = re.search(r"\[file:hashes\.'SHA-256'\s*=\s*'([^']+)'\]", pattern, re.I)
+        sha256_match = re.search(
+            r"\[file:hashes\.'SHA-256'\s*=\s*'([^']+)'\]", pattern, re.I
+        )
         if sha256_match:
             return ("hash", sha256_match.group(1))
 

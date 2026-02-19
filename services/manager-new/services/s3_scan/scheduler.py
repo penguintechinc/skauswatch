@@ -32,8 +32,8 @@ class ScanScheduler:
         self,
         bucket_config_id: int,
         cron_expression: str,
-        timezone_str: str = 'UTC',
-        enabled: bool = True
+        timezone_str: str = "UTC",
+        enabled: bool = True,
     ) -> dict:
         """
         Set or update a scan schedule for a bucket configuration
@@ -62,9 +62,11 @@ class ScanScheduler:
             next_run_at = self._calculate_next_run(cron_expression, timezone_str)
 
             # Check if schedule already exists
-            existing = self.db(
-                self.db.s3_scan_schedules.bucket_config_id == bucket_config_id
-            ).select().first()
+            existing = (
+                self.db(self.db.s3_scan_schedules.bucket_config_id == bucket_config_id)
+                .select()
+                .first()
+            )
 
             if existing:
                 # Update existing schedule
@@ -75,10 +77,12 @@ class ScanScheduler:
                     timezone=timezone_str,
                     enabled=enabled,
                     next_run_at=next_run_at,
-                    updated_at=datetime.utcnow()
+                    updated_at=datetime.utcnow(),
                 )
                 schedule_id = existing.id
-                logger.info(f"Updated scan schedule {schedule_id} for bucket config {bucket_config_id}")
+                logger.info(
+                    f"Updated scan schedule {schedule_id} for bucket config {bucket_config_id}"
+                )
             else:
                 # Create new schedule
                 schedule_id = self.db.s3_scan_schedules.insert(
@@ -88,22 +92,26 @@ class ScanScheduler:
                     enabled=enabled,
                     next_run_at=next_run_at,
                     created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow()
+                    updated_at=datetime.utcnow(),
                 )
-                logger.info(f"Created scan schedule {schedule_id} for bucket config {bucket_config_id}")
+                logger.info(
+                    f"Created scan schedule {schedule_id} for bucket config {bucket_config_id}"
+                )
 
             self.db.commit()
 
             # Fetch and return the schedule
-            schedule = self.db(
-                self.db.s3_scan_schedules.id == schedule_id
-            ).select().first()
+            schedule = (
+                self.db(self.db.s3_scan_schedules.id == schedule_id).select().first()
+            )
 
             return schedule.as_dict()
 
         except Exception as e:
             self.db.rollback()
-            logger.error(f"Error setting schedule for bucket config {bucket_config_id}: {str(e)}")
+            logger.error(
+                f"Error setting schedule for bucket config {bucket_config_id}: {str(e)}"
+            )
             raise
 
     async def get_schedule(self, bucket_config_id: int) -> Optional[dict]:
@@ -117,9 +125,11 @@ class ScanScheduler:
             Dictionary containing schedule data, or None if not found
         """
         try:
-            schedule = self.db(
-                self.db.s3_scan_schedules.bucket_config_id == bucket_config_id
-            ).select().first()
+            schedule = (
+                self.db(self.db.s3_scan_schedules.bucket_config_id == bucket_config_id)
+                .select()
+                .first()
+            )
 
             if not schedule:
                 return None
@@ -127,7 +137,9 @@ class ScanScheduler:
             return schedule.as_dict()
 
         except Exception as e:
-            logger.error(f"Error fetching schedule for bucket config {bucket_config_id}: {str(e)}")
+            logger.error(
+                f"Error fetching schedule for bucket config {bucket_config_id}: {str(e)}"
+            )
             raise
 
     async def delete_schedule(self, bucket_config_id: int) -> bool:
@@ -148,15 +160,21 @@ class ScanScheduler:
             self.db.commit()
 
             if deleted:
-                logger.info(f"Deleted scan schedule for bucket config {bucket_config_id}")
+                logger.info(
+                    f"Deleted scan schedule for bucket config {bucket_config_id}"
+                )
                 return True
             else:
-                logger.warning(f"No schedule found for bucket config {bucket_config_id}")
+                logger.warning(
+                    f"No schedule found for bucket config {bucket_config_id}"
+                )
                 return False
 
         except Exception as e:
             self.db.rollback()
-            logger.error(f"Error deleting schedule for bucket config {bucket_config_id}: {str(e)}")
+            logger.error(
+                f"Error deleting schedule for bucket config {bucket_config_id}: {str(e)}"
+            )
             raise
 
     async def check_and_run_due_schedules(self) -> int:
@@ -170,9 +188,8 @@ class ScanScheduler:
             current_time = datetime.utcnow()
 
             # Find schedules that are due
-            query = (
-                (self.db.s3_scan_schedules.enabled == True) &
-                (self.db.s3_scan_schedules.next_run_at <= current_time)
+            query = (self.db.s3_scan_schedules.enabled == True) & (
+                self.db.s3_scan_schedules.next_run_at <= current_time
             )
 
             due_schedules = self.db(query).select()
@@ -182,9 +199,13 @@ class ScanScheduler:
             for schedule in due_schedules:
                 try:
                     # Get bucket configuration
-                    bucket_config = self.db(
-                        self.db.s3_bucket_configs.id == schedule.bucket_config_id
-                    ).select().first()
+                    bucket_config = (
+                        self.db(
+                            self.db.s3_bucket_configs.id == schedule.bucket_config_id
+                        )
+                        .select()
+                        .first()
+                    )
 
                     if not bucket_config:
                         logger.warning(
@@ -196,11 +217,11 @@ class ScanScheduler:
                     # Create and start scan job
                     job = await self.job_manager.create_job(
                         bucket_config_id=schedule.bucket_config_id,
-                        scan_type='scheduled',
+                        scan_type="scheduled",
                         scan_options={
-                            'schedule_id': schedule.id,
-                            'cron_expression': schedule.cron_expression
-                        }
+                            "schedule_id": schedule.id,
+                            "cron_expression": schedule.cron_expression,
+                        },
                     )
 
                     logger.info(
@@ -215,14 +236,14 @@ class ScanScheduler:
                     next_run_at = self._calculate_next_run(
                         schedule.cron_expression,
                         schedule.timezone,
-                        from_time=current_time
+                        from_time=current_time,
                     )
 
                     self.db(self.db.s3_scan_schedules.id == schedule.id).update(
                         last_run_at=last_run_at,
                         next_run_at=next_run_at,
-                        last_job_id=job['job_id'],
-                        updated_at=current_time
+                        last_job_id=job["job_id"],
+                        updated_at=current_time,
                     )
 
                 except Exception as schedule_error:
@@ -243,10 +264,7 @@ class ScanScheduler:
             raise
 
     def _calculate_next_run(
-        self,
-        cron_expression: str,
-        timezone_str: str,
-        from_time: datetime = None
+        self, cron_expression: str, timezone_str: str, from_time: datetime = None
     ) -> datetime:
         """
         Calculate the next run time for a cron expression
@@ -270,9 +288,11 @@ class ScanScheduler:
                 base_time = datetime.utcnow()
 
             # Convert to target timezone
-            base_time_tz = tz.localize(
-                base_time.replace(tzinfo=None)
-            ) if base_time.tzinfo is None else base_time.astimezone(tz)
+            base_time_tz = (
+                tz.localize(base_time.replace(tzinfo=None))
+                if base_time.tzinfo is None
+                else base_time.astimezone(tz)
+            )
 
             # Calculate next run
             cron = croniter(cron_expression, base_time_tz)
@@ -290,10 +310,7 @@ class ScanScheduler:
             )
             raise
 
-    async def list_schedules(
-        self,
-        enabled_only: bool = False
-    ) -> list:
+    async def list_schedules(self, enabled_only: bool = False) -> list:
         """
         List all scan schedules
 
@@ -332,10 +349,7 @@ class ScanScheduler:
         try:
             updated = self.db(
                 self.db.s3_scan_schedules.bucket_config_id == bucket_config_id
-            ).update(
-                enabled=False,
-                updated_at=datetime.utcnow()
-            )
+            ).update(enabled=False, updated_at=datetime.utcnow())
 
             self.db.commit()
 
@@ -343,12 +357,16 @@ class ScanScheduler:
                 logger.info(f"Paused schedule for bucket config {bucket_config_id}")
                 return True
             else:
-                logger.warning(f"No schedule found for bucket config {bucket_config_id}")
+                logger.warning(
+                    f"No schedule found for bucket config {bucket_config_id}"
+                )
                 return False
 
         except Exception as e:
             self.db.rollback()
-            logger.error(f"Error pausing schedule for bucket config {bucket_config_id}: {str(e)}")
+            logger.error(
+                f"Error pausing schedule for bucket config {bucket_config_id}: {str(e)}"
+            )
             raise
 
     async def resume_schedule(self, bucket_config_id: int) -> bool:
@@ -363,27 +381,28 @@ class ScanScheduler:
         """
         try:
             # Get the schedule
-            schedule = self.db(
-                self.db.s3_scan_schedules.bucket_config_id == bucket_config_id
-            ).select().first()
+            schedule = (
+                self.db(self.db.s3_scan_schedules.bucket_config_id == bucket_config_id)
+                .select()
+                .first()
+            )
 
             if not schedule:
-                logger.warning(f"No schedule found for bucket config {bucket_config_id}")
+                logger.warning(
+                    f"No schedule found for bucket config {bucket_config_id}"
+                )
                 return False
 
             # Recalculate next run time
             next_run_at = self._calculate_next_run(
-                schedule.cron_expression,
-                schedule.timezone
+                schedule.cron_expression, schedule.timezone
             )
 
             # Update schedule
             self.db(
                 self.db.s3_scan_schedules.bucket_config_id == bucket_config_id
             ).update(
-                enabled=True,
-                next_run_at=next_run_at,
-                updated_at=datetime.utcnow()
+                enabled=True, next_run_at=next_run_at, updated_at=datetime.utcnow()
             )
 
             self.db.commit()
@@ -393,7 +412,9 @@ class ScanScheduler:
 
         except Exception as e:
             self.db.rollback()
-            logger.error(f"Error resuming schedule for bucket config {bucket_config_id}: {str(e)}")
+            logger.error(
+                f"Error resuming schedule for bucket config {bucket_config_id}: {str(e)}"
+            )
             raise
 
     async def get_next_runs(self, limit: int = 10) -> list:
@@ -407,26 +428,25 @@ class ScanScheduler:
             List of schedule dictionaries with bucket configuration details
         """
         try:
-            schedules = self.db(
-                self.db.s3_scan_schedules.enabled == True
-            ).select(
-                orderby=self.db.s3_scan_schedules.next_run_at,
-                limitby=(0, limit)
+            schedules = self.db(self.db.s3_scan_schedules.enabled == True).select(
+                orderby=self.db.s3_scan_schedules.next_run_at, limitby=(0, limit)
             )
 
             results = []
 
             for schedule in schedules:
                 # Get bucket configuration
-                bucket_config = self.db(
-                    self.db.s3_bucket_configs.id == schedule.bucket_config_id
-                ).select().first()
+                bucket_config = (
+                    self.db(self.db.s3_bucket_configs.id == schedule.bucket_config_id)
+                    .select()
+                    .first()
+                )
 
                 schedule_dict = schedule.as_dict()
 
                 if bucket_config:
-                    schedule_dict['bucket_name'] = bucket_config.bucket_name
-                    schedule_dict['endpoint'] = bucket_config.endpoint
+                    schedule_dict["bucket_name"] = bucket_config.bucket_name
+                    schedule_dict["endpoint"] = bucket_config.endpoint
 
                 results.append(schedule_dict)
 

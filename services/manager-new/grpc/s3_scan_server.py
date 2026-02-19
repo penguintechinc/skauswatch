@@ -64,39 +64,38 @@ class S3ScanServicer:
             if not request.task_id:
                 logger.error("SubmitScanTask: Missing task_id")
                 return s3_scan_pb2.TaskAck(
-                    accepted=False,
-                    message="Missing required field: task_id"
+                    accepted=False, message="Missing required field: task_id"
                 )
 
             if not request.job_id:
                 logger.error("SubmitScanTask: Missing job_id", task_id=request.task_id)
                 return s3_scan_pb2.TaskAck(
-                    accepted=False,
-                    message="Missing required field: job_id"
+                    accepted=False, message="Missing required field: job_id"
                 )
 
             if not request.object_key:
-                logger.error("SubmitScanTask: Missing object_key", task_id=request.task_id)
+                logger.error(
+                    "SubmitScanTask: Missing object_key", task_id=request.task_id
+                )
                 return s3_scan_pb2.TaskAck(
-                    accepted=False,
-                    message="Missing required field: object_key"
+                    accepted=False, message="Missing required field: object_key"
                 )
 
             # Create scan task dict from protobuf message
             task_data = {
-                'task_id': request.task_id,
-                'job_id': request.job_id,
-                'bucket_config_id': request.bucket_config_id,
-                'object_key': request.object_key,
-                'object_size': request.object_size,
-                'endpoint_url': request.endpoint_url,
-                'bucket_name': request.bucket_name,
-                'access_key': request.access_key,
-                'secret_key': request.secret_key,
-                'region': request.region,
-                'use_ssl': request.use_ssl,
-                'path_style': request.path_style,
-                'yara_enabled': request.yara_enabled,
+                "task_id": request.task_id,
+                "job_id": request.job_id,
+                "bucket_config_id": request.bucket_config_id,
+                "object_key": request.object_key,
+                "object_size": request.object_size,
+                "endpoint_url": request.endpoint_url,
+                "bucket_name": request.bucket_name,
+                "access_key": request.access_key,
+                "secret_key": request.secret_key,
+                "region": request.region,
+                "use_ssl": request.use_ssl,
+                "path_style": request.path_style,
+                "yara_enabled": request.yara_enabled,
             }
 
             # Publish task to Redis stream via job manager
@@ -110,21 +109,17 @@ class S3ScanServicer:
             )
 
             return s3_scan_pb2.TaskAck(
-                accepted=True,
-                message="Scan task published successfully"
+                accepted=True, message="Scan task published successfully"
             )
 
         except Exception as e:
             logger.error(
                 "Error submitting scan task",
-                task_id=getattr(request, 'task_id', 'unknown'),
+                task_id=getattr(request, "task_id", "unknown"),
                 error=str(e),
                 exc_info=True,
             )
-            return s3_scan_pb2.TaskAck(
-                accepted=False,
-                message=f"Error: {str(e)}"
-            )
+            return s3_scan_pb2.TaskAck(accepted=False, message=f"Error: {str(e)}")
 
     async def ReportScanResult(self, request, context):
         """
@@ -146,45 +141,55 @@ class S3ScanServicer:
                 return s3_scan_pb2.ResultAck(accepted=False)
 
             if not request.job_id:
-                logger.error("ReportScanResult: Missing job_id", task_id=request.task_id)
+                logger.error(
+                    "ReportScanResult: Missing job_id", task_id=request.task_id
+                )
                 return s3_scan_pb2.ResultAck(accepted=False)
 
             # Convert protobuf result to dict for database storage
             result_data = {
-                'job_id': request.job_id,
-                'bucket_config_id': 0,  # Will be looked up from job
-                'object_key': request.object_key,
-                'scan_status': request.scan_status,
-                'is_malware': request.is_malware,
-                'is_pup': request.is_pup,
-                'is_threat': request.is_threat,
-                'detected_file_type': request.detected_file_type if request.detected_file_type else None,
-                'threat_details': list(request.threat_names) if request.threat_names else [],
-                'file_hash': request.file_sha256 if request.file_sha256 else request.file_sha1,
-                'scan_duration_ms': request.scan_duration_ms,
-                'error_message': request.error_message if request.error_message else None,
+                "job_id": request.job_id,
+                "bucket_config_id": 0,  # Will be looked up from job
+                "object_key": request.object_key,
+                "scan_status": request.scan_status,
+                "is_malware": request.is_malware,
+                "is_pup": request.is_pup,
+                "is_threat": request.is_threat,
+                "detected_file_type": (
+                    request.detected_file_type if request.detected_file_type else None
+                ),
+                "threat_details": (
+                    list(request.threat_names) if request.threat_names else []
+                ),
+                "file_hash": (
+                    request.file_sha256 if request.file_sha256 else request.file_sha1
+                ),
+                "scan_duration_ms": request.scan_duration_ms,
+                "error_message": (
+                    request.error_message if request.error_message else None
+                ),
             }
 
             # Store additional hash fields if available
             if request.file_md5:
-                result_data['file_md5'] = request.file_md5
+                result_data["file_md5"] = request.file_md5
             if request.file_sha1:
-                result_data['file_sha1'] = request.file_sha1
+                result_data["file_sha1"] = request.file_sha1
             if request.file_sha256:
-                result_data['file_sha256'] = request.file_sha256
+                result_data["file_sha256"] = request.file_sha256
 
             # Store JSON fields if present
             if request.clamav_result_json:
-                result_data['clamav_result_json'] = request.clamav_result_json
+                result_data["clamav_result_json"] = request.clamav_result_json
             if request.yara_matches_json:
-                result_data['yara_matches_json'] = request.yara_matches_json
+                result_data["yara_matches_json"] = request.yara_matches_json
             if request.ti_enrichment_json:
-                result_data['ti_enrichment_json'] = request.ti_enrichment_json
+                result_data["ti_enrichment_json"] = request.ti_enrichment_json
 
             # Look up bucket_config_id from job
             job = await self.job_manager.get_job_status(request.job_id)
             if job:
-                result_data['bucket_config_id'] = job['bucket_config_id']
+                result_data["bucket_config_id"] = job["bucket_config_id"]
 
             # Save result to database
             result_id = await self.results_manager.save_scan_result(result_data)
@@ -195,7 +200,7 @@ class S3ScanServicer:
                 scanned_count=1,
                 infected_count=1 if request.is_malware else 0,
                 pup_count=1 if request.is_pup else 0,
-                error_count=1 if request.scan_status == 'error' else 0,
+                error_count=1 if request.scan_status == "error" else 0,
             )
 
             logger.info(
@@ -213,7 +218,7 @@ class S3ScanServicer:
         except Exception as e:
             logger.error(
                 "Error reporting scan result",
-                task_id=getattr(request, 'task_id', 'unknown'),
+                task_id=getattr(request, "task_id", "unknown"),
                 error=str(e),
                 exc_info=True,
             )
@@ -273,54 +278,54 @@ class S3ScanServicer:
             )
 
             # Check if scan completed immediately or is pending
-            if result.get('scan_status') == 'completed':
+            if result.get("scan_status") == "completed":
                 # Scan completed, populate full result
                 scan_result = s3_scan_pb2.ScanResult(
-                    task_id=result.get('task_id', ''),
-                    job_id='adhoc',
-                    object_key=result.get('object_key', ''),
-                    scan_status=result.get('scan_status', 'completed'),
-                    is_malware=result.get('is_malware', False),
-                    is_pup=result.get('is_pup', False),
-                    is_threat=result.get('is_threat', False),
-                    detected_file_type=result.get('detected_file_type', ''),
-                    threat_names=result.get('threat_details', []),
-                    file_md5=result.get('file_md5', ''),
-                    file_sha1=result.get('file_sha1', ''),
-                    file_sha256=result.get('file_sha256', ''),
-                    clamav_result_json=result.get('clamav_result_json', ''),
-                    yara_matches_json=result.get('yara_matches_json', ''),
-                    ti_enrichment_json=result.get('ti_enrichment_json', ''),
-                    scan_duration_ms=result.get('scan_duration_ms', 0),
-                    tags_applied=result.get('tags_applied', False),
-                    error_message=result.get('error_message', ''),
+                    task_id=result.get("task_id", ""),
+                    job_id="adhoc",
+                    object_key=result.get("object_key", ""),
+                    scan_status=result.get("scan_status", "completed"),
+                    is_malware=result.get("is_malware", False),
+                    is_pup=result.get("is_pup", False),
+                    is_threat=result.get("is_threat", False),
+                    detected_file_type=result.get("detected_file_type", ""),
+                    threat_names=result.get("threat_details", []),
+                    file_md5=result.get("file_md5", ""),
+                    file_sha1=result.get("file_sha1", ""),
+                    file_sha256=result.get("file_sha256", ""),
+                    clamav_result_json=result.get("clamav_result_json", ""),
+                    yara_matches_json=result.get("yara_matches_json", ""),
+                    ti_enrichment_json=result.get("ti_enrichment_json", ""),
+                    scan_duration_ms=result.get("scan_duration_ms", 0),
+                    tags_applied=result.get("tags_applied", False),
+                    error_message=result.get("error_message", ""),
                 )
 
                 return s3_scan_pb2.AdhocScanResponse(
                     scan_id=scan_id,
-                    status='complete',
+                    status="complete",
                     result=scan_result,
                 )
             else:
                 # Scan is pending or in progress
                 return s3_scan_pb2.AdhocScanResponse(
                     scan_id=scan_id,
-                    status=result.get('scan_status', 'pending'),
+                    status=result.get("scan_status", "pending"),
                 )
 
         except Exception as e:
             logger.error(
                 "Error processing ad-hoc scan",
-                scan_id=getattr(request, 'scan_id', 'unknown'),
-                filename=getattr(request, 'filename', 'unknown'),
+                scan_id=getattr(request, "scan_id", "unknown"),
+                filename=getattr(request, "filename", "unknown"),
                 error=str(e),
                 exc_info=True,
             )
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Error: {str(e)}")
             return s3_scan_pb2.AdhocScanResponse(
-                scan_id=getattr(request, 'scan_id', ''),
-                status='error',
+                scan_id=getattr(request, "scan_id", ""),
+                status="error",
             )
 
     async def StreamScanResults(self, request_iterator, context):
@@ -358,7 +363,7 @@ class S3ScanServicer:
                 except Exception as e:
                     logger.error(
                         "Error processing streamed result",
-                        task_id=getattr(result, 'task_id', 'unknown'),
+                        task_id=getattr(result, "task_id", "unknown"),
                         error=str(e),
                         exc_info=True,
                     )
@@ -426,30 +431,30 @@ class S3ScanServicer:
             logger.info(
                 "Retrieved job status",
                 job_id=request.job_id,
-                status=job['status'],
-                scanned=job.get('scanned_objects', 0),
-                total=job.get('total_objects', 0),
+                status=job["status"],
+                scanned=job.get("scanned_objects", 0),
+                total=job.get("total_objects", 0),
             )
 
             return s3_scan_pb2.ScanStatusResponse(
                 job_id=request.job_id,
-                status=job['status'],
-                total=job.get('total_objects', 0),
-                scanned=job.get('scanned_objects', 0),
-                infected=job.get('infected_objects', 0),
+                status=job["status"],
+                total=job.get("total_objects", 0),
+                scanned=job.get("scanned_objects", 0),
+                infected=job.get("infected_objects", 0),
             )
 
         except Exception as e:
             logger.error(
                 "Error getting scan status",
-                job_id=getattr(request, 'job_id', 'unknown'),
+                job_id=getattr(request, "job_id", "unknown"),
                 error=str(e),
                 exc_info=True,
             )
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(f"Error: {str(e)}")
             return s3_scan_pb2.ScanStatusResponse(
-                job_id=getattr(request, 'job_id', ''),
+                job_id=getattr(request, "job_id", ""),
                 status="error",
                 total=0,
                 scanned=0,

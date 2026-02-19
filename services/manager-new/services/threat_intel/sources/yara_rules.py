@@ -1,4 +1,5 @@
 """YARA rules threat intelligence source."""
+
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -30,6 +31,7 @@ class YARASource:
 
         try:
             import yara
+
             self._yara_available = True
         except ImportError:
             logger.warning("yara-python not installed, YARA matching unavailable")
@@ -59,10 +61,7 @@ class YARASource:
             try:
                 self._rules = yara.compile(filepaths=rule_files)
                 self._extract_metadata(rule_files)
-                logger.info(
-                    "YARA rules loaded",
-                    rule_count=len(rule_files)
-                )
+                logger.info("YARA rules loaded", rule_count=len(rule_files))
             except yara.SyntaxError as e:
                 logger.error("YARA syntax error", error=str(e))
             except Exception as e:
@@ -82,11 +81,7 @@ class YARASource:
                 self._rule_metadata.extend(metadata)
 
             except Exception as e:
-                logger.error(
-                    "Failed to parse rule file",
-                    file=rule_path,
-                    error=str(e)
-                )
+                logger.error("Failed to parse rule file", file=rule_path, error=str(e))
 
     def _parse_rule_file(self, content: str, filepath: str) -> List[Dict[str, Any]]:
         """Parse YARA rule file for metadata and IOCs."""
@@ -96,8 +91,7 @@ class YARASource:
 
         # Find all rule definitions
         rule_pattern = re.compile(
-            r'rule\s+(\w+)(?:\s*:\s*([\w\s]+))?\s*\{([^}]+)\}',
-            re.DOTALL
+            r"rule\s+(\w+)(?:\s*:\s*([\w\s]+))?\s*\{([^}]+)\}", re.DOTALL
         )
 
         for match in rule_pattern.finditer(content):
@@ -117,24 +111,28 @@ class YARASource:
             }
 
             # Extract metadata section
-            meta_match = re.search(r'meta\s*:\s*(.+?)(?=strings|condition|$)', body, re.DOTALL)
+            meta_match = re.search(
+                r"meta\s*:\s*(.+?)(?=strings|condition|$)", body, re.DOTALL
+            )
             if meta_match:
                 meta_content = meta_match.group(1)
-                for meta_line in meta_content.split('\n'):
+                for meta_line in meta_content.split("\n"):
                     meta_line = meta_line.strip()
-                    if '=' in meta_line:
-                        key, value = meta_line.split('=', 1)
+                    if "=" in meta_line:
+                        key, value = meta_line.split("=", 1)
                         key = key.strip()
                         value = value.strip().strip('"')
                         rule_data["metadata"][key] = value
 
             # Extract strings section
-            strings_match = re.search(r'strings\s*:\s*(.+?)(?=condition|$)', body, re.DOTALL)
+            strings_match = re.search(
+                r"strings\s*:\s*(.+?)(?=condition|$)", body, re.DOTALL
+            )
             if strings_match:
                 strings_content = strings_match.group(1)
-                for string_line in strings_content.split('\n'):
+                for string_line in strings_content.split("\n"):
                     string_line = string_line.strip()
-                    if string_line.startswith('$'):
+                    if string_line.startswith("$"):
                         # Parse string definition
                         string_def = self._parse_string_definition(string_line)
                         if string_def:
@@ -153,8 +151,7 @@ class YARASource:
 
         # Match: $name = "value" or $name = { hex } or $name = /regex/
         string_match = re.match(
-            r'\$(\w+)\s*=\s*(?:"([^"]+)"|{([^}]+)}|/([^/]+)/)',
-            line
+            r'\$(\w+)\s*=\s*(?:"([^"]+)"|{([^}]+)}|/([^/]+)/)', line
         )
 
         if string_match:
@@ -248,10 +245,16 @@ class YARASource:
                 }
 
                 for string_match in match.strings:
-                    match_info["strings"].append({
-                        "identifier": string_match.identifier,
-                        "offset": string_match.instances[0].offset if string_match.instances else None,
-                    })
+                    match_info["strings"].append(
+                        {
+                            "identifier": string_match.identifier,
+                            "offset": (
+                                string_match.instances[0].offset
+                                if string_match.instances
+                                else None
+                            ),
+                        }
+                    )
 
                 matches.append(match_info)
 

@@ -243,7 +243,8 @@ def _extract_cwe_from_tags(tags: str) -> list[str]:
 
     # Simple pattern matching for CWE-XXX
     import re
-    pattern = r'cwe-(\d+)'
+
+    pattern = r"cwe-(\d+)"
     matches = re.findall(pattern, tags_lower)
 
     for match in matches:

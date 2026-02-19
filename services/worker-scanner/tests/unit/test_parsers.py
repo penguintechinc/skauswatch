@@ -14,7 +14,6 @@ from scanners.parsers.nuclei_parser import parse_nuclei_finding
 from scanners.parsers.openvas_parser import parse_openvas_report
 from scanners.parsers.zap_parser import parse_zap_alert
 
-
 # =============================================================================
 # Nuclei Parser Tests
 # =============================================================================
@@ -820,7 +819,11 @@ class TestParserConsistency:
     def test_all_parsers_return_normalized_finding(self):
         """Test that all parsers return NormalizedFinding objects."""
         # Nuclei
-        nuclei_data = {"template-id": "test", "info": {"name": "Test"}, "host": "https://test.com"}
+        nuclei_data = {
+            "template-id": "test",
+            "info": {"name": "Test"},
+            "host": "https://test.com",
+        }
         nuclei_finding = parse_nuclei_finding(nuclei_data)
 
         # ZAP
@@ -843,11 +846,20 @@ class TestParserConsistency:
     def test_all_parsers_have_required_fields(self):
         """Test that all parsers populate required NormalizedFinding fields."""
         # Nuclei
-        nuclei_data = {"template-id": "test", "info": {"name": "Test", "severity": "high"}, "host": "https://test.com"}
+        nuclei_data = {
+            "template-id": "test",
+            "info": {"name": "Test", "severity": "high"},
+            "host": "https://test.com",
+        }
         nuclei_finding = parse_nuclei_finding(nuclei_data)
 
         # ZAP
-        zap_alert = {"pluginId": "1", "name": "Test", "riskcode": "2", "url": "https://test.com"}
+        zap_alert = {
+            "pluginId": "1",
+            "name": "Test",
+            "riskcode": "2",
+            "url": "https://test.com",
+        }
         zap_finding = parse_zap_alert(zap_alert)
 
         # OpenVAS
@@ -873,12 +885,21 @@ class TestParserConsistency:
 
         # Nuclei
         for sev in ["critical", "high", "medium", "low", "info"]:
-            nuclei_data = {"template-id": "test", "info": {"name": "Test", "severity": sev}, "host": "https://test.com"}
+            nuclei_data = {
+                "template-id": "test",
+                "info": {"name": "Test", "severity": sev},
+                "host": "https://test.com",
+            }
             finding = parse_nuclei_finding(nuclei_data)
             assert finding.severity in valid_severities
 
         # ZAP
         for risk_code in ["3", "2", "1", "0"]:
-            zap_alert = {"pluginId": "1", "name": "Test", "riskcode": risk_code, "url": "https://test.com"}
+            zap_alert = {
+                "pluginId": "1",
+                "name": "Test",
+                "riskcode": risk_code,
+                "url": "https://test.com",
+            }
             finding = parse_zap_alert(zap_alert)
             assert finding.severity in valid_severities

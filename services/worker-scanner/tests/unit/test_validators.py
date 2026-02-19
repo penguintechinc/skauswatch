@@ -126,7 +126,9 @@ class TestValidateTargetValue:
 
     def test_valid_ipv6_full(self):
         """Test valid full IPv6 address."""
-        is_valid, error = validate_target_value("ip", "2001:0db8:85a3:0000:0000:8a2e:0370:7334")
+        is_valid, error = validate_target_value(
+            "ip", "2001:0db8:85a3:0000:0000:8a2e:0370:7334"
+        )
         assert is_valid is True
         assert error == ""
 
@@ -163,7 +165,9 @@ class TestValidateTargetValue:
 
     def test_valid_url_with_path(self):
         """Test valid URL with path."""
-        is_valid, error = validate_target_value("url", "https://example.com/path/to/resource")
+        is_valid, error = validate_target_value(
+            "url", "https://example.com/path/to/resource"
+        )
         assert is_valid is True
         assert error == ""
 
@@ -271,36 +275,45 @@ class TestValidateTargetValue:
 class TestValidateSeverity:
     """Tests for validate_severity function."""
 
-    @pytest.mark.parametrize("severity,expected", [
-        ("critical", True),
-        ("high", True),
-        ("medium", True),
-        ("low", True),
-        ("info", True),
-    ])
+    @pytest.mark.parametrize(
+        "severity,expected",
+        [
+            ("critical", True),
+            ("high", True),
+            ("medium", True),
+            ("low", True),
+            ("info", True),
+        ],
+    )
     def test_valid_severities(self, severity, expected):
         """Test all valid severity levels."""
         assert validate_severity(severity) is expected
 
-    @pytest.mark.parametrize("severity,expected", [
-        ("CRITICAL", True),
-        ("HIGH", True),
-        ("MEDIUM", True),
-        ("LOW", True),
-        ("INFO", True),
-        ("Critical", True),
-        ("High", True),
-    ])
+    @pytest.mark.parametrize(
+        "severity,expected",
+        [
+            ("CRITICAL", True),
+            ("HIGH", True),
+            ("MEDIUM", True),
+            ("LOW", True),
+            ("INFO", True),
+            ("Critical", True),
+            ("High", True),
+        ],
+    )
     def test_severity_case_insensitive(self, severity, expected):
         """Test severity is case-insensitive."""
         assert validate_severity(severity) is expected
 
-    @pytest.mark.parametrize("severity,expected", [
-        ("unknown", False),
-        ("", False),
-        ("severe", False),
-        ("blocker", False),
-    ])
+    @pytest.mark.parametrize(
+        "severity,expected",
+        [
+            ("unknown", False),
+            ("", False),
+            ("severe", False),
+            ("blocker", False),
+        ],
+    )
     def test_invalid_severities(self, severity, expected):
         """Test invalid severity levels."""
         assert validate_severity(severity) is expected
@@ -314,32 +327,41 @@ class TestValidateSeverity:
 class TestValidateScannerType:
     """Tests for validate_scanner_type function."""
 
-    @pytest.mark.parametrize("scanner_type,expected", [
-        ("nuclei", True),
-        ("zap", True),
-        ("openvas", True),
-    ])
+    @pytest.mark.parametrize(
+        "scanner_type,expected",
+        [
+            ("nuclei", True),
+            ("zap", True),
+            ("openvas", True),
+        ],
+    )
     def test_valid_scanner_types(self, scanner_type, expected):
         """Test all valid scanner types."""
         assert validate_scanner_type(scanner_type) is expected
 
-    @pytest.mark.parametrize("scanner_type,expected", [
-        ("NUCLEI", True),
-        ("ZAP", True),
-        ("OPENVAS", True),
-        ("Nuclei", True),
-        ("Zap", True),
-    ])
+    @pytest.mark.parametrize(
+        "scanner_type,expected",
+        [
+            ("NUCLEI", True),
+            ("ZAP", True),
+            ("OPENVAS", True),
+            ("Nuclei", True),
+            ("Zap", True),
+        ],
+    )
     def test_scanner_type_case_insensitive(self, scanner_type, expected):
         """Test scanner type is case-insensitive."""
         assert validate_scanner_type(scanner_type) is expected
 
-    @pytest.mark.parametrize("scanner_type,expected", [
-        ("nessus", False),
-        ("burp", False),
-        ("", False),
-        ("unknown", False),
-    ])
+    @pytest.mark.parametrize(
+        "scanner_type,expected",
+        [
+            ("nessus", False),
+            ("burp", False),
+            ("", False),
+            ("unknown", False),
+        ],
+    )
     def test_invalid_scanner_types(self, scanner_type, expected):
         """Test invalid scanner types."""
         assert validate_scanner_type(scanner_type) is expected
@@ -353,40 +375,49 @@ class TestValidateScannerType:
 class TestValidateScanType:
     """Tests for validate_scan_type function."""
 
-    @pytest.mark.parametrize("scan_type,expected", [
-        ("baseline", True),
-        ("full", True),
-        ("api", True),
-        ("custom", True),
-        ("discovery", True),
-        ("full_and_fast", True),
-        ("full_and_deep", True),
-    ])
+    @pytest.mark.parametrize(
+        "scan_type,expected",
+        [
+            ("baseline", True),
+            ("full", True),
+            ("api", True),
+            ("custom", True),
+            ("discovery", True),
+            ("full_and_fast", True),
+            ("full_and_deep", True),
+        ],
+    )
     def test_valid_scan_types(self, scan_type, expected):
         """Test all valid scan types."""
         assert validate_scan_type(scan_type) is expected
 
-    @pytest.mark.parametrize("scan_type,expected", [
-        ("BASELINE", True),
-        ("FULL", True),
-        ("API", True),
-        ("CUSTOM", True),
-        ("DISCOVERY", True),
-        ("FULL_AND_FAST", True),
-        ("FULL_AND_DEEP", True),
-        ("Baseline", True),
-        ("Full", True),
-    ])
+    @pytest.mark.parametrize(
+        "scan_type,expected",
+        [
+            ("BASELINE", True),
+            ("FULL", True),
+            ("API", True),
+            ("CUSTOM", True),
+            ("DISCOVERY", True),
+            ("FULL_AND_FAST", True),
+            ("FULL_AND_DEEP", True),
+            ("Baseline", True),
+            ("Full", True),
+        ],
+    )
     def test_scan_type_case_insensitive(self, scan_type, expected):
         """Test scan type is case-insensitive."""
         assert validate_scan_type(scan_type) is expected
 
-    @pytest.mark.parametrize("scan_type,expected", [
-        ("unknown", False),
-        ("partial", False),
-        ("", False),
-        ("quick", False),
-    ])
+    @pytest.mark.parametrize(
+        "scan_type,expected",
+        [
+            ("unknown", False),
+            ("partial", False),
+            ("", False),
+            ("quick", False),
+        ],
+    )
     def test_invalid_scan_types(self, scan_type, expected):
         """Test invalid scan types."""
         assert validate_scan_type(scan_type) is expected
@@ -400,34 +431,43 @@ class TestValidateScanType:
 class TestValidateFindingStatus:
     """Tests for validate_finding_status function."""
 
-    @pytest.mark.parametrize("status,expected", [
-        ("open", True),
-        ("acknowledged", True),
-        ("false_positive", True),
-        ("fixed", True),
-    ])
+    @pytest.mark.parametrize(
+        "status,expected",
+        [
+            ("open", True),
+            ("acknowledged", True),
+            ("false_positive", True),
+            ("fixed", True),
+        ],
+    )
     def test_valid_finding_statuses(self, status, expected):
         """Test all valid finding statuses."""
         assert validate_finding_status(status) is expected
 
-    @pytest.mark.parametrize("status,expected", [
-        ("OPEN", True),
-        ("ACKNOWLEDGED", True),
-        ("FALSE_POSITIVE", True),
-        ("FIXED", True),
-        ("Open", True),
-        ("Acknowledged", True),
-    ])
+    @pytest.mark.parametrize(
+        "status,expected",
+        [
+            ("OPEN", True),
+            ("ACKNOWLEDGED", True),
+            ("FALSE_POSITIVE", True),
+            ("FIXED", True),
+            ("Open", True),
+            ("Acknowledged", True),
+        ],
+    )
     def test_finding_status_case_insensitive(self, status, expected):
         """Test finding status is case-insensitive."""
         assert validate_finding_status(status) is expected
 
-    @pytest.mark.parametrize("status,expected", [
-        ("closed", False),
-        ("resolved", False),
-        ("", False),
-        ("unknown", False),
-    ])
+    @pytest.mark.parametrize(
+        "status,expected",
+        [
+            ("closed", False),
+            ("resolved", False),
+            ("", False),
+            ("unknown", False),
+        ],
+    )
     def test_invalid_finding_statuses(self, status, expected):
         """Test invalid finding statuses."""
         assert validate_finding_status(status) is expected
@@ -523,36 +563,45 @@ class TestValidateCronExpression:
 class TestValidateJobStatus:
     """Tests for validate_job_status function."""
 
-    @pytest.mark.parametrize("status,expected", [
-        ("pending", True),
-        ("running", True),
-        ("completed", True),
-        ("failed", True),
-        ("cancelled", True),
-    ])
+    @pytest.mark.parametrize(
+        "status,expected",
+        [
+            ("pending", True),
+            ("running", True),
+            ("completed", True),
+            ("failed", True),
+            ("cancelled", True),
+        ],
+    )
     def test_valid_job_statuses(self, status, expected):
         """Test all valid job statuses."""
         assert validate_job_status(status) is expected
 
-    @pytest.mark.parametrize("status,expected", [
-        ("PENDING", True),
-        ("RUNNING", True),
-        ("COMPLETED", True),
-        ("FAILED", True),
-        ("CANCELLED", True),
-        ("Pending", True),
-        ("Running", True),
-    ])
+    @pytest.mark.parametrize(
+        "status,expected",
+        [
+            ("PENDING", True),
+            ("RUNNING", True),
+            ("COMPLETED", True),
+            ("FAILED", True),
+            ("CANCELLED", True),
+            ("Pending", True),
+            ("Running", True),
+        ],
+    )
     def test_job_status_case_insensitive(self, status, expected):
         """Test job status is case-insensitive."""
         assert validate_job_status(status) is expected
 
-    @pytest.mark.parametrize("status,expected", [
-        ("unknown", False),
-        ("paused", False),
-        ("", False),
-        ("finished", False),
-    ])
+    @pytest.mark.parametrize(
+        "status,expected",
+        [
+            ("unknown", False),
+            ("paused", False),
+            ("", False),
+            ("finished", False),
+        ],
+    )
     def test_invalid_job_statuses(self, status, expected):
         """Test invalid job statuses."""
         assert validate_job_status(status) is expected
@@ -566,24 +615,30 @@ class TestValidateJobStatus:
 class TestValidatePriority:
     """Tests for validate_priority function."""
 
-    @pytest.mark.parametrize("priority,expected", [
-        (1, True),
-        (5, True),
-        (10, True),
-        (2, True),
-        (9, True),
-    ])
+    @pytest.mark.parametrize(
+        "priority,expected",
+        [
+            (1, True),
+            (5, True),
+            (10, True),
+            (2, True),
+            (9, True),
+        ],
+    )
     def test_valid_priorities(self, priority, expected):
         """Test valid priority values."""
         assert validate_priority(priority) is expected
 
-    @pytest.mark.parametrize("priority,expected", [
-        (0, False),
-        (-1, False),
-        (11, False),
-        (100, False),
-        (-10, False),
-    ])
+    @pytest.mark.parametrize(
+        "priority,expected",
+        [
+            (0, False),
+            (-1, False),
+            (11, False),
+            (100, False),
+            (-10, False),
+        ],
+    )
     def test_invalid_priorities(self, priority, expected):
         """Test invalid priority values."""
         assert validate_priority(priority) is expected
@@ -698,7 +753,7 @@ class TestSanitizeString:
     def test_sanitize_all_control_characters(self):
         """Test removal of all control characters."""
         # Include various control characters (0x00-0x1F)
-        test_string = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F"
+        test_string = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f"
         result = sanitize_string(test_string)
         assert result == ""
 

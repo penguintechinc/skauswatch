@@ -37,45 +37,45 @@ def _build_connection_uri() -> str:
     Raises:
         ValueError: If required environment variables are missing or DB_TYPE is invalid
     """
-    db_type = os.environ.get('DB_TYPE', 'postgres').lower()
+    db_type = os.environ.get("DB_TYPE", "postgres").lower()
 
-    if db_type == 'sqlite':
-        db_name = os.environ.get('DB_NAME', 'storage.db')
-        return f'sqlite://{db_name}'
+    if db_type == "sqlite":
+        db_name = os.environ.get("DB_NAME", "storage.db")
+        return f"sqlite://{db_name}"
 
-    elif db_type in ('postgres', 'postgresql'):
+    elif db_type in ("postgres", "postgresql"):
         # Required parameters for PostgreSQL
-        db_host = os.environ.get('DB_HOST')
-        db_port = os.environ.get('DB_PORT', '5432')
-        db_name = os.environ.get('DB_NAME')
-        db_user = os.environ.get('DB_USER')
-        db_password = os.environ.get('DB_PASSWORD')
+        db_host = os.environ.get("DB_HOST")
+        db_port = os.environ.get("DB_PORT", "5432")
+        db_name = os.environ.get("DB_NAME")
+        db_user = os.environ.get("DB_USER")
+        db_password = os.environ.get("DB_PASSWORD")
 
         if not all([db_host, db_name, db_user, db_password]):
             raise ValueError(
-                'PostgreSQL requires DB_HOST, DB_NAME, DB_USER, and DB_PASSWORD environment variables'
+                "PostgreSQL requires DB_HOST, DB_NAME, DB_USER, and DB_PASSWORD environment variables"
             )
 
-        return f'postgres://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}'
+        return f"postgres://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
-    elif db_type == 'mysql':
+    elif db_type == "mysql":
         # Required parameters for MySQL
-        db_host = os.environ.get('DB_HOST')
-        db_port = os.environ.get('DB_PORT', '3306')
-        db_name = os.environ.get('DB_NAME')
-        db_user = os.environ.get('DB_USER')
-        db_password = os.environ.get('DB_PASSWORD')
+        db_host = os.environ.get("DB_HOST")
+        db_port = os.environ.get("DB_PORT", "3306")
+        db_name = os.environ.get("DB_NAME")
+        db_user = os.environ.get("DB_USER")
+        db_password = os.environ.get("DB_PASSWORD")
 
         if not all([db_host, db_name, db_user, db_password]):
             raise ValueError(
-                'MySQL requires DB_HOST, DB_NAME, DB_USER, and DB_PASSWORD environment variables'
+                "MySQL requires DB_HOST, DB_NAME, DB_USER, and DB_PASSWORD environment variables"
             )
 
-        return f'mysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}'
+        return f"mysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
 
     else:
         raise ValueError(
-            f'Invalid DB_TYPE: {db_type}. Supported types: postgres, mysql, sqlite'
+            f"Invalid DB_TYPE: {db_type}. Supported types: postgres, mysql, sqlite"
         )
 
 
@@ -94,7 +94,7 @@ def get_db() -> DAL:
         Exception: If database connection fails
     """
     # Check if this thread already has a connection
-    if not hasattr(_thread_local, 'db') or _thread_local.db is None:
+    if not hasattr(_thread_local, "db") or _thread_local.db is None:
         try:
             # Build connection URI
             uri = _build_connection_uri()
@@ -107,17 +107,20 @@ def get_db() -> DAL:
                 pool_size=10,
                 migrate=False,
                 fake_migrate=False,
-                folder='databases',  # PyDAL metadata folder
-                lazy_tables=False
+                folder="databases",  # PyDAL metadata folder
+                lazy_tables=False,
             )
 
-            logger.info('Database connection established for thread %s', threading.current_thread().name)
+            logger.info(
+                "Database connection established for thread %s",
+                threading.current_thread().name,
+            )
 
         except ValueError as e:
-            logger.error('Database configuration error: %s', str(e))
+            logger.error("Database configuration error: %s", str(e))
             raise
         except Exception as e:
-            logger.error('Failed to connect to database: %s', str(e))
+            logger.error("Failed to connect to database: %s", str(e))
             raise
 
     return _thread_local.db
@@ -130,12 +133,15 @@ def close_db() -> None:
     This function should be called when a thread is done with the database
     connection to properly release resources.
     """
-    if hasattr(_thread_local, 'db') and _thread_local.db is not None:
+    if hasattr(_thread_local, "db") and _thread_local.db is not None:
         try:
             _thread_local.db.close()
-            logger.info('Database connection closed for thread %s', threading.current_thread().name)
+            logger.info(
+                "Database connection closed for thread %s",
+                threading.current_thread().name,
+            )
         except Exception as e:
-            logger.warning('Error closing database connection: %s', str(e))
+            logger.warning("Error closing database connection: %s", str(e))
         finally:
             _thread_local.db = None
 
@@ -150,11 +156,12 @@ def init_app(app) -> None:
     Args:
         app: Flask application instance
     """
+
     @app.teardown_appcontext
     def teardown_db(exception: Optional[Exception] = None) -> None:
         """Close database connection at end of request context."""
         if exception:
-            logger.warning('Request ended with exception: %s', str(exception))
+            logger.warning("Request ended with exception: %s", str(exception))
         close_db()
 
-    logger.info('Database connection manager initialized for Flask app')
+    logger.info("Database connection manager initialized for Flask app")

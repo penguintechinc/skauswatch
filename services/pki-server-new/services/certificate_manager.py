@@ -1,4 +1,5 @@
 """Certificate management service."""
+
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
@@ -15,9 +16,7 @@ class CertificateManager:
     """Manages certificate lifecycle and database operations."""
 
     def __init__(
-        self,
-        x509_ca: X509CertificateAuthority,
-        ssh_ca: SSHCertificateAuthority
+        self, x509_ca: X509CertificateAuthority, ssh_ca: SSHCertificateAuthority
     ):
         """Initialize certificate manager."""
         self.x509_ca = x509_ca
@@ -45,19 +44,21 @@ class CertificateManager:
         metadata: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """Issue X.509 certificate and store in database."""
-        cert_pem, serial, private_key_pem, cert_meta = await self.x509_ca.issue_certificate(
-            subject=subject,
-            key_algorithm=key_algorithm,
-            key_size=key_size,
-            validity_days=validity_days,
-            san_dns=san_dns,
-            san_ip=san_ip,
-            san_email=san_email,
-            key_usage=key_usage,
-            extended_key_usage=extended_key_usage,
-            is_ca=is_ca,
-            path_length=path_length,
-            csr_pem=csr_pem,
+        cert_pem, serial, private_key_pem, cert_meta = (
+            await self.x509_ca.issue_certificate(
+                subject=subject,
+                key_algorithm=key_algorithm,
+                key_size=key_size,
+                validity_days=validity_days,
+                san_dns=san_dns,
+                san_ip=san_ip,
+                san_email=san_email,
+                key_usage=key_usage,
+                extended_key_usage=extended_key_usage,
+                is_ca=is_ca,
+                path_length=path_length,
+                csr_pem=csr_pem,
+            )
         )
 
         # Store in database
@@ -155,9 +156,11 @@ class CertificateManager:
             if cert_id:
                 cert = db(db.x509_certificates.id == cert_id).select().first()
             elif serial_number:
-                cert = db(
-                    db.x509_certificates.serial_number == serial_number
-                ).select().first()
+                cert = (
+                    db(db.x509_certificates.serial_number == serial_number)
+                    .select()
+                    .first()
+                )
             else:
                 return False
 
@@ -199,9 +202,7 @@ class CertificateManager:
             )
 
             logger.info(
-                "X.509 certificate revoked",
-                serial=cert.serial_number,
-                reason=reason
+                "X.509 certificate revoked", serial=cert.serial_number, reason=reason
             )
 
         return True
@@ -230,7 +231,7 @@ class CertificateManager:
 
             certs = query.select(
                 orderby=~db.x509_certificates.created_at,
-                limitby=(offset, offset + page_size)
+                limitby=(offset, offset + page_size),
             )
 
             return [self._cert_to_dict(c, include_pem=False) for c in certs], total
@@ -333,9 +334,11 @@ class CertificateManager:
             if cert_id:
                 cert = db(db.ssh_certificates.id == cert_id).select().first()
             elif serial_number:
-                cert = db(
-                    db.ssh_certificates.serial_number == serial_number
-                ).select().first()
+                cert = (
+                    db(db.ssh_certificates.serial_number == serial_number)
+                    .select()
+                    .first()
+                )
             else:
                 return None
 
@@ -356,9 +359,11 @@ class CertificateManager:
             if cert_id:
                 cert = db(db.ssh_certificates.id == cert_id).select().first()
             elif serial_number:
-                cert = db(
-                    db.ssh_certificates.serial_number == serial_number
-                ).select().first()
+                cert = (
+                    db(db.ssh_certificates.serial_number == serial_number)
+                    .select()
+                    .first()
+                )
             else:
                 return False
 
@@ -400,9 +405,7 @@ class CertificateManager:
             )
 
             logger.info(
-                "SSH certificate revoked",
-                serial=cert.serial_number,
-                reason=reason
+                "SSH certificate revoked", serial=cert.serial_number, reason=reason
             )
 
         return True
@@ -431,7 +434,7 @@ class CertificateManager:
 
             certs = query.select(
                 orderby=~db.ssh_certificates.created_at,
-                limitby=(offset, offset + page_size)
+                limitby=(offset, offset + page_size),
             )
 
             return [self._ssh_cert_to_dict(c, include_cert=False) for c in certs], total
@@ -442,9 +445,7 @@ class CertificateManager:
     async def generate_x509_crl(self) -> Dict[str, Any]:
         """Generate X.509 CRL from revoked certificates."""
         with db_session() as db:
-            entries = db(
-                db.crl_entries.certificate_type == "x509"
-            ).select()
+            entries = db(db.crl_entries.certificate_type == "x509").select()
 
             revoked = [
                 {
@@ -468,14 +469,9 @@ class CertificateManager:
     async def generate_ssh_krl(self) -> Dict[str, Any]:
         """Generate SSH KRL from revoked certificates."""
         with db_session() as db:
-            entries = db(
-                db.crl_entries.certificate_type == "ssh"
-            ).select()
+            entries = db(db.crl_entries.certificate_type == "ssh").select()
 
-            revoked = [
-                {"serial_number": e.serial_number}
-                for e in entries
-            ]
+            revoked = [{"serial_number": e.serial_number} for e in entries]
 
         krl_binary, krl_version = await self.ssh_ca.generate_krl(revoked)
         import base64
@@ -502,9 +498,9 @@ class CertificateManager:
             x509_revoked = db(db.x509_certificates.status == "revoked").count()
             x509_expired = db(db.x509_certificates.not_after < now).count()
             x509_expiring = db(
-                (db.x509_certificates.status == "active") &
-                (db.x509_certificates.not_after < expiring_soon) &
-                (db.x509_certificates.not_after > now)
+                (db.x509_certificates.status == "active")
+                & (db.x509_certificates.not_after < expiring_soon)
+                & (db.x509_certificates.not_after > now)
             ).count()
 
             # SSH stats
@@ -531,9 +527,7 @@ class CertificateManager:
     # =========================================================================
     # Helper Methods
     # =========================================================================
-    def _cert_to_dict(
-        self, cert: Any, include_pem: bool = True
-    ) -> Dict[str, Any]:
+    def _cert_to_dict(self, cert: Any, include_pem: bool = True) -> Dict[str, Any]:
         """Convert X.509 certificate row to dictionary."""
         result = {
             "id": str(cert.id),
@@ -560,9 +554,7 @@ class CertificateManager:
 
         return result
 
-    def _ssh_cert_to_dict(
-        self, cert: Any, include_cert: bool = True
-    ) -> Dict[str, Any]:
+    def _ssh_cert_to_dict(self, cert: Any, include_cert: bool = True) -> Dict[str, Any]:
         """Convert SSH certificate row to dictionary."""
         result = {
             "id": str(cert.id),

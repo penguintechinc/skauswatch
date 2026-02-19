@@ -240,10 +240,14 @@ class ManagerServiceServicer:
 
         indicator_type = type_map.get(request.type, "ip")
 
-        ioc = db(
-            (db.threat_indicators.indicator_type == indicator_type) &
-            (db.threat_indicators.value == request.value)
-        ).select().first()
+        ioc = (
+            db(
+                (db.threat_indicators.indicator_type == indicator_type)
+                & (db.threat_indicators.value == request.value)
+            )
+            .select()
+            .first()
+        )
 
         if ioc:
             # Reverse type map
@@ -258,7 +262,9 @@ class ManagerServiceServicer:
 
             ioc_response = manager_pb2.IOCResponse(
                 id=ioc.id,
-                indicator_type=type_reverse.get(ioc.indicator_type, manager_pb2.INDICATOR_IP),
+                indicator_type=type_reverse.get(
+                    ioc.indicator_type, manager_pb2.INDICATOR_IP
+                ),
                 value=ioc.value,
                 threat_level=level_map.get(ioc.threat_level, manager_pb2.THREAT_MEDIUM),
                 confidence=ioc.confidence or 0.5,
@@ -299,7 +305,13 @@ class ManagerServiceServicer:
         return response
 
 
-async def serve(config: ManagerConfig, job_manager=None, results_manager=None, adhoc_manager=None, bucket_manager=None) -> None:
+async def serve(
+    config: ManagerConfig,
+    job_manager=None,
+    results_manager=None,
+    adhoc_manager=None,
+    bucket_manager=None,
+) -> None:
     """
     Start the gRPC server.
 
@@ -325,6 +337,7 @@ async def serve(config: ManagerConfig, job_manager=None, results_manager=None, a
     s3_scan_available = False
     try:
         from grpc.generated import s3_scan_pb2_grpc
+
         s3_scan_available = True
     except ImportError:
         logger.warning(
@@ -349,7 +362,9 @@ async def serve(config: ManagerConfig, job_manager=None, results_manager=None, a
     )
 
     # Register S3ScanService if managers are provided and stubs available
-    if s3_scan_available and all([job_manager, results_manager, adhoc_manager, bucket_manager]):
+    if s3_scan_available and all(
+        [job_manager, results_manager, adhoc_manager, bucket_manager]
+    ):
         from grpc.s3_scan_server import S3ScanServicer
 
         s3_scan_pb2_grpc.add_S3ScanServiceServicer_to_server(

@@ -1,4 +1,5 @@
 """SSH Certificate REST API endpoints."""
+
 from datetime import datetime
 from functools import wraps
 from typing import Callable
@@ -21,6 +22,7 @@ ssh_bp = Blueprint("ssh", __name__, url_prefix="/ssh")
 
 def validate_request(model_class):
     """Decorator to validate request body with Pydantic model."""
+
     def decorator(f: Callable) -> Callable:
         @wraps(f)
         async def wrapper(*args, **kwargs):
@@ -30,14 +32,16 @@ def validate_request(model_class):
                 g.validated_data = validated
                 return await f(*args, **kwargs)
             except ValidationError as e:
-                return jsonify({
-                    "error": "Validation error",
-                    "details": e.errors()
-                }), 400
+                return (
+                    jsonify({"error": "Validation error", "details": e.errors()}),
+                    400,
+                )
             except Exception as e:
                 logger.error("Request validation failed", error=str(e))
                 return jsonify({"error": "Invalid request"}), 400
+
         return wrapper
+
     return decorator
 
 
@@ -78,7 +82,7 @@ async def issue_certificate():
             "SSH certificate issued",
             serial=result["serial_number"],
             key_id=data.key_id,
-            type=data.certificate_type.value
+            type=data.certificate_type.value,
         )
 
         return jsonify(result), 201
@@ -172,13 +176,15 @@ async def list_certificates():
         page_size=page_size,
     )
 
-    return jsonify({
-        "certificates": certificates,
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "pages": (total + page_size - 1) // page_size,
-    })
+    return jsonify(
+        {
+            "certificates": certificates,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": (total + page_size - 1) // page_size,
+        }
+    )
 
 
 # =============================================================================
@@ -197,11 +203,16 @@ async def get_krl():
     # Return as binary if requested
     if request.headers.get("Accept") == "application/octet-stream":
         import base64
+
         krl_binary = base64.b64decode(krl["krl_binary"])
-        return krl_binary, 200, {
-            "Content-Type": "application/octet-stream",
-            "Content-Disposition": "attachment; filename=revoked_keys"
-        }
+        return (
+            krl_binary,
+            200,
+            {
+                "Content-Type": "application/octet-stream",
+                "Content-Disposition": "attachment; filename=revoked_keys",
+            },
+        )
 
     return jsonify(krl)
 
@@ -256,14 +267,15 @@ async def generate_known_hosts():
         return jsonify({"error": "hostnames required"}), 400
 
     known_hosts_entry = cert_manager.ssh_ca.generate_known_hosts_entry(
-        hostnames=hostnames,
-        cert_authority=True
+        hostnames=hostnames, cert_authority=True
     )
 
-    return jsonify({
-        "known_hosts": known_hosts_entry,
-        "hostnames": hostnames,
-    })
+    return jsonify(
+        {
+            "known_hosts": known_hosts_entry,
+            "hostnames": hostnames,
+        }
+    )
 
 
 @ssh_bp.route("/config/authorized-keys", methods=["POST"])
@@ -277,17 +289,18 @@ async def generate_authorized_keys():
         return jsonify({"error": "Certificate manager not initialized"}), 503
 
     authorized_keys_entry = cert_manager.ssh_ca.generate_authorized_keys_entry(
-        principals=data.principals,
-        options=data.options
+        principals=data.principals, options=data.options
     )
 
     ca_public_key = cert_manager.ssh_ca.get_ca_public_key()
 
-    return jsonify({
-        "authorized_keys": authorized_keys_entry,
-        "trustedUserCAKeys": ca_public_key,
-        "principals": data.principals,
-    })
+    return jsonify(
+        {
+            "authorized_keys": authorized_keys_entry,
+            "trustedUserCAKeys": ca_public_key,
+            "principals": data.principals,
+        }
+    )
 
 
 @ssh_bp.route("/config/ssh-config", methods=["POST"])
@@ -304,19 +317,20 @@ async def generate_ssh_config():
         hostname=data.hostname,
         port=data.port,
         user=data.user,
-        identity_file=data.identity_file
+        identity_file=data.identity_file,
     )
 
     known_hosts_entry = cert_manager.ssh_ca.generate_known_hosts_entry(
-        hostnames=[data.hostname],
-        cert_authority=True
+        hostnames=[data.hostname], cert_authority=True
     )
 
-    return jsonify({
-        "ssh_config": ssh_config,
-        "known_hosts_entry": known_hosts_entry,
-        "ca_public_key": cert_manager.ssh_ca.get_ca_public_key(),
-    })
+    return jsonify(
+        {
+            "ssh_config": ssh_config,
+            "known_hosts_entry": known_hosts_entry,
+            "ca_public_key": cert_manager.ssh_ca.get_ca_public_key(),
+        }
+    )
 
 
 # =============================================================================
@@ -338,17 +352,21 @@ async def get_certificate_status(cert_id: str):
     now = datetime.utcnow()
     is_expired = cert["valid_before"] < now
 
-    return jsonify({
-        "certificate_id": cert_id,
-        "serial_number": cert["serial_number"],
-        "key_id": cert["key_id"],
-        "status": cert["status"],
-        "is_expired": is_expired,
-        "valid_after": cert["valid_after"].isoformat(),
-        "valid_before": cert["valid_before"].isoformat(),
-        "revoked_at": cert["revoked_at"].isoformat() if cert["revoked_at"] else None,
-        "revocation_reason": cert.get("revocation_reason"),
-    })
+    return jsonify(
+        {
+            "certificate_id": cert_id,
+            "serial_number": cert["serial_number"],
+            "key_id": cert["key_id"],
+            "status": cert["status"],
+            "is_expired": is_expired,
+            "valid_after": cert["valid_after"].isoformat(),
+            "valid_before": cert["valid_before"].isoformat(),
+            "revoked_at": (
+                cert["revoked_at"].isoformat() if cert["revoked_at"] else None
+            ),
+            "revocation_reason": cert.get("revocation_reason"),
+        }
+    )
 
 
 # =============================================================================

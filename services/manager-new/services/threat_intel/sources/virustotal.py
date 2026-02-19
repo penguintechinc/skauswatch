@@ -1,4 +1,5 @@
 """VirusTotal threat intelligence source."""
+
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
@@ -48,6 +49,7 @@ class VirusTotalSource:
         # URL needs to be base64 encoded
         if indicator_type == "url":
             import base64
+
             value = base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
 
         try:
@@ -117,6 +119,7 @@ class VirusTotalSource:
         # URL needs to be base64 encoded
         if indicator_type == "url":
             import base64
+
             value = base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
 
         enrichment = {
@@ -143,43 +146,53 @@ class VirusTotalSource:
             suspicious = stats.get("suspicious", 0)
             total = sum(stats.values()) if stats else 0
 
-            enrichment.update({
-                "found": True,
-                "malicious": malicious > 0,
-                "stats": stats,
-                "detection_rate": f"{malicious}/{total}" if total else "0/0",
-                "reputation": attributes.get("reputation", 0),
-                "tags": attributes.get("tags", []),
-            })
+            enrichment.update(
+                {
+                    "found": True,
+                    "malicious": malicious > 0,
+                    "stats": stats,
+                    "detection_rate": f"{malicious}/{total}" if total else "0/0",
+                    "reputation": attributes.get("reputation", 0),
+                    "tags": attributes.get("tags", []),
+                }
+            )
 
             # Type-specific enrichment
             if indicator_type == "ip":
-                enrichment.update({
-                    "asn": attributes.get("asn"),
-                    "as_owner": attributes.get("as_owner"),
-                    "country": attributes.get("country"),
-                    "network": attributes.get("network"),
-                })
+                enrichment.update(
+                    {
+                        "asn": attributes.get("asn"),
+                        "as_owner": attributes.get("as_owner"),
+                        "country": attributes.get("country"),
+                        "network": attributes.get("network"),
+                    }
+                )
 
             elif indicator_type == "domain":
-                enrichment.update({
-                    "registrar": attributes.get("registrar"),
-                    "creation_date": attributes.get("creation_date"),
-                    "last_dns_records": attributes.get("last_dns_records", [])[:5],
-                    "popularity_ranks": attributes.get("popularity_ranks"),
-                })
+                enrichment.update(
+                    {
+                        "registrar": attributes.get("registrar"),
+                        "creation_date": attributes.get("creation_date"),
+                        "last_dns_records": attributes.get("last_dns_records", [])[:5],
+                        "popularity_ranks": attributes.get("popularity_ranks"),
+                    }
+                )
 
             elif indicator_type == "hash":
-                enrichment.update({
-                    "meaningful_name": attributes.get("meaningful_name"),
-                    "type_description": attributes.get("type_description"),
-                    "size": attributes.get("size"),
-                    "names": attributes.get("names", [])[:5],
-                    "sandbox_verdicts": attributes.get("sandbox_verdicts"),
-                })
+                enrichment.update(
+                    {
+                        "meaningful_name": attributes.get("meaningful_name"),
+                        "type_description": attributes.get("type_description"),
+                        "size": attributes.get("size"),
+                        "names": attributes.get("names", [])[:5],
+                        "sandbox_verdicts": attributes.get("sandbox_verdicts"),
+                    }
+                )
 
             # Calculate risk score
-            enrichment["risk_score"] = self._calculate_risk_score(malicious, suspicious, total)
+            enrichment["risk_score"] = self._calculate_risk_score(
+                malicious, suspicious, total
+            )
 
         except Exception as e:
             logger.error("VirusTotal enrichment failed", error=str(e))

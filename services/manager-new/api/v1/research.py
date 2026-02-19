@@ -168,7 +168,9 @@ async def lookup():
 
         try:
             shodan_result = await clients["shodan"].lookup_ip(lookup_request.query)
-            result["shodan"] = shodan_result if shodan_result else {"error": "No results"}
+            result["shodan"] = (
+                shodan_result if shodan_result else {"error": "No results"}
+            )
             logger.debug("research_shodan_complete", query=lookup_request.query)
         except Exception as e:
             logger.error(
@@ -352,10 +354,12 @@ async def shodan_lookup():
     if not clients["shodan"].enabled:
         logger.warning("research_shodan_disabled")
         return (
-            jsonify({
-                "error": "Shodan integration not enabled",
-                "details": "Please configure Shodan API key and enable integration",
-            }),
+            jsonify(
+                {
+                    "error": "Shodan integration not enabled",
+                    "details": "Please configure Shodan API key and enable integration",
+                }
+            ),
             503,
         )
 
@@ -408,10 +412,12 @@ async def maltego_lookup():
     if not clients["maltego"].enabled:
         logger.warning("research_maltego_disabled")
         return (
-            jsonify({
-                "error": "Maltego integration not enabled",
-                "details": "Please configure Maltego and enable integration",
-            }),
+            jsonify(
+                {
+                    "error": "Maltego integration not enabled",
+                    "details": "Please configure Maltego and enable integration",
+                }
+            ),
             503,
         )
 

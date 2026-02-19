@@ -127,33 +127,34 @@ def list_schedules() -> Tuple[Dict[str, Any], int]:
 
         # Execute query with pagination
         rows = db(query).select(
-            orderby=~db.scan_schedules.created_at,
-            limitby=(offset, offset + limit)
+            orderby=~db.scan_schedules.created_at, limitby=(offset, offset + limit)
         )
 
         # Convert rows to dictionaries
         schedules = [_row_to_dict(row) for row in rows]
 
         logger.info(
-            "Listed %d schedules (page %d, total %d)",
-            len(schedules),
-            page,
-            total_count
+            "Listed %d schedules (page %d, total %d)", len(schedules), page, total_count
         )
 
-        return jsonify({
-            "schedules": schedules,
-            "total": total_count,
-            "page": page,
-            "per_page": per_page
-        }), 200
+        return (
+            jsonify(
+                {
+                    "schedules": schedules,
+                    "total": total_count,
+                    "page": page,
+                    "per_page": per_page,
+                }
+            ),
+            200,
+        )
 
     except Exception as e:
         logger.error("Failed to list schedules: %s", str(e))
-        return jsonify({
-            "error": f"Failed to list schedules: {str(e)}",
-            "code": 500
-        }), 500
+        return (
+            jsonify({"error": f"Failed to list schedules: {str(e)}", "code": 500}),
+            500,
+        )
 
 
 @schedules_bp.route("", methods=["POST"])
@@ -191,10 +192,7 @@ def create_schedule() -> Tuple[Dict[str, Any], int]:
         # Get request JSON
         data = request.get_json()
         if not data:
-            return jsonify({
-                "error": "Request body is required",
-                "code": 400
-            }), 400
+            return jsonify({"error": "Request body is required", "code": 400}), 400
 
         # Validate required fields
         required_fields = [
@@ -202,29 +200,31 @@ def create_schedule() -> Tuple[Dict[str, Any], int]:
             "target_id",
             "scanner_type",
             "scan_type",
-            "cron_expression"
+            "cron_expression",
         ]
         missing_fields = [f for f in required_fields if f not in data]
         if missing_fields:
-            return jsonify({
-                "error": "Missing required fields",
-                "missing": missing_fields,
-                "code": 400
-            }), 400
+            return (
+                jsonify(
+                    {
+                        "error": "Missing required fields",
+                        "missing": missing_fields,
+                        "code": 400,
+                    }
+                ),
+                400,
+            )
 
         # Validate cron expression
         cron_expression = data.get("cron_expression", "").strip()
         if not cron_expression:
-            return jsonify({
-                "error": "Cron expression cannot be empty",
-                "code": 400
-            }), 400
+            return (
+                jsonify({"error": "Cron expression cannot be empty", "code": 400}),
+                400,
+            )
 
         if not croniter.is_valid(cron_expression):
-            return jsonify({
-                "error": "Invalid cron expression",
-                "code": 400
-            }), 400
+            return jsonify({"error": "Invalid cron expression", "code": 400}), 400
 
         # Get database connection
         db = get_configured_db()
@@ -234,10 +234,7 @@ def create_schedule() -> Tuple[Dict[str, Any], int]:
         target = db.scan_targets[target_id]
         if not target:
             logger.warning("Target not found for schedule creation: %d", target_id)
-            return jsonify({
-                "error": "Target not found",
-                "code": 404
-            }), 404
+            return jsonify({"error": "Target not found", "code": 404}), 404
 
         # Verify scanner is enabled
         scanner_type = data.get("scanner_type", "").lower()
@@ -252,10 +249,12 @@ def create_schedule() -> Tuple[Dict[str, Any], int]:
 
         if not scanner_enabled:
             logger.warning("Scanner not available for schedule: %s", scanner_type)
-            return jsonify({
-                "error": f"Scanner {scanner_type} is not available",
-                "code": 400
-            }), 400
+            return (
+                jsonify(
+                    {"error": f"Scanner {scanner_type} is not available", "code": 400}
+                ),
+                400,
+            )
 
         # Calculate next_run from cron expression
         try:
@@ -263,10 +262,10 @@ def create_schedule() -> Tuple[Dict[str, Any], int]:
             next_run = cron_iter.get_next(datetime)
         except Exception as e:
             logger.error("Failed to calculate next_run: %s", str(e))
-            return jsonify({
-                "error": "Failed to calculate next run time",
-                "code": 400
-            }), 400
+            return (
+                jsonify({"error": "Failed to calculate next run time", "code": 400}),
+                400,
+            )
 
         # Get current user ID
         user_id = get_current_user_id()
@@ -298,17 +297,17 @@ def create_schedule() -> Tuple[Dict[str, Any], int]:
             schedule_id,
             insert_data["name"],
             target_id,
-            user_id
+            user_id,
         )
 
         return jsonify(schedule_dict), 201
 
     except Exception as e:
         logger.error("Failed to create schedule: %s", str(e))
-        return jsonify({
-            "error": f"Failed to create schedule: {str(e)}",
-            "code": 500
-        }), 500
+        return (
+            jsonify({"error": f"Failed to create schedule: {str(e)}", "code": 500}),
+            500,
+        )
 
 
 @schedules_bp.route("/<int:schedule_id>", methods=["GET"])
@@ -334,10 +333,7 @@ def get_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
         row = db.scan_schedules[schedule_id]
         if not row:
             logger.warning("Schedule not found: %d", schedule_id)
-            return jsonify({
-                "error": "Schedule not found",
-                "code": 404
-            }), 404
+            return jsonify({"error": "Schedule not found", "code": 404}), 404
 
         # Convert to dictionary
         schedule_dict = _row_to_dict(row)
@@ -348,10 +344,10 @@ def get_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
 
     except Exception as e:
         logger.error("Failed to retrieve schedule %d: %s", schedule_id, str(e))
-        return jsonify({
-            "error": f"Failed to retrieve schedule: {str(e)}",
-            "code": 500
-        }), 500
+        return (
+            jsonify({"error": f"Failed to retrieve schedule: {str(e)}", "code": 500}),
+            500,
+        )
 
 
 @schedules_bp.route("/<int:schedule_id>", methods=["PUT"])
@@ -390,10 +386,7 @@ def update_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
         # Get request JSON
         data = request.get_json()
         if not data:
-            return jsonify({
-                "error": "Request body is required",
-                "code": 400
-            }), 400
+            return jsonify({"error": "Request body is required", "code": 400}), 400
 
         # Get database connection
         db = get_configured_db()
@@ -402,10 +395,7 @@ def update_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
         row = db.scan_schedules[schedule_id]
         if not row:
             logger.warning("Schedule not found for update: %d", schedule_id)
-            return jsonify({
-                "error": "Schedule not found",
-                "code": 404
-            }), 404
+            return jsonify({"error": "Schedule not found", "code": 404}), 404
 
         # Prepare update data
         update_data = {}
@@ -425,11 +415,18 @@ def update_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
                 scanner_enabled = settings.scanner_toggles.openvas_enabled
 
             if not scanner_enabled:
-                logger.warning("Scanner not available for schedule update: %s", scanner_type)
-                return jsonify({
-                    "error": f"Scanner {scanner_type} is not available",
-                    "code": 400
-                }), 400
+                logger.warning(
+                    "Scanner not available for schedule update: %s", scanner_type
+                )
+                return (
+                    jsonify(
+                        {
+                            "error": f"Scanner {scanner_type} is not available",
+                            "code": 400,
+                        }
+                    ),
+                    400,
+                )
 
             update_data["scanner_type"] = scanner_type
 
@@ -443,16 +440,13 @@ def update_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
         if "cron_expression" in data:
             cron_expression = data.get("cron_expression", "").strip()
             if not cron_expression:
-                return jsonify({
-                    "error": "Cron expression cannot be empty",
-                    "code": 400
-                }), 400
+                return (
+                    jsonify({"error": "Cron expression cannot be empty", "code": 400}),
+                    400,
+                )
 
             if not croniter.is_valid(cron_expression):
-                return jsonify({
-                    "error": "Invalid cron expression",
-                    "code": 400
-                }), 400
+                return jsonify({"error": "Invalid cron expression", "code": 400}), 400
 
             # Calculate new next_run
             try:
@@ -461,10 +455,12 @@ def update_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
                 update_data["next_run"] = next_run
             except Exception as e:
                 logger.error("Failed to calculate next_run: %s", str(e))
-                return jsonify({
-                    "error": "Failed to calculate next run time",
-                    "code": 400
-                }), 400
+                return (
+                    jsonify(
+                        {"error": "Failed to calculate next run time", "code": 400}
+                    ),
+                    400,
+                )
 
             update_data["cron_expression"] = cron_expression
 
@@ -498,10 +494,10 @@ def update_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
 
     except Exception as e:
         logger.error("Failed to update schedule %d: %s", schedule_id, str(e))
-        return jsonify({
-            "error": f"Failed to update schedule: {str(e)}",
-            "code": 500
-        }), 500
+        return (
+            jsonify({"error": f"Failed to update schedule: {str(e)}", "code": 500}),
+            500,
+        )
 
 
 @schedules_bp.route("/<int:schedule_id>", methods=["DELETE"])
@@ -527,10 +523,7 @@ def delete_schedule(schedule_id: int) -> Tuple[str, int]:
         row = db.scan_schedules[schedule_id]
         if not row:
             logger.warning("Schedule not found for deletion: %d", schedule_id)
-            return jsonify({
-                "error": "Schedule not found",
-                "code": 404
-            }), 404
+            return jsonify({"error": "Schedule not found", "code": 404}), 404
 
         # Delete schedule
         db(db.scan_schedules.id == schedule_id).delete()
@@ -542,10 +535,10 @@ def delete_schedule(schedule_id: int) -> Tuple[str, int]:
 
     except Exception as e:
         logger.error("Failed to delete schedule %d: %s", schedule_id, str(e))
-        return jsonify({
-            "error": f"Failed to delete schedule: {str(e)}",
-            "code": 500
-        }), 500
+        return (
+            jsonify({"error": f"Failed to delete schedule: {str(e)}", "code": 500}),
+            500,
+        )
 
 
 @schedules_bp.route("/<int:schedule_id>/run", methods=["POST"])
@@ -585,10 +578,7 @@ def run_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
         schedule = db.scan_schedules[schedule_id]
         if not schedule:
             logger.warning("Schedule not found for manual execution: %d", schedule_id)
-            return jsonify({
-                "error": "Schedule not found",
-                "code": 404
-            }), 404
+            return jsonify({"error": "Schedule not found", "code": 404}), 404
 
         # Get current user ID
         user_id = get_current_user_id()
@@ -616,7 +606,7 @@ def run_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
             "Created manual scan job %d from schedule %d by user %s",
             job_id,
             schedule_id,
-            user_id
+            user_id,
         )
 
         # Dispatch async Celery task
@@ -628,15 +618,12 @@ def run_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
             logger.info("Dispatched Celery task %s for manual job %d", task.id, job_id)
         except Exception as e:
             logger.error(
-                "Failed to dispatch Celery task for manual job %d: %s",
-                job_id,
-                str(e)
+                "Failed to dispatch Celery task for manual job %d: %s", job_id, str(e)
             )
             # Don't fail the request - job is created, worker can pick it up later
             # Update job with error status for visibility
             db(db.scan_jobs.id == job_id).update(
-                status="failed",
-                error_message=f"Failed to dispatch task: {str(e)}"
+                status="failed", error_message=f"Failed to dispatch task: {str(e)}"
             )
             db.commit()
 
@@ -645,7 +632,7 @@ def run_schedule(schedule_id: int) -> Tuple[Dict[str, Any], int]:
 
     except Exception as e:
         logger.error("Failed to execute schedule %d: %s", schedule_id, str(e))
-        return jsonify({
-            "error": f"Failed to execute schedule: {str(e)}",
-            "code": 500
-        }), 500
+        return (
+            jsonify({"error": f"Failed to execute schedule: {str(e)}", "code": 500}),
+            500,
+        )

@@ -1,4 +1,5 @@
 """PKI Server configuration using Pydantic."""
+
 import os
 from typing import Optional, List
 from pydantic import BaseModel, Field, field_validator
@@ -6,10 +7,10 @@ from pydantic import BaseModel, Field, field_validator
 
 class DatabaseConfig(BaseModel):
     """Database configuration."""
+
     url: str = Field(
         default_factory=lambda: os.getenv(
-            "DATABASE_URL",
-            "postgresql://skauswatch:password@localhost:5432/skauswatch"
+            "DATABASE_URL", "postgresql://skauswatch:password@localhost:5432/skauswatch"
         )
     )
     pool_size: int = Field(default=10)
@@ -18,11 +19,9 @@ class DatabaseConfig(BaseModel):
 
 class RedisConfig(BaseModel):
     """Redis configuration."""
+
     url: str = Field(
-        default_factory=lambda: os.getenv(
-            "REDIS_URL",
-            "redis://localhost:6379/0"
-        )
+        default_factory=lambda: os.getenv("REDIS_URL", "redis://localhost:6379/0")
     )
     key_prefix: str = Field(
         default_factory=lambda: os.getenv("REDIS_KEY_PREFIX", "skauswatch")
@@ -31,6 +30,7 @@ class RedisConfig(BaseModel):
 
 class X509CAConfig(BaseModel):
     """X.509 Certificate Authority configuration."""
+
     ca_key_path: str = Field(
         default_factory=lambda: os.getenv("CA_KEY_PATH", "/etc/pki/ca.key")
     )
@@ -71,6 +71,7 @@ class X509CAConfig(BaseModel):
 
 class SSHCAConfig(BaseModel):
     """SSH Certificate Authority configuration."""
+
     ca_key_path: str = Field(
         default_factory=lambda: os.getenv("SSH_CA_KEY_PATH", "/etc/pki/ssh_ca")
     )
@@ -83,14 +84,10 @@ class SSHCAConfig(BaseModel):
         default_factory=lambda: os.getenv("SSH_CA_KEY_PASSWORD")
     )
     default_validity_seconds: int = Field(
-        default_factory=lambda: int(
-            os.getenv("SSH_DEFAULT_VALIDITY_SECONDS", "86400")
-        )
+        default_factory=lambda: int(os.getenv("SSH_DEFAULT_VALIDITY_SECONDS", "86400"))
     )
     max_validity_seconds: int = Field(
-        default_factory=lambda: int(
-            os.getenv("SSH_MAX_VALIDITY_SECONDS", "604800")
-        )
+        default_factory=lambda: int(os.getenv("SSH_MAX_VALIDITY_SECONDS", "604800"))
     )
     default_key_type: str = Field(
         default_factory=lambda: os.getenv("SSH_DEFAULT_KEY_TYPE", "ed25519")
@@ -111,27 +108,21 @@ class SSHCAConfig(BaseModel):
 
 class GRPCConfig(BaseModel):
     """gRPC server configuration."""
-    port: int = Field(
-        default_factory=lambda: int(os.getenv("GRPC_PORT", "50052"))
-    )
+
+    port: int = Field(default_factory=lambda: int(os.getenv("GRPC_PORT", "50052")))
     max_workers: int = Field(
         default_factory=lambda: int(os.getenv("GRPC_MAX_WORKERS", "10"))
     )
     max_message_length: int = Field(
-        default_factory=lambda: int(
-            os.getenv("GRPC_MAX_MESSAGE_LENGTH", "4194304")
-        )
+        default_factory=lambda: int(os.getenv("GRPC_MAX_MESSAGE_LENGTH", "4194304"))
     )
 
 
 class APIConfig(BaseModel):
     """REST API configuration."""
-    host: str = Field(
-        default_factory=lambda: os.getenv("API_HOST", "0.0.0.0")
-    )
-    port: int = Field(
-        default_factory=lambda: int(os.getenv("API_PORT", "8001"))
-    )
+
+    host: str = Field(default_factory=lambda: os.getenv("API_HOST", "0.0.0.0"))
+    port: int = Field(default_factory=lambda: int(os.getenv("API_PORT", "8001")))
     debug: bool = Field(
         default_factory=lambda: os.getenv("QUART_DEBUG", "false").lower() == "true"
     )
@@ -139,15 +130,13 @@ class APIConfig(BaseModel):
 
 class RateLimitConfig(BaseModel):
     """Rate limiting configuration."""
+
     enabled: bool = Field(
-        default_factory=lambda: os.getenv(
-            "RATE_LIMIT_ENABLED", "true"
-        ).lower() == "true"
+        default_factory=lambda: os.getenv("RATE_LIMIT_ENABLED", "true").lower()
+        == "true"
     )
     requests_per_minute: int = Field(
-        default_factory=lambda: int(
-            os.getenv("RATE_LIMIT_REQUESTS_PER_MINUTE", "60")
-        )
+        default_factory=lambda: int(os.getenv("RATE_LIMIT_REQUESTS_PER_MINUTE", "60"))
     )
     burst_size: int = Field(
         default_factory=lambda: int(os.getenv("RATE_LIMIT_BURST_SIZE", "10"))
@@ -156,39 +145,33 @@ class RateLimitConfig(BaseModel):
 
 class AuditConfig(BaseModel):
     """Audit logging configuration."""
+
     enabled: bool = Field(
-        default_factory=lambda: os.getenv(
-            "AUDIT_ENABLED", "true"
-        ).lower() == "true"
+        default_factory=lambda: os.getenv("AUDIT_ENABLED", "true").lower() == "true"
     )
     log_to_file: bool = Field(
-        default_factory=lambda: os.getenv(
-            "AUDIT_LOG_TO_FILE", "false"
-        ).lower() == "true"
+        default_factory=lambda: os.getenv("AUDIT_LOG_TO_FILE", "false").lower()
+        == "true"
     )
     log_path: str = Field(
-        default_factory=lambda: os.getenv(
-            "AUDIT_LOG_PATH", "/var/log/pki/audit.log"
-        )
+        default_factory=lambda: os.getenv("AUDIT_LOG_PATH", "/var/log/pki/audit.log")
     )
 
 
 class ManagerConfig(BaseModel):
     """Manager service connection configuration."""
+
     grpc_address: str = Field(
-        default_factory=lambda: os.getenv(
-            "MANAGER_GRPC_ADDR", "manager:50051"
-        )
+        default_factory=lambda: os.getenv("MANAGER_GRPC_ADDR", "manager:50051")
     )
     api_url: str = Field(
-        default_factory=lambda: os.getenv(
-            "MANAGER_API_URL", "http://manager:5000"
-        )
+        default_factory=lambda: os.getenv("MANAGER_API_URL", "http://manager:5000")
     )
 
 
 class Settings(BaseModel):
     """Application settings container."""
+
     app_name: str = "SkausWatch PKI Server"
     version: str = "1.0.0"
     environment: str = Field(

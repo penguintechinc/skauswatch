@@ -1,4 +1,5 @@
 """AI integration services."""
+
 from services.ai.provider import AIProvider
 from services.ai.ollama_client import OllamaClient
 from services.ai.anthropic_client import AnthropicClient

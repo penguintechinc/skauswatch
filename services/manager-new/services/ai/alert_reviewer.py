@@ -1,4 +1,5 @@
 """AI-powered alert review service."""
+
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
@@ -35,9 +36,7 @@ Be concise and actionable. Use bullet points for clarity.
 Always provide a confidence score (0-100) for your assessment."""
 
     def __init__(
-        self,
-        provider_type: str = "ollama",
-        provider_config: Dict[str, Any] = None
+        self, provider_type: str = "ollama", provider_config: Dict[str, Any] = None
     ):
         """
         Initialize alert reviewer.
@@ -53,8 +52,7 @@ Always provide a confidence score (0-100) for your assessment."""
     async def initialize(self) -> None:
         """Initialize the AI provider."""
         self._provider = AIProviderFactory.create(
-            self.provider_type,
-            self.provider_config
+            self.provider_type, self.provider_config
         )
 
         if self._provider:
@@ -63,12 +61,11 @@ Always provide a confidence score (0-100) for your assessment."""
                 logger.info(
                     "Alert reviewer initialized",
                     provider=self.provider_type,
-                    model=self._provider.model
+                    model=self._provider.model,
                 )
             else:
                 logger.warning(
-                    "AI provider health check failed",
-                    provider=self.provider_type
+                    "AI provider health check failed", provider=self.provider_type
                 )
         else:
             logger.error("Failed to create AI provider")
@@ -78,9 +75,7 @@ Always provide a confidence score (0-100) for your assessment."""
         """Check if reviewer is available."""
         return self._provider is not None
 
-    async def review_alert(
-        self, alert: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def review_alert(self, alert: Dict[str, Any]) -> Dict[str, Any]:
         """
         Review a single security alert.
 
@@ -115,17 +110,13 @@ Always provide a confidence score (0-100) for your assessment."""
             logger.info(
                 "Alert reviewed",
                 alert_id=alert.get("id"),
-                verdict=result.get("verdict")
+                verdict=result.get("verdict"),
             )
 
             return result
 
         except Exception as e:
-            logger.error(
-                "Alert review failed",
-                alert_id=alert.get("id"),
-                error=str(e)
-            )
+            logger.error("Alert review failed", alert_id=alert.get("id"), error=str(e))
             return {
                 "error": str(e),
                 "alert_id": alert.get("id"),
@@ -149,9 +140,7 @@ Always provide a confidence score (0-100) for your assessment."""
             results.append(result)
         return results
 
-    async def correlate_alerts(
-        self, alerts: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
+    async def correlate_alerts(self, alerts: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Analyze multiple alerts for correlation.
 
@@ -218,9 +207,7 @@ Always provide a confidence score (0-100) for your assessment."""
             logger.error("Incident summary generation failed", error=str(e))
             return {"error": str(e)}
 
-    async def suggest_remediation(
-        self, alert: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def suggest_remediation(self, alert: Dict[str, Any]) -> Dict[str, Any]:
         """
         Suggest remediation steps for an alert.
 
@@ -269,7 +256,9 @@ Be specific and actionable."""
     def _build_alert_prompt(self, alert: Dict[str, Any]) -> str:
         """Build prompt for alert review."""
         indicators = alert.get("indicators", [])
-        indicator_str = "\n".join(f"  - {i}" for i in indicators) if indicators else "None"
+        indicator_str = (
+            "\n".join(f"  - {i}" for i in indicators) if indicators else "None"
+        )
 
         return f"""Review this security alert:
 
@@ -360,7 +349,8 @@ Provide:
 
         # Extract confidence score
         import re
-        confidence_match = re.search(r'confidence[:\s]+(\d+)', response_lower)
+
+        confidence_match = re.search(r"confidence[:\s]+(\d+)", response_lower)
         if confidence_match:
             result["confidence"] = int(confidence_match.group(1))
 

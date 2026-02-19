@@ -2,6 +2,7 @@
 
 Supports both local and remote Ollama instances.
 """
+
 from typing import Optional, Dict, Any, List
 
 import httpx
@@ -63,7 +64,7 @@ class OllamaClient(AIProvider):
         system: str = None,
         model: str = None,
         temperature: float = 0.7,
-        **kwargs
+        **kwargs,
     ) -> str:
         """
         Send analysis request to Ollama.
@@ -102,9 +103,7 @@ class OllamaClient(AIProvider):
 
         except httpx.HTTPStatusError as e:
             logger.error(
-                "Ollama API error",
-                status=e.response.status_code,
-                error=str(e)
+                "Ollama API error", status=e.response.status_code, error=str(e)
             )
             raise
         except httpx.TimeoutException:
@@ -120,7 +119,7 @@ class OllamaClient(AIProvider):
         system: str = None,
         model: str = None,
         temperature: float = 0.7,
-        **kwargs
+        **kwargs,
     ) -> str:
         """
         Multi-turn chat with Ollama.
@@ -138,16 +137,20 @@ class OllamaClient(AIProvider):
         ollama_messages = []
 
         if system:
-            ollama_messages.append({
-                "role": "system",
-                "content": system,
-            })
+            ollama_messages.append(
+                {
+                    "role": "system",
+                    "content": system,
+                }
+            )
 
         for msg in messages:
-            ollama_messages.append({
-                "role": msg["role"],
-                "content": msg["content"],
-            })
+            ollama_messages.append(
+                {
+                    "role": msg["role"],
+                    "content": msg["content"],
+                }
+            )
 
         payload = {
             "model": model or self._model,
@@ -219,9 +222,7 @@ class OllamaClient(AIProvider):
             logger.error("Failed to get model info", model=model, error=str(e))
             return {}
 
-    async def generate_embeddings(
-        self, text: str, model: str = None
-    ) -> List[float]:
+    async def generate_embeddings(self, text: str, model: str = None) -> List[float]:
         """Generate embeddings for text."""
         try:
             response = await self._client.post(

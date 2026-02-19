@@ -1,4 +1,5 @@
 """Anthropic Claude AI provider client."""
+
 from typing import Optional, Dict, Any, List
 
 import httpx
@@ -66,7 +67,7 @@ class AnthropicClient(AIProvider):
         model: str = None,
         max_tokens: int = None,
         temperature: float = 0.7,
-        **kwargs
+        **kwargs,
     ) -> str:
         """
         Send analysis request to Claude.
@@ -84,9 +85,7 @@ class AnthropicClient(AIProvider):
         payload = {
             "model": model or self._model,
             "max_tokens": max_tokens or self._max_tokens,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
+            "messages": [{"role": "user", "content": prompt}],
             "temperature": temperature,
         }
 
@@ -109,9 +108,7 @@ class AnthropicClient(AIProvider):
 
         except httpx.HTTPStatusError as e:
             logger.error(
-                "Anthropic API error",
-                status=e.response.status_code,
-                error=str(e)
+                "Anthropic API error", status=e.response.status_code, error=str(e)
             )
             raise
         except Exception as e:
@@ -125,7 +122,7 @@ class AnthropicClient(AIProvider):
         model: str = None,
         max_tokens: int = None,
         temperature: float = 0.7,
-        **kwargs
+        **kwargs,
     ) -> str:
         """
         Multi-turn chat with Claude.
@@ -146,10 +143,12 @@ class AnthropicClient(AIProvider):
             role = msg["role"]
             if role == "system":
                 continue  # System is separate in Anthropic API
-            anthropic_messages.append({
-                "role": role,
-                "content": msg["content"],
-            })
+            anthropic_messages.append(
+                {
+                    "role": role,
+                    "content": msg["content"],
+                }
+            )
 
         payload = {
             "model": model or self._model,

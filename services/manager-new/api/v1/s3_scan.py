@@ -104,8 +104,12 @@ async def list_buckets():
                 "max_file_size_mb": bucket.max_file_size_mb,
                 "scan_enabled": bucket.scan_enabled,
                 "yara_enabled": bucket.yara_enabled,
-                "created_at": bucket.created_at.isoformat() if bucket.created_at else None,
-                "updated_at": bucket.updated_at.isoformat() if bucket.updated_at else None,
+                "created_at": (
+                    bucket.created_at.isoformat() if bucket.created_at else None
+                ),
+                "updated_at": (
+                    bucket.updated_at.isoformat() if bucket.updated_at else None
+                ),
             }
         )
 
@@ -138,14 +142,23 @@ async def create_bucket():
 
     db = get_db(config.database.uri)
 
-    existing = db(
-        (db.s3_bucket_configs.endpoint_url == create_data.endpoint_url)
-        & (db.s3_bucket_configs.bucket_name == create_data.bucket_name)
-    ).select().first()
+    existing = (
+        db(
+            (db.s3_bucket_configs.endpoint_url == create_data.endpoint_url)
+            & (db.s3_bucket_configs.bucket_name == create_data.bucket_name)
+        )
+        .select()
+        .first()
+    )
 
     if existing:
         return (
-            jsonify({"error": "Bucket configuration already exists", "existing_id": existing.id}),
+            jsonify(
+                {
+                    "error": "Bucket configuration already exists",
+                    "existing_id": existing.id,
+                }
+            ),
             409,
         )
 
@@ -180,7 +193,9 @@ async def create_bucket():
                     "name": bucket.name,
                     "bucket_name": bucket.bucket_name,
                     "access_key_id": masked_access,
-                    "created_at": bucket.created_at.isoformat() if bucket.created_at else None,
+                    "created_at": (
+                        bucket.created_at.isoformat() if bucket.created_at else None
+                    ),
                 },
             }
         ),
@@ -220,8 +235,12 @@ async def get_bucket(bucket_id: int):
                 "max_file_size_mb": bucket.max_file_size_mb,
                 "scan_enabled": bucket.scan_enabled,
                 "yara_enabled": bucket.yara_enabled,
-                "created_at": bucket.created_at.isoformat() if bucket.created_at else None,
-                "updated_at": bucket.updated_at.isoformat() if bucket.updated_at else None,
+                "created_at": (
+                    bucket.created_at.isoformat() if bucket.created_at else None
+                ),
+                "updated_at": (
+                    bucket.updated_at.isoformat() if bucket.updated_at else None
+                ),
             }
         ),
         200,
@@ -345,7 +364,9 @@ async def test_bucket_connection(bucket_id: int):
             aws_secret_access_key=bucket.secret_access_key,
             region_name=bucket.region,
             use_ssl=bucket.use_ssl,
-            config=boto3.session.Config(s3={"addressing_style": "path" if bucket.path_style else "virtual"}),
+            config=boto3.session.Config(
+                s3={"addressing_style": "path" if bucket.path_style else "virtual"}
+            ),
         )
 
         s3_client.head_bucket(Bucket=bucket.bucket_name)
@@ -374,7 +395,9 @@ async def test_bucket_connection(bucket_id: int):
         )
     except Exception as e:
         return (
-            jsonify({"success": False, "error": "Connection failed", "details": str(e)}),
+            jsonify(
+                {"success": False, "error": "Connection failed", "details": str(e)}
+            ),
             500,
         )
 
@@ -426,7 +449,9 @@ async def trigger_scan(bucket_id: int):
                     "bucket_config_id": job.bucket_config_id,
                     "job_type": job.job_type,
                     "status": job.status,
-                    "created_at": job.created_at.isoformat() if job.created_at else None,
+                    "created_at": (
+                        job.created_at.isoformat() if job.created_at else None
+                    ),
                 },
             }
         ),
@@ -482,7 +507,9 @@ async def list_jobs():
                 "prefix_filter": job.prefix_filter,
                 "force_rescan": job.force_rescan,
                 "started_at": job.started_at.isoformat() if job.started_at else None,
-                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+                "completed_at": (
+                    job.completed_at.isoformat() if job.completed_at else None
+                ),
                 "error_message": job.error_message,
                 "created_at": job.created_at.isoformat() if job.created_at else None,
             }
@@ -523,7 +550,7 @@ async def get_job(job_id: int):
 
     progress_pct = 0.0
     if total_files > 0 and job.status == S3ScanJobStatus.RUNNING.value:
-        completed = (job.files_scanned or 0)
+        completed = job.files_scanned or 0
         progress_pct = (completed / total_files) * 100 if total_files > 0 else 0.0
 
     return (
@@ -541,7 +568,9 @@ async def get_job(job_id: int):
                 "prefix_filter": job.prefix_filter,
                 "force_rescan": job.force_rescan,
                 "started_at": job.started_at.isoformat() if job.started_at else None,
-                "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+                "completed_at": (
+                    job.completed_at.isoformat() if job.completed_at else None
+                ),
                 "error_message": job.error_message,
                 "metadata": job.metadata or {},
                 "created_at": job.created_at.isoformat() if job.created_at else None,
@@ -591,22 +620,32 @@ async def query_results():
         query_params = {
             "bucket_config_id": request.args.get("bucket_config_id", type=int),
             "scan_status": request.args.getlist("scan_status"),
-            "is_malware": request.args.get("is_malware", type=lambda v: v.lower() == "true")
-            if request.args.get("is_malware")
-            else None,
-            "is_pup": request.args.get("is_pup", type=lambda v: v.lower() == "true")
-            if request.args.get("is_pup")
-            else None,
-            "is_threat": request.args.get("is_threat", type=lambda v: v.lower() == "true")
-            if request.args.get("is_threat")
-            else None,
+            "is_malware": (
+                request.args.get("is_malware", type=lambda v: v.lower() == "true")
+                if request.args.get("is_malware")
+                else None
+            ),
+            "is_pup": (
+                request.args.get("is_pup", type=lambda v: v.lower() == "true")
+                if request.args.get("is_pup")
+                else None
+            ),
+            "is_threat": (
+                request.args.get("is_threat", type=lambda v: v.lower() == "true")
+                if request.args.get("is_threat")
+                else None
+            ),
             "file_type": request.args.get("file_type"),
-            "date_from": datetime.fromisoformat(request.args.get("date_from"))
-            if request.args.get("date_from")
-            else None,
-            "date_to": datetime.fromisoformat(request.args.get("date_to"))
-            if request.args.get("date_to")
-            else None,
+            "date_from": (
+                datetime.fromisoformat(request.args.get("date_from"))
+                if request.args.get("date_from")
+                else None
+            ),
+            "date_to": (
+                datetime.fromisoformat(request.args.get("date_to"))
+                if request.args.get("date_to")
+                else None
+            ),
             "page": request.args.get("page", 1, type=int),
             "per_page": min(request.args.get("per_page", 50, type=int), 500),
         }
@@ -624,10 +663,14 @@ async def query_results():
     query = db.s3_scan_results
 
     if query_data.bucket_config_id:
-        query = query & (db.s3_scan_results.bucket_config_id == query_data.bucket_config_id)
+        query = query & (
+            db.s3_scan_results.bucket_config_id == query_data.bucket_config_id
+        )
     if query_data.scan_status:
         query = query & (
-            db.s3_scan_results.scan_status.belongs([s.value for s in query_data.scan_status])
+            db.s3_scan_results.scan_status.belongs(
+                [s.value for s in query_data.scan_status]
+            )
         )
     if query_data.is_malware is not None:
         query = query & (db.s3_scan_results.is_malware == query_data.is_malware)
@@ -666,7 +709,9 @@ async def query_results():
                 "yara_matches": result.yara_matches or [],
                 "scan_engine": result.scan_engine,
                 "confidence_score": result.confidence_score,
-                "scanned_at": result.scanned_at.isoformat() if result.scanned_at else None,
+                "scanned_at": (
+                    result.scanned_at.isoformat() if result.scanned_at else None
+                ),
             }
         )
 
@@ -716,9 +761,15 @@ async def get_result(result_id: int):
                 "confidence_score": result.confidence_score,
                 "error_message": result.error_message,
                 "metadata": result.metadata or {},
-                "scanned_at": result.scanned_at.isoformat() if result.scanned_at else None,
-                "created_at": result.created_at.isoformat() if result.created_at else None,
-                "updated_at": result.updated_at.isoformat() if result.updated_at else None,
+                "scanned_at": (
+                    result.scanned_at.isoformat() if result.scanned_at else None
+                ),
+                "created_at": (
+                    result.created_at.isoformat() if result.created_at else None
+                ),
+                "updated_at": (
+                    result.updated_at.isoformat() if result.updated_at else None
+                ),
             }
         ),
         200,
@@ -745,8 +796,12 @@ async def get_statistics():
     total_scanned = db(query).count()
     total_infected = db(query & (db.s3_scan_results.is_malware == True)).count()
     total_pup = db(query & (db.s3_scan_results.is_pup == True)).count()
-    total_clean = db(query & (db.s3_scan_results.scan_status == S3ScanStatus.CLEAN.value)).count()
-    total_error = db(query & (db.s3_scan_results.scan_status == S3ScanStatus.ERROR.value)).count()
+    total_clean = db(
+        query & (db.s3_scan_results.scan_status == S3ScanStatus.CLEAN.value)
+    ).count()
+    total_error = db(
+        query & (db.s3_scan_results.scan_status == S3ScanStatus.ERROR.value)
+    ).count()
     total_skipped = db(
         query & (db.s3_scan_results.scan_status == S3ScanStatus.SKIPPED.value)
     ).count()
@@ -761,18 +816,30 @@ async def get_statistics():
 
     by_bucket = {}
     if not bucket_config_id:
-        all_buckets = db(query).select(db.s3_scan_results.bucket_config_id, distinct=True)
+        all_buckets = db(query).select(
+            db.s3_scan_results.bucket_config_id, distinct=True
+        )
         for row in all_buckets:
-            bucket = db(db.s3_bucket_configs.id == row.bucket_config_id).select().first()
+            bucket = (
+                db(db.s3_bucket_configs.id == row.bucket_config_id).select().first()
+            )
             if bucket:
-                bucket_query = query & (db.s3_scan_results.bucket_config_id == row.bucket_config_id)
+                bucket_query = query & (
+                    db.s3_scan_results.bucket_config_id == row.bucket_config_id
+                )
                 by_bucket[bucket.name] = {
                     "total": db(bucket_query).count(),
-                    "infected": db(bucket_query & (db.s3_scan_results.is_malware == True)).count(),
-                    "pup": db(bucket_query & (db.s3_scan_results.is_pup == True)).count(),
+                    "infected": db(
+                        bucket_query & (db.s3_scan_results.is_malware == True)
+                    ).count(),
+                    "pup": db(
+                        bucket_query & (db.s3_scan_results.is_pup == True)
+                    ).count(),
                 }
 
-    last_scan = db(query).select(orderby=~db.s3_scan_results.scanned_at, limitby=(0, 1)).first()
+    last_scan = (
+        db(query).select(orderby=~db.s3_scan_results.scanned_at, limitby=(0, 1)).first()
+    )
     last_scan_at = last_scan.scanned_at if last_scan else None
 
     return (
@@ -823,15 +890,23 @@ async def get_schedule(bucket_id: int):
                 "timezone": schedule.timezone,
                 "enabled": schedule.enabled,
                 "last_triggered_at": (
-                    schedule.last_triggered_at.isoformat() if schedule.last_triggered_at else None
+                    schedule.last_triggered_at.isoformat()
+                    if schedule.last_triggered_at
+                    else None
                 ),
                 "next_trigger_at": (
-                    schedule.next_trigger_at.isoformat() if schedule.next_trigger_at else None
+                    schedule.next_trigger_at.isoformat()
+                    if schedule.next_trigger_at
+                    else None
                 ),
                 "error_count": schedule.error_count or 0,
                 "last_error_message": schedule.last_error_message,
-                "created_at": schedule.created_at.isoformat() if schedule.created_at else None,
-                "updated_at": schedule.updated_at.isoformat() if schedule.updated_at else None,
+                "created_at": (
+                    schedule.created_at.isoformat() if schedule.created_at else None
+                ),
+                "updated_at": (
+                    schedule.updated_at.isoformat() if schedule.updated_at else None
+                ),
             }
         ),
         200,
@@ -857,7 +932,9 @@ async def set_schedule(bucket_id: int):
     if not bucket:
         return jsonify({"error": "Bucket configuration not found"}), 404
 
-    existing_schedule = db(db.s3_scan_schedules.bucket_config_id == bucket_id).select().first()
+    existing_schedule = (
+        db(db.s3_scan_schedules.bucket_config_id == bucket_id).select().first()
+    )
 
     if existing_schedule:
         db(db.s3_scan_schedules.bucket_config_id == bucket_id).update(
@@ -888,8 +965,12 @@ async def set_schedule(bucket_id: int):
                     "cron_expression": schedule.cron_expression,
                     "timezone": schedule.timezone,
                     "enabled": schedule.enabled,
-                    "created_at": schedule.created_at.isoformat() if schedule.created_at else None,
-                    "updated_at": schedule.updated_at.isoformat() if schedule.updated_at else None,
+                    "created_at": (
+                        schedule.created_at.isoformat() if schedule.created_at else None
+                    ),
+                    "updated_at": (
+                        schedule.updated_at.isoformat() if schedule.updated_at else None
+                    ),
                 },
             }
         ),
@@ -980,7 +1061,9 @@ async def upload_file():
                         "scan_status": adhoc_scan.scan_status,
                         "file_hash_sha256": adhoc_scan.file_hash_sha256,
                         "scanned_at": (
-                            adhoc_scan.scanned_at.isoformat() if adhoc_scan.scanned_at else None
+                            adhoc_scan.scanned_at.isoformat()
+                            if adhoc_scan.scanned_at
+                            else None
                         ),
                     },
                 }
@@ -1002,7 +1085,9 @@ async def get_upload_result(scan_id: int):
     if not adhoc_scan:
         return jsonify({"error": "Scan result not found"}), 404
 
-    if adhoc_scan.user_id != g.current_user_id and g.current_user["role"] not in ["admin"]:
+    if adhoc_scan.user_id != g.current_user_id and g.current_user["role"] not in [
+        "admin"
+    ]:
         return jsonify({"error": "Access denied"}), 403
 
     return (
@@ -1025,8 +1110,12 @@ async def get_upload_result(scan_id: int):
                 "file_hash_sha256": adhoc_scan.file_hash_sha256,
                 "error_message": adhoc_scan.error_message,
                 "metadata": adhoc_scan.metadata or {},
-                "scanned_at": adhoc_scan.scanned_at.isoformat() if adhoc_scan.scanned_at else None,
-                "created_at": adhoc_scan.created_at.isoformat() if adhoc_scan.created_at else None,
+                "scanned_at": (
+                    adhoc_scan.scanned_at.isoformat() if adhoc_scan.scanned_at else None
+                ),
+                "created_at": (
+                    adhoc_scan.created_at.isoformat() if adhoc_scan.created_at else None
+                ),
             }
         ),
         200,
@@ -1098,7 +1187,9 @@ async def delete_upload_scan(scan_id: int):
     if not adhoc_scan:
         return jsonify({"error": "Scan result not found"}), 404
 
-    if adhoc_scan.user_id != g.current_user_id and g.current_user["role"] not in ["admin"]:
+    if adhoc_scan.user_id != g.current_user_id and g.current_user["role"] not in [
+        "admin"
+    ]:
         return jsonify({"error": "Access denied"}), 403
 
     db(db.adhoc_scans.id == scan_id).delete()
@@ -1127,14 +1218,20 @@ async def create_ti_indicator(result_id: int):
     if not result.is_threat:
         return jsonify({"error": "Scan result is not marked as threat"}), 400
 
-    file_hash_sha256 = result.metadata.get("file_hash_sha256") if result.metadata else None
+    file_hash_sha256 = (
+        result.metadata.get("file_hash_sha256") if result.metadata else None
+    )
     if not file_hash_sha256:
         return jsonify({"error": "No file hash available in scan result"}), 400
 
-    existing_ioc = db(
-        (db.threat_indicators.indicator_type == "file_hash")
-        & (db.threat_indicators.value == file_hash_sha256)
-    ).select().first()
+    existing_ioc = (
+        db(
+            (db.threat_indicators.indicator_type == "file_hash")
+            & (db.threat_indicators.value == file_hash_sha256)
+        )
+        .select()
+        .first()
+    )
 
     if existing_ioc:
         return (
@@ -1176,7 +1273,9 @@ async def create_ti_indicator(result_id: int):
                     "indicator_type": ioc.indicator_type,
                     "value": ioc.value,
                     "threat_level": ioc.threat_level,
-                    "created_at": ioc.created_at.isoformat() if ioc.created_at else None,
+                    "created_at": (
+                        ioc.created_at.isoformat() if ioc.created_at else None
+                    ),
                 },
             }
         ),
@@ -1195,18 +1294,24 @@ async def get_ti_enrichment(result_id: int):
     if not result:
         return jsonify({"error": "Scan result not found"}), 404
 
-    file_hash_sha256 = result.metadata.get("file_hash_sha256") if result.metadata else None
+    file_hash_sha256 = (
+        result.metadata.get("file_hash_sha256") if result.metadata else None
+    )
     if not file_hash_sha256:
         return jsonify({"enrichment": None, "found": False}), 200
 
-    ioc = db(
-        (db.threat_indicators.indicator_type == "file_hash")
-        & (db.threat_indicators.value == file_hash_sha256)
-        & (
-            (db.threat_indicators.expires_at == None)
-            | (db.threat_indicators.expires_at > datetime.utcnow())
+    ioc = (
+        db(
+            (db.threat_indicators.indicator_type == "file_hash")
+            & (db.threat_indicators.value == file_hash_sha256)
+            & (
+                (db.threat_indicators.expires_at == None)
+                | (db.threat_indicators.expires_at > datetime.utcnow())
+            )
         )
-    ).select().first()
+        .select()
+        .first()
+    )
 
     if not ioc:
         return jsonify({"enrichment": None, "found": False}), 200
@@ -1245,14 +1350,18 @@ async def hash_lookup():
 
     db = get_db(config.database.uri)
 
-    ioc = db(
-        (db.threat_indicators.indicator_type == "file_hash")
-        & (db.threat_indicators.value == lookup_data.hash_value)
-        & (
-            (db.threat_indicators.expires_at == None)
-            | (db.threat_indicators.expires_at > datetime.utcnow())
+    ioc = (
+        db(
+            (db.threat_indicators.indicator_type == "file_hash")
+            & (db.threat_indicators.value == lookup_data.hash_value)
+            & (
+                (db.threat_indicators.expires_at == None)
+                | (db.threat_indicators.expires_at > datetime.utcnow())
+            )
         )
-    ).select().first()
+        .select()
+        .first()
+    )
 
     if not ioc:
         return jsonify({"found": False, "hash": lookup_data.hash_value}), 200
@@ -1269,7 +1378,9 @@ async def hash_lookup():
                     "source": ioc.source,
                     "tags": ioc.tags or [],
                     "metadata": ioc.metadata or {},
-                    "created_at": ioc.created_at.isoformat() if ioc.created_at else None,
+                    "created_at": (
+                        ioc.created_at.isoformat() if ioc.created_at else None
+                    ),
                 },
             }
         ),

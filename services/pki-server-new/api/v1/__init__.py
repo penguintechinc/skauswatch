@@ -1,4 +1,5 @@
 """PKI Server REST API v1."""
+
 from quart import Blueprint
 
 from .x509 import x509_bp

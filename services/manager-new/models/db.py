@@ -411,14 +411,26 @@ def define_pydal_tables(db: DAL) -> None:
     THREAT_LEVELS = ["critical", "high", "medium", "low", "info"]
 
     # Valid alert statuses
-    ALERT_STATUSES = ["pending", "in_progress", "resolved", "false_positive", "escalated"]
+    ALERT_STATUSES = [
+        "pending",
+        "in_progress",
+        "resolved",
+        "false_positive",
+        "escalated",
+    ]
 
     # Valid indicator types
     INDICATOR_TYPES = ["ip", "domain", "hash", "url", "email", "file", "registry"]
 
     db.define_table(
         "users",
-        Field("email", "string", length=255, required=True, requires=[IS_NOT_EMPTY(), IS_EMAIL()]),
+        Field(
+            "email",
+            "string",
+            length=255,
+            required=True,
+            requires=[IS_NOT_EMPTY(), IS_EMAIL()],
+        ),
         Field("password_hash", "string", length=255, required=True),
         Field("full_name", "string", length=255),
         Field(
@@ -426,7 +438,10 @@ def define_pydal_tables(db: DAL) -> None:
             "string",
             length=20,
             default="viewer",
-            requires=IS_IN_SET(VALID_ROLES, error_message=f"Role must be one of: {', '.join(VALID_ROLES)}"),
+            requires=IS_IN_SET(
+                VALID_ROLES,
+                error_message=f"Role must be one of: {', '.join(VALID_ROLES)}",
+            ),
         ),
         Field("is_active", "boolean", default=True),
         Field("mfa_enabled", "boolean", default=False),
@@ -459,7 +474,9 @@ def define_pydal_tables(db: DAL) -> None:
         ),
         Field("value", "text", required=True),
         Field("threat_level", "string", length=20, requires=IS_IN_SET(THREAT_LEVELS)),
-        Field("confidence", "double", default=0.5, requires=IS_FLOAT_IN_RANGE(0.0, 1.0)),
+        Field(
+            "confidence", "double", default=0.5, requires=IS_FLOAT_IN_RANGE(0.0, 1.0)
+        ),
         Field("source", "string", length=100, required=True),
         Field("tags", "json", default=[]),
         Field("metadata", "json", default={}),
@@ -473,8 +490,20 @@ def define_pydal_tables(db: DAL) -> None:
         "alerts",
         Field("title", "string", length=255, required=True, requires=IS_NOT_EMPTY()),
         Field("description", "text"),
-        Field("severity", "string", length=20, required=True, requires=IS_IN_SET(THREAT_LEVELS)),
-        Field("status", "string", length=20, default="pending", requires=IS_IN_SET(ALERT_STATUSES)),
+        Field(
+            "severity",
+            "string",
+            length=20,
+            required=True,
+            requires=IS_IN_SET(THREAT_LEVELS),
+        ),
+        Field(
+            "status",
+            "string",
+            length=20,
+            default="pending",
+            requires=IS_IN_SET(ALERT_STATUSES),
+        ),
         Field("source", "string", length=100),
         Field("indicators", "json", default=[]),
         Field("ai_review", "json"),
@@ -498,7 +527,13 @@ def define_pydal_tables(db: DAL) -> None:
         Field("resource_id", "string", length=128),
         Field("resource_type", "string", length=50),
         Field("requester_id", "reference users", required=True),
-        Field("status", "string", length=20, default="pending", requires=IS_IN_SET(["pending", "approved", "rejected", "expired"])),
+        Field(
+            "status",
+            "string",
+            length=20,
+            default="pending",
+            requires=IS_IN_SET(["pending", "approved", "rejected", "expired"]),
+        ),
         Field("required_approvals", "integer", default=1),
         Field("current_approvals", "integer", default=0),
         Field("approvers", "json", default=[]),
@@ -518,16 +553,18 @@ def define_pydal_tables(db: DAL) -> None:
             "string",
             length=64,
             required=True,
-            requires=IS_IN_SET([
-                "authentication",
-                "authorization",
-                "user_management",
-                "alert_management",
-                "threat_intel",
-                "certificate",
-                "configuration",
-                "edr",
-            ]),
+            requires=IS_IN_SET(
+                [
+                    "authentication",
+                    "authorization",
+                    "user_management",
+                    "alert_management",
+                    "threat_intel",
+                    "certificate",
+                    "configuration",
+                    "edr",
+                ]
+            ),
         ),
         Field("action", "string", length=128, required=True),
         Field("resource_type", "string", length=64),
@@ -537,7 +574,13 @@ def define_pydal_tables(db: DAL) -> None:
         Field("user_agent", "text"),
         Field("success", "boolean", required=True),
         Field("details", "json", default={}),
-        Field("severity", "string", length=16, default="info", requires=IS_IN_SET(["debug", "info", "warning", "error", "critical"])),
+        Field(
+            "severity",
+            "string",
+            length=16,
+            default="info",
+            requires=IS_IN_SET(["debug", "info", "warning", "error", "critical"]),
+        ),
         Field("created_at", "datetime", default=datetime.utcnow),
         migrate=False,
     )
@@ -550,7 +593,13 @@ def define_pydal_tables(db: DAL) -> None:
         Field("os_type", "string", length=50),
         Field("os_version", "string", length=100),
         Field("agent_version", "string", length=32),
-        Field("status", "string", length=20, default="active", requires=IS_IN_SET(["active", "inactive", "disconnected"])),
+        Field(
+            "status",
+            "string",
+            length=20,
+            default="active",
+            requires=IS_IN_SET(["active", "inactive", "disconnected"]),
+        ),
         Field("last_heartbeat", "datetime"),
         Field("metadata", "json", default={}),
         Field("created_at", "datetime", default=datetime.utcnow),
@@ -578,7 +627,14 @@ def define_pydal_tables(db: DAL) -> None:
 
     db.define_table(
         "s3_bucket_configs",
-        Field("name", "string", length=255, unique=True, required=True, requires=IS_NOT_EMPTY()),
+        Field(
+            "name",
+            "string",
+            length=255,
+            unique=True,
+            required=True,
+            requires=IS_NOT_EMPTY(),
+        ),
         Field("endpoint_url", "string", length=255, required=True),
         Field("bucket_name", "string", length=255, required=True),
         Field("access_key_id", "string", length=255, required=True),
@@ -601,8 +657,22 @@ def define_pydal_tables(db: DAL) -> None:
         "s3_scan_jobs",
         Field("job_id", "string", length=36, unique=True, required=True),
         Field("bucket_config_id", "reference s3_bucket_configs", required=True),
-        Field("job_type", "string", length=50, required=True, requires=IS_IN_SET(["full_scan", "incremental_scan", "prefix_scan"])),
-        Field("status", "string", length=20, default="pending", requires=IS_IN_SET(["pending", "running", "completed", "failed", "cancelled"])),
+        Field(
+            "job_type",
+            "string",
+            length=50,
+            required=True,
+            requires=IS_IN_SET(["full_scan", "incremental_scan", "prefix_scan"]),
+        ),
+        Field(
+            "status",
+            "string",
+            length=20,
+            default="pending",
+            requires=IS_IN_SET(
+                ["pending", "running", "completed", "failed", "cancelled"]
+            ),
+        ),
         Field("total_objects", "integer", default=0),
         Field("scanned_objects", "integer", default=0),
         Field("infected_objects", "integer", default=0),
@@ -627,7 +697,14 @@ def define_pydal_tables(db: DAL) -> None:
         Field("object_etag", "string", length=128),
         Field("content_type", "string", length=128),
         Field("detected_file_type", "string", length=64),
-        Field("scan_status", "string", length=20, requires=IS_IN_SET(["pending", "scanning", "completed", "failed", "skipped"])),
+        Field(
+            "scan_status",
+            "string",
+            length=20,
+            requires=IS_IN_SET(
+                ["pending", "scanning", "completed", "failed", "skipped"]
+            ),
+        ),
         Field("is_malware", "boolean", default=False),
         Field("is_pup", "boolean", default=False),
         Field("is_threat", "boolean", default=False),
@@ -659,7 +736,12 @@ def define_pydal_tables(db: DAL) -> None:
         Field("file_size", "integer"),
         Field("content_type", "string", length=128),
         Field("detected_file_type", "string", length=64),
-        Field("scan_status", "string", length=20, requires=IS_IN_SET(["pending", "scanning", "completed", "failed"])),
+        Field(
+            "scan_status",
+            "string",
+            length=20,
+            requires=IS_IN_SET(["pending", "scanning", "completed", "failed"]),
+        ),
         Field("is_malware", "boolean", default=False),
         Field("is_pup", "boolean", default=False),
         Field("is_threat", "boolean", default=False),
@@ -681,7 +763,12 @@ def define_pydal_tables(db: DAL) -> None:
 
     db.define_table(
         "s3_scan_schedules",
-        Field("bucket_config_id", "reference s3_bucket_configs", unique=True, required=True),
+        Field(
+            "bucket_config_id",
+            "reference s3_bucket_configs",
+            unique=True,
+            required=True,
+        ),
         Field("cron_expression", "string", length=100, required=True),
         Field("timezone", "string", length=50, default="UTC"),
         Field("enabled", "boolean", default=True),

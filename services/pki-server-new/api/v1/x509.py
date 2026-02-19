@@ -1,4 +1,5 @@
 """X.509 Certificate REST API endpoints."""
+
 from datetime import datetime
 from functools import wraps
 from typing import Callable
@@ -21,6 +22,7 @@ x509_bp = Blueprint("x509", __name__, url_prefix="/certificates")
 
 def validate_request(model_class):
     """Decorator to validate request body with Pydantic model."""
+
     def decorator(f: Callable) -> Callable:
         @wraps(f)
         async def wrapper(*args, **kwargs):
@@ -30,14 +32,16 @@ def validate_request(model_class):
                 g.validated_data = validated
                 return await f(*args, **kwargs)
             except ValidationError as e:
-                return jsonify({
-                    "error": "Validation error",
-                    "details": e.errors()
-                }), 400
+                return (
+                    jsonify({"error": "Validation error", "details": e.errors()}),
+                    400,
+                )
             except Exception as e:
                 logger.error("Request validation failed", error=str(e))
                 return jsonify({"error": "Invalid request"}), 400
+
         return wrapper
+
     return decorator
 
 
@@ -79,7 +83,7 @@ async def issue_certificate():
         logger.info(
             "X.509 certificate issued",
             serial=result["serial_number"],
-            subject=data.subject
+            subject=data.subject,
         )
 
         return jsonify(result), 201
@@ -103,7 +107,9 @@ async def get_certificate(cert_id: str):
         return jsonify({"error": "Certificate not found"}), 404
 
     # Don't return private key unless explicitly requested
-    include_private_key = request.args.get("include_private_key", "false").lower() == "true"
+    include_private_key = (
+        request.args.get("include_private_key", "false").lower() == "true"
+    )
     if not include_private_key:
         cert.pop("private_key_pem", None)
 
@@ -173,10 +179,7 @@ async def revoke_certificate_by_serial(serial_number: str):
     if not success:
         return jsonify({"error": "Certificate not found"}), 404
 
-    return jsonify({
-        "message": "Certificate revoked",
-        "serial_number": serial_number
-    })
+    return jsonify({"message": "Certificate revoked", "serial_number": serial_number})
 
 
 # =============================================================================
@@ -207,13 +210,15 @@ async def list_certificates():
         page_size=page_size,
     )
 
-    return jsonify({
-        "certificates": certificates,
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "pages": (total + page_size - 1) // page_size,
-    })
+    return jsonify(
+        {
+            "certificates": certificates,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": (total + page_size - 1) // page_size,
+        }
+    )
 
 
 @x509_bp.route("/search", methods=["POST"])
@@ -234,13 +239,15 @@ async def search_certificates():
         page_size=data.page_size,
     )
 
-    return jsonify({
-        "certificates": certificates,
-        "total": total,
-        "page": data.page,
-        "page_size": data.page_size,
-        "pages": (total + data.page_size - 1) // data.page_size,
-    })
+    return jsonify(
+        {
+            "certificates": certificates,
+            "total": total,
+            "page": data.page,
+            "page_size": data.page_size,
+            "pages": (total + data.page_size - 1) // data.page_size,
+        }
+    )
 
 
 # =============================================================================
@@ -258,10 +265,14 @@ async def get_crl():
 
     # Return as PEM if requested
     if request.headers.get("Accept") == "application/pkix-crl":
-        return crl["crl_pem"], 200, {
-            "Content-Type": "application/pkix-crl",
-            "Content-Disposition": "attachment; filename=crl.pem"
-        }
+        return (
+            crl["crl_pem"],
+            200,
+            {
+                "Content-Type": "application/pkix-crl",
+                "Content-Disposition": "attachment; filename=crl.pem",
+            },
+        )
 
     return jsonify(crl)
 
@@ -292,12 +303,14 @@ async def ocsp_response():
         cert = await cert_manager.get_x509_certificate(serial_number=serial_number)
 
         if not cert:
-            return jsonify({
-                "serial_number": serial_number,
-                "status": "unknown",
-                "this_update": datetime.utcnow().isoformat(),
-                "next_update": datetime.utcnow().isoformat(),
-            })
+            return jsonify(
+                {
+                    "serial_number": serial_number,
+                    "status": "unknown",
+                    "this_update": datetime.utcnow().isoformat(),
+                    "next_update": datetime.utcnow().isoformat(),
+                }
+            )
 
         status = "good"
         revocation_time = None
@@ -305,17 +318,21 @@ async def ocsp_response():
 
         if cert["status"] == "revoked":
             status = "revoked"
-            revocation_time = cert["revoked_at"].isoformat() if cert["revoked_at"] else None
+            revocation_time = (
+                cert["revoked_at"].isoformat() if cert["revoked_at"] else None
+            )
             revocation_reason = cert.get("revocation_reason")
 
-        return jsonify({
-            "serial_number": serial_number,
-            "status": status,
-            "this_update": datetime.utcnow().isoformat(),
-            "next_update": datetime.utcnow().isoformat(),
-            "revocation_time": revocation_time,
-            "revocation_reason": revocation_reason,
-        })
+        return jsonify(
+            {
+                "serial_number": serial_number,
+                "status": status,
+                "this_update": datetime.utcnow().isoformat(),
+                "next_update": datetime.utcnow().isoformat(),
+                "revocation_time": revocation_time,
+                "revocation_reason": revocation_reason,
+            }
+        )
 
     except Exception as e:
         logger.error("OCSP request failed", error=str(e))
@@ -349,10 +366,14 @@ async def download_ca_certificate():
 
     ca_pem = cert_manager.x509_ca.get_ca_certificate_pem()
 
-    return ca_pem, 200, {
-        "Content-Type": "application/x-pem-file",
-        "Content-Disposition": "attachment; filename=ca.crt"
-    }
+    return (
+        ca_pem,
+        200,
+        {
+            "Content-Type": "application/x-pem-file",
+            "Content-Disposition": "attachment; filename=ca.crt",
+        },
+    )
 
 
 # =============================================================================
@@ -374,13 +395,17 @@ async def get_certificate_status(cert_id: str):
     now = datetime.utcnow()
     is_expired = cert["not_after"] < now
 
-    return jsonify({
-        "certificate_id": cert_id,
-        "serial_number": cert["serial_number"],
-        "status": cert["status"],
-        "is_expired": is_expired,
-        "not_before": cert["not_before"].isoformat(),
-        "not_after": cert["not_after"].isoformat(),
-        "revoked_at": cert["revoked_at"].isoformat() if cert["revoked_at"] else None,
-        "revocation_reason": cert.get("revocation_reason"),
-    })
+    return jsonify(
+        {
+            "certificate_id": cert_id,
+            "serial_number": cert["serial_number"],
+            "status": cert["status"],
+            "is_expired": is_expired,
+            "not_before": cert["not_before"].isoformat(),
+            "not_after": cert["not_after"].isoformat(),
+            "revoked_at": (
+                cert["revoked_at"].isoformat() if cert["revoked_at"] else None
+            ),
+            "revocation_reason": cert.get("revocation_reason"),
+        }
+    )

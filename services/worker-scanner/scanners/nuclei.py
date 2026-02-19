@@ -53,14 +53,13 @@ class NucleiScanner(BaseScanner):
 
         # Set binary path from config, env var, or default
         self.binary_path = config.get(
-            "binary_path",
-            os.environ.get("NUCLEI_BINARY_PATH", "/usr/local/bin/nuclei")
+            "binary_path", os.environ.get("NUCLEI_BINARY_PATH", "/usr/local/bin/nuclei")
         )
 
         # Set templates path from config, env var, or default
         self.templates_path = config.get(
             "templates_path",
-            os.environ.get("NUCLEI_TEMPLATES_PATH", "/root/nuclei-templates")
+            os.environ.get("NUCLEI_TEMPLATES_PATH", "/root/nuclei-templates"),
         )
 
         # Set rate limit and concurrency
@@ -74,10 +73,7 @@ class NucleiScanner(BaseScanner):
         )
 
     def scan(
-        self,
-        target: str,
-        scan_type: str,
-        config: dict | None = None
+        self, target: str, scan_type: str, config: dict | None = None
     ) -> ScanResult:
         """Execute a Nuclei scan against the target.
 
@@ -97,9 +93,7 @@ class NucleiScanner(BaseScanner):
         start_time = time.time()
         merge_config = {**self.config, **(config or {})}
 
-        self.logger.info(
-            f"Starting Nuclei {scan_type} scan against {target}"
-        )
+        self.logger.info(f"Starting Nuclei {scan_type} scan against {target}")
 
         # Build command line arguments
         cmd_parts = [self.binary_path]
@@ -178,7 +172,9 @@ class NucleiScanner(BaseScanner):
             cmd_parts.extend(["-timeout", str(merge_config["timeout"])])
 
         # Log the command being executed
-        self.logger.debug(f"Executing command: {' '.join(shlex.quote(p) for p in cmd_parts)}")
+        self.logger.debug(
+            f"Executing command: {' '.join(shlex.quote(p) for p in cmd_parts)}"
+        )
 
         # Execute the scan
         try:
@@ -506,8 +502,17 @@ class NucleiScanner(BaseScanner):
                 )
 
             # Check that severity levels are valid
-            valid_severities = {"critical", "high", "medium", "low", "info", "informational"}
-            provided_severities = {s.strip().lower() for s in severity_filter.split(",")}
+            valid_severities = {
+                "critical",
+                "high",
+                "medium",
+                "low",
+                "info",
+                "informational",
+            }
+            provided_severities = {
+                s.strip().lower() for s in severity_filter.split(",")
+            }
             invalid_severities = provided_severities - valid_severities
 
             if invalid_severities:

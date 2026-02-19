@@ -49,12 +49,12 @@ class S3ScanClient:
             self.channel = grpc.aio.insecure_channel(
                 self.server_address,
                 options=[
-                    ('grpc.max_send_message_length', 50 * 1024 * 1024),  # 50MB
-                    ('grpc.max_receive_message_length', 50 * 1024 * 1024),  # 50MB
-                    ('grpc.keepalive_time_ms', 30000),  # 30 seconds
-                    ('grpc.keepalive_timeout_ms', 10000),  # 10 seconds
-                    ('grpc.keepalive_permit_without_calls', True),
-                    ('grpc.http2.max_pings_without_data', 0),
+                    ("grpc.max_send_message_length", 50 * 1024 * 1024),  # 50MB
+                    ("grpc.max_receive_message_length", 50 * 1024 * 1024),  # 50MB
+                    ("grpc.keepalive_time_ms", 30000),  # 30 seconds
+                    ("grpc.keepalive_timeout_ms", 10000),  # 10 seconds
+                    ("grpc.keepalive_permit_without_calls", True),
+                    ("grpc.http2.max_pings_without_data", 0),
                 ],
             )
 
@@ -67,7 +67,9 @@ class S3ScanClient:
             # Test connection with a simple call (wait for channel to be ready)
             await self.channel.channel_ready()
 
-            logger.info("Connected to manager gRPC server", server_address=self.server_address)
+            logger.info(
+                "Connected to manager gRPC server", server_address=self.server_address
+            )
 
         except Exception as e:
             logger.error(
@@ -125,24 +127,24 @@ class S3ScanClient:
 
             # Build ScanResult message
             scan_result = s3_scan_pb2.ScanResult(
-                task_id=result.get('task_id', ''),
-                job_id=result.get('job_id', ''),
-                object_key=result.get('object_key', ''),
-                scan_status=result.get('scan_status', 'error'),
-                is_malware=result.get('is_malware', False),
-                is_pup=result.get('is_pup', False),
-                is_threat=result.get('is_threat', False),
-                detected_file_type=result.get('detected_file_type', ''),
-                threat_names=result.get('threat_names', []),
-                file_md5=result.get('file_md5', ''),
-                file_sha1=result.get('file_sha1', ''),
-                file_sha256=result.get('file_sha256', ''),
-                clamav_result_json=result.get('clamav_result_json', ''),
-                yara_matches_json=result.get('yara_matches_json', ''),
-                ti_enrichment_json=result.get('ti_enrichment_json', ''),
-                scan_duration_ms=result.get('scan_duration_ms', 0),
-                tags_applied=result.get('tags_applied', False),
-                error_message=result.get('error_message', ''),
+                task_id=result.get("task_id", ""),
+                job_id=result.get("job_id", ""),
+                object_key=result.get("object_key", ""),
+                scan_status=result.get("scan_status", "error"),
+                is_malware=result.get("is_malware", False),
+                is_pup=result.get("is_pup", False),
+                is_threat=result.get("is_threat", False),
+                detected_file_type=result.get("detected_file_type", ""),
+                threat_names=result.get("threat_names", []),
+                file_md5=result.get("file_md5", ""),
+                file_sha1=result.get("file_sha1", ""),
+                file_sha256=result.get("file_sha256", ""),
+                clamav_result_json=result.get("clamav_result_json", ""),
+                yara_matches_json=result.get("yara_matches_json", ""),
+                ti_enrichment_json=result.get("ti_enrichment_json", ""),
+                scan_duration_ms=result.get("scan_duration_ms", 0),
+                tags_applied=result.get("tags_applied", False),
+                error_message=result.get("error_message", ""),
             )
 
             # Call ReportScanResult RPC
@@ -154,23 +156,23 @@ class S3ScanClient:
             if response.accepted:
                 logger.info(
                     "Scan result reported successfully",
-                    task_id=result.get('task_id'),
-                    job_id=result.get('job_id'),
-                    object_key=result.get('object_key'),
+                    task_id=result.get("task_id"),
+                    job_id=result.get("job_id"),
+                    object_key=result.get("object_key"),
                 )
                 return True
             else:
                 logger.warning(
                     "Scan result rejected by manager",
-                    task_id=result.get('task_id'),
-                    job_id=result.get('job_id'),
+                    task_id=result.get("task_id"),
+                    job_id=result.get("job_id"),
                 )
                 return False
 
         except grpc.RpcError as e:
             logger.error(
                 "gRPC error reporting scan result",
-                task_id=result.get('task_id'),
+                task_id=result.get("task_id"),
                 error_code=e.code(),
                 error_details=e.details(),
                 exc_info=True,
@@ -179,7 +181,7 @@ class S3ScanClient:
         except Exception as e:
             logger.error(
                 "Error reporting scan result",
-                task_id=result.get('task_id'),
+                task_id=result.get("task_id"),
                 error=str(e),
                 exc_info=True,
             )
@@ -218,19 +220,19 @@ class S3ScanClient:
             )
 
             status = {
-                'job_id': response.job_id,
-                'status': response.status,
-                'total': response.total,
-                'scanned': response.scanned,
-                'infected': response.infected,
+                "job_id": response.job_id,
+                "status": response.status,
+                "total": response.total,
+                "scanned": response.scanned,
+                "infected": response.infected,
             }
 
             logger.info(
                 "Retrieved job status",
                 job_id=job_id,
-                status=status['status'],
-                scanned=status['scanned'],
-                total=status['total'],
+                status=status["status"],
+                scanned=status["scanned"],
+                total=status["total"],
             )
 
             return status
@@ -277,24 +279,24 @@ class S3ScanClient:
             async def result_generator():
                 for result in results:
                     scan_result = s3_scan_pb2.ScanResult(
-                        task_id=result.get('task_id', ''),
-                        job_id=result.get('job_id', ''),
-                        object_key=result.get('object_key', ''),
-                        scan_status=result.get('scan_status', 'error'),
-                        is_malware=result.get('is_malware', False),
-                        is_pup=result.get('is_pup', False),
-                        is_threat=result.get('is_threat', False),
-                        detected_file_type=result.get('detected_file_type', ''),
-                        threat_names=result.get('threat_names', []),
-                        file_md5=result.get('file_md5', ''),
-                        file_sha1=result.get('file_sha1', ''),
-                        file_sha256=result.get('file_sha256', ''),
-                        clamav_result_json=result.get('clamav_result_json', ''),
-                        yara_matches_json=result.get('yara_matches_json', ''),
-                        ti_enrichment_json=result.get('ti_enrichment_json', ''),
-                        scan_duration_ms=result.get('scan_duration_ms', 0),
-                        tags_applied=result.get('tags_applied', False),
-                        error_message=result.get('error_message', ''),
+                        task_id=result.get("task_id", ""),
+                        job_id=result.get("job_id", ""),
+                        object_key=result.get("object_key", ""),
+                        scan_status=result.get("scan_status", "error"),
+                        is_malware=result.get("is_malware", False),
+                        is_pup=result.get("is_pup", False),
+                        is_threat=result.get("is_threat", False),
+                        detected_file_type=result.get("detected_file_type", ""),
+                        threat_names=result.get("threat_names", []),
+                        file_md5=result.get("file_md5", ""),
+                        file_sha1=result.get("file_sha1", ""),
+                        file_sha256=result.get("file_sha256", ""),
+                        clamav_result_json=result.get("clamav_result_json", ""),
+                        yara_matches_json=result.get("yara_matches_json", ""),
+                        ti_enrichment_json=result.get("ti_enrichment_json", ""),
+                        scan_duration_ms=result.get("scan_duration_ms", 0),
+                        tags_applied=result.get("tags_applied", False),
+                        error_message=result.get("error_message", ""),
                     )
                     yield scan_result
                     await asyncio.sleep(0)  # Yield control

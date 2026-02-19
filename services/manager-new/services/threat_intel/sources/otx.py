@@ -1,4 +1,5 @@
 """AlienVault OTX threat intelligence source."""
+
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
@@ -35,9 +36,7 @@ class OTXSource:
     }
 
     def __init__(
-        self,
-        api_key: str,
-        base_url: str = "https://otx.alienvault.com/api/v1"
+        self, api_key: str, base_url: str = "https://otx.alienvault.com/api/v1"
     ):
         """Initialize OTX source."""
         self.api_key = api_key
@@ -100,8 +99,7 @@ class OTXSource:
         try:
             # Get subscribed pulses
             response = await self._client.get(
-                "/pulses/subscribed",
-                params={"limit": 50, "page": 1}
+                "/pulses/subscribed", params={"limit": 50, "page": 1}
             )
             response.raise_for_status()
 
@@ -112,22 +110,24 @@ class OTXSource:
                 pulse_indicators = pulse.get("indicators", [])
 
                 for ind in pulse_indicators:
-                    indicators.append({
-                        "indicator_type": self._reverse_map_type(ind.get("type")),
-                        "value": ind.get("indicator"),
-                        "source": "otx",
-                        "pulse_id": pulse.get("id"),
-                        "pulse_name": pulse.get("name"),
-                        "description": ind.get("description"),
-                        "created": ind.get("created"),
-                        "threat_level": self._map_threat_level(pulse),
-                        "tags": pulse.get("tags", []),
-                    })
+                    indicators.append(
+                        {
+                            "indicator_type": self._reverse_map_type(ind.get("type")),
+                            "value": ind.get("indicator"),
+                            "source": "otx",
+                            "pulse_id": pulse.get("id"),
+                            "pulse_name": pulse.get("name"),
+                            "description": ind.get("description"),
+                            "created": ind.get("created"),
+                            "threat_level": self._map_threat_level(pulse),
+                            "tags": pulse.get("tags", []),
+                        }
+                    )
 
             logger.info(
                 "OTX pulses fetched",
                 pulse_count=len(pulses),
-                indicator_count=len(indicators)
+                indicator_count=len(indicators),
             )
 
         except Exception as e:
@@ -154,7 +154,9 @@ class OTXSource:
             general = await self._get_section(otx_type, value, "general")
             if general:
                 enrichment["general"] = general
-                enrichment["pulse_count"] = general.get("pulse_info", {}).get("count", 0)
+                enrichment["pulse_count"] = general.get("pulse_info", {}).get(
+                    "count", 0
+                )
                 enrichment["malicious"] = enrichment["pulse_count"] > 0
 
             # Get geo info for IPs
@@ -214,9 +216,7 @@ class OTXSource:
             params["modified_since"] = modified_since
 
         try:
-            response = await self._client.get(
-                "/pulses/subscribed", params=params
-            )
+            response = await self._client.get("/pulses/subscribed", params=params)
             response.raise_for_status()
             return response.json().get("results", [])
         except Exception as e:

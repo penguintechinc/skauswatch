@@ -171,10 +171,7 @@ class BaseScanner(abc.ABC):
 
     @abc.abstractmethod
     def scan(
-        self,
-        target: str,
-        scan_type: str,
-        config: dict | None = None
+        self, target: str, scan_type: str, config: dict | None = None
     ) -> ScanResult:
         """Execute a security scan against the target.
 

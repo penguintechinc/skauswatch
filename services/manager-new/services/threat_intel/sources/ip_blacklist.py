@@ -1,4 +1,5 @@
 """IP Blacklist threat intelligence source."""
+
 import asyncio
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Set
@@ -84,18 +85,14 @@ class IPBlacklistSource:
                 feed_indicators = await self._fetch_feed(feed_name, feed_config)
                 indicators.extend(feed_indicators)
             except Exception as e:
-                logger.error(
-                    "Failed to fetch feed",
-                    feed=feed_name,
-                    error=str(e)
-                )
+                logger.error("Failed to fetch feed", feed=feed_name, error=str(e))
 
         self._last_fetch = datetime.utcnow()
 
         logger.info(
             "IP blacklist feeds updated",
             total_ips=len(self._ip_cache),
-            feeds_fetched=len(self.FEEDS)
+            feeds_fetched=len(self.FEEDS),
         )
 
         return indicators
@@ -127,21 +124,19 @@ class IPBlacklistSource:
                     self._ip_cache.add(ip)
                     self._ip_sources[ip] = feed_name
 
-                    indicators.append({
-                        "indicator_type": "ip",
-                        "value": ip,
-                        "source": feed_name,
-                        "description": config["description"],
-                        "threat_level": "high",
-                        "confidence": 0.8,
-                    })
+                    indicators.append(
+                        {
+                            "indicator_type": "ip",
+                            "value": ip,
+                            "source": feed_name,
+                            "description": config["description"],
+                            "threat_level": "high",
+                            "confidence": 0.8,
+                        }
+                    )
 
         except httpx.HTTPError as e:
-            logger.error(
-                "HTTP error fetching feed",
-                feed=feed_name,
-                error=str(e)
-            )
+            logger.error("HTTP error fetching feed", feed=feed_name, error=str(e))
             raise
 
         return indicators

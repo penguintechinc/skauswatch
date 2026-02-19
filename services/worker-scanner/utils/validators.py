@@ -32,7 +32,10 @@ def validate_target_value(target_type: str, value: str) -> tuple[bool, str]:
         # Domain validation: RFC 1123 compliant domain names
         # Must not contain protocol prefix
         if "://" in value:
-            return False, "Domain should not include protocol prefix (http://, https://)"
+            return (
+                False,
+                "Domain should not include protocol prefix (http://, https://)",
+            )
 
         domain_pattern = r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$"
         if not re.match(domain_pattern, value):

@@ -316,7 +316,9 @@ def delete_job(job_id: int) -> tuple[Any, int]:
             celery_app.control.revoke(str(job_id), terminate=True)
             logger.info("Revoked Celery task for job %d", job_id)
         except Exception as e:
-            logger.warning("Failed to revoke Celery task for job %d: %s", job_id, str(e))
+            logger.warning(
+                "Failed to revoke Celery task for job %d: %s", job_id, str(e)
+            )
             # Continue anyway - job is marked as cancelled
 
     # Handle pending jobs - just cancel them

@@ -1,4 +1,5 @@
 """gRPC server implementation for PKI Service."""
+
 import asyncio
 from concurrent import futures
 from datetime import datetime
@@ -151,7 +152,9 @@ class PKIServiceServicer:
         """Get X.509 certificate by ID or serial."""
         try:
             cert_id = request.id if request.HasField("id") else None
-            serial = request.serial_number if request.HasField("serial_number") else None
+            serial = (
+                request.serial_number if request.HasField("serial_number") else None
+            )
 
             cert = await self.cert_manager.get_x509_certificate(
                 cert_id=cert_id, serial_number=serial
@@ -187,7 +190,9 @@ class PKIServiceServicer:
         """Revoke an X.509 certificate."""
         try:
             cert_id = request.id if request.HasField("id") else None
-            serial = request.serial_number if request.HasField("serial_number") else None
+            serial = (
+                request.serial_number if request.HasField("serial_number") else None
+            )
             reason = REVOCATION_REVERSE.get(request.reason, "unspecified")
 
             success = await self.cert_manager.revoke_x509_certificate(
@@ -218,7 +223,9 @@ class PKIServiceServicer:
         """Get X.509 certificate status."""
         try:
             cert_id = request.id if request.HasField("id") else None
-            serial = request.serial_number if request.HasField("serial_number") else None
+            serial = (
+                request.serial_number if request.HasField("serial_number") else None
+            )
 
             cert = await self.cert_manager.get_x509_certificate(
                 cert_id=cert_id, serial_number=serial
@@ -239,7 +246,9 @@ class PKIServiceServicer:
                 is_expired=is_expired,
                 not_before=cert["not_before"].isoformat(),
                 not_after=cert["not_after"].isoformat(),
-                revoked_at=cert["revoked_at"].isoformat() if cert.get("revoked_at") else "",
+                revoked_at=(
+                    cert["revoked_at"].isoformat() if cert.get("revoked_at") else ""
+                ),
                 revocation_reason=cert.get("revocation_reason") or "",
             )
 
@@ -271,7 +280,9 @@ class PKIServiceServicer:
                     not_after=c["not_after"].isoformat(),
                     fingerprint_sha256=c["fingerprint_sha256"],
                     status=STATUS_MAP.get(c["status"], 0),
-                    revoked_at=c["revoked_at"].isoformat() if c.get("revoked_at") else "",
+                    revoked_at=(
+                        c["revoked_at"].isoformat() if c.get("revoked_at") else ""
+                    ),
                     created_at=c["created_at"].isoformat(),
                 )
                 for c in certs
@@ -344,7 +355,9 @@ class PKIServiceServicer:
         """Get SSH certificate by ID or serial."""
         try:
             cert_id = request.id if request.HasField("id") else None
-            serial = request.serial_number if request.HasField("serial_number") else None
+            serial = (
+                request.serial_number if request.HasField("serial_number") else None
+            )
 
             cert = await self.cert_manager.get_ssh_certificate(
                 cert_id=cert_id, serial_number=serial
@@ -382,7 +395,9 @@ class PKIServiceServicer:
         """Revoke an SSH certificate."""
         try:
             cert_id = request.id if request.HasField("id") else None
-            serial = request.serial_number if request.HasField("serial_number") else None
+            serial = (
+                request.serial_number if request.HasField("serial_number") else None
+            )
             reason = REVOCATION_REVERSE.get(request.reason, "unspecified")
 
             success = await self.cert_manager.revoke_ssh_certificate(
@@ -413,7 +428,9 @@ class PKIServiceServicer:
         """Get SSH certificate status."""
         try:
             cert_id = request.id if request.HasField("id") else None
-            serial = request.serial_number if request.HasField("serial_number") else None
+            serial = (
+                request.serial_number if request.HasField("serial_number") else None
+            )
 
             cert = await self.cert_manager.get_ssh_certificate(
                 cert_id=cert_id, serial_number=serial
@@ -434,7 +451,9 @@ class PKIServiceServicer:
                 is_expired=is_expired,
                 not_before=cert["valid_after"].isoformat(),
                 not_after=cert["valid_before"].isoformat(),
-                revoked_at=cert["revoked_at"].isoformat() if cert.get("revoked_at") else "",
+                revoked_at=(
+                    cert["revoked_at"].isoformat() if cert.get("revoked_at") else ""
+                ),
                 revocation_reason=cert.get("revocation_reason") or "",
             )
 
@@ -448,7 +467,11 @@ class PKIServiceServicer:
         """List SSH certificates."""
         try:
             status = STATUS_REVERSE.get(request.status) if request.status else None
-            cert_type = SSH_CERT_TYPE_REVERSE.get(request.certificate_type) if hasattr(request, 'certificate_type') else None
+            cert_type = (
+                SSH_CERT_TYPE_REVERSE.get(request.certificate_type)
+                if hasattr(request, "certificate_type")
+                else None
+            )
 
             certs, total = await self.cert_manager.list_ssh_certificates(
                 status=status,
@@ -470,7 +493,9 @@ class PKIServiceServicer:
                     key_type=c["key_type"],
                     hostname=c.get("hostname") or "",
                     status=STATUS_MAP.get(c["status"], 0),
-                    revoked_at=c["revoked_at"].isoformat() if c.get("revoked_at") else "",
+                    revoked_at=(
+                        c["revoked_at"].isoformat() if c.get("revoked_at") else ""
+                    ),
                     created_at=c["created_at"].isoformat(),
                 )
                 for c in certs
@@ -504,7 +529,11 @@ class PKIServiceServicer:
             entries = [
                 pki_pb2.RevokedCertEntry(
                     serial_number=e["serial_number"],
-                    revoked_at=e["revoked_at"].isoformat() if isinstance(e["revoked_at"], datetime) else e["revoked_at"],
+                    revoked_at=(
+                        e["revoked_at"].isoformat()
+                        if isinstance(e["revoked_at"], datetime)
+                        else e["revoked_at"]
+                    ),
                     reason=e.get("reason", "unspecified"),
                 )
                 for e in crl["revoked_certificates"]
@@ -528,6 +557,7 @@ class PKIServiceServicer:
         """Get Key Revocation List."""
         try:
             import base64
+
             krl = await self.cert_manager.generate_ssh_krl()
 
             entries = [

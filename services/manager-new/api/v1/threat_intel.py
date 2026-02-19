@@ -58,8 +58,8 @@ async def list_iocs():
         query = query & (db.threat_indicators.source == source)
     if not include_expired:
         query = query & (
-            (db.threat_indicators.expires_at == None) |
-            (db.threat_indicators.expires_at > datetime.utcnow())
+            (db.threat_indicators.expires_at == None)
+            | (db.threat_indicators.expires_at > datetime.utcnow())
         )
 
     # Execute query
@@ -72,26 +72,33 @@ async def list_iocs():
     # Convert to response format
     ioc_list = []
     for ioc in iocs:
-        ioc_list.append({
-            "id": ioc.id,
-            "indicator_type": ioc.indicator_type,
-            "value": ioc.value,
-            "threat_level": ioc.threat_level,
-            "confidence": ioc.confidence,
-            "source": ioc.source,
-            "tags": ioc.tags or [],
-            "metadata": ioc.metadata or {},
-            "expires_at": ioc.expires_at.isoformat() if ioc.expires_at else None,
-            "created_at": ioc.created_at.isoformat() if ioc.created_at else None,
-        })
+        ioc_list.append(
+            {
+                "id": ioc.id,
+                "indicator_type": ioc.indicator_type,
+                "value": ioc.value,
+                "threat_level": ioc.threat_level,
+                "confidence": ioc.confidence,
+                "source": ioc.source,
+                "tags": ioc.tags or [],
+                "metadata": ioc.metadata or {},
+                "expires_at": ioc.expires_at.isoformat() if ioc.expires_at else None,
+                "created_at": ioc.created_at.isoformat() if ioc.created_at else None,
+            }
+        )
 
-    return jsonify({
-        "items": ioc_list,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
-    }), 200
+    return (
+        jsonify(
+            {
+                "items": ioc_list,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "pages": (total + per_page - 1) // per_page,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/iocs/<int:ioc_id>", methods=["GET"])
@@ -105,19 +112,24 @@ async def get_ioc(ioc_id: int):
     if not ioc:
         return jsonify({"error": "IOC not found"}), 404
 
-    return jsonify({
-        "id": ioc.id,
-        "indicator_type": ioc.indicator_type,
-        "value": ioc.value,
-        "threat_level": ioc.threat_level,
-        "confidence": ioc.confidence,
-        "source": ioc.source,
-        "tags": ioc.tags or [],
-        "metadata": ioc.metadata or {},
-        "expires_at": ioc.expires_at.isoformat() if ioc.expires_at else None,
-        "created_at": ioc.created_at.isoformat() if ioc.created_at else None,
-        "updated_at": ioc.updated_at.isoformat() if ioc.updated_at else None,
-    }), 200
+    return (
+        jsonify(
+            {
+                "id": ioc.id,
+                "indicator_type": ioc.indicator_type,
+                "value": ioc.value,
+                "threat_level": ioc.threat_level,
+                "confidence": ioc.confidence,
+                "source": ioc.source,
+                "tags": ioc.tags or [],
+                "metadata": ioc.metadata or {},
+                "expires_at": ioc.expires_at.isoformat() if ioc.expires_at else None,
+                "created_at": ioc.created_at.isoformat() if ioc.created_at else None,
+                "updated_at": ioc.updated_at.isoformat() if ioc.updated_at else None,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/iocs", methods=["POST"])
@@ -136,10 +148,14 @@ async def create_ioc():
     db = get_db(config.database.uri)
 
     # Check for duplicate
-    existing = db(
-        (db.threat_indicators.indicator_type == create_data.indicator_type.value) &
-        (db.threat_indicators.value == create_data.value)
-    ).select().first()
+    existing = (
+        db(
+            (db.threat_indicators.indicator_type == create_data.indicator_type.value)
+            & (db.threat_indicators.value == create_data.value)
+        )
+        .select()
+        .first()
+    )
 
     if existing:
         return jsonify({"error": "IOC already exists", "existing_id": existing.id}), 409
@@ -159,16 +175,23 @@ async def create_ioc():
 
     ioc = db(db.threat_indicators.id == ioc_id).select().first()
 
-    return jsonify({
-        "message": "IOC created successfully",
-        "ioc": {
-            "id": ioc.id,
-            "indicator_type": ioc.indicator_type,
-            "value": ioc.value,
-            "threat_level": ioc.threat_level,
-            "created_at": ioc.created_at.isoformat() if ioc.created_at else None,
-        },
-    }), 201
+    return (
+        jsonify(
+            {
+                "message": "IOC created successfully",
+                "ioc": {
+                    "id": ioc.id,
+                    "indicator_type": ioc.indicator_type,
+                    "value": ioc.value,
+                    "threat_level": ioc.threat_level,
+                    "created_at": (
+                        ioc.created_at.isoformat() if ioc.created_at else None
+                    ),
+                },
+            }
+        ),
+        201,
+    )
 
 
 @bp.route("/iocs/bulk", methods=["POST"])
@@ -193,10 +216,17 @@ async def bulk_create_iocs():
     for idx, ioc_data in enumerate(bulk_data.indicators):
         try:
             # Check for existing
-            existing = db(
-                (db.threat_indicators.indicator_type == ioc_data.indicator_type.value) &
-                (db.threat_indicators.value == ioc_data.value)
-            ).select().first()
+            existing = (
+                db(
+                    (
+                        db.threat_indicators.indicator_type
+                        == ioc_data.indicator_type.value
+                    )
+                    & (db.threat_indicators.value == ioc_data.value)
+                )
+                .select()
+                .first()
+            )
 
             if existing:
                 # Update existing
@@ -227,13 +257,18 @@ async def bulk_create_iocs():
 
     db.commit()
 
-    return jsonify({
-        "success": True,
-        "created_count": created_count,
-        "updated_count": updated_count,
-        "error_count": len(errors),
-        "errors": errors[:10],  # Return first 10 errors
-    }), 201
+    return (
+        jsonify(
+            {
+                "success": True,
+                "created_count": created_count,
+                "updated_count": updated_count,
+                "error_count": len(errors),
+                "errors": errors[:10],  # Return first 10 errors
+            }
+        ),
+        201,
+    )
 
 
 @bp.route("/iocs/<int:ioc_id>", methods=["DELETE"])
@@ -276,21 +311,25 @@ async def search_iocs():
     if search_data.query:
         query = query & (db.threat_indicators.value.contains(search_data.query))
     if search_data.indicator_type:
-        query = query & (db.threat_indicators.indicator_type.belongs(
-            [t.value for t in search_data.indicator_type]
-        ))
+        query = query & (
+            db.threat_indicators.indicator_type.belongs(
+                [t.value for t in search_data.indicator_type]
+            )
+        )
     if search_data.threat_level:
-        query = query & (db.threat_indicators.threat_level.belongs(
-            [t.value for t in search_data.threat_level]
-        ))
+        query = query & (
+            db.threat_indicators.threat_level.belongs(
+                [t.value for t in search_data.threat_level]
+            )
+        )
     if search_data.source:
         query = query & (db.threat_indicators.source == search_data.source)
     if search_data.confidence_min:
         query = query & (db.threat_indicators.confidence >= search_data.confidence_min)
     if not search_data.include_expired:
         query = query & (
-            (db.threat_indicators.expires_at == None) |
-            (db.threat_indicators.expires_at > datetime.utcnow())
+            (db.threat_indicators.expires_at == None)
+            | (db.threat_indicators.expires_at > datetime.utcnow())
         )
 
     # Execute query
@@ -303,24 +342,31 @@ async def search_iocs():
     # Convert to response format
     ioc_list = []
     for ioc in iocs:
-        ioc_list.append({
-            "id": ioc.id,
-            "indicator_type": ioc.indicator_type,
-            "value": ioc.value,
-            "threat_level": ioc.threat_level,
-            "confidence": ioc.confidence,
-            "source": ioc.source,
-            "tags": ioc.tags or [],
-            "created_at": ioc.created_at.isoformat() if ioc.created_at else None,
-        })
+        ioc_list.append(
+            {
+                "id": ioc.id,
+                "indicator_type": ioc.indicator_type,
+                "value": ioc.value,
+                "threat_level": ioc.threat_level,
+                "confidence": ioc.confidence,
+                "source": ioc.source,
+                "tags": ioc.tags or [],
+                "created_at": ioc.created_at.isoformat() if ioc.created_at else None,
+            }
+        )
 
-    return jsonify({
-        "items": ioc_list,
-        "total": total,
-        "page": search_data.page,
-        "per_page": search_data.per_page,
-        "pages": (total + search_data.per_page - 1) // search_data.per_page,
-    }), 200
+    return (
+        jsonify(
+            {
+                "items": ioc_list,
+                "total": total,
+                "page": search_data.page,
+                "per_page": search_data.per_page,
+                "pages": (total + search_data.per_page - 1) // search_data.per_page,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/iocs/lookup", methods=["POST"])
@@ -338,34 +384,48 @@ async def lookup_ioc():
         return jsonify({"error": "Both 'type' and 'value' are required"}), 400
 
     # Search for matching IOC
-    ioc = db(
-        (db.threat_indicators.indicator_type == indicator_type) &
-        (db.threat_indicators.value == value) &
-        (
-            (db.threat_indicators.expires_at == None) |
-            (db.threat_indicators.expires_at > datetime.utcnow())
+    ioc = (
+        db(
+            (db.threat_indicators.indicator_type == indicator_type)
+            & (db.threat_indicators.value == value)
+            & (
+                (db.threat_indicators.expires_at == None)
+                | (db.threat_indicators.expires_at > datetime.utcnow())
+            )
         )
-    ).select().first()
+        .select()
+        .first()
+    )
 
     if ioc:
-        return jsonify({
-            "found": True,
-            "ioc": {
-                "id": ioc.id,
-                "indicator_type": ioc.indicator_type,
-                "value": ioc.value,
-                "threat_level": ioc.threat_level,
-                "confidence": ioc.confidence,
-                "source": ioc.source,
-                "tags": ioc.tags or [],
-            },
-        }), 200
+        return (
+            jsonify(
+                {
+                    "found": True,
+                    "ioc": {
+                        "id": ioc.id,
+                        "indicator_type": ioc.indicator_type,
+                        "value": ioc.value,
+                        "threat_level": ioc.threat_level,
+                        "confidence": ioc.confidence,
+                        "source": ioc.source,
+                        "tags": ioc.tags or [],
+                    },
+                }
+            ),
+            200,
+        )
 
-    return jsonify({
-        "found": False,
-        "indicator_type": indicator_type,
-        "value": value,
-    }), 200
+    return (
+        jsonify(
+            {
+                "found": False,
+                "indicator_type": indicator_type,
+                "value": value,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/statistics", methods=["GET"])
@@ -389,28 +449,39 @@ async def get_statistics():
 
     # Count by source (top 10)
     # Note: PyDAL doesn't support GROUP BY directly in select, so we do it differently
-    all_sources = db(db.threat_indicators).select(db.threat_indicators.source, distinct=True)
+    all_sources = db(db.threat_indicators).select(
+        db.threat_indicators.source, distinct=True
+    )
     source_counts = {}
     for row in all_sources:
         if row.source:
-            source_counts[row.source] = db(db.threat_indicators.source == row.source).count()
+            source_counts[row.source] = db(
+                db.threat_indicators.source == row.source
+            ).count()
 
     # Sort and take top 10
-    top_sources = dict(sorted(source_counts.items(), key=lambda x: x[1], reverse=True)[:10])
+    top_sources = dict(
+        sorted(source_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    )
 
     # Count expired
     expired_count = db(
-        (db.threat_indicators.expires_at != None) &
-        (db.threat_indicators.expires_at <= datetime.utcnow())
+        (db.threat_indicators.expires_at != None)
+        & (db.threat_indicators.expires_at <= datetime.utcnow())
     ).count()
 
-    return jsonify({
-        "total": db(db.threat_indicators).count(),
-        "by_type": type_counts,
-        "by_threat_level": level_counts,
-        "top_sources": top_sources,
-        "expired": expired_count,
-    }), 200
+    return (
+        jsonify(
+            {
+                "total": db(db.threat_indicators).count(),
+                "by_type": type_counts,
+                "by_threat_level": level_counts,
+                "top_sources": top_sources,
+                "expired": expired_count,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/feeds", methods=["GET"])
@@ -423,52 +494,62 @@ async def list_feeds():
 
     # DNS Blacklist
     if config.threat_intel.dns_blacklist_enabled:
-        feeds.append({
-            "id": "dns_blacklist",
-            "name": "DNS Blacklists",
-            "type": "dns",
-            "enabled": True,
-            "description": "SpamHaus, SpamCop, SORBS DNS blacklists",
-        })
+        feeds.append(
+            {
+                "id": "dns_blacklist",
+                "name": "DNS Blacklists",
+                "type": "dns",
+                "enabled": True,
+                "description": "SpamHaus, SpamCop, SORBS DNS blacklists",
+            }
+        )
 
     # IP Blacklist
     if config.threat_intel.ip_blacklist_enabled:
-        feeds.append({
-            "id": "ip_blacklist",
-            "name": "IP Blacklists",
-            "type": "ip",
-            "enabled": True,
-            "description": "Known malicious IP address lists",
-        })
+        feeds.append(
+            {
+                "id": "ip_blacklist",
+                "name": "IP Blacklists",
+                "type": "ip",
+                "enabled": True,
+                "description": "Known malicious IP address lists",
+            }
+        )
 
     # AlienVault OTX
-    feeds.append({
-        "id": "otx",
-        "name": "AlienVault OTX",
-        "type": "api",
-        "enabled": config.threat_intel.otx_enabled,
-        "configured": bool(config.threat_intel.otx_api_key),
-        "description": "Open Threat Exchange threat intelligence",
-    })
+    feeds.append(
+        {
+            "id": "otx",
+            "name": "AlienVault OTX",
+            "type": "api",
+            "enabled": config.threat_intel.otx_enabled,
+            "configured": bool(config.threat_intel.otx_api_key),
+            "description": "Open Threat Exchange threat intelligence",
+        }
+    )
 
     # VirusTotal
-    feeds.append({
-        "id": "virustotal",
-        "name": "VirusTotal",
-        "type": "api",
-        "enabled": config.threat_intel.virustotal_enabled,
-        "configured": bool(config.threat_intel.virustotal_api_key),
-        "description": "VirusTotal file and URL analysis",
-    })
+    feeds.append(
+        {
+            "id": "virustotal",
+            "name": "VirusTotal",
+            "type": "api",
+            "enabled": config.threat_intel.virustotal_enabled,
+            "configured": bool(config.threat_intel.virustotal_api_key),
+            "description": "VirusTotal file and URL analysis",
+        }
+    )
 
     # STIX/TAXII
-    feeds.append({
-        "id": "taxii",
-        "name": "STIX/TAXII",
-        "type": "taxii",
-        "enabled": config.threat_intel.taxii_enabled,
-        "servers": len(config.threat_intel.taxii_servers),
-        "description": "STIX/TAXII 2.1 threat feeds",
-    })
+    feeds.append(
+        {
+            "id": "taxii",
+            "name": "STIX/TAXII",
+            "type": "taxii",
+            "enabled": config.threat_intel.taxii_enabled,
+            "servers": len(config.threat_intel.taxii_servers),
+            "description": "STIX/TAXII 2.1 threat feeds",
+        }
+    )
 
     return jsonify({"feeds": feeds}), 200

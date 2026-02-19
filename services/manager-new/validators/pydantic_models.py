@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, EmailStr, Field, validator
 
-
 # ============================================
 # Enums
 # ============================================
@@ -563,8 +562,7 @@ class DnsLookupRequest(BaseModel):
 
     query: str = Field(..., min_length=1, max_length=500)
     indicator_type: ResearchIndicatorType = Field(
-        default=ResearchIndicatorType.DOMAIN,
-        description="domain only"
+        default=ResearchIndicatorType.DOMAIN, description="domain only"
     )
 
 

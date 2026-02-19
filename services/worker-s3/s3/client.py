@@ -93,9 +93,7 @@ class S3Client:
                 "Metadata": response.get("Metadata", {}),
             }
 
-    async def download_to_file(
-        self, bucket: str, key: str, local_path: str
-    ) -> int:
+    async def download_to_file(self, bucket: str, key: str, local_path: str) -> int:
         """Download S3 object to local file.
 
         Args:

@@ -13,7 +13,15 @@ class CreateJobSchema(Schema):
     scan_type = fields.String(
         required=True,
         validate=validate.OneOf(
-            ["baseline", "full", "api", "custom", "discovery", "full_and_fast", "full_and_deep"]
+            [
+                "baseline",
+                "full",
+                "api",
+                "custom",
+                "discovery",
+                "full_and_fast",
+                "full_and_deep",
+            ]
         ),
     )
     priority = fields.Integer(load_default=5, validate=validate.Range(min=1, max=10))
@@ -43,11 +51,11 @@ class JobFilterSchema(Schema):
     """Schema for filtering and querying jobs."""
 
     status = fields.String(
-        validate=validate.OneOf(["pending", "running", "completed", "failed", "cancelled"])
+        validate=validate.OneOf(
+            ["pending", "running", "completed", "failed", "cancelled"]
+        )
     )
-    scanner_type = fields.String(
-        validate=validate.OneOf(["nuclei", "zap", "openvas"])
-    )
+    scanner_type = fields.String(validate=validate.OneOf(["nuclei", "zap", "openvas"]))
     target_id = fields.Integer()
     page = fields.Integer(load_default=1, validate=validate.Range(min=1))
     per_page = fields.Integer(load_default=20, validate=validate.Range(min=1, max=100))

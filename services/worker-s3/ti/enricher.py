@@ -37,9 +37,7 @@ class TIEnricher:
         if self.session:
             await self.session.close()
 
-    async def enrich(
-        self, sha256: str, md5: str, threat_names: List[str]
-    ) -> Dict:
+    async def enrich(self, sha256: str, md5: str, threat_names: List[str]) -> Dict:
         """Enrich hash with threat intelligence from multiple sources.
 
         Args:
@@ -85,9 +83,7 @@ class TIEnricher:
 
             # If threat names provided, try to identify family
             if threat_names and not result["threat_family"]:
-                result["threat_family"] = self._extract_family_from_names(
-                    threat_names
-                )
+                result["threat_family"] = self._extract_family_from_names(threat_names)
 
         except Exception as e:
             logger.error(f"Error enriching hash {sha256}: {e}")

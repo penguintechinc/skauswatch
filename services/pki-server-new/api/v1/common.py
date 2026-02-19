@@ -1,4 +1,5 @@
 """Common REST API endpoints for PKI Server."""
+
 from datetime import datetime, timedelta
 
 from quart import Blueprint, jsonify, current_app
@@ -37,10 +38,12 @@ async def get_all_ca_info():
     x509_info = cert_manager.x509_ca.get_ca_info()
     ssh_info = cert_manager.ssh_ca.get_ca_info()
 
-    return jsonify({
-        "x509": x509_info,
-        "ssh": ssh_info,
-    })
+    return jsonify(
+        {
+            "x509": x509_info,
+            "ssh": ssh_info,
+        }
+    )
 
 
 @common_bp.route("/audit", methods=["GET"])
@@ -65,8 +68,7 @@ async def get_audit_log():
         offset = (page - 1) * page_size
 
         entries = query.select(
-            orderby=~db.pki_audit_log.timestamp,
-            limitby=(offset, offset + page_size)
+            orderby=~db.pki_audit_log.timestamp, limitby=(offset, offset + page_size)
         )
 
         audit_log = [
@@ -86,13 +88,15 @@ async def get_audit_log():
             for e in entries
         ]
 
-    return jsonify({
-        "audit_log": audit_log,
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "pages": (total + page_size - 1) // page_size,
-    })
+    return jsonify(
+        {
+            "audit_log": audit_log,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": (total + page_size - 1) // page_size,
+        }
+    )
 
 
 @common_bp.route("/expiring", methods=["GET"])
@@ -115,9 +119,9 @@ async def get_expiring_certificates():
     with db_session() as db:
         if cert_type in ("x509", "all"):
             x509_certs = db(
-                (db.x509_certificates.status == "active") &
-                (db.x509_certificates.not_after < expiring_before) &
-                (db.x509_certificates.not_after > now)
+                (db.x509_certificates.status == "active")
+                & (db.x509_certificates.not_after < expiring_before)
+                & (db.x509_certificates.not_after > now)
             ).select(orderby=db.x509_certificates.not_after)
 
             result["x509"] = [
@@ -133,9 +137,9 @@ async def get_expiring_certificates():
 
         if cert_type in ("ssh", "all"):
             ssh_certs = db(
-                (db.ssh_certificates.status == "active") &
-                (db.ssh_certificates.valid_before < expiring_before) &
-                (db.ssh_certificates.valid_before > now)
+                (db.ssh_certificates.status == "active")
+                & (db.ssh_certificates.valid_before < expiring_before)
+                & (db.ssh_certificates.valid_before > now)
             ).select(orderby=db.ssh_certificates.valid_before)
 
             result["ssh"] = [
@@ -163,21 +167,23 @@ async def cleanup_expired():
     with db_session() as db:
         # Update expired X.509 certificates
         x509_updated = db(
-            (db.x509_certificates.status == "active") &
-            (db.x509_certificates.not_after < now)
+            (db.x509_certificates.status == "active")
+            & (db.x509_certificates.not_after < now)
         ).update(status="expired", updated_at=now)
         updated_count += x509_updated
 
         # Update expired SSH certificates
         ssh_updated = db(
-            (db.ssh_certificates.status == "active") &
-            (db.ssh_certificates.valid_before < now)
+            (db.ssh_certificates.status == "active")
+            & (db.ssh_certificates.valid_before < now)
         ).update(status="expired", updated_at=now)
         updated_count += ssh_updated
 
     logger.info("Expired certificates cleanup", updated_count=updated_count)
 
-    return jsonify({
-        "message": "Cleanup completed",
-        "updated_count": updated_count,
-    })
+    return jsonify(
+        {
+            "message": "Cleanup completed",
+            "updated_count": updated_count,
+        }
+    )

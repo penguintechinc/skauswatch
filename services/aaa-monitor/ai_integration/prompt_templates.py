@@ -20,6 +20,7 @@ logger = structlog.get_logger(__name__)
 
 class PromptCategory(str, Enum):
     """Prompt template categories"""
+
     SECURITY_ANALYSIS = "security_analysis"
     ANOMALY_DETECTION = "anomaly_detection"
     THREAT_CLASSIFICATION = "threat_classification"
@@ -32,14 +33,16 @@ class PromptCategory(str, Enum):
 
 class PromptComplexity(str, Enum):
     """Prompt complexity levels"""
-    SIMPLE = "simple"      # Basic analysis
+
+    SIMPLE = "simple"  # Basic analysis
     DETAILED = "detailed"  # Comprehensive analysis
-    EXPERT = "expert"      # Advanced technical analysis
+    EXPERT = "expert"  # Advanced technical analysis
 
 
 @dataclass
 class PromptTemplate:
     """Prompt template definition"""
+
     name: str
     category: PromptCategory
     analysis_type: AIAnalysisType
@@ -53,15 +56,15 @@ class PromptTemplate:
 
 class PromptTemplateManager:
     """Manages prompt templates for AI analysis"""
-    
+
     def __init__(self):
         """Initialize prompt template manager"""
         self.templates: Dict[str, PromptTemplate] = {}
         self._load_builtin_templates()
-    
+
     def _load_builtin_templates(self):
         """Load built-in prompt templates"""
-        
+
         # Security Event Analysis Templates
         self.templates["security_basic"] = PromptTemplate(
             name="security_basic",
@@ -84,9 +87,9 @@ Context: {context}
             required_fields=["log_data"],
             optional_fields=["context", "timeframe"],
             description="Basic security event analysis for quick threat assessment",
-            example_context={"timeframe": "last_hour", "source": "firewall"}
+            example_context={"timeframe": "last_hour", "source": "firewall"},
         )
-        
+
         self.templates["security_detailed"] = PromptTemplate(
             name="security_detailed",
             category=PromptCategory.SECURITY_ANALYSIS,
@@ -146,10 +149,10 @@ Format your response with clear sections and specific evidence from the log data
                 "source": "endpoint_detection",
                 "timeframe": "last_24_hours",
                 "environment": "production",
-                "previous_incidents": "none_recent"
-            }
+                "previous_incidents": "none_recent",
+            },
         )
-        
+
         # Anomaly Detection Templates
         self.templates["anomaly_basic"] = PromptTemplate(
             name="anomaly_basic",
@@ -178,9 +181,9 @@ Please provide:
             required_fields=["log_data"],
             optional_fields=["baseline_context", "normal_patterns"],
             description="Basic anomaly detection for log patterns",
-            example_context={"baseline_context": "30_day_average"}
+            example_context={"baseline_context": "30_day_average"},
         )
-        
+
         self.templates["anomaly_statistical"] = PromptTemplate(
             name="anomaly_statistical",
             category=PromptCategory.ANOMALY_DETECTION,
@@ -238,15 +241,19 @@ Please conduct a thorough statistical analysis:
 Provide quantitative measures where possible and explain your methodology.
 """.strip(),
             required_fields=["log_data", "baseline_metrics"],
-            optional_fields=["analysis_window", "confidence_threshold", "normal_patterns"],
+            optional_fields=[
+                "analysis_window",
+                "confidence_threshold",
+                "normal_patterns",
+            ],
             description="Advanced statistical anomaly detection with quantitative analysis",
             example_context={
                 "analysis_window": "7_days",
                 "confidence_threshold": "95%",
-                "normal_patterns": "weekday_business_hours"
-            }
+                "normal_patterns": "weekday_business_hours",
+            },
         )
-        
+
         # Threat Classification Templates
         self.templates["threat_classification"] = PromptTemplate(
             name="threat_classification",
@@ -302,15 +309,20 @@ Provide comprehensive threat classification:
 Include confidence scores for your assessments.
 """.strip(),
             required_fields=["log_data"],
-            optional_fields=["known_actors", "threat_intel", "industry", "asset_criticality"],
+            optional_fields=[
+                "known_actors",
+                "threat_intel",
+                "industry",
+                "asset_criticality",
+            ],
             description="Comprehensive threat classification with MITRE ATT&CK mapping",
             example_context={
                 "known_actors": "APT groups active in region",
                 "industry": "financial_services",
-                "asset_criticality": "high_value_targets"
-            }
+                "asset_criticality": "high_value_targets",
+            },
         )
-        
+
         # Log Correlation Templates
         self.templates["correlation_timeline"] = PromptTemplate(
             name="correlation_timeline",
@@ -370,10 +382,10 @@ Focus on establishing clear causal relationships between events.
             description="Advanced log correlation for incident reconstruction",
             example_context={
                 "time_window": "6_hours",
-                "systems": ["firewall", "endpoint", "domain_controller"]
-            }
+                "systems": ["firewall", "endpoint", "domain_controller"],
+            },
         )
-        
+
         # Pattern Analysis Templates
         self.templates["pattern_discovery"] = PromptTemplate(
             name="pattern_discovery",
@@ -434,15 +446,20 @@ Conduct comprehensive pattern analysis:
 Provide statistical significance and actionable recommendations.
 """.strip(),
             required_fields=["log_data"],
-            optional_fields=["pattern_types", "time_granularity", "min_frequency", "scope"],
+            optional_fields=[
+                "pattern_types",
+                "time_granularity",
+                "min_frequency",
+                "scope",
+            ],
             description="Advanced pattern discovery and analysis with predictive insights",
             example_context={
                 "pattern_types": "authentication,network,file_access",
                 "time_granularity": "hourly",
-                "min_frequency": "10_occurrences"
-            }
+                "min_frequency": "10_occurrences",
+            },
         )
-        
+
         # Incident Summary Templates
         self.templates["incident_executive_summary"] = PromptTemplate(
             name="incident_executive_summary",
@@ -509,15 +526,21 @@ Provide a comprehensive executive summary:
 Format for executive audience with clear action items.
 """.strip(),
             required_fields=["log_data"],
-            optional_fields=["detection_time", "incident_duration", "affected_systems", "business_impact", "response_actions"],
+            optional_fields=[
+                "detection_time",
+                "incident_duration",
+                "affected_systems",
+                "business_impact",
+                "response_actions",
+            ],
             description="Executive-level incident summary with business impact assessment",
             example_context={
                 "detection_time": "2024-01-15 14:30",
                 "incident_duration": "4_hours",
-                "affected_systems": "email_server,file_shares"
-            }
+                "affected_systems": "email_server,file_shares",
+            },
         )
-        
+
         # Compliance Check Templates
         self.templates["compliance_audit"] = PromptTemplate(
             name="compliance_audit",
@@ -578,66 +601,71 @@ Conduct thorough compliance assessment:
 Map findings to specific compliance requirements.
 """.strip(),
             required_fields=["log_data", "compliance_standards"],
-            optional_fields=["specific_requirements", "audit_period", "previous_findings"],
+            optional_fields=[
+                "specific_requirements",
+                "audit_period",
+                "previous_findings",
+            ],
             description="Comprehensive compliance analysis against industry standards",
             example_context={
                 "compliance_standards": "SOX,PCI-DSS,ISO27001",
-                "audit_period": "Q4_2024"
-            }
+                "audit_period": "Q4_2024",
+            },
         )
 
     def get_template(self, template_name: str) -> Optional[PromptTemplate]:
         """Get a specific template by name
-        
+
         Args:
             template_name: Name of the template
-            
+
         Returns:
             Template if found, None otherwise
         """
         return self.templates.get(template_name)
-    
-    def list_templates(self, 
-                      category: Optional[PromptCategory] = None,
-                      analysis_type: Optional[AIAnalysisType] = None,
-                      complexity: Optional[PromptComplexity] = None) -> List[PromptTemplate]:
+
+    def list_templates(
+        self,
+        category: Optional[PromptCategory] = None,
+        analysis_type: Optional[AIAnalysisType] = None,
+        complexity: Optional[PromptComplexity] = None,
+    ) -> List[PromptTemplate]:
         """List available templates with optional filters
-        
+
         Args:
             category: Filter by category
-            analysis_type: Filter by analysis type  
+            analysis_type: Filter by analysis type
             complexity: Filter by complexity level
-            
+
         Returns:
             List of matching templates
         """
         templates = list(self.templates.values())
-        
+
         if category:
             templates = [t for t in templates if t.category == category]
-        
+
         if analysis_type:
             templates = [t for t in templates if t.analysis_type == analysis_type]
-            
+
         if complexity:
             templates = [t for t in templates if t.complexity == complexity]
-        
+
         return templates
-    
-    def format_prompt(self, 
-                     template_name: str, 
-                     data: Dict[str, Any],
-                     validate_fields: bool = True) -> str:
+
+    def format_prompt(
+        self, template_name: str, data: Dict[str, Any], validate_fields: bool = True
+    ) -> str:
         """Format a prompt template with provided data
-        
+
         Args:
             template_name: Name of the template
             data: Data to fill template placeholders
             validate_fields: Whether to validate required fields
-            
+
         Returns:
             Formatted prompt string
-            
+
         Raises:
             KeyError: If required fields are missing
             ValueError: If template not found
@@ -645,14 +673,15 @@ Map findings to specific compliance requirements.
         template = self.templates.get(template_name)
         if not template:
             raise ValueError(f"Template '{template_name}' not found")
-        
+
         # Validate required fields
         if validate_fields:
-            missing_fields = [field for field in template.required_fields 
-                            if field not in data]
+            missing_fields = [
+                field for field in template.required_fields if field not in data
+            ]
             if missing_fields:
                 raise KeyError(f"Missing required fields: {missing_fields}")
-        
+
         # Format template with data
         try:
             # Handle missing optional fields
@@ -660,35 +689,37 @@ Map findings to specific compliance requirements.
             for field in template.optional_fields:
                 if field not in format_data:
                     format_data[field] = "Not specified"
-            
+
             # Format JSON data nicely
             for key, value in format_data.items():
                 if isinstance(value, (dict, list)):
                     format_data[key] = json.dumps(value, indent=2)
                 elif value is None:
                     format_data[key] = "Not provided"
-            
+
             formatted_prompt = template.template.format(**format_data)
             return formatted_prompt
-            
+
         except KeyError as e:
             raise KeyError(f"Template formatting error: {e}")
-    
-    def create_custom_prompt(self,
-                           analysis_type: AIAnalysisType,
-                           log_data: Any,
-                           context: Optional[Dict[str, Any]] = None,
-                           instructions: Optional[List[str]] = None,
-                           complexity: PromptComplexity = PromptComplexity.DETAILED) -> str:
+
+    def create_custom_prompt(
+        self,
+        analysis_type: AIAnalysisType,
+        log_data: Any,
+        context: Optional[Dict[str, Any]] = None,
+        instructions: Optional[List[str]] = None,
+        complexity: PromptComplexity = PromptComplexity.DETAILED,
+    ) -> str:
         """Create a custom prompt for log analysis
-        
+
         Args:
             analysis_type: Type of analysis to perform
             log_data: Log data to analyze
             context: Additional context information
             instructions: Specific instructions for analysis
             complexity: Complexity level of analysis
-            
+
         Returns:
             Custom formatted prompt
         """
@@ -717,15 +748,15 @@ Map findings to specific compliance requirements.
             AIAnalysisType.INCIDENT_SUMMARY: (
                 "You are an incident response analyst. "
                 "Create comprehensive incident summaries with actionable recommendations."
-            )
+            ),
         }
-        
+
         # Format log data
         if isinstance(log_data, (dict, list)):
             formatted_data = json.dumps(log_data, indent=2)
         else:
             formatted_data = str(log_data)
-        
+
         # Build prompt based on complexity
         if complexity == PromptComplexity.SIMPLE:
             prompt = f"""
@@ -739,7 +770,7 @@ Context: {json.dumps(context, indent=2) if context else 'None provided'}
 
 Provide a concise analysis with key findings and recommendations.
 """
-        
+
         elif complexity == PromptComplexity.DETAILED:
             prompt = f"""
 {system_instructions.get(analysis_type, 'You are a log analysis expert.')}
@@ -765,7 +796,7 @@ Please provide a comprehensive analysis including:
 
 {self._format_custom_instructions(instructions)}
 """
-        
+
         else:  # EXPERT
             prompt = f"""
 {system_instructions.get(analysis_type, 'You are a log analysis expert.')}
@@ -797,88 +828,91 @@ Provide a comprehensive expert analysis including:
 
 Use industry-standard frameworks and provide quantitative measures where possible.
 """
-        
+
         return prompt.strip()
-    
+
     def _format_custom_instructions(self, instructions: Optional[List[str]]) -> str:
         """Format custom instructions for prompt
-        
+
         Args:
             instructions: List of custom instructions
-            
+
         Returns:
             Formatted instructions string
         """
         if not instructions:
             return ""
-        
+
         formatted = "Additional Instructions:\n"
         for i, instruction in enumerate(instructions, 1):
             formatted += f"{i}. {instruction}\n"
-        
+
         return formatted
 
-    def suggest_template(self, 
-                        analysis_type: AIAnalysisType,
-                        data_characteristics: Optional[Dict[str, Any]] = None) -> List[str]:
+    def suggest_template(
+        self,
+        analysis_type: AIAnalysisType,
+        data_characteristics: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
         """Suggest appropriate templates based on analysis type and data characteristics
-        
+
         Args:
             analysis_type: Type of analysis needed
             data_characteristics: Characteristics of the data to analyze
-            
+
         Returns:
             List of recommended template names
         """
         matching_templates = [
-            t.name for t in self.templates.values() 
-            if t.analysis_type == analysis_type
+            t.name for t in self.templates.values() if t.analysis_type == analysis_type
         ]
-        
+
         if not matching_templates:
             # Return generic templates that might work
             return ["security_basic", "anomaly_basic"]
-        
+
         # Sort by complexity - start with detailed, then simple, then expert
         complexity_order = {
             PromptComplexity.DETAILED: 1,
-            PromptComplexity.SIMPLE: 2, 
-            PromptComplexity.EXPERT: 3
+            PromptComplexity.SIMPLE: 2,
+            PromptComplexity.EXPERT: 3,
         }
-        
+
         template_objects = [self.templates[name] for name in matching_templates]
         sorted_templates = sorted(
-            template_objects,
-            key=lambda t: complexity_order.get(t.complexity, 4)
+            template_objects, key=lambda t: complexity_order.get(t.complexity, 4)
         )
-        
+
         return [t.name for t in sorted_templates]
-    
-    def validate_template_data(self, template_name: str, data: Dict[str, Any]) -> Dict[str, List[str]]:
+
+    def validate_template_data(
+        self, template_name: str, data: Dict[str, Any]
+    ) -> Dict[str, List[str]]:
         """Validate data against template requirements
-        
+
         Args:
             template_name: Name of the template
             data: Data to validate
-            
+
         Returns:
             Dict with 'missing_required' and 'available_optional' keys
         """
         template = self.templates.get(template_name)
         if not template:
-            return {'missing_required': ['Template not found'], 'available_optional': []}
-        
+            return {
+                "missing_required": ["Template not found"],
+                "available_optional": [],
+            }
+
         missing_required = [
-            field for field in template.required_fields 
-            if field not in data
+            field for field in template.required_fields if field not in data
         ]
-        
+
         available_optional = [
-            field for field in template.optional_fields 
-            if field in data
+            field for field in template.optional_fields if field in data
         ]
-        
+
         return {
-            'missing_required': missing_required,
-            'available_optional': available_optional
+            "missing_required": missing_required,
+            "available_optional": available_optional,
         }

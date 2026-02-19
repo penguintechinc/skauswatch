@@ -34,8 +34,9 @@ class ClamAVScanner:
     Connects to ClamAV daemon via Unix socket and performs file scans.
     """
 
-    def __init__(self, socket_path: str = "/var/run/clamav/clamd.ctl",
-                 timeout: int = 60) -> None:
+    def __init__(
+        self, socket_path: str = "/var/run/clamav/clamd.ctl", timeout: int = 60
+    ) -> None:
         """
         Initialize ClamAV scanner.
 
@@ -47,8 +48,10 @@ class ClamAVScanner:
             ImportError: If clamd library is not installed
         """
         if clamd is None:
-            raise ImportError("clamd library is required for ClamAV scanning. "
-                            "Install it with: pip install pyclamd")
+            raise ImportError(
+                "clamd library is required for ClamAV scanning. "
+                "Install it with: pip install pyclamd"
+            )
 
         self.socket_path = socket_path
         self.timeout = timeout
@@ -69,7 +72,9 @@ class ClamAVScanner:
                 self._client = clamd.ClamdUnixSocket(self.socket_path)
                 self._client.socket.settimeout(self.timeout)
             except (clamd.ClamdNetworkException, OSError) as e:
-                logger.error(f"Failed to connect to ClamAV daemon at {self.socket_path}: {e}")
+                logger.error(
+                    f"Failed to connect to ClamAV daemon at {self.socket_path}: {e}"
+                )
                 raise ConnectionError(f"Cannot connect to ClamAV daemon: {e}") from e
 
         return self._client
@@ -116,11 +121,7 @@ class ClamAVScanner:
 
             if result is None:
                 # File is clean
-                return ScanResult(
-                    is_malware=False,
-                    is_pup=False,
-                    threat_names=[]
-                )
+                return ScanResult(is_malware=False, is_pup=False, threat_names=[])
 
             # result is a dict like:
             # {'/path/to/file': ('FOUND', 'Virus.Name')}
@@ -136,14 +137,14 @@ class ClamAVScanner:
 
             is_malware = len(threat_names) > 0
 
-            logger.info(f"ClamAV scan of {file_path}: "
-                       f"malware={is_malware}, pup={is_pup}, "
-                       f"threats={threat_names}")
+            logger.info(
+                f"ClamAV scan of {file_path}: "
+                f"malware={is_malware}, pup={is_pup}, "
+                f"threats={threat_names}"
+            )
 
             return ScanResult(
-                is_malware=is_malware,
-                is_pup=is_pup,
-                threat_names=threat_names
+                is_malware=is_malware, is_pup=is_pup, threat_names=threat_names
             )
 
         except (clamd.ClamdNetworkException, OSError) as e:

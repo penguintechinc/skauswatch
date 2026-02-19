@@ -1,4 +1,5 @@
 """Threat Intelligence Manager - Core IOC management."""
+
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
@@ -45,10 +46,14 @@ class ThreatIntelManager:
 
         with db_session() as db:
             # Check if IOC already exists
-            existing = db(
-                (db.threat_indicators.indicator_type == indicator_type) &
-                (db.threat_indicators.value == value)
-            ).select().first()
+            existing = (
+                db(
+                    (db.threat_indicators.indicator_type == indicator_type)
+                    & (db.threat_indicators.value == value)
+                )
+                .select()
+                .first()
+            )
 
             if existing:
                 # Update existing IOC
@@ -86,7 +91,7 @@ class ThreatIntelManager:
             ioc_id=ioc_id,
             type=indicator_type,
             value=value[:50],
-            threat_level=threat_level
+            threat_level=threat_level,
         )
 
         return {
@@ -119,21 +124,26 @@ class ThreatIntelManager:
                     value = ioc_data.get("value")
 
                     if not indicator_type or not value:
-                        errors.append({
-                            "value": value,
-                            "error": "Missing indicator_type or value"
-                        })
+                        errors.append(
+                            {"value": value, "error": "Missing indicator_type or value"}
+                        )
                         continue
 
                     # Check existing
-                    existing = db(
-                        (db.threat_indicators.indicator_type == indicator_type) &
-                        (db.threat_indicators.value == value)
-                    ).select().first()
+                    existing = (
+                        db(
+                            (db.threat_indicators.indicator_type == indicator_type)
+                            & (db.threat_indicators.value == value)
+                        )
+                        .select()
+                        .first()
+                    )
 
                     if existing:
                         db(db.threat_indicators.id == existing.id).update(
-                            threat_level=ioc_data.get("threat_level", existing.threat_level),
+                            threat_level=ioc_data.get(
+                                "threat_level", existing.threat_level
+                            ),
                             confidence=ioc_data.get("confidence", existing.confidence),
                             last_seen=now,
                             updated_at=now,
@@ -159,16 +169,13 @@ class ThreatIntelManager:
                         created += 1
 
                 except Exception as e:
-                    errors.append({
-                        "value": ioc_data.get("value"),
-                        "error": str(e)
-                    })
+                    errors.append({"value": ioc_data.get("value"), "error": str(e)})
 
         logger.info(
             "Bulk IOC import completed",
             created=created,
             updated=updated,
-            errors=len(errors)
+            errors=len(errors),
         )
 
         return {
@@ -186,10 +193,14 @@ class ThreatIntelManager:
             if ioc_id:
                 ioc = db(db.threat_indicators.id == ioc_id).select().first()
             elif indicator_type and value:
-                ioc = db(
-                    (db.threat_indicators.indicator_type == indicator_type) &
-                    (db.threat_indicators.value == value)
-                ).select().first()
+                ioc = (
+                    db(
+                        (db.threat_indicators.indicator_type == indicator_type)
+                        & (db.threat_indicators.value == value)
+                    )
+                    .select()
+                    .first()
+                )
             else:
                 return None
 
@@ -260,6 +271,7 @@ class ThreatIntelManager:
             cached = await self.redis.get(cache_key)
             if cached:
                 import json
+
                 return json.loads(cached)
 
         # Query database
@@ -268,6 +280,7 @@ class ThreatIntelManager:
         if ioc and self.redis:
             # Cache result
             import json
+
             await self.redis.setex(
                 cache_key, self._cache_ttl, json.dumps(ioc, default=str)
             )
@@ -287,10 +300,12 @@ class ThreatIntelManager:
             if indicator_type and value:
                 match = await self.lookup_indicator(indicator_type, value)
                 if match:
-                    results.append({
-                        "indicator": ind,
-                        "match": match,
-                    })
+                    results.append(
+                        {
+                            "indicator": ind,
+                            "match": match,
+                        }
+                    )
 
         return results
 
@@ -333,7 +348,7 @@ class ThreatIntelManager:
 
             iocs = query.select(
                 orderby=~db.threat_indicators.created_at,
-                limitby=(offset, offset + page_size)
+                limitby=(offset, offset + page_size),
             )
 
             return [self._ioc_to_dict(ioc) for ioc in iocs], total

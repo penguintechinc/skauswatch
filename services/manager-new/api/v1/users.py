@@ -67,23 +67,30 @@ async def list_users():
     # Convert to response format
     user_list = []
     for user in users:
-        user_list.append({
-            "id": user.id,
-            "email": user.email,
-            "full_name": user.full_name or "",
-            "role": user.role,
-            "is_active": user.is_active,
-            "mfa_enabled": user.mfa_enabled or False,
-            "created_at": user.created_at.isoformat() if user.created_at else None,
-        })
+        user_list.append(
+            {
+                "id": user.id,
+                "email": user.email,
+                "full_name": user.full_name or "",
+                "role": user.role,
+                "is_active": user.is_active,
+                "mfa_enabled": user.mfa_enabled or False,
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+            }
+        )
 
-    return jsonify({
-        "items": user_list,
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
-    }), 200
+    return (
+        jsonify(
+            {
+                "items": user_list,
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "pages": (total + per_page - 1) // per_page,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/<int:user_id>", methods=["GET"])
@@ -94,23 +101,31 @@ async def get_user(user_id: int):
     db = get_db(config.database.uri)
 
     # Users can view their own profile, admins/maintainers can view any
-    if g.current_user_id != user_id and g.current_user["role"] not in ["admin", "maintainer"]:
+    if g.current_user_id != user_id and g.current_user["role"] not in [
+        "admin",
+        "maintainer",
+    ]:
         return jsonify({"error": "Forbidden"}), 403
 
     user = db(db.users.id == user_id).select().first()
     if not user:
         return jsonify({"error": "User not found"}), 404
 
-    return jsonify({
-        "id": user.id,
-        "email": user.email,
-        "full_name": user.full_name or "",
-        "role": user.role,
-        "is_active": user.is_active,
-        "mfa_enabled": user.mfa_enabled or False,
-        "created_at": user.created_at.isoformat() if user.created_at else None,
-        "updated_at": user.updated_at.isoformat() if user.updated_at else None,
-    }), 200
+    return (
+        jsonify(
+            {
+                "id": user.id,
+                "email": user.email,
+                "full_name": user.full_name or "",
+                "role": user.role,
+                "is_active": user.is_active,
+                "mfa_enabled": user.mfa_enabled or False,
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+                "updated_at": user.updated_at.isoformat() if user.updated_at else None,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("", methods=["POST"])
@@ -146,16 +161,21 @@ async def create_user():
 
     user = db(db.users.id == user_id).select().first()
 
-    return jsonify({
-        "message": "User created successfully",
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "full_name": user.full_name or "",
-            "role": user.role,
-            "is_active": user.is_active,
-        },
-    }), 201
+    return (
+        jsonify(
+            {
+                "message": "User created successfully",
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "full_name": user.full_name or "",
+                    "role": user.role,
+                    "is_active": user.is_active,
+                },
+            }
+        ),
+        201,
+    )
 
 
 @bp.route("/<int:user_id>", methods=["PUT"])
@@ -196,10 +216,14 @@ async def update_user(user_id: int):
     if is_admin:
         if update_data.email is not None:
             # Check if new email already exists
-            existing = db(
-                (db.users.email == update_data.email.lower()) &
-                (db.users.id != user_id)
-            ).select().first()
+            existing = (
+                db(
+                    (db.users.email == update_data.email.lower())
+                    & (db.users.id != user_id)
+                )
+                .select()
+                .first()
+            )
             if existing:
                 return jsonify({"error": "Email already in use"}), 409
             updates["email"] = update_data.email.lower()
@@ -217,16 +241,21 @@ async def update_user(user_id: int):
     # Fetch updated user
     user = db(db.users.id == user_id).select().first()
 
-    return jsonify({
-        "message": "User updated successfully",
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "full_name": user.full_name or "",
-            "role": user.role,
-            "is_active": user.is_active,
-        },
-    }), 200
+    return (
+        jsonify(
+            {
+                "message": "User updated successfully",
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "full_name": user.full_name or "",
+                    "role": user.role,
+                    "is_active": user.is_active,
+                },
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/<int:user_id>", methods=["DELETE"])

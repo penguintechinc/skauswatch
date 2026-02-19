@@ -39,8 +39,8 @@ from database.connection import init_app as init_db
 # Configure logging based on settings
 logging.basicConfig(
     level=getattr(logging, settings.logging.level.upper(), logging.INFO),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stdout,
 )
 logger = logging.getLogger(__name__)
 
@@ -62,39 +62,42 @@ def create_app() -> Flask:
     app = Flask(__name__)
 
     # Load configuration from settings
-    app.config['SECRET_KEY'] = settings.flask.secret_key
-    app.config['DEBUG'] = settings.flask.debug
-    app.config['ENV'] = settings.flask.env
-    app.config['JSONIFY_PRETTYPRINT_REGULAR'] = settings.flask.debug
+    app.config["SECRET_KEY"] = settings.flask.secret_key
+    app.config["DEBUG"] = settings.flask.debug
+    app.config["ENV"] = settings.flask.env
+    app.config["JSONIFY_PRETTYPRINT_REGULAR"] = settings.flask.debug
 
     # JWT Configuration
-    app.config['JWT_SECRET_KEY'] = settings.jwt.secret_key
-    app.config['JWT_ALGORITHM'] = settings.jwt.algorithm
+    app.config["JWT_SECRET_KEY"] = settings.jwt.secret_key
+    app.config["JWT_ALGORITHM"] = settings.jwt.algorithm
 
     # Database Configuration
-    app.config['DB_TYPE'] = settings.database.type
-    app.config['DB_HOST'] = settings.database.host
-    app.config['DB_PORT'] = settings.database.port
-    app.config['DB_NAME'] = settings.database.name
+    app.config["DB_TYPE"] = settings.database.type
+    app.config["DB_HOST"] = settings.database.host
+    app.config["DB_PORT"] = settings.database.port
+    app.config["DB_NAME"] = settings.database.name
 
     logger.info(
         "Flask application created: environment=%s, debug=%s",
         settings.flask.env,
-        settings.flask.debug
+        settings.flask.debug,
     )
 
     # Initialize CORS with permissive development defaults
     # NOTE: In production, configure specific origins via environment variables
-    CORS(app, resources={
-        r"/api/*": {
-            "origins": "*",
-            "methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization"],
-            "expose_headers": ["Content-Type", "Authorization"],
-            "supports_credentials": True,
-            "max_age": 3600
-        }
-    })
+    CORS(
+        app,
+        resources={
+            r"/api/*": {
+                "origins": "*",
+                "methods": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+                "allow_headers": ["Content-Type", "Authorization"],
+                "expose_headers": ["Content-Type", "Authorization"],
+                "supports_credentials": True,
+                "max_age": 3600,
+            }
+        },
+    )
     logger.info("CORS initialized with permissive development defaults")
 
     # Initialize database connection manager
@@ -104,7 +107,7 @@ def create_app() -> Flask:
             "Database connection manager initialized: type=%s, host=%s, name=%s",
             settings.database.type,
             settings.database.host,
-            settings.database.name
+            settings.database.name,
         )
     except Exception as e:
         logger.error("Failed to initialize database: %s", str(e))
@@ -120,11 +123,11 @@ def create_app() -> Flask:
         from api.routes.scanners import scanners_bp
 
         # Register all blueprints under /api/v1/scanner prefix with resource sub-paths
-        app.register_blueprint(targets_bp, url_prefix='/api/v1/scanner/targets')
-        app.register_blueprint(jobs_bp, url_prefix='/api/v1/scanner/jobs')
-        app.register_blueprint(findings_bp, url_prefix='/api/v1/scanner/findings')
-        app.register_blueprint(schedules_bp, url_prefix='/api/v1/scanner/schedules')
-        app.register_blueprint(scanners_bp, url_prefix='/api/v1/scanner')
+        app.register_blueprint(targets_bp, url_prefix="/api/v1/scanner/targets")
+        app.register_blueprint(jobs_bp, url_prefix="/api/v1/scanner/jobs")
+        app.register_blueprint(findings_bp, url_prefix="/api/v1/scanner/findings")
+        app.register_blueprint(schedules_bp, url_prefix="/api/v1/scanner/schedules")
+        app.register_blueprint(scanners_bp, url_prefix="/api/v1/scanner")
 
         logger.info(
             "API blueprints registered: targets, jobs, findings, schedules, scanners"
@@ -136,7 +139,7 @@ def create_app() -> Flask:
         )
 
     # Register health check endpoint
-    @app.route('/api/v1/scanner/healthz', methods=['GET'])
+    @app.route("/api/v1/scanner/healthz", methods=["GET"])
     def health_check() -> Tuple[Response, int]:
         """Health check endpoint.
 
@@ -153,13 +156,13 @@ def create_app() -> Flask:
             "database": {
                 "type": settings.database.type,
                 "host": settings.database.host,
-                "connected": True  # Connection is lazy, will be checked on first use
+                "connected": True,  # Connection is lazy, will be checked on first use
             },
             "scanners": {
                 "nuclei": settings.scanner_toggles.nuclei_enabled,
                 "zap": settings.scanner_toggles.zap_enabled,
-                "openvas": settings.scanner_toggles.openvas_enabled
-            }
+                "openvas": settings.scanner_toggles.openvas_enabled,
+            },
         }
         return jsonify(health_data), 200
 
@@ -176,11 +179,12 @@ def create_app() -> Flask:
             Tuple[Response, int]: JSON error response and HTTP 400
         """
         logger.warning("Bad request: %s", str(error))
-        return jsonify({
-            "error": "Bad Request",
-            "message": str(error),
-            "status_code": 400
-        }), 400
+        return (
+            jsonify(
+                {"error": "Bad Request", "message": str(error), "status_code": 400}
+            ),
+            400,
+        )
 
     @app.errorhandler(404)
     def not_found(error: Exception) -> Tuple[Response, int]:
@@ -193,11 +197,16 @@ def create_app() -> Flask:
             Tuple[Response, int]: JSON error response and HTTP 404
         """
         logger.warning("Resource not found: %s", str(error))
-        return jsonify({
-            "error": "Not Found",
-            "message": "The requested resource was not found",
-            "status_code": 404
-        }), 404
+        return (
+            jsonify(
+                {
+                    "error": "Not Found",
+                    "message": "The requested resource was not found",
+                    "status_code": 404,
+                }
+            ),
+            404,
+        )
 
     @app.errorhandler(422)
     def unprocessable_entity(error: Exception) -> Tuple[Response, int]:
@@ -210,11 +219,16 @@ def create_app() -> Flask:
             Tuple[Response, int]: JSON error response and HTTP 422
         """
         logger.warning("Unprocessable entity: %s", str(error))
-        return jsonify({
-            "error": "Unprocessable Entity",
-            "message": str(error),
-            "status_code": 422
-        }), 422
+        return (
+            jsonify(
+                {
+                    "error": "Unprocessable Entity",
+                    "message": str(error),
+                    "status_code": 422,
+                }
+            ),
+            422,
+        )
 
     @app.errorhandler(500)
     def internal_server_error(error: Exception) -> Tuple[Response, int]:
@@ -227,11 +241,16 @@ def create_app() -> Flask:
             Tuple[Response, int]: JSON error response and HTTP 500
         """
         logger.error("Internal server error: %s", str(error), exc_info=True)
-        return jsonify({
-            "error": "Internal Server Error",
-            "message": "An unexpected error occurred",
-            "status_code": 500
-        }), 500
+        return (
+            jsonify(
+                {
+                    "error": "Internal Server Error",
+                    "message": "An unexpected error occurred",
+                    "status_code": 500,
+                }
+            ),
+            500,
+        )
 
     # Log startup information
     logger.info("=" * 80)
@@ -240,15 +259,26 @@ def create_app() -> Flask:
     logger.info("Environment: %s", settings.flask.env)
     logger.info("Debug Mode: %s", settings.flask.debug)
     logger.info("Port: %d", settings.flask.port)
-    logger.info("Database: %s @ %s:%d/%s",
-                settings.database.type,
-                settings.database.host,
-                settings.database.port,
-                settings.database.name)
+    logger.info(
+        "Database: %s @ %s:%d/%s",
+        settings.database.type,
+        settings.database.host,
+        settings.database.port,
+        settings.database.name,
+    )
     logger.info("Enabled Scanners:")
-    logger.info("  - Nuclei:  %s", "ENABLED" if settings.scanner_toggles.nuclei_enabled else "DISABLED")
-    logger.info("  - ZAP:     %s", "ENABLED" if settings.scanner_toggles.zap_enabled else "DISABLED")
-    logger.info("  - OpenVAS: %s", "ENABLED" if settings.scanner_toggles.openvas_enabled else "DISABLED")
+    logger.info(
+        "  - Nuclei:  %s",
+        "ENABLED" if settings.scanner_toggles.nuclei_enabled else "DISABLED",
+    )
+    logger.info(
+        "  - ZAP:     %s",
+        "ENABLED" if settings.scanner_toggles.zap_enabled else "DISABLED",
+    )
+    logger.info(
+        "  - OpenVAS: %s",
+        "ENABLED" if settings.scanner_toggles.openvas_enabled else "DISABLED",
+    )
     logger.info("=" * 80)
 
     return app
@@ -273,8 +303,8 @@ if __name__ == "__main__":
     )
 
     app.run(
-        host='0.0.0.0',
+        host="0.0.0.0",
         port=settings.flask.port,
         debug=settings.flask.debug,
-        threaded=True
+        threaded=True,
     )

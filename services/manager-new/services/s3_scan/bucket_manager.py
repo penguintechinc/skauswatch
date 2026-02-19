@@ -36,7 +36,11 @@ class BucketConfigManager:
             encryption_key: Base64-encoded Fernet encryption key
         """
         self.db = db
-        self.cipher = Fernet(encryption_key.encode() if isinstance(encryption_key, str) else encryption_key)
+        self.cipher = Fernet(
+            encryption_key.encode()
+            if isinstance(encryption_key, str)
+            else encryption_key
+        )
 
     def _encrypt(self, plaintext: str) -> str:
         """
@@ -240,13 +244,23 @@ class BucketConfigManager:
         if "access_key_id" in data:
             update_fields["access_key_id"] = self._encrypt(data["access_key_id"])
         if "secret_access_key" in data:
-            update_fields["secret_access_key"] = self._encrypt(data["secret_access_key"])
+            update_fields["secret_access_key"] = self._encrypt(
+                data["secret_access_key"]
+            )
 
         # Handle other fields
         for field in [
-            "name", "endpoint_url", "bucket_name", "region", "use_ssl",
-            "path_style", "prefix_filter", "file_types_filter",
-            "max_file_size_mb", "scan_enabled", "yara_enabled",
+            "name",
+            "endpoint_url",
+            "bucket_name",
+            "region",
+            "use_ssl",
+            "path_style",
+            "prefix_filter",
+            "file_types_filter",
+            "max_file_size_mb",
+            "scan_enabled",
+            "yara_enabled",
         ]:
             if field in data:
                 update_fields[field] = data[field]
@@ -322,7 +336,9 @@ class BucketConfigManager:
                 use_ssl=config.get("use_ssl", True),
                 config={
                     "s3": {
-                        "addressing_style": "path" if config.get("path_style") else "auto"
+                        "addressing_style": (
+                            "path" if config.get("path_style") else "auto"
+                        )
                     }
                 },
             ) as s3_client:

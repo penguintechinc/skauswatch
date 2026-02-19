@@ -39,6 +39,7 @@ def get_current_user() -> Optional[dict]:
 
 def auth_required(f: Callable) -> Callable:
     """Decorator to require authentication."""
+
     @wraps(f)
     def decorated(*args, **kwargs):
         token = get_token_from_header()
@@ -76,6 +77,7 @@ def auth_required(f: Callable) -> Callable:
 
 def role_required(*allowed_roles: str) -> Callable:
     """Decorator to require specific roles."""
+
     def decorator(f: Callable) -> Callable:
         @wraps(f)
         def decorated(*args, **kwargs):
@@ -86,11 +88,16 @@ def role_required(*allowed_roles: str) -> Callable:
 
             user_role = user.get("role", "")
             if user_role not in allowed_roles:
-                return jsonify({
-                    "error": "Insufficient permissions",
-                    "required_roles": list(allowed_roles),
-                    "your_role": user_role,
-                }), 403
+                return (
+                    jsonify(
+                        {
+                            "error": "Insufficient permissions",
+                            "required_roles": list(allowed_roles),
+                            "your_role": user_role,
+                        }
+                    ),
+                    403,
+                )
 
             return f(*args, **kwargs)
 

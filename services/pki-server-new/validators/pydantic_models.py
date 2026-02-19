@@ -1,4 +1,5 @@
 """Pydantic models for PKI Server request/response validation."""
+
 import re
 from datetime import datetime
 from enum import Enum
@@ -70,62 +71,52 @@ class ExtendedKeyUsage(str, Enum):
 # =============================================================================
 class X509CertificateRequest(BaseModel):
     """Request to issue an X.509 certificate."""
+
     subject: str = Field(
-        ..., min_length=1, max_length=512,
-        description="Certificate subject DN"
+        ..., min_length=1, max_length=512, description="Certificate subject DN"
     )
     key_algorithm: KeyAlgorithm = Field(
-        default=KeyAlgorithm.RSA,
-        description="Key algorithm"
+        default=KeyAlgorithm.RSA, description="Key algorithm"
     )
     key_size: int = Field(
-        default=4096,
-        ge=2048, le=8192,
-        description="Key size in bits (RSA/ECDSA)"
+        default=4096, ge=2048, le=8192, description="Key size in bits (RSA/ECDSA)"
     )
     validity_days: int = Field(
-        default=365,
-        ge=1, le=825,
-        description="Certificate validity in days"
+        default=365, ge=1, le=825, description="Certificate validity in days"
     )
     san_dns: List[str] = Field(
         default_factory=list,
         max_length=50,
-        description="Subject Alternative Names - DNS"
+        description="Subject Alternative Names - DNS",
     )
     san_ip: List[str] = Field(
         default_factory=list,
         max_length=20,
-        description="Subject Alternative Names - IP"
+        description="Subject Alternative Names - IP",
     )
     san_email: List[str] = Field(
         default_factory=list,
         max_length=10,
-        description="Subject Alternative Names - Email"
+        description="Subject Alternative Names - Email",
     )
     key_usage: List[KeyUsage] = Field(
-        default_factory=lambda: [
-            KeyUsage.DIGITAL_SIGNATURE,
-            KeyUsage.KEY_ENCIPHERMENT
-        ],
-        description="Key usage extensions"
+        default_factory=lambda: [KeyUsage.DIGITAL_SIGNATURE, KeyUsage.KEY_ENCIPHERMENT],
+        description="Key usage extensions",
     )
     extended_key_usage: List[ExtendedKeyUsage] = Field(
         default_factory=lambda: [ExtendedKeyUsage.SERVER_AUTH],
-        description="Extended key usage"
+        description="Extended key usage",
     )
     is_ca: bool = Field(default=False, description="Issue as CA certificate")
     path_length: Optional[int] = Field(
-        default=None, ge=0, le=10,
-        description="CA path length constraint"
+        default=None, ge=0, le=10, description="CA path length constraint"
     )
     csr_pem: Optional[str] = Field(
         default=None,
-        description="CSR in PEM format (if provided, key is not generated)"
+        description="CSR in PEM format (if provided, key is not generated)",
     )
     generate_key: bool = Field(
-        default=True,
-        description="Generate private key (ignored if CSR provided)"
+        default=True, description="Generate private key (ignored if CSR provided)"
     )
 
     @field_validator("san_dns", mode="before")
@@ -134,8 +125,7 @@ class X509CertificateRequest(BaseModel):
         if not v:
             return v
         dns_pattern = re.compile(
-            r"^(\*\.)?([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
-            r"[a-zA-Z]{2,}$"
+            r"^(\*\.)?([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*" r"[a-zA-Z]{2,}$"
         )
         for dns in v:
             if not dns_pattern.match(dns):
@@ -147,9 +137,7 @@ class X509CertificateRequest(BaseModel):
     def validate_san_ip(cls, v: List[str]) -> List[str]:
         if not v:
             return v
-        ipv4_pattern = re.compile(
-            r"^(\d{1,3}\.){3}\d{1,3}$"
-        )
+        ipv4_pattern = re.compile(r"^(\d{1,3}\.){3}\d{1,3}$")
         ipv6_pattern = re.compile(
             r"^([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}$|"
             r"^([0-9a-fA-F]{1,4}:)*::([0-9a-fA-F]{1,4}:)*[0-9a-fA-F]{1,4}$"
@@ -170,6 +158,7 @@ class X509CertificateRequest(BaseModel):
 
 class X509CertificateResponse(BaseModel):
     """Response containing issued X.509 certificate."""
+
     id: str
     serial_number: str
     subject: str
@@ -190,6 +179,7 @@ class X509CertificateResponse(BaseModel):
 
 class X509CertificateInfo(BaseModel):
     """Certificate information without private key."""
+
     id: str
     serial_number: str
     subject: str
@@ -211,51 +201,38 @@ class X509CertificateInfo(BaseModel):
 # =============================================================================
 class SSHCertificateRequest(BaseModel):
     """Request to issue an SSH certificate."""
-    public_key: str = Field(
-        ..., min_length=50,
-        description="SSH public key"
-    )
+
+    public_key: str = Field(..., min_length=50, description="SSH public key")
     certificate_type: SSHCertificateType = Field(
-        default=SSHCertificateType.USER,
-        description="Certificate type (user or host)"
+        default=SSHCertificateType.USER, description="Certificate type (user or host)"
     )
-    key_id: str = Field(
-        ..., min_length=1, max_length=256,
-        description="Key identifier"
-    )
+    key_id: str = Field(..., min_length=1, max_length=256, description="Key identifier")
     principals: List[str] = Field(
-        ..., min_length=1, max_length=50,
-        description="List of principals"
+        ..., min_length=1, max_length=50, description="List of principals"
     )
     validity_seconds: int = Field(
-        default=86400,
-        ge=60, le=604800,
-        description="Validity period in seconds"
+        default=86400, ge=60, le=604800, description="Validity period in seconds"
     )
     extensions: Dict[str, str] = Field(
         default_factory=lambda: {
             "permit-agent-forwarding": "",
             "permit-port-forwarding": "",
             "permit-pty": "",
-            "permit-user-rc": ""
+            "permit-user-rc": "",
         },
-        description="Certificate extensions"
+        description="Certificate extensions",
     )
     critical_options: Dict[str, str] = Field(
-        default_factory=dict,
-        description="Critical options"
+        default_factory=dict, description="Critical options"
     )
     source_addresses: List[str] = Field(
-        default_factory=list,
-        description="Allowed source addresses"
+        default_factory=list, description="Allowed source addresses"
     )
     force_command: Optional[str] = Field(
-        default=None, max_length=512,
-        description="Forced command"
+        default=None, max_length=512, description="Forced command"
     )
     hostname: Optional[str] = Field(
-        default=None, max_length=256,
-        description="Hostname for host certificates"
+        default=None, max_length=256, description="Hostname for host certificates"
     )
 
     @field_validator("public_key")
@@ -288,6 +265,7 @@ class SSHCertificateRequest(BaseModel):
 
 class SSHCertificateResponse(BaseModel):
     """Response containing issued SSH certificate."""
+
     id: str
     serial_number: str
     key_id: str
@@ -306,6 +284,7 @@ class SSHCertificateResponse(BaseModel):
 
 class SSHCertificateInfo(BaseModel):
     """SSH certificate information."""
+
     id: str
     serial_number: str
     key_id: str
@@ -326,18 +305,18 @@ class SSHCertificateInfo(BaseModel):
 # =============================================================================
 class RevokeRequest(BaseModel):
     """Request to revoke a certificate."""
+
     reason: RevocationReason = Field(
-        default=RevocationReason.UNSPECIFIED,
-        description="Revocation reason"
+        default=RevocationReason.UNSPECIFIED, description="Revocation reason"
     )
     invalidity_date: Optional[datetime] = Field(
-        default=None,
-        description="Date when key was compromised"
+        default=None, description="Date when key was compromised"
     )
 
 
 class CRLResponse(BaseModel):
     """Certificate Revocation List response."""
+
     crl_number: int
     this_update: datetime
     next_update: datetime
@@ -347,6 +326,7 @@ class CRLResponse(BaseModel):
 
 class KRLResponse(BaseModel):
     """SSH Key Revocation List response."""
+
     version: int
     generated_at: datetime
     revoked_keys: List[Dict[str, Any]]
@@ -358,6 +338,7 @@ class KRLResponse(BaseModel):
 # =============================================================================
 class OCSPRequest(BaseModel):
     """OCSP request."""
+
     serial_number: str = Field(..., description="Certificate serial number")
     issuer_name_hash: Optional[str] = None
     issuer_key_hash: Optional[str] = None
@@ -365,6 +346,7 @@ class OCSPRequest(BaseModel):
 
 class OCSPResponse(BaseModel):
     """OCSP response."""
+
     serial_number: str
     status: str  # good, revoked, unknown
     this_update: datetime
@@ -378,6 +360,7 @@ class OCSPResponse(BaseModel):
 # =============================================================================
 class CAInfo(BaseModel):
     """Certificate Authority information."""
+
     ca_type: str
     subject: str
     issuer: str
@@ -392,6 +375,7 @@ class CAInfo(BaseModel):
 
 class X509CAInfo(CAInfo):
     """X.509 CA specific information."""
+
     ca_certificate_pem: str
     ocsp_responder_url: Optional[str] = None
     crl_distribution_points: List[str] = []
@@ -399,6 +383,7 @@ class X509CAInfo(CAInfo):
 
 class SSHCAInfo(BaseModel):
     """SSH CA information."""
+
     ca_public_key: str
     key_type: str
     fingerprint: str
@@ -411,6 +396,7 @@ class SSHCAInfo(BaseModel):
 # =============================================================================
 class CertificateSearchRequest(BaseModel):
     """Search certificates."""
+
     subject: Optional[str] = None
     serial_number: Optional[str] = None
     fingerprint: Optional[str] = None
@@ -426,6 +412,7 @@ class CertificateSearchRequest(BaseModel):
 
 class CertificateListResponse(BaseModel):
     """Paginated certificate list."""
+
     certificates: List[X509CertificateInfo]
     total: int
     page: int
@@ -435,6 +422,7 @@ class CertificateListResponse(BaseModel):
 
 class SSHCertificateListResponse(BaseModel):
     """Paginated SSH certificate list."""
+
     certificates: List[SSHCertificateInfo]
     total: int
     page: int
@@ -447,6 +435,7 @@ class SSHCertificateListResponse(BaseModel):
 # =============================================================================
 class CertificateStatistics(BaseModel):
     """Certificate statistics."""
+
     total_certificates: int
     active_certificates: int
     revoked_certificates: int
@@ -464,6 +453,7 @@ class CertificateStatistics(BaseModel):
 # =============================================================================
 class SSHConfigRequest(BaseModel):
     """Request to generate SSH config."""
+
     hostname: str = Field(..., description="Target hostname")
     port: int = Field(default=22, ge=1, le=65535)
     user: Optional[str] = None
@@ -472,6 +462,7 @@ class SSHConfigRequest(BaseModel):
 
 class SSHConfigResponse(BaseModel):
     """Generated SSH configuration."""
+
     ssh_config: str
     known_hosts_entry: str
     ca_public_key: str
@@ -479,17 +470,15 @@ class SSHConfigResponse(BaseModel):
 
 class AuthorizedKeysRequest(BaseModel):
     """Request for authorized_keys generation."""
+
     principals: List[str] = Field(
-        ..., min_length=1,
-        description="Principals to authorize"
+        ..., min_length=1, description="Principals to authorize"
     )
-    options: Dict[str, str] = Field(
-        default_factory=dict,
-        description="SSH options"
-    )
+    options: Dict[str, str] = Field(default_factory=dict, description="SSH options")
 
 
 class AuthorizedKeysResponse(BaseModel):
     """Generated authorized_keys content."""
+
     authorized_keys: str
     trustedUserCAKeys: str

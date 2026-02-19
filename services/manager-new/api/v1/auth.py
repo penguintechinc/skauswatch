@@ -50,7 +50,9 @@ def create_access_token(user_id: int, role: str, config) -> str:
         "exp": expires,
         "iat": datetime.utcnow(),
     }
-    return jwt.encode(payload, config.auth.jwt_secret, algorithm=config.auth.jwt_algorithm)
+    return jwt.encode(
+        payload, config.auth.jwt_secret, algorithm=config.auth.jwt_algorithm
+    )
 
 
 def create_refresh_token(user_id: int, config, db) -> tuple[str, datetime]:
@@ -62,7 +64,9 @@ def create_refresh_token(user_id: int, config, db) -> tuple[str, datetime]:
         "exp": expires,
         "iat": datetime.utcnow(),
     }
-    token = jwt.encode(payload, config.auth.jwt_secret, algorithm=config.auth.jwt_algorithm)
+    token = jwt.encode(
+        payload, config.auth.jwt_secret, algorithm=config.auth.jwt_algorithm
+    )
 
     # Store hash of token in database for revocation
     token_hash = hashlib.sha256(token.encode()).hexdigest()
@@ -168,7 +172,9 @@ async def login():
 
         # Lock account if too many failures
         if user.failed_login_attempts + 1 >= config.auth.max_login_attempts:
-            lockout_until = datetime.utcnow() + timedelta(minutes=config.auth.lockout_duration_minutes)
+            lockout_until = datetime.utcnow() + timedelta(
+                minutes=config.auth.lockout_duration_minutes
+            )
             db(db.users.id == user.id).update(account_locked_until=lockout_until)
 
         db.commit()
@@ -189,18 +195,23 @@ async def login():
     access_token = create_access_token(user.id, user.role, config)
     refresh_token, refresh_expires = create_refresh_token(user.id, config, db)
 
-    return jsonify({
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "Bearer",
-        "expires_in": int(config.auth.access_token_expires.total_seconds()),
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "full_name": user.full_name or "",
-            "role": user.role,
-        },
-    }), 200
+    return (
+        jsonify(
+            {
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_type": "Bearer",
+                "expires_in": int(config.auth.access_token_expires.total_seconds()),
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "full_name": user.full_name or "",
+                    "role": user.role,
+                },
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/refresh", methods=["POST"])
@@ -233,11 +244,15 @@ async def refresh():
 
     # Check if token is revoked
     token_hash = hashlib.sha256(refresh_data.refresh_token.encode()).hexdigest()
-    stored_token = db(
-        (db.refresh_tokens.token_hash == token_hash) &
-        (db.refresh_tokens.revoked == False) &
-        (db.refresh_tokens.expires_at > datetime.utcnow())
-    ).select().first()
+    stored_token = (
+        db(
+            (db.refresh_tokens.token_hash == token_hash)
+            & (db.refresh_tokens.revoked == False)
+            & (db.refresh_tokens.expires_at > datetime.utcnow())
+        )
+        .select()
+        .first()
+    )
 
     if not stored_token:
         return jsonify({"error": "Refresh token has been revoked"}), 401
@@ -256,12 +271,17 @@ async def refresh():
     access_token = create_access_token(user.id, user.role, config)
     new_refresh_token, refresh_expires = create_refresh_token(user.id, config, db)
 
-    return jsonify({
-        "access_token": access_token,
-        "refresh_token": new_refresh_token,
-        "token_type": "Bearer",
-        "expires_in": int(config.auth.access_token_expires.total_seconds()),
-    }), 200
+    return (
+        jsonify(
+            {
+                "access_token": access_token,
+                "refresh_token": new_refresh_token,
+                "token_type": "Bearer",
+                "expires_in": int(config.auth.access_token_expires.total_seconds()),
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/logout", methods=["POST"])
@@ -272,13 +292,20 @@ async def logout():
     db = get_db(config.database.uri)
 
     # Revoke all user's refresh tokens
-    revoked_count = db(db.refresh_tokens.user_id == g.current_user_id).update(revoked=True)
+    revoked_count = db(db.refresh_tokens.user_id == g.current_user_id).update(
+        revoked=True
+    )
     db.commit()
 
-    return jsonify({
-        "message": "Successfully logged out",
-        "tokens_revoked": revoked_count,
-    }), 200
+    return (
+        jsonify(
+            {
+                "message": "Successfully logged out",
+                "tokens_revoked": revoked_count,
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/me", methods=["GET"])
@@ -287,15 +314,22 @@ async def get_me():
     """Get current user profile."""
     user = g.current_user
 
-    return jsonify({
-        "id": user["id"],
-        "email": user["email"],
-        "full_name": user.get("full_name", ""),
-        "role": user["role"],
-        "is_active": user["is_active"],
-        "mfa_enabled": user.get("mfa_enabled", False),
-        "created_at": user["created_at"].isoformat() if user.get("created_at") else None,
-    }), 200
+    return (
+        jsonify(
+            {
+                "id": user["id"],
+                "email": user["email"],
+                "full_name": user.get("full_name", ""),
+                "role": user["role"],
+                "is_active": user["is_active"],
+                "mfa_enabled": user.get("mfa_enabled", False),
+                "created_at": (
+                    user["created_at"].isoformat() if user.get("created_at") else None
+                ),
+            }
+        ),
+        200,
+    )
 
 
 @bp.route("/register", methods=["POST"])
@@ -329,12 +363,17 @@ async def register():
 
     user = db(db.users.id == user_id).select().first()
 
-    return jsonify({
-        "message": "Registration successful",
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "full_name": user.full_name or "",
-            "role": user.role,
-        },
-    }), 201
+    return (
+        jsonify(
+            {
+                "message": "Registration successful",
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "full_name": user.full_name or "",
+                    "role": user.role,
+                },
+            }
+        ),
+        201,
+    )
