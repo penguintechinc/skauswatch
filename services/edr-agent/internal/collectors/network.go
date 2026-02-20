@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shirou/gopsutil/v4/net"
+	psutilnet "github.com/shirou/gopsutil/v4/net"
 	"go.uber.org/zap"
 )
 

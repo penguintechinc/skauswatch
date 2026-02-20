@@ -30,8 +30,10 @@ WORKDIR /app
 # Create non-root user
 RUN groupadd -r webui && useradd -r -g webui webui
 
-# Copy package files for production dependencies
+# Copy package files and registry config for production dependencies
 COPY package*.json ./
+ARG GITHUB_TOKEN
+COPY .npmrc ./
 
 # Install production dependencies only
 RUN npm install --omit=dev && npm cache clean --force
