@@ -53,3 +53,29 @@ services:
       - FLASK_DEBUG=true
     volumes:
       - ./services/worker-s3:/app
+
+  # Worker Scanner - development mode with hot reload
+  worker-scanner:
+    environment:
+      - FLASK_DEBUG=1
+      - CELERY_ALWAYS_EAGER=true
+    volumes:
+      - ./services/worker-scanner:/app
+
+  # WebUI - development mode with hot reload
+  webui:
+    environment:
+      - NODE_ENV=development
+    command: npm run dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./services/webui:/app
+      - ./services/webui/node_modules:/app/node_modules
+
+  # EDR Agent - development mode with debug logging
+  edr-agent:
+    environment:
+      - LOG_LEVEL=debug
+    volumes:
+      - ./services/edr-agent:/app

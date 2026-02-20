@@ -325,6 +325,61 @@ services:
       - app-network
     restart: unless-stopped
 
+  # Worker-Scanner Service (Vulnerability Scanner)
+  worker-scanner:
+    build:
+      context: ./services/worker-scanner
+      dockerfile: Dockerfile
+    container_name: skauswatch-worker-scanner
+    environment:
+      - WORKER_SCANNER_PORT=5004
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-app_db}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/0
+      - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/1
+    ports:
+      - "${WORKER_SCANNER_PORT:-5004}:5004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # WebUI Service (React Frontend)
+  webui:
+    build:
+      context: ./services/webui
+      dockerfile: Dockerfile
+    container_name: skauswatch-webui
+    environment:
+      - PORT=3000
+      - API_URL=http://manager:5000
+    ports:
+      - "${WEBUI_PORT:-3000}:3000"
+    depends_on:
+      manager:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # EDR Agent Service (Go EDR Agent)
+  edr-agent:
+    build:
+      context: ./services/edr-agent
+      dockerfile: Dockerfile
+    container_name: skauswatch-edr-agent
+    environment:
+      - MANAGER_URL=http://manager:5000
+    depends_on:
+      manager:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app-network
+
 volumes:
   postgres_data:
     driver: local

@@ -14,7 +14,7 @@ DOCKER_ORG := penguintechinc
 PYTHON_VERSION := 3.13
 
 # Service directories
-SERVICES := services/manager-new services/pki-server-new services/ssh-ca services/aaa-monitor services/worker-s3
+SERVICES := services/manager-new services/pki-server-new services/ssh-ca services/aaa-monitor services/worker-s3 services/worker-scanner services/webui services/edr-agent
 
 # Colors for output
 RED := \033[31m
@@ -153,6 +153,9 @@ build-python: ## Build - Syntax-check all Python services
 	@python3 -m compileall services/ssh-ca || true
 	@python3 -m compileall services/aaa-monitor || true
 	@python3 -m compileall services/worker-s3 || true
+	@python3 -m compileall services/worker-scanner || true
+	@python3 -m compileall services/webui || true
+	@python3 -m compileall services/edr-agent || true
 
 # Docker Commands
 docker-build: ## Docker - Build all SkausWatch service images
@@ -167,6 +170,12 @@ docker-build: ## Docker - Build all SkausWatch service images
 		-f services/aaa-monitor/Dockerfile services/aaa-monitor/
 	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-worker-s3:$(VERSION) \
 		-f services/worker-s3/Dockerfile services/worker-s3/
+	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-worker-scanner:$(VERSION) \
+		-f services/worker-scanner/Dockerfile services/worker-scanner/
+	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-webui:$(VERSION) \
+		-f services/webui/Dockerfile services/webui/
+	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-edr-agent:$(VERSION) \
+		-f services/edr-agent/Dockerfile services/edr-agent/
 	@echo "$(GREEN)All images built!$(RESET)"
 
 docker-push: ## Docker - Push all service images to registry
@@ -176,6 +185,9 @@ docker-push: ## Docker - Push all service images to registry
 	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-ssh-ca:$(VERSION)
 	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-aaa-monitor:$(VERSION)
 	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-worker-s3:$(VERSION)
+	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-worker-scanner:$(VERSION)
+	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-webui:$(VERSION)
+	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-edr-agent:$(VERSION)
 
 docker-run: ## Docker - Run application with Docker Compose
 	@docker-compose up --build
@@ -270,6 +282,8 @@ health: ## Health - Check all service health endpoints
 	@curl -sf http://localhost:5001/health && echo "$(GREEN)pki-server: OK$(RESET)" || echo "$(RED)pki-server (5001): FAILED$(RESET)"
 	@curl -sf http://localhost:5002/health && echo "$(GREEN)ssh-ca: OK$(RESET)" || echo "$(RED)ssh-ca (5002): FAILED$(RESET)"
 	@curl -sf http://localhost:5003/health && echo "$(GREEN)aaa-monitor: OK$(RESET)" || echo "$(RED)aaa-monitor (5003): FAILED$(RESET)"
+	@curl -sf http://localhost:5004/health && echo "$(GREEN)worker-scanner: OK$(RESET)" || echo "$(RED)worker-scanner (5004): FAILED$(RESET)"
+	@curl -sf http://localhost:3000/health && echo "$(GREEN)webui: OK$(RESET)" || echo "$(RED)webui (3000): FAILED$(RESET)"
 
 logs: ## Logs - Show all service logs
 	@docker-compose logs -f
@@ -288,6 +302,15 @@ logs-aaa: ## Logs - Show AAA monitor logs
 
 logs-worker: ## Logs - Show S3 worker logs
 	@docker-compose logs -f worker-s3
+
+logs-scanner: ## Logs - Show scanner worker logs
+	@docker-compose logs -f worker-scanner
+
+logs-webui: ## Logs - Show WebUI logs
+	@docker-compose logs -f webui
+
+logs-edr: ## Logs - Show EDR agent logs
+	@docker-compose logs -f edr-agent
 
 logs-db: ## Logs - Show database logs
 	@docker-compose logs -f postgres redis
@@ -353,6 +376,8 @@ info: ## Info - Show project information and service URLs
 	@echo "  PKI Server:     http://localhost:5001"
 	@echo "  SSH CA:         http://localhost:5002"
 	@echo "  AAA Monitor:    http://localhost:5003"
+	@echo "  Worker Scanner: http://localhost:5004"
+	@echo "  WebUI:          http://localhost:3000"
 	@echo "  Prometheus:     http://localhost:9090"
 	@echo "  Grafana:        http://localhost:3001"
 	@echo ""

@@ -27,6 +27,12 @@ replicas:
   count: 2
 - name: worker-s3
   count: 2
+- name: worker-scanner
+  count: 2
+- name: webui
+  count: 2
+- name: edr-agent
+  count: 2
 
 configMapGenerator:
 - name: skauswatch-config

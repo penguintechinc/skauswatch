@@ -26,3 +26,8 @@ resources:
 - ../../manifests/aaa-monitor/service.yaml
 - ../../manifests/worker-s3/deployment.yaml
 - ../../manifests/worker-s3/service.yaml
+- ../../manifests/worker-scanner/deployment.yaml
+- ../../manifests/worker-scanner/service.yaml
+- ../../manifests/webui/deployment.yaml
+- ../../manifests/webui/service.yaml
+- ../../manifests/edr-agent/daemonset.yaml

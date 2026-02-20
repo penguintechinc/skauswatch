@@ -1,0 +1,21 @@
+# Beta environment overrides (dal2 cluster)
+image:
+  registry: registry-dal2.penguintech.io
+  pullPolicy: Always
+  tag: latest
+
+namespace: skauswatch-beta
+
+env:
+  - name: LOG_LEVEL
+    value: "INFO"
+  - name: RELEASE_MODE
+    value: "false"
+
+resources:
+  limits:
+    cpu: "500m"
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi

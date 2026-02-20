@@ -1,0 +1,15 @@
+apiVersion: v2
+name: skauswatch-webui
+description: SkausWatch Web UI (Node.js/React)
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skauswatch
+  - webui
+  - react
+  - nodejs
+  - frontend
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io
