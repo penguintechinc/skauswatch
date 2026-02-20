@@ -9,6 +9,10 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
+# GitHub Packages authentication
+ARG GITHUB_TOKEN
+COPY .npmrc ./
+
 # Install dependencies
 RUN npm install
 
