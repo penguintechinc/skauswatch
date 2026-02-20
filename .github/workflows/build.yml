@@ -28,6 +28,7 @@ on:
 
 permissions:
   contents: read
+  packages: read
   security-events: write
 
 jobs:
@@ -147,6 +148,7 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.VERSION }}
             BUILD_TIME=${{ steps.version.outputs.EPOCH64 }}
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
 
   test:
     name: Run Tests
