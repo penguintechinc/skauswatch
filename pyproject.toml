@@ -177,18 +177,20 @@ ignore_errors = true
 [tool.pytest.ini_options]
 minversion = "7.0"
 addopts = "-ra -q --strict-markers --strict-config"
-testpaths = [
-    "tests",
-]
+testpaths = ["tests"]
+asyncio_mode = "auto"
 filterwarnings = [
     "error",
     "ignore::UserWarning",
+    "ignore::DeprecationWarning",
     "ignore:.*unclosed.*:ResourceWarning",
 ]
 markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
+    "integration: marks tests as integration tests",
+    "e2e: marks tests as end-to-end tests",
+    "smoke: marks tests as smoke tests",
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
 
 [tool.coverage.run]
