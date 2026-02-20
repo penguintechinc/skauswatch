@@ -33,6 +33,6 @@ flake8==7.1.1
 mypy==1.14.0
 
 # Penguin Tech Libraries
-penguin-libs>=0.1.0          # Validation, HTTP, gRPC utilities
-penguin-licensing>=0.1.0     # License server client
-penguintechinc-utils>=0.1.0  # Sanitized logging, Flask utils
+# TODO: install from internal PyPI: penguin-libs>=0.1.0          # Validation, HTTP, gRPC utilities
+# TODO: install from internal PyPI: penguin-licensing>=0.1.0     # License server client
+# TODO: install from internal PyPI: penguintechinc-utils>=0.1.0  # Sanitized logging, Flask utils
