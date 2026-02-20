@@ -10,7 +10,7 @@ RUN apk add --no-cache gcc musl-dev
 
 # Copy go mod files
 COPY go.mod go.sum* ./
-RUN go mod download
+RUN go mod tidy && go mod download
 
 # Copy source code
 COPY . .
