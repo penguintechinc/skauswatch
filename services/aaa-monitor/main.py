@@ -144,7 +144,7 @@ async def lifespan(app: FastAPI):
 
 async def startup():
     """Application startup"""
-    global config, redis_client, log_processor, event_classifier, buffer_manager, analysis_engine, pattern_detector, anomaly_detector, alert_manager, escalation_manager, health_checker, kubernetes_collector, lxc_collector, auditd_collector, syslog_collector, journald_collector, file_collector, database_collector, taxii_client, stix_parser, indicator_matcher, threat_database, ai_provider_manager
+    global redis_client, health_checker
 
     try:
         # Initialize Redis connection

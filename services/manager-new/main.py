@@ -109,7 +109,7 @@ def create_app(config_instance: ManagerConfig = None) -> Quart:
     @app.before_serving
     async def startup():
         """Application startup."""
-        global stream_manager, audit_publisher, background_tasks
+        global stream_manager, audit_publisher
 
         logger.info(
             "Starting SkausWatch Manager Service",
