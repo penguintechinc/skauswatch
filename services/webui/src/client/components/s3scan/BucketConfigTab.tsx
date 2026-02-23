@@ -50,7 +50,7 @@ const timezones = [
   'Australia/Sydney',
 ];
 
-export const BucketConfigTab: React.FC = () => {
+const BucketConfigTab: React.FC = () => {
   const [buckets, setBuckets] = useState<BucketConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -893,3 +893,5 @@ export const BucketConfigTab: React.FC = () => {
     </div>
   );
 };
+
+export default BucketConfigTab;

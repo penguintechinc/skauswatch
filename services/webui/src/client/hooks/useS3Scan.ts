@@ -16,6 +16,8 @@ import type {
   TIEnrichment,
 } from '../types/s3scan';
 
+export type { BucketConfig };
+
 // S3 Scan API
 export const s3ScanApi = {
   // ============= Bucket Configurations =============
