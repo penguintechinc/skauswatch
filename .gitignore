@@ -208,3 +208,6 @@ env/
 local_settings.py
 config.local.yml
 config.local.yaml
+
+# Worktrees
+.worktrees/
