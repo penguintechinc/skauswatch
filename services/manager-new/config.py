@@ -243,6 +243,28 @@ class S3ScanConfig(BaseModel):
     )
 
 
+class SIEMConfig(BaseModel):
+    """SIEM / log pipeline configuration."""
+
+    enabled: bool = Field(default=True, description="Enable SIEM log pipeline")
+    opensearch_url: str = Field(
+        default="http://opensearch:9200", description="OpenSearch endpoint for SIEM logs"
+    )
+    log_receiver_url: str = Field(
+        default="http://log-receiver:5010", description="Log receiver service URL"
+    )
+    retention_days: int = Field(
+        default=90, ge=1, le=400, description="Log retention in days (1–400)"
+    )
+    free_tier_user_cap: int = Field(
+        default=5, ge=1, description="Maximum users on free tier"
+    )
+    exempt_domains: List[str] = Field(
+        default_factory=lambda: ["skauswatch.penguintech.cloud", "skauswatch.app"],
+        description="Domains exempt from free-tier user cap and SSO license requirement",
+    )
+
+
 class ManagerConfig(BaseModel):
     """Main Manager service configuration."""
 
@@ -261,6 +283,7 @@ class ManagerConfig(BaseModel):
     opensearch: OpenSearchConfig = Field(default_factory=OpenSearchConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     s3_scan: S3ScanConfig = Field(default_factory=S3ScanConfig)
+    siem: SIEMConfig = Field(default_factory=SIEMConfig)
 
     class Config:
         env_prefix = "SKAUSWATCH_"
@@ -351,4 +374,10 @@ def load_config() -> ManagerConfig:
             port=int(os.getenv("API_PORT", "5000")),
         ),
         s3_scan=_build_s3_scan_config(),
+        siem=SIEMConfig(
+            enabled=os.getenv("SIEM_ENABLED", "true").lower() == "true",
+            opensearch_url=os.getenv("OPENSEARCH_URL", "http://opensearch:9200"),
+            log_receiver_url=os.getenv("LOG_RECEIVER_URL", "http://log-receiver:5010"),
+            retention_days=int(os.getenv("LOG_RETENTION_DAYS", "90")),
+        ),
     )

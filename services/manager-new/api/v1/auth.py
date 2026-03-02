@@ -16,6 +16,7 @@ from typing import Optional
 import bcrypt
 import jwt
 from models.db import get_db
+from penguin_licensing import get_license_client
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
 from validators.pydantic_models import (
@@ -77,6 +78,33 @@ def create_refresh_token(user_id: int, config, db) -> tuple[str, datetime]:
     db.commit()
 
     return token, expires
+
+
+def _require_sso_license(request_host: str = "") -> tuple[dict, int] | None:
+    """Check SSO license. Returns error response tuple if not licensed, None if allowed.
+
+    Call at the start of SSO/OIDC route handlers:
+        err = _require_sso_license(request.headers.get("Host", ""))
+        if err:
+            return err
+    """
+    config = current_app.config["MANAGER_CONFIG"]
+    exempt_domains = config.siem.exempt_domains
+    is_exempt = any(
+        request_host == d or request_host.endswith(f".{d}")
+        for d in exempt_domains
+    )
+    if is_exempt:
+        return None
+
+    try:
+        lc = get_license_client()
+        if lc.has_feature("sso"):
+            return None
+    except Exception:
+        pass
+
+    return jsonify({"error": "SSO requires a premium license"}), 402
 
 
 def auth_required(f):

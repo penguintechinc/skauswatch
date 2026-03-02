@@ -281,6 +281,7 @@ def _register_blueprints(app: Quart) -> None:
         edr,
         research,
         s3_scan,
+        siem,
         threat_intel,
         users,
     )
@@ -293,6 +294,7 @@ def _register_blueprints(app: Quart) -> None:
     app.register_blueprint(approvals.bp, url_prefix="/api/v1/approvals")
     app.register_blueprint(edr.bp, url_prefix="/api/v1/edr")
     app.register_blueprint(s3_scan.bp, url_prefix="/api/v1/s3-scan")
+    app.register_blueprint(siem.bp, url_prefix="/api/v1/siem")
 
 
 async def _start_background_tasks() -> None:

@@ -21,6 +21,28 @@ services:
     networks:
       - app-network
 
+  # OpenSearch (SIEM log indexing)
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: skauswatch-opensearch
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+      - plugins.index_management.enabled=true
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
   # Redis Cache
   redis:
     image: redis:7-alpine
@@ -68,6 +90,11 @@ services:
       - MINIO_ENDPOINT=http://minio:9000
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      # SIEM Integration
+      - OPENSEARCH_URL=http://opensearch:9200
+      - LOG_RECEIVER_URL=http://log-receiver:5010
+      - SIEM_ENABLED=${SIEM_ENABLED:-true}
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-90}
       # TI Integration
       - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY:-}
       - OTX_API_KEY=${OTX_API_KEY:-}
@@ -105,6 +132,42 @@ services:
       - minio_data:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Log Receiver Service (SIEM ingest: HTTP + syslog UDP + Redis stream)
+  log-receiver:
+    build:
+      context: ./services/log-receiver
+      dockerfile: Dockerfile
+    container_name: skauswatch-log-receiver
+    environment:
+      - OPENSEARCH_URL=http://opensearch:9200
+      - S3_ENDPOINT_URL=http://minio:9000
+      - S3_REGION=us-east-1
+      - S3_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - S3_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - S3_SIEM_BUCKET=skauswatch-siem-logs
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/0
+      - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-90}
+      - HTTP_PORT=5010
+      - SYSLOG_UDP_PORT=514
+    ports:
+      - "${LOG_RECEIVER_PORT:-5010}:5010"
+      - "514:514/udp"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5010/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -390,6 +453,8 @@ volumes:
   grafana_data:
     driver: local
   minio_data:
+    driver: local
+  opensearch_data:
     driver: local
   clamav_db:
     driver: local

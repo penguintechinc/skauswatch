@@ -14,6 +14,7 @@ from typing import Optional
 
 from api.v1.auth import auth_required, hash_password, role_required
 from models.db import get_db
+from penguin_licensing import get_license_client
 from pydantic import BaseModel, EmailStr, Field, ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
 from validators.pydantic_models import UserResponse, UserRole
@@ -141,6 +142,28 @@ async def create_user():
         return jsonify({"error": "Validation error", "details": e.errors()}), 400
 
     db = get_db(config.database.uri)
+
+    # Enforce free-tier user cap
+    siem_cfg = config.siem
+    try:
+        lc = get_license_client()
+        has_premium = lc.has_feature("premium")
+    except Exception:
+        has_premium = False
+
+    if not has_premium:
+        request_host = request.headers.get("Host", "")
+        is_exempt = any(
+            request_host == d or request_host.endswith(f".{d}")
+            for d in siem_cfg.exempt_domains
+        )
+        if not is_exempt:
+            user_count = db(db.users).count()
+            if user_count >= siem_cfg.free_tier_user_cap:
+                return (
+                    jsonify({"error": "User limit reached. Upgrade to premium for more than 5 users."}),
+                    403,
+                )
 
     # Check if email already exists
     existing = db(db.users.email == create_data.email.lower()).select().first()
