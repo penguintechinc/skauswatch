@@ -1,0 +1,56 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: darwin-config
+  namespace: darwin-dev
+data:
+  LOG_LEVEL: "DEBUG"
+  DB_TYPE: "postgres"
+  CORS_ORIGINS: "https://darwin.penguintech.io"
+  DB_HOST: "postgresql.darwin-dev.svc.cluster.local"
+  DB_PORT: "5432"
+  DB_NAME: "darwin"
+  REDIS_HOST: "redis.darwin-dev.svc.cluster.local"
+  REDIS_PORT: "6379"
+  LICENSE_SERVER_URL: "https://license.penguintech.io"
+  RELEASE_MODE: "false"
+
+  # AI Feature Flag
+  AI_ENABLED: "true"
+  DEFAULT_AI_PROVIDER: "ollama"
+  OLLAMA_BASE_URL: "http://ollama.ollama.svc.cluster.local:11434"
+
+  # Ollama Model Configuration
+  OLLAMA_SECURITY_LLM: "granite-code:34b"
+  OLLAMA_BEST_PRACTICES_LLM: "llama3.3:70b"
+  OLLAMA_FRAMEWORK_LLM: "codestral:22b"
+  OLLAMA_IAC_LLM: "granite-code:20b"
+  OLLAMA_FALLBACK_LLM: "starcoder2:15b"
+  OLLAMA_DEFAULT_LLM: "granite-code:20b"
+
+  # Review Category Flags
+  REVIEW_SECURITY_ENABLED: "true"
+  REVIEW_BEST_PRACTICES_ENABLED: "true"
+  REVIEW_FRAMEWORK_ENABLED: "true"
+  REVIEW_IAC_ENABLED: "true"
+
+  # License Configuration
+  MAX_REPOS_FREE: "3"
+  REQUIRE_LICENSE_FOR_EXTRA_REPOS: "true"
+
+  # Review Limits
+  MAX_FILES_PER_REVIEW: "50"
+  MAX_LINES_PER_FILE: "1000"
+  REVIEW_TIMEOUT_SECONDS: "300"
+
+  # Sandbox Configuration
+  SANDBOX_BASE_PATH: "/tmp/pr-reviewer"
+  SANDBOX_CLEANUP_TIMEOUT: "3600"
+
+  # Celery Configuration
+  DEFAULT_POLLING_INTERVAL_MINUTES: "5"
+
+  # Default Admin User
+  DEFAULT_ADMIN_EMAIL: "admin@localhost.local"
+  DEFAULT_ADMIN_PASSWORD: "admin123"

@@ -1,0 +1,56 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: project-template-dev
+
+namespace: project-template-dev
+
+namePrefix: dev-
+
+commonLabels:
+  environment: development
+
+bases:
+- ../../base
+
+replicas:
+- name: flask-backend
+  count: 1
+- name: webui
+  count: 1
+
+configMapGenerator:
+- name: project-template-config
+  behavior: merge
+  literals:
+  - LOG_LEVEL=DEBUG
+  - RELEASE_MODE=false
+  - AI_ENABLED=true
+  - DEFAULT_AI_PROVIDER=ollama
+  - OLLAMA_BASE_URL=http://localhost:11434
+  - OLLAMA_SECURITY_LLM=granite-code:34b
+  - OLLAMA_BEST_PRACTICES_LLM=llama3.3:70b
+  - OLLAMA_FRAMEWORK_LLM=codestral:22b
+  - OLLAMA_IAC_LLM=granite-code:20b
+  - OLLAMA_FALLBACK_LLM=starcoder2:15b
+  - OLLAMA_DEFAULT_LLM=granite-code:20b
+  - REVIEW_SECURITY_ENABLED=true
+  - REVIEW_BEST_PRACTICES_ENABLED=true
+  - REVIEW_FRAMEWORK_ENABLED=true
+  - REVIEW_IAC_ENABLED=true
+  - MAX_FILES_PER_REVIEW=50
+  - MAX_LINES_PER_FILE=1000
+  - REVIEW_TIMEOUT_SECONDS=300
+
+secretGenerator:
+- name: project-template-secrets
+  behavior: merge
+  literals:
+  - DB_USER=devuser
+  - DB_PASS=devpass
+  - SECRET_KEY=devsecretkey
+  - SECURITY_PASSWORD_SALT=devsalt
+  - LICENSE_KEY=PENG-DEV-XXXX-XXXX-XXXX-ABCD
+  - REDIS_PASSWORD=devredis

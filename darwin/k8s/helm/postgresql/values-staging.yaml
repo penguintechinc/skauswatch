@@ -1,0 +1,37 @@
+# Staging PostgreSQL Configuration
+# Multiple replicas, medium resources
+
+replicaCount: 2
+
+image:
+  tag: "16-alpine"
+
+persistence:
+  enabled: true
+  size: 20Gi
+  storageClassName: standard
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 1Gi
+
+postgresql:
+  maxConnections: 200
+  sharedBuffers: 512MB
+  effectiveCacheSize: 2GB
+  maintenanceWorkMem: 128MB
+  walBuffers: 32MB
+
+backup:
+  enabled: true
+  schedule: "0 2 * * *"
+  retention: 7
+
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: false

@@ -1,0 +1,18 @@
+apiVersion: v2
+name: postgresql
+description: PostgreSQL database service with high availability and backup support
+type: application
+version: 1.0.0
+appVersion: "16"
+keywords:
+  - postgresql
+  - database
+  - sql
+  - relational
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io
+home: https://www.postgresql.org
+sources:
+  - https://github.com/postgres/postgres
+icon: https://www.postgresql.org/media/img/about/press/elephant.png

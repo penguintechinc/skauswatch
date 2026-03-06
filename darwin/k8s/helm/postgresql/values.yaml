@@ -1,0 +1,130 @@
+# Default PostgreSQL Helm Chart Values
+
+replicaCount: 1
+
+image:
+  repository: postgres
+  pullPolicy: IfNotPresent
+  tag: "16-alpine"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  fsGroup: 999
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+
+service:
+  type: ClusterIP
+  port: 5432
+  targetPort: 5432
+  annotations: {}
+  headlessService: true
+
+persistence:
+  enabled: true
+  size: 10Gi
+  storageClassName: standard
+  accessModes:
+    - ReadWriteOnce
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 1Gi
+  requests:
+    cpu: 150m
+    memory: 512Mi
+
+livenessProbe:
+  exec:
+    command:
+      - /bin/sh
+      - -c
+      - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  exec:
+    command:
+      - /bin/sh
+      - -c
+      - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# PostgreSQL Database Configuration
+postgresql:
+  # Database initialization
+  database: postgres
+  username: postgres
+  password: changeme-in-production
+
+  # Configuration
+  initdbArgs: ""
+
+  # Connection settings
+  maxConnections: 100
+  superuserReservedConnections: 3
+
+  # Memory settings
+  sharedBuffers: 256MB
+  effectiveCacheSize: 1GB
+  maintenanceWorkMem: 64MB
+  walBuffers: 16MB
+
+  # WAL settings
+  walLevel: replica
+  maxWalSenders: 3
+  walKeepSegments: 64
+
+  # Query planning
+  randomPageCost: 1.1
+  effectiveIoConcurrency: 200
+
+  # Performance
+  workMem: 4MB
+  maxParallelWorkersPerGather: 2
+  maxWorkerProcesses: 2
+  maxParallelWorkers: 2
+
+# Backup Configuration
+backup:
+  enabled: false
+  schedule: "0 2 * * *"  # Daily at 2 AM UTC
+  retention: 7  # days
+
+# Monitoring
+monitoring:
+  enabled: false
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s

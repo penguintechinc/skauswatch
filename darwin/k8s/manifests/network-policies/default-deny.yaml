@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: darwin
+  labels:
+    app: darwin
+    component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress: []
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: darwin
+  labels:
+    app: darwin
+    component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress: []

@@ -1,0 +1,29 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgresql-netpol
+  namespace: darwin
+  labels:
+    app: darwin
+    component: network-policy
+    service: postgresql
+spec:
+  podSelector:
+    matchLabels:
+      app: postgresql
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from flask-backend pods only
+    - from:
+        - podSelector:
+            matchLabels:
+              app: flask-backend
+      ports:
+        - protocol: TCP
+          port: 5432
+
+  egress:
+    # Deny all egress traffic (database isolation)
+    - to: []

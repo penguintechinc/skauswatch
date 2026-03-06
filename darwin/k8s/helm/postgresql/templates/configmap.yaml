@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "postgresql.fullname" . }}-config
+  labels:
+    {{- include "postgresql.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+data:
+  postgresql.conf: |
+    # PostgreSQL Configuration
+    # Database cluster management
+    max_connections = {{ .Values.postgresql.maxConnections }}
+    superuser_reserved_connections = {{ .Values.postgresql.superuserReservedConnections }}
+
+    # Memory Settings
+    shared_buffers = {{ .Values.postgresql.sharedBuffers }}
+    effective_cache_size = {{ .Values.postgresql.effectiveCacheSize }}
+    maintenance_work_mem = {{ .Values.postgresql.maintenanceWorkMem }}
+    checkpoint_completion_target = 0.9
+    wal_buffers = {{ .Values.postgresql.walBuffers }}
+    default_statistics_target = 100
+
+    # WAL Settings
+    wal_level = {{ .Values.postgresql.walLevel }}
+    max_wal_senders = {{ .Values.postgresql.maxWalSenders }}
+    wal_keep_segments = {{ .Values.postgresql.walKeepSegments }}
+
+    # Query Planning
+    random_page_cost = {{ .Values.postgresql.randomPageCost }}
+    effective_io_concurrency = {{ .Values.postgresql.effectiveIoConcurrency }}
+
+    # Logging
+    logging_collector = on
+    log_directory = 'pg_log'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_statement = 'mod'
+    log_duration = off
+    log_lock_waits = on
+    log_min_duration_statement = 1000
+
+    # Client Connection
+    listen_addresses = '*'
+    unix_socket_directories = '/var/run/postgresql'
+
+    # Performance
+    work_mem = {{ .Values.postgresql.workMem }}
+    max_parallel_workers_per_gather = {{ .Values.postgresql.maxParallelWorkersPerGather }}
+    max_worker_processes = {{ .Values.postgresql.maxWorkerProcesses }}
+    max_parallel_workers = {{ .Values.postgresql.maxParallelWorkers }}

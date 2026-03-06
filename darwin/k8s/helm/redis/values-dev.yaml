@@ -1,0 +1,26 @@
+# Development environment overrides
+replicaCount: 1
+
+image:
+  tag: "7-alpine"
+
+persistence:
+  enabled: true
+  size: 2Gi
+  storageClassName: ""
+
+resources:
+  limits:
+    cpu: 50m
+    memory: 128Mi
+  requests:
+    cpu: 25m
+    memory: 64Mi
+
+redis:
+  requirepass: true
+  appendonly: true
+  appendfsync: always
+
+secrets:
+  redisPassword: "dev-redis-password"

@@ -1,0 +1,14 @@
+---
+apiVersion: v2
+name: redis
+description: Redis cache service with AOF persistence
+type: application
+version: 1.0.0
+appVersion: "7"
+keywords:
+  - redis
+  - cache
+  - persistence
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io

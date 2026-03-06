@@ -1,0 +1,103 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: celery-beat
+  namespace: darwin-dev
+  labels:
+    app: celery-beat
+spec:
+  # CRITICAL: Only ONE replica - multiple beats would duplicate schedules
+  replicas: 1
+  selector:
+    matchLabels:
+      app: celery-beat
+  template:
+    metadata:
+      labels:
+        app: celery-beat
+    spec:
+      containers:
+      - name: celery-beat
+        image: registry-dal2.penguintech.io/darwin/flask-backend:dev
+        imagePullPolicy: Always
+        command: ["celery"]
+        args:
+        - "-A"
+        - "celery_worker.celery"
+        - "beat"
+        - "--loglevel=info"
+        env:
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: LOG_LEVEL
+        - name: DB_TYPE
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DB_TYPE
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DB_PORT
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DB_NAME
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: darwin-secrets
+              key: DB_USER
+        - name: DB_PASS
+          valueFrom:
+            secretKeyRef:
+              name: darwin-secrets
+              key: DB_PASS
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: darwin-secrets
+              key: SECRET_KEY
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: REDIS_HOST
+        - name: REDIS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: REDIS_PORT
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: darwin-secrets
+              key: REDIS_PASSWORD
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/0"
+        - name: CELERY_BROKER_URL
+          value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/0"
+        - name: CELERY_RESULT_BACKEND
+          value: "redis://:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/0"
+        - name: DEFAULT_POLLING_INTERVAL_MINUTES
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DEFAULT_POLLING_INTERVAL_MINUTES
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 256Mi

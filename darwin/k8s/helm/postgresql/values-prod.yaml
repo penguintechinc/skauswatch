@@ -1,0 +1,53 @@
+# Production PostgreSQL Configuration
+# Multiple replicas, large resources, backup enabled
+
+replicaCount: 3
+
+image:
+  tag: "16-alpine"
+
+persistence:
+  enabled: true
+  size: 100Gi
+  storageClassName: standard
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 4Gi
+  requests:
+    cpu: 1000m
+    memory: 2Gi
+
+postgresql:
+  maxConnections: 300
+  sharedBuffers: 1GB
+  effectiveCacheSize: 4GB
+  maintenanceWorkMem: 256MB
+  walBuffers: 64MB
+  maxWalSenders: 5
+  walKeepSegments: 128
+  maxParallelWorkers: 4
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - postgresql
+        topologyKey: kubernetes.io/hostname
+
+backup:
+  enabled: true
+  schedule: "0 2 * * *"
+  retention: 30
+
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true

@@ -1,0 +1,32 @@
+# Development PostgreSQL Configuration
+# Single replica, minimal resources
+
+replicaCount: 1
+
+image:
+  tag: "16-alpine"
+
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClassName: standard
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+postgresql:
+  maxConnections: 50
+  sharedBuffers: 128MB
+  effectiveCacheSize: 512MB
+  maintenanceWorkMem: 32MB
+
+backup:
+  enabled: false
+
+monitoring:
+  enabled: false
