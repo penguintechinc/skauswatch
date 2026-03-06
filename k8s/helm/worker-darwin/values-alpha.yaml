@@ -1,0 +1,41 @@
+# Alpha environment overrides (local MicroK8s)
+replicaCount: 1
+
+image:
+  pullPolicy: Never
+  tag: latest
+
+namespace: skauswatch
+
+env:
+  - name: LOG_LEVEL
+    value: "DEBUG"
+  - name: FLASK_ENV
+    value: "development"
+  - name: RELEASE_MODE
+    value: "false"
+
+celery:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: "500m"
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: "250m"
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Internal service only - no ingress
+ingress:
+  enabled: false

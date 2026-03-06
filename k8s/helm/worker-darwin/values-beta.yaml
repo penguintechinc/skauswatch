@@ -1,0 +1,42 @@
+# Beta environment overrides (dal2 cluster)
+replicaCount: 1
+
+image:
+  registry: registry-dal2.penguintech.io
+  pullPolicy: Always
+  tag: latest
+
+namespace: skauswatch
+
+env:
+  - name: LOG_LEVEL
+    value: "INFO"
+  - name: FLASK_ENV
+    value: "production"
+  - name: RELEASE_MODE
+    value: "false"
+
+celery:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: "1"
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 256Mi
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: "500m"
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# Internal service only - no ingress
+ingress:
+  enabled: false

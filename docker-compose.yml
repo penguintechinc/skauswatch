@@ -98,6 +98,8 @@ services:
       # TI Integration
       - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY:-}
       - OTX_API_KEY=${OTX_API_KEY:-}
+      # Darwin AI Review
+      - WORKER_DARWIN_URL=http://worker-darwin:5005
     ports:
       - "${MANAGER_PORT:-5004}:5000"
       - "${MANAGER_GRPC_PORT:-50054}:50051"
@@ -394,17 +396,105 @@ services:
       context: ./services/worker-scanner
       dockerfile: Dockerfile
     container_name: skauswatch-worker-scanner
+    cap_add:
+      - NET_RAW
     environment:
       - WORKER_SCANNER_PORT=5004
       - DATABASE_URL=postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-app_db}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/0
       - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/1
+      - ASM_ENABLED=${ASM_ENABLED:-true}
+      - ASM_S3_ENDPOINT_URL=${ASM_S3_ENDPOINT_URL:-http://minio:9000}
+      - ASM_S3_REGION=${ASM_S3_REGION:-us-east-1}
+      - ASM_S3_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - ASM_S3_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+      - ASM_S3_BUCKET=${ASM_S3_BUCKET:-skauswatch-asm-artifacts}
+      - ASM_MASSCAN_RATE=${ASM_MASSCAN_RATE:-1000}
+      - ASM_SCREENSHOT_TIMEOUT=${ASM_SCREENSHOT_TIMEOUT:-10}
+      - ASM_EXTRA_PORTS=${ASM_EXTRA_PORTS:-}
     ports:
       - "${WORKER_SCANNER_PORT:-5004}:5004"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Worker-Darwin Service (Darwin AI Code Review API)
+  worker-darwin:
+    build:
+      context: ./services/worker-darwin
+      dockerfile: Dockerfile
+    container_name: skauswatch-worker-darwin
+    environment:
+      - DARWIN_PORT=5005
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB:-app_db}
+      - DARWIN_DB_USER=${DARWIN_DB_USER:-darwin}
+      - DARWIN_DB_PASS=${DARWIN_DB_PASS:-change-me-darwin-pass}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-password}
+      - DARWIN_CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/2
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
+      - DARWIN_AI_PROVIDER=${DARWIN_AI_PROVIDER:-anthropic}
+      - DARWIN_AI_MODEL=${DARWIN_AI_MODEL:-claude-opus-4-5}
+      - DARWIN_FREE_TIER_USER_CAP=${DARWIN_FREE_TIER_USER_CAP:-3}
+      - DARWIN_MAX_REPOS_FREE=${DARWIN_MAX_REPOS_FREE:-3}
+      - DARWIN_MAX_REVIEWS_PER_DAY=${DARWIN_MAX_REVIEWS_PER_DAY:-10}
+      - LICENSE_KEY=${LICENSE_KEY:-}
+    ports:
+      - "${WORKER_DARWIN_PORT:-5005}:5005"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5005/healthz')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Worker-Darwin Celery (Darwin AI Code Review background tasks)
+  worker-darwin-celery:
+    build:
+      context: ./services/worker-darwin
+      dockerfile: Dockerfile
+    container_name: skauswatch-worker-darwin-celery
+    command: >
+      celery -A workers.celery_app.celery_app worker
+      --loglevel=info
+      -Q darwin_reviews,darwin_plans,darwin_polling
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${POSTGRES_DB:-app_db}
+      - DARWIN_DB_USER=${DARWIN_DB_USER:-darwin}
+      - DARWIN_DB_PASS=${DARWIN_DB_PASS:-change-me-darwin-pass}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-password}
+      - DARWIN_CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/2
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
+      - DARWIN_AI_PROVIDER=${DARWIN_AI_PROVIDER:-anthropic}
+      - DARWIN_AI_MODEL=${DARWIN_AI_MODEL:-claude-opus-4-5}
+      - LICENSE_KEY=${LICENSE_KEY:-}
+    depends_on:
+      worker-darwin:
         condition: service_healthy
     restart: unless-stopped
     networks:

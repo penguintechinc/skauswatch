@@ -28,6 +28,10 @@ resources:
 - ../../manifests/worker-s3/service.yaml
 - ../../manifests/worker-scanner/deployment.yaml
 - ../../manifests/worker-scanner/service.yaml
+- ../../manifests/worker-darwin/deployment.yaml
+- ../../manifests/worker-darwin/service.yaml
+- ../../manifests/worker-darwin/secret.yaml
+- ../../manifests/worker-darwin-celery/deployment.yaml
 - ../../manifests/webui/deployment.yaml
 - ../../manifests/webui/service.yaml
 - ../../manifests/edr-agent/daemonset.yaml

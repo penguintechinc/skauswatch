@@ -5,7 +5,7 @@ kind: Kustomization
 metadata:
   name: skauswatch-beta
 
-namespace: skauswatch-beta
+namespace: skauswatch
 
 namePrefix: beta-
 
@@ -29,6 +29,10 @@ replicas:
   count: 2
 - name: worker-scanner
   count: 2
+- name: worker-darwin
+  count: 1
+- name: worker-darwin-celery
+  count: 1
 - name: webui
   count: 2
 - name: edr-agent
@@ -40,6 +44,9 @@ configMapGenerator:
   literals:
   - LOG_LEVEL=INFO
   - RELEASE_MODE=false
+  # IceBox shim env vars — pki-server and ssh-ca now proxy to IceBox services
+  - ICEBOX_PKI_URL=http://icebox-pki-server.icebox.svc.cluster.local:8081
+  - ICEBOX_SSH_CA_URL=http://icebox-ssh-ca.icebox.svc.cluster.local:8082
 
 secretGenerator:
 - name: skauswatch-secrets
@@ -51,3 +58,11 @@ secretGenerator:
   - SECURITY_PASSWORD_SALT=betasalt
   - LICENSE_KEY=PENG-BETA-XXXX-XXXX-XXXX-ABCD
   - REDIS_PASSWORD=betaredis
+- name: skauswatch-darwin-secrets
+  behavior: merge
+  literals:
+  - DARWIN_DB_USER=darwin
+  - DARWIN_DB_PASS=betadarwinpass
+  - DARWIN_CELERY_BROKER_URL=redis://:betaredis@redis:6379/2
+  - ANTHROPIC_API_KEY=
+  - OPENAI_API_KEY=

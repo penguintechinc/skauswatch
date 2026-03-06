@@ -24,6 +24,20 @@ RUN NUCLEI_VERSION=$(curl -s https://api.github.com/repos/projectdiscovery/nucle
     chmod +x /usr/local/bin/nuclei && \
     rm nuclei.zip
 
+# gowitness (HTTP screenshot tool)
+ARG GOWITNESS_VERSION=2.5.1
+RUN curl -fsSL https://github.com/sensepost/gowitness/releases/download/${GOWITNESS_VERSION}/gowitness-linux-amd64 \
+    -o /usr/local/bin/gowitness && chmod +x /usr/local/bin/gowitness
+
+# Masscan, Xvfb, xfreerdp, vncsnapshot for ASM scanning
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    masscan \
+    xvfb \
+    xfreerdp3-x11 \
+    vncsnapshot \
+    libcap2-bin \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
@@ -51,6 +65,19 @@ WORKDIR /app
 
 # Copy Nuclei binary from builder
 COPY --from=builder /usr/local/bin/nuclei /usr/local/bin/nuclei
+
+# Copy gowitness binary from builder
+COPY --from=builder /usr/local/bin/gowitness /usr/local/bin/gowitness
+
+# masscan needs raw socket capability - set during build, NET_RAW cap required at runtime via docker-compose
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    masscan \
+    xvfb \
+    xfreerdp3-x11 \
+    vncsnapshot \
+    libcap2-bin \
+    && rm -rf /var/lib/apt/lists/* \
+    && setcap cap_net_raw+ep /usr/bin/masscan
 
 # Copy Python packages from builder
 COPY --from=builder /install /usr/local

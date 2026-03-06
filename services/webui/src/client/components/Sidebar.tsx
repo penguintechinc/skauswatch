@@ -22,6 +22,7 @@ const navigation: NavCategory[] = [
     items: [
       { label: 'Threat Intel', path: '/threat-intel', icon: '🛡️' },
       { label: 'S3 Scanning', path: '/s3-scan', icon: '🔍' },
+      { label: 'Darwin AI Review', path: '/darwin', icon: '🤖' },
     ],
   },
   {

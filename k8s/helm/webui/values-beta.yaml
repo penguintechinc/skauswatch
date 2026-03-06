@@ -6,7 +6,7 @@ image:
   pullPolicy: Always
   tag: latest
 
-namespace: skauswatch-beta
+namespace: skauswatch
 
 env:
   - name: NODE_ENV

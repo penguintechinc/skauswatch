@@ -5,7 +5,7 @@ image:
   pullPolicy: Never
   tag: latest
 
-namespace: skauswatch-alpha
+namespace: skauswatch
 
 env:
   - name: LOG_LEVEL

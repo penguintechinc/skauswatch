@@ -128,8 +128,12 @@ def create_app() -> Flask:
         app.register_blueprint(schedules_bp, url_prefix="/api/v1/scanner/schedules")
         app.register_blueprint(scanners_bp, url_prefix="/api/v1/scanner")
 
+        from api.routes.asm import asm_bp
+
+        app.register_blueprint(asm_bp, url_prefix="/api/v1/asm")
+
         logger.info(
-            "API blueprints registered: targets, jobs, findings, schedules, scanners"
+            "API blueprints registered: targets, jobs, findings, schedules, scanners, asm"
         )
     except ImportError as e:
         logger.error("Failed to import blueprints: %s", str(e))

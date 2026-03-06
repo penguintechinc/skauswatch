@@ -1,0 +1,111 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-darwin-celery
+  namespace: skauswatch
+  labels:
+    app.kubernetes.io/name: worker-darwin-celery
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: worker-darwin-celery
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: worker-darwin-celery
+        app.kubernetes.io/component: worker
+        app.kubernetes.io/managed-by: kustomize
+    spec:
+      serviceAccountName: skauswatch
+      containers:
+      - name: worker-darwin-celery
+        image: ghcr.io/penguintechinc/skauswatch-worker-darwin:latest
+        imagePullPolicy: Always
+        command:
+          - celery
+          - -A
+          - workers.celery_app.celery_app
+          - worker
+          - --loglevel=info
+          - -Q
+          - darwin_reviews,darwin_plans,darwin_polling
+        env:
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: skauswatch-config
+              key: LOG_LEVEL
+        - name: DB_HOST
+          value: "postgres"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: skauswatch-config
+              key: DB_NAME
+        - name: DARWIN_DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: skauswatch-darwin-secrets
+              key: DARWIN_DB_USER
+        - name: DARWIN_DB_PASS
+          valueFrom:
+            secretKeyRef:
+              name: skauswatch-darwin-secrets
+              key: DARWIN_DB_PASS
+        - name: DARWIN_CELERY_BROKER_URL
+          valueFrom:
+            secretKeyRef:
+              name: skauswatch-darwin-secrets
+              key: DARWIN_CELERY_BROKER_URL
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: skauswatch-darwin-secrets
+              key: ANTHROPIC_API_KEY
+              optional: true
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: skauswatch-darwin-secrets
+              key: OPENAI_API_KEY
+              optional: true
+        - name: DARWIN_AI_PROVIDER
+          valueFrom:
+            configMapKeyRef:
+              name: skauswatch-config
+              key: DARWIN_AI_PROVIDER
+              optional: true
+        - name: DARWIN_AI_MODEL
+          valueFrom:
+            configMapKeyRef:
+              name: skauswatch-config
+              key: DARWIN_AI_MODEL
+              optional: true
+        - name: LICENSE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: skauswatch-secrets
+              key: LICENSE_KEY
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false

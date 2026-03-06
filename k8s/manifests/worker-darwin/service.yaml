@@ -1,0 +1,19 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-darwin
+  namespace: skauswatch
+  labels:
+    app.kubernetes.io/name: worker-darwin
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5005
+      targetPort: 5005
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: worker-darwin

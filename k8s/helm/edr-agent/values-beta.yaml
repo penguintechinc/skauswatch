@@ -4,7 +4,7 @@ image:
   pullPolicy: Always
   tag: latest
 
-namespace: skauswatch-beta
+namespace: skauswatch
 
 env:
   - name: LOG_LEVEL

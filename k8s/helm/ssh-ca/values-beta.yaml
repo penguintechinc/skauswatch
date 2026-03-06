@@ -6,7 +6,7 @@ image:
   pullPolicy: Always
   tag: latest
 
-namespace: skauswatch-beta
+namespace: skauswatch
 
 env:
   - name: LOG_LEVEL
@@ -15,6 +15,9 @@ env:
     value: "production"
   - name: RELEASE_MODE
     value: "false"
+  # IceBox shim: forward to IceBox ssh-ca (absorbed service)
+  - name: ICEBOX_SSH_CA_URL
+    value: "http://icebox-ssh-ca.icebox.svc.cluster.local:8082"
 
 autoscaling:
   enabled: true

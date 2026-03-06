@@ -12,6 +12,7 @@ import Profile from './pages/Profile';
 import Settings from './pages/Settings';
 import ThreatIntel from './pages/ThreatIntel';
 import S3Scan from './pages/S3Scan';
+import Darwin from './pages/Darwin';
 
 function App() {
   const { isAuthenticated, isLoading, checkAuth } = useAuth();
@@ -63,6 +64,9 @@ function App() {
 
         {/* S3 Malware Scanning - all authenticated users */}
         <Route path="/s3-scan" element={<S3Scan />} />
+
+        {/* Darwin AI Code Review - all authenticated users */}
+        <Route path="/darwin" element={<Darwin />} />
 
         {/* Profile - all authenticated users */}
         <Route path="/profile" element={<Profile />} />

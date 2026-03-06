@@ -13,15 +13,12 @@ Quart-based unified Manager service providing:
 import asyncio
 import logging
 import os
-import signal
-import sys
-from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import structlog
 from models.db import close_db, get_db, init_database_schema
-from quart import Quart, jsonify, request
+from quart import Quart, jsonify
 from quart_cors import cors
 
 from config import ManagerConfig, load_config
@@ -277,7 +274,9 @@ def _register_blueprints(app: Quart) -> None:
     from api.v1 import (
         alerts,
         approvals,
+        asm,
         auth,
+        darwin,
         edr,
         research,
         s3_scan,
@@ -295,6 +294,8 @@ def _register_blueprints(app: Quart) -> None:
     app.register_blueprint(edr.bp, url_prefix="/api/v1/edr")
     app.register_blueprint(s3_scan.bp, url_prefix="/api/v1/s3-scan")
     app.register_blueprint(siem.bp, url_prefix="/api/v1/siem")
+    app.register_blueprint(asm.bp, url_prefix="/api/v1/asm")
+    app.register_blueprint(darwin.bp, url_prefix="/api/v1/darwin")
 
 
 async def _start_background_tasks() -> None:
