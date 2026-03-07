@@ -4,10 +4,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Tuple
 
-from flask import Blueprint, Response, jsonify, request
-
 from config.settings import settings
 from database.models import get_db
+from flask import Blueprint, Response, jsonify, request
 from workers.plan_worker import generate_plan
 
 logger = logging.getLogger(__name__)
@@ -26,7 +25,9 @@ def list_plans() -> Tuple[Response, int]:
             orderby=~db.darwin_issue_plans.created_at
         )
     else:
-        rows = db(db.darwin_issue_plans).select(orderby=~db.darwin_issue_plans.created_at)
+        rows = db(db.darwin_issue_plans).select(
+            orderby=~db.darwin_issue_plans.created_at
+        )
 
     return jsonify([_plan_to_dict(r) for r in rows]), 200
 

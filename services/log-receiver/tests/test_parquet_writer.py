@@ -1,9 +1,14 @@
-import pytest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
-pytest.importorskip("aiobotocore", reason="aiobotocore not installed (install service deps to run)")
-pytest.importorskip("pyarrow", reason="pyarrow not installed (install service deps to run)")
+import pytest
+
+pytest.importorskip(
+    "aiobotocore", reason="aiobotocore not installed (install service deps to run)"
+)
+pytest.importorskip(
+    "pyarrow", reason="pyarrow not installed (install service deps to run)"
+)
 
 from ocsf.schema import OCSFEvent
 from writers.parquet_writer import ParquetWriter
@@ -33,7 +38,9 @@ def _mock_writer(endpoint_url=None):
     mock_client = AsyncMock()
     mock_client.put_object = AsyncMock()
     mock_session = MagicMock()
-    mock_session.create_client.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_session.create_client.return_value.__aenter__ = AsyncMock(
+        return_value=mock_client
+    )
     mock_session.create_client.return_value.__aexit__ = AsyncMock(return_value=False)
     writer._session = mock_session
     return writer, mock_client, mock_session

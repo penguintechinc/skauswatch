@@ -3,11 +3,10 @@ import json
 from typing import Any
 
 import redis.asyncio as aioredis
-from penguin_utils import get_logger
-
 from ocsf.normalizer import normalize
-from writers.parquet_writer import ParquetWriter
+from penguin_utils import get_logger
 from writers.opensearch_writer import OpenSearchWriter
+from writers.parquet_writer import ParquetWriter
 
 logger = get_logger(__name__)
 
@@ -30,7 +29,9 @@ class RedisStreamConsumer:
 
     async def start(self) -> None:
         try:
-            await self._redis.xgroup_create(STREAM_KEY, GROUP_NAME, id="0", mkstream=True)
+            await self._redis.xgroup_create(
+                STREAM_KEY, GROUP_NAME, id="0", mkstream=True
+            )
         except Exception:
             pass  # group already exists
 
@@ -38,8 +39,11 @@ class RedisStreamConsumer:
         while True:
             try:
                 messages = await self._redis.xreadgroup(
-                    GROUP_NAME, CONSUMER_NAME,
-                    {STREAM_KEY: ">"}, count=BATCH_SIZE, block=5000
+                    GROUP_NAME,
+                    CONSUMER_NAME,
+                    {STREAM_KEY: ">"},
+                    count=BATCH_SIZE,
+                    block=5000,
                 )
                 if messages:
                     await self._process(messages)

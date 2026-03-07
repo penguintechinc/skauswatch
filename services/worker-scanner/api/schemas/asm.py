@@ -28,7 +28,9 @@ class PortsConfigSchema(Schema):
         fields.Int(validate=validate.Range(min=1, max=65535)),
         load_default=[],
     )
-    masscan_rate = fields.Int(load_default=1000, validate=validate.Range(min=1, max=1000000))
+    masscan_rate = fields.Int(
+        load_default=1000, validate=validate.Range(min=1, max=1000000)
+    )
 
 
 class AsmScanResponseSchema(Schema):

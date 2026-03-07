@@ -2,14 +2,14 @@ import asyncio
 import signal
 
 from aiohttp import web
+from ingest.http_handler import HTTPIngestHandler
+from ingest.redis_consumer import RedisStreamConsumer
+from ingest.syslog_handler import SyslogProtocol
 from penguin_utils import configure_logging, get_logger
+from writers.opensearch_writer import OpenSearchWriter
+from writers.parquet_writer import ParquetWriter
 
 from config import LogReceiverConfig
-from ingest.http_handler import HTTPIngestHandler
-from ingest.syslog_handler import SyslogProtocol
-from ingest.redis_consumer import RedisStreamConsumer
-from writers.parquet_writer import ParquetWriter
-from writers.opensearch_writer import OpenSearchWriter
 
 configure_logging()
 logger = get_logger(__name__)
@@ -25,7 +25,9 @@ async def main() -> None:
         secret_key=cfg.s3_secret_key,
         bucket=cfg.s3_siem_bucket,
     )
-    opensearch = OpenSearchWriter(url=cfg.opensearch_url, retention_days=cfg.log_retention_days)
+    opensearch = OpenSearchWriter(
+        url=cfg.opensearch_url, retention_days=cfg.log_retention_days
+    )
     await opensearch.ensure_ism_policy()
 
     http_handler = HTTPIngestHandler(parquet, opensearch)
@@ -49,7 +51,9 @@ async def main() -> None:
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", cfg.http_port)
     await site.start()
-    logger.info("log_receiver_started", http_port=cfg.http_port, udp_port=cfg.syslog_udp_port)
+    logger.info(
+        "log_receiver_started", http_port=cfg.http_port, udp_port=cfg.syslog_udp_port
+    )
 
     loop = asyncio.get_event_loop()
     stop = loop.create_future()

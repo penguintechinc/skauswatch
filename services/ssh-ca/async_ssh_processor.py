@@ -42,21 +42,32 @@ _DEPRECATION_HEADERS = {
     "Sunset": "SkausWatch v2.0.0",
 }
 
-_HOP_BY_HOP = frozenset({
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade", "content-length",
-})
+_HOP_BY_HOP = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+        "content-length",
+    }
+)
 
 
 @app.route("/healthz")
 async def healthz():
     """Liveness probe."""
-    return jsonify({
-        "status": "healthy",
-        "mode": "deprecation-shim",
-        "successor": ICEBOX_SSH_CA_URL,
-        "timestamp": datetime.utcnow().isoformat(),
-    })
+    return jsonify(
+        {
+            "status": "healthy",
+            "mode": "deprecation-shim",
+            "successor": ICEBOX_SSH_CA_URL,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    )
 
 
 @app.route("/api/v1/<path:path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
@@ -68,7 +79,8 @@ async def proxy_to_icebox(path: str):
         target_url = f"{target_url}?{query_string}"
 
     forward_headers = {
-        k: v for k, v in request.headers.items()
+        k: v
+        for k, v in request.headers.items()
         if k.lower() not in _HOP_BY_HOP and k.lower() != "host"
     }
     forward_headers["X-Forwarded-By"] = "skauswatch-ssh-ca-shim/v1"
@@ -77,7 +89,9 @@ async def proxy_to_icebox(path: str):
 
     logger.warning(
         "SSH CA shim: forwarding %s /api/v1/%s → %s (DEPRECATED)",
-        request.method, path, ICEBOX_SSH_CA_URL,
+        request.method,
+        path,
+        ICEBOX_SSH_CA_URL,
     )
 
     try:
@@ -91,7 +105,8 @@ async def proxy_to_icebox(path: str):
             ) as resp:
                 content = await resp.read()
                 response_headers = {
-                    k: v for k, v in resp.headers.items()
+                    k: v
+                    for k, v in resp.headers.items()
                     if k.lower() not in _HOP_BY_HOP
                 }
                 response_headers.update(_DEPRECATION_HEADERS)
@@ -104,10 +119,12 @@ async def proxy_to_icebox(path: str):
 
     except aiohttp.ClientConnectorError as exc:
         logger.error("SSH CA shim: cannot reach %s: %s", ICEBOX_SSH_CA_URL, exc)
-        resp = jsonify({
-            "error": "IceBox SSH CA service unavailable",
-            "detail": f"Cannot connect to {ICEBOX_SSH_CA_URL}.",
-        })
+        resp = jsonify(
+            {
+                "error": "IceBox SSH CA service unavailable",
+                "detail": f"Cannot connect to {ICEBOX_SSH_CA_URL}.",
+            }
+        )
         for k, v in _DEPRECATION_HEADERS.items():
             resp.headers[k] = v
         return resp, 503
@@ -119,6 +136,7 @@ async def proxy_to_icebox(path: str):
 
 if __name__ == "__main__":
     import asyncio
+
     import hypercorn.asyncio
     from hypercorn.config import Config as HConfig
 

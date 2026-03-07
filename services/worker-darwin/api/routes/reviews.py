@@ -6,13 +6,12 @@ License cap enforcement (Point C):
 """
 
 import logging
-from datetime import datetime, date, timezone
+from datetime import date, datetime, timezone
 from typing import Tuple
-
-from flask import Blueprint, Response, jsonify, request
 
 from config.settings import settings
 from database.models import get_db
+from flask import Blueprint, Response, jsonify, request
 from workers.review_worker import process_review
 
 logger = logging.getLogger(__name__)
@@ -28,6 +27,7 @@ def _check_review_day_cap() -> Tuple[bool, int, str]:
     """
     try:
         from penguin_licensing import get_license_client
+
         lc = get_license_client()
         if lc.has_feature("darwin"):
             return True, 200, ""
@@ -36,9 +36,7 @@ def _check_review_day_cap() -> Tuple[bool, int, str]:
 
     db = get_db()
     today_start = datetime.combine(date.today(), datetime.min.time())
-    count = db(
-        (db.darwin_reviews.created_at >= today_start)
-    ).count()
+    count = db((db.darwin_reviews.created_at >= today_start)).count()
 
     cap = settings.license.max_reviews_per_day
     if count >= cap:

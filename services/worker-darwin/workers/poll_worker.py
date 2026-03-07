@@ -3,8 +3,8 @@
 import logging
 from typing import Any
 
-from workers.celery_app import celery_app
 from database.models import get_configured_db
+from workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 

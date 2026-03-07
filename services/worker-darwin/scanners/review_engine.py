@@ -170,7 +170,9 @@ class ReviewEngine:
                 if review_id is not None:
                     self._track_usage(review_id, ai_provider, response)
 
-                parsed = self._parse_response(response, category, pr_file.path, ai_provider.name)
+                parsed = self._parse_response(
+                    response, category, pr_file.path, ai_provider.name
+                )
                 comments.extend(parsed)
 
             except Exception as exc:
@@ -202,7 +204,9 @@ class ReviewEngine:
         try:
             content = response.content.strip()
             # Strip markdown code fences if present
-            json_match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", content, re.DOTALL)
+            json_match = re.search(
+                r"```(?:json)?\s*(\[.*?\])\s*```", content, re.DOTALL
+            )
             if json_match:
                 content = json_match.group(1)
 
@@ -218,7 +222,9 @@ class ReviewEngine:
                     line_start=finding.get("line_start", 1),
                     line_end=finding.get("line_end", finding.get("line_start", 1)),
                     category=category,
-                    severity=self._normalize_severity(finding.get("severity", "suggestion")),
+                    severity=self._normalize_severity(
+                        finding.get("severity", "suggestion")
+                    ),
                     title=finding.get("title", "Code review finding"),
                     body=finding.get("body", ""),
                     source=f"ai:{provider_name}",
@@ -268,6 +274,7 @@ class ReviewEngine:
 
         try:
             from database.models import get_configured_db
+
             db = get_configured_db()
             try:
                 cost = ai_provider.estimate_cost(

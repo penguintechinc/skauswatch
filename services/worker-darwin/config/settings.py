@@ -116,7 +116,9 @@ class Settings:
             port=int(os.environ.get("DB_PORT", "5432")),
             name=os.environ.get("DB_NAME", "skauswatch"),
             user=os.environ.get("DARWIN_DB_USER", os.environ.get("DB_USER", "darwin")),
-            password=os.environ.get("DARWIN_DB_PASS", os.environ.get("DB_PASS", "changeme")),
+            password=os.environ.get(
+                "DARWIN_DB_PASS", os.environ.get("DB_PASS", "changeme")
+            ),
         )
 
         # Darwin Celery uses Redis DB 2 to avoid collision with worker-scanner (DB 1)
@@ -141,7 +143,9 @@ class Settings:
 
         self.license = LicenseConfig(
             key=os.environ.get("LICENSE_KEY"),
-            server_url=os.environ.get("LICENSE_SERVER_URL", "https://license.penguintech.io"),
+            server_url=os.environ.get(
+                "LICENSE_SERVER_URL", "https://license.penguintech.io"
+            ),
             release_mode=_parse_bool(os.environ.get("RELEASE_MODE", "false")),
             free_tier_user_cap=int(os.environ.get("DARWIN_FREE_TIER_USER_CAP", "3")),
             max_repos_free=int(os.environ.get("DARWIN_MAX_REPOS_FREE", "3")),

@@ -30,10 +30,18 @@ def upgrade() -> None:
         "asm_scans",
         sa.Column("id", sa.Integer(), nullable=False, autoincrement=True),
         sa.Column("target_id", sa.Integer(), nullable=False),
-        sa.Column("mode", sa.String(length=20), nullable=False, server_default="external"),
-        sa.Column("status", sa.String(length=50), nullable=False, server_default="pending"),
-        sa.Column("ports_config", sa.JSON().with_variant(sa.Text(), "sqlite"), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "mode", sa.String(length=20), nullable=False, server_default="external"
+        ),
+        sa.Column(
+            "status", sa.String(length=50), nullable=False, server_default="pending"
+        ),
+        sa.Column(
+            "ports_config", sa.JSON().with_variant(sa.Text(), "sqlite"), nullable=True
+        ),
+        sa.Column(
+            "created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()
+        ),
         sa.Column("started_at", sa.DateTime(), nullable=True),
         sa.Column("completed_at", sa.DateTime(), nullable=True),
         sa.Column("created_by", sa.String(length=255), nullable=True),
@@ -53,7 +61,9 @@ def upgrade() -> None:
         sa.Column("is_alive", sa.Boolean(), nullable=False, server_default="1"),
         sa.Column("latency_ms", sa.Float(), nullable=True),
         sa.Column("os_guess", sa.String(length=255), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()
+        ),
         sa.ForeignKeyConstraint(["scan_id"], ["asm_scans.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -66,12 +76,16 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False, autoincrement=True),
         sa.Column("host_id", sa.Integer(), nullable=False),
         sa.Column("port", sa.Integer(), nullable=False),
-        sa.Column("protocol", sa.String(length=10), nullable=False, server_default="tcp"),
+        sa.Column(
+            "protocol", sa.String(length=10), nullable=False, server_default="tcp"
+        ),
         sa.Column("state", sa.String(length=20), nullable=False, server_default="open"),
         sa.Column("service_name", sa.String(length=100), nullable=True),
         sa.Column("banner", sa.Text(), nullable=True),
         sa.Column("version", sa.String(length=255), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()
+        ),
         sa.ForeignKeyConstraint(["host_id"], ["asm_hosts.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -90,8 +104,12 @@ def upgrade() -> None:
         sa.Column("height", sa.Integer(), nullable=True),
         sa.Column("file_size_bytes", sa.Integer(), nullable=True),
         sa.Column("captured_at", sa.DateTime(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
-        sa.ForeignKeyConstraint(["service_id"], ["asm_services.id"], ondelete="CASCADE"),
+        sa.Column(
+            "created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()
+        ),
+        sa.ForeignKeyConstraint(
+            ["service_id"], ["asm_services.id"], ondelete="CASCADE"
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("idx_asm_screenshots_service_id", "asm_screenshots", ["service_id"])
@@ -109,12 +127,18 @@ def upgrade() -> None:
         sa.Column("days_until_expiry", sa.Integer(), nullable=True),
         sa.Column("sans", sa.JSON().with_variant(sa.Text(), "sqlite"), nullable=True),
         sa.Column("fingerprint_sha256", sa.String(length=64), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
-        sa.ForeignKeyConstraint(["service_id"], ["asm_services.id"], ondelete="CASCADE"),
+        sa.Column(
+            "created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()
+        ),
+        sa.ForeignKeyConstraint(
+            ["service_id"], ["asm_services.id"], ondelete="CASCADE"
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("idx_asm_certs_service_id", "asm_certs", ["service_id"])
-    op.create_index("idx_asm_certs_expiry", "asm_certs", ["is_expired", "days_until_expiry"])
+    op.create_index(
+        "idx_asm_certs_expiry", "asm_certs", ["is_expired", "days_until_expiry"]
+    )
 
     # Create asm_diffs table
     op.create_table(
@@ -122,13 +146,27 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False, autoincrement=True),
         sa.Column("scan_id", sa.Integer(), nullable=False),
         sa.Column("prev_scan_id", sa.Integer(), nullable=True),
-        sa.Column("new_services", sa.JSON().with_variant(sa.Text(), "sqlite"), nullable=True),
-        sa.Column("removed_services", sa.JSON().with_variant(sa.Text(), "sqlite"), nullable=True),
-        sa.Column("new_certs", sa.JSON().with_variant(sa.Text(), "sqlite"), nullable=True),
-        sa.Column("expired_certs", sa.JSON().with_variant(sa.Text(), "sqlite"), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "new_services", sa.JSON().with_variant(sa.Text(), "sqlite"), nullable=True
+        ),
+        sa.Column(
+            "removed_services",
+            sa.JSON().with_variant(sa.Text(), "sqlite"),
+            nullable=True,
+        ),
+        sa.Column(
+            "new_certs", sa.JSON().with_variant(sa.Text(), "sqlite"), nullable=True
+        ),
+        sa.Column(
+            "expired_certs", sa.JSON().with_variant(sa.Text(), "sqlite"), nullable=True
+        ),
+        sa.Column(
+            "created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()
+        ),
         sa.ForeignKeyConstraint(["scan_id"], ["asm_scans.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["prev_scan_id"], ["asm_scans.id"], ondelete="SET NULL"),
+        sa.ForeignKeyConstraint(
+            ["prev_scan_id"], ["asm_scans.id"], ondelete="SET NULL"
+        ),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("idx_asm_diffs_scan_id", "asm_diffs", ["scan_id"])
@@ -139,8 +177,13 @@ def upgrade() -> None:
         sa.Column("id", sa.Integer(), nullable=False, autoincrement=True),
         sa.Column("key", sa.String(length=255), nullable=False, unique=True),
         sa.Column("value", sa.JSON().with_variant(sa.Text(), "sqlite"), nullable=True),
-        sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now(),
-                  onupdate=sa.func.now()),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(),
+            nullable=False,
+            server_default=sa.func.now(),
+            onupdate=sa.func.now(),
+        ),
         sa.Column("updated_by", sa.String(length=255), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )

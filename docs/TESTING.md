@@ -1,6 +1,6 @@
 # Testing Guide - SkausWatch
 
-Comprehensive testing documentation for SkausWatch's four-service architecture, including unit tests, integration tests, PKI testing, SSH CA testing, smoke tests, mock data, and cross-architecture validation.
+Comprehensive testing documentation for SkausWatch's eight-service architecture with IceBox and Darwin sub-modules, including unit tests, integration tests, PKI testing, SSH CA testing, smoke tests, mock data, and cross-architecture validation.
 
 ## Overview
 
@@ -14,6 +14,7 @@ Testing is organized into multiple levels to ensure comprehensive coverage, fast
 | **PKI Tests** | Certificate management validation | 2-5 min | Certificate generation, revocation, OCSP |
 | **SSH CA Tests** | SSH certificate authority validation | 2-5 min | SSH cert generation, validation, expiry |
 | **E2E Tests** | Critical workflows end-to-end | 5-10 min | User scenarios, business logic |
+| **IceBox Tests** | Secrets vault validation | 2-5 min | Encryption, JIT tokens, one-time secrets, API |
 | **Performance Tests** | Scalability and throughput validation | 5-15 min | Load, latency, resource usage |
 
 ---
@@ -482,6 +483,92 @@ def test_ssh_cert_validation():
 
 ---
 
+## IceBox Sub-Module Tests
+
+### Location
+
+IceBox tests live in the IceBox worktree, separate from core SkausWatch tests:
+
+```
+.worktrees/icebox/icebox/
+├── services/flask-backend/tests/
+│   ├── test_envelope.py           # AES-256-GCM roundtrip, tamper, MEK rotation
+│   ├── test_jit_token.py          # HMAC token format, expiry, tamper detection
+│   └── test_jit_flow_integration.py  # Full JIT + one-time secret lifecycle
+└── tests/smoke/
+    └── run-all.sh                 # 6-phase smoke runner
+```
+
+### IceBox Smoke Tests
+
+**6-phase smoke runner:**
+
+```bash
+# Full smoke run (build + run + API)
+icebox/tests/smoke/run-all.sh
+
+# Build only (faster, pre-commit)
+icebox/tests/smoke/run-all.sh --build-only
+
+# Skip build (use existing images)
+icebox/tests/smoke/run-all.sh --skip-build
+```
+
+**Phases:**
+1. Build all 5 IceBox containers
+2. Start services (flask-backend, pki-server, ssh-ca, sync-worker, webui)
+3. Wait for health checks
+4. API health validation
+5. Core API smoke (secrets CRUD, JIT request, one-time create)
+6. Teardown
+
+**Requirements**: IceBox namespace must exist on `--context local-alpha`. Provision with:
+```bash
+kubectl apply --context local-alpha -k icebox/k8s/kustomize/overlays/alpha
+```
+
+### IceBox Unit Tests
+
+```bash
+# All IceBox unit tests
+cd .worktrees/icebox/icebox/services/flask-backend
+pytest tests/ -v
+
+# Envelope encryption tests
+pytest tests/test_envelope.py -v
+# Covers: AES-256-GCM roundtrip, authentication tag tamper detection, MEK rotation
+
+# JIT token tests
+pytest tests/test_jit_token.py -v
+# Covers: HMAC token format (jit:{grant_id}:{grantee_id}:{expires}), expiry, tamper
+
+# JIT flow integration test
+pytest tests/test_jit_flow_integration.py -v
+# Covers: full lifecycle — JIT request → approve → generate token → use → expire
+# Also covers: one-time secret create → view → verify view-once enforcement
+```
+
+### IceBox WebUI Smoke Tests
+
+IceBox WebUI has 9 pages, each requiring a smoke test:
+- `/login` — LoginPageBuilder with ALTCHA CAPTCHA
+- `/dashboard` — Secrets summary cards
+- `/secrets` — Secrets list and CRUD
+- `/jit-access` — JIT access request/approve workflow
+- `/cloud-sync` — Cloud integration management
+- `/audit` — Audit log viewer
+- `/one-time` — One-time secrets
+- `/settings` — MEK rotation, license key management
+- `/pki` and `/ssh` — IceBox PKI/SSH CA management
+
+Run via Playwright:
+```bash
+cd .worktrees/icebox/icebox/webui
+npx playwright test tests/smoke/
+```
+
+---
+
 ## End-to-End Tests
 
 ### Purpose
@@ -582,7 +669,7 @@ Create `scripts/build/test-multiarch.sh`:
 
 set -e
 
-SERVICES=("manager" "pki-server" "ssh-ca" "aaa-monitor")
+SERVICES=("manager-new" "pki-server-new" "ssh-ca" "aaa-monitor" "worker-s3" "worker-scanner" "edr-agent" "webui")
 ARCHITECTURES=("linux/amd64" "linux/arm64")
 
 for service in "${SERVICES[@]}"; do
@@ -635,8 +722,9 @@ Follow this order for efficient testing before commits:
 6. **Unit tests** (1-2 min)
 7. **Integration tests** (2-5 min)
 8. **PKI/SSH CA tests** (2-5 min)
-9. **E2E tests** (5-10 min)
-10. **Cross-architecture build** (optional, slow)
+9. **IceBox smoke tests** (if IceBox modified): `icebox/tests/smoke/run-all.sh --build-only`
+10. **E2E tests** (5-10 min)
+11. **Cross-architecture build** (optional, slow)
 
 ## CI/CD Integration
 
@@ -651,5 +739,5 @@ See [Workflows](WORKFLOWS.md) for detailed CI/CD configuration.
 
 ---
 
-**Last Updated**: 2026-01-06
+**Last Updated**: 2026-03-07
 **Maintained by**: Penguin Tech Inc

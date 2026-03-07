@@ -2,18 +2,15 @@ import asyncio
 import re
 from typing import Any
 
-from penguin_utils import get_logger
-
 from ocsf.normalizer import normalize
-from writers.parquet_writer import ParquetWriter
+from penguin_utils import get_logger
 from writers.opensearch_writer import OpenSearchWriter
+from writers.parquet_writer import ParquetWriter
 
 logger = get_logger(__name__)
 
 # RFC 5424: <priority>version timestamp hostname app-name procid msgid structured-data msg
-SYSLOG_RE = re.compile(
-    r"<(\d+)>\d* (\S+) (\S+) (\S+) \S+ \S+ \S+ (.*)", re.DOTALL
-)
+SYSLOG_RE = re.compile(r"<(\d+)>\d* (\S+) (\S+) (\S+) \S+ \S+ \S+ (.*)", re.DOTALL)
 
 
 class SyslogProtocol(asyncio.DatagramProtocol):

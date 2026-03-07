@@ -44,21 +44,32 @@ _DEPRECATION_HEADERS = {
 }
 
 # Hop-by-hop headers that must not be forwarded
-_HOP_BY_HOP = frozenset({
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade", "content-length",
-})
+_HOP_BY_HOP = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+        "content-length",
+    }
+)
 
 
 @app.route("/healthz")
 async def healthz():
     """Liveness probe — shim is always healthy if running."""
-    return jsonify({
-        "status": "healthy",
-        "mode": "deprecation-shim",
-        "successor": ICEBOX_PKI_URL,
-        "timestamp": datetime.utcnow().isoformat(),
-    })
+    return jsonify(
+        {
+            "status": "healthy",
+            "mode": "deprecation-shim",
+            "successor": ICEBOX_PKI_URL,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+    )
 
 
 @app.route("/api/v1/<path:path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
@@ -70,7 +81,8 @@ async def proxy_to_icebox(path: str):
         target_url = f"{target_url}?{query_string}"
 
     forward_headers = {
-        k: v for k, v in request.headers.items()
+        k: v
+        for k, v in request.headers.items()
         if k.lower() not in _HOP_BY_HOP and k.lower() != "host"
     }
     forward_headers["X-Forwarded-By"] = "skauswatch-pki-shim/v1"
@@ -95,7 +107,8 @@ async def proxy_to_icebox(path: str):
             ) as resp:
                 content = await resp.read()
                 response_headers = {
-                    k: v for k, v in resp.headers.items()
+                    k: v
+                    for k, v in resp.headers.items()
                     if k.lower() not in _HOP_BY_HOP
                 }
                 response_headers.update(_DEPRECATION_HEADERS)
@@ -109,11 +122,13 @@ async def proxy_to_icebox(path: str):
 
     except aiohttp.ClientConnectorError as exc:
         logger.error("PKI shim: cannot reach IceBox PKI at %s: %s", ICEBOX_PKI_URL, exc)
-        resp = jsonify({
-            "error": "IceBox PKI service unavailable",
-            "detail": f"Cannot connect to {ICEBOX_PKI_URL}. Ensure IceBox pki-server is deployed.",
-            "migration": "https://docs.penguintech.io/skauswatch/icebox/pki-migration",
-        })
+        resp = jsonify(
+            {
+                "error": "IceBox PKI service unavailable",
+                "detail": f"Cannot connect to {ICEBOX_PKI_URL}. Ensure IceBox pki-server is deployed.",
+                "migration": "https://docs.penguintech.io/skauswatch/icebox/pki-migration",
+            }
+        )
         for k, v in _DEPRECATION_HEADERS.items():
             resp.headers[k] = v
         return resp, 503
@@ -125,6 +140,7 @@ async def proxy_to_icebox(path: str):
 
 if __name__ == "__main__":
     import asyncio
+
     import hypercorn.asyncio
     from hypercorn.config import Config as HConfig
 

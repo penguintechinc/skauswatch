@@ -34,11 +34,10 @@ import logging
 import sys
 from typing import Tuple
 
-from flask import Flask, Response, jsonify
-from flask_cors import CORS
-
 from config.settings import settings
 from database.models import teardown_db
+from flask import Flask, Response, jsonify
+from flask_cors import CORS
 
 logging.basicConfig(
     level=getattr(logging, settings.flask.env == "production" and "INFO" or "DEBUG"),
@@ -77,9 +76,9 @@ def create_app() -> Flask:
     # Register blueprints
     try:
         from api.routes.health import health_bp
+        from api.routes.plans import plans_bp
         from api.routes.repos import repos_bp
         from api.routes.reviews import reviews_bp
-        from api.routes.plans import plans_bp
 
         app.register_blueprint(health_bp)
         app.register_blueprint(repos_bp, url_prefix="/api/v1/darwin/repos")
@@ -95,17 +94,22 @@ def create_app() -> Flask:
     @app.route("/api/v1/darwin/status", methods=["GET"])
     def darwin_status() -> Tuple[Response, int]:
         """Darwin service status endpoint."""
-        return jsonify({
-            "service": "worker-darwin",
-            "status": "running",
-            "ai_provider": settings.ai.provider,
-            "ai_model": settings.ai.model,
-            "license": {
-                "free_tier_user_cap": settings.license.free_tier_user_cap,
-                "max_repos_free": settings.license.max_repos_free,
-                "max_reviews_per_day": settings.license.max_reviews_per_day,
-            },
-        }), 200
+        return (
+            jsonify(
+                {
+                    "service": "worker-darwin",
+                    "status": "running",
+                    "ai_provider": settings.ai.provider,
+                    "ai_model": settings.ai.model,
+                    "license": {
+                        "free_tier_user_cap": settings.license.free_tier_user_cap,
+                        "max_repos_free": settings.license.max_repos_free,
+                        "max_reviews_per_day": settings.license.max_reviews_per_day,
+                    },
+                }
+            ),
+            200,
+        )
 
     # Error handlers
     @app.errorhandler(400)
@@ -127,10 +131,12 @@ def create_app() -> Flask:
     logger.info("=" * 60)
     logger.info("Port: %d", settings.flask.port)
     logger.info("AI Provider: %s (%s)", settings.ai.provider, settings.ai.model)
-    logger.info("Free tier caps: %d users / %d repos / %d reviews/day",
-                settings.license.free_tier_user_cap,
-                settings.license.max_repos_free,
-                settings.license.max_reviews_per_day)
+    logger.info(
+        "Free tier caps: %d users / %d repos / %d reviews/day",
+        settings.license.free_tier_user_cap,
+        settings.license.max_repos_free,
+        settings.license.max_reviews_per_day,
+    )
     logger.info("=" * 60)
 
     return app

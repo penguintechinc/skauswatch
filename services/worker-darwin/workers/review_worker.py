@@ -7,11 +7,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from celery import Task
-
-from workers.celery_app import celery_app
 from database.models import get_configured_db
 from scanners.ai_provider import create_provider
 from scanners.review_engine import ReviewEngine
+from workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,9 @@ class ReviewWorkerTask(Task):
     retry_jitter = True
 
 
-@celery_app.task(bind=True, base=ReviewWorkerTask, name="workers.review_worker.process_review")
+@celery_app.task(
+    bind=True, base=ReviewWorkerTask, name="workers.review_worker.process_review"
+)
 def process_review(self: Task, review_id: int) -> dict[str, Any]:
     """Process a queued code review.
 
@@ -43,7 +44,10 @@ def process_review(self: Task, review_id: int) -> dict[str, Any]:
             return {"status": "error", "message": f"Review {review_id} not found"}
 
         if review.status != "pending":
-            return {"status": "skipped", "message": f"Review {review_id} already processed"}
+            return {
+                "status": "skipped",
+                "message": f"Review {review_id} already processed",
+            }
 
         # Mark in progress
         db(db.darwin_reviews.id == review_id).update(status="processing")
@@ -56,9 +60,7 @@ def process_review(self: Task, review_id: int) -> dict[str, Any]:
             return {"status": "failed", "message": "Repo config not found"}
 
         cred = (
-            db(db.darwin_git_credentials.tenant_id == repo.tenant_id)
-            .select()
-            .first()
+            db(db.darwin_git_credentials.tenant_id == repo.tenant_id).select().first()
         )
         if not cred:
             db(db.darwin_reviews.id == review_id).update(status="failed")

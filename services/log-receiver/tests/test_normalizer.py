@@ -1,6 +1,6 @@
-import pytest
 from datetime import timezone
 
+import pytest
 from ocsf.normalizer import normalize
 
 

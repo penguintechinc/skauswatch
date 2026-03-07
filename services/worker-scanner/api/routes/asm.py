@@ -52,7 +52,10 @@ def create_asm_scan():
     # Verify target exists
     target = db.scan_targets[data["target_id"]]
     if not target:
-        return jsonify({"error": "Target not found", "target_id": data["target_id"]}), 404
+        return (
+            jsonify({"error": "Target not found", "target_id": data["target_id"]}),
+            404,
+        )
 
     # Load extra ports from DB settings (merged with request extra_ports)
     db_extra_ports = _get_setting(db, "extra_ports", [])
@@ -89,14 +92,19 @@ def create_asm_scan():
         return jsonify({"error": "Failed to queue scan", "details": str(e)}), 500
 
     scan = db.asm_scans[scan_id]
-    return jsonify({
-        "id": scan.id,
-        "target_id": scan.target_id,
-        "mode": scan.mode,
-        "status": scan.status,
-        "ports_config": scan.ports_config,
-        "created_at": scan.created_at.isoformat() if scan.created_at else None,
-    }), 201
+    return (
+        jsonify(
+            {
+                "id": scan.id,
+                "target_id": scan.target_id,
+                "mode": scan.mode,
+                "status": scan.status,
+                "ports_config": scan.ports_config,
+                "created_at": scan.created_at.isoformat() if scan.created_at else None,
+            }
+        ),
+        201,
+    )
 
 
 @asm_bp.route("/scans", methods=["GET"])
@@ -130,12 +138,17 @@ def list_asm_scans():
         )
         total = db(db.asm_scans.id > 0).count()
 
-    return jsonify({
-        "scans": [_serialize_scan(r) for r in rows],
-        "total": total,
-        "page": page,
-        "per_page": per_page,
-    }), 200
+    return (
+        jsonify(
+            {
+                "scans": [_serialize_scan(r) for r in rows],
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+            }
+        ),
+        200,
+    )
 
 
 @asm_bp.route("/scans/<int:scan_id>", methods=["GET"])
@@ -163,23 +176,28 @@ def get_asm_scan_hosts(scan_id: int):
         services = db(db.asm_services.host_id == host.id).select(
             orderby=db.asm_services.port
         )
-        result.append({
-            "id": host.id,
-            "ip_address": host.ip_address,
-            "hostname": host.hostname,
-            "is_alive": host.is_alive,
-            "latency_ms": host.latency_ms,
-            "os_guess": host.os_guess,
-            "services": [{
-                "id": s.id,
-                "port": s.port,
-                "protocol": s.protocol,
-                "state": s.state,
-                "service_name": s.service_name,
-                "banner": s.banner,
-                "version": s.version,
-            } for s in services],
-        })
+        result.append(
+            {
+                "id": host.id,
+                "ip_address": host.ip_address,
+                "hostname": host.hostname,
+                "is_alive": host.is_alive,
+                "latency_ms": host.latency_ms,
+                "os_guess": host.os_guess,
+                "services": [
+                    {
+                        "id": s.id,
+                        "port": s.port,
+                        "protocol": s.protocol,
+                        "state": s.state,
+                        "service_name": s.service_name,
+                        "banner": s.banner,
+                        "version": s.version,
+                    }
+                    for s in services
+                ],
+            }
+        )
     return jsonify({"hosts": result, "total": len(result)}), 200
 
 
@@ -202,18 +220,20 @@ def get_asm_scan_screenshots(scan_id: int):
     for row in screenshots:
         s = row.asm_screenshots
         presigned_url = _generate_presigned_url(s.s3_key)
-        result.append({
-            "id": s.id,
-            "service_id": s.service_id,
-            "s3_key": s.s3_key,
-            "presigned_url": presigned_url,
-            "url": s.url,
-            "tool": s.tool,
-            "file_size_bytes": s.file_size_bytes,
-            "captured_at": s.captured_at.isoformat() if s.captured_at else None,
-            "host": row.asm_hosts.ip_address,
-            "port": row.asm_services.port,
-        })
+        result.append(
+            {
+                "id": s.id,
+                "service_id": s.service_id,
+                "s3_key": s.s3_key,
+                "presigned_url": presigned_url,
+                "url": s.url,
+                "tool": s.tool,
+                "file_size_bytes": s.file_size_bytes,
+                "captured_at": s.captured_at.isoformat() if s.captured_at else None,
+                "host": row.asm_hosts.ip_address,
+                "port": row.asm_services.port,
+            }
+        )
     return jsonify({"screenshots": result, "total": len(result)}), 200
 
 
@@ -234,19 +254,21 @@ def get_asm_scan_certs(scan_id: int):
     result = []
     for row in certs:
         c = row.asm_certs
-        result.append({
-            "id": c.id,
-            "subject": c.subject,
-            "issuer": c.issuer,
-            "not_before": c.not_before.isoformat() if c.not_before else None,
-            "not_after": c.not_after.isoformat() if c.not_after else None,
-            "is_expired": c.is_expired,
-            "days_until_expiry": c.days_until_expiry,
-            "sans": c.sans,
-            "fingerprint_sha256": c.fingerprint_sha256,
-            "host": row.asm_hosts.ip_address,
-            "port": row.asm_services.port,
-        })
+        result.append(
+            {
+                "id": c.id,
+                "subject": c.subject,
+                "issuer": c.issuer,
+                "not_before": c.not_before.isoformat() if c.not_before else None,
+                "not_after": c.not_after.isoformat() if c.not_after else None,
+                "is_expired": c.is_expired,
+                "days_until_expiry": c.days_until_expiry,
+                "sans": c.sans,
+                "fingerprint_sha256": c.fingerprint_sha256,
+                "host": row.asm_hosts.ip_address,
+                "port": row.asm_services.port,
+            }
+        )
     return jsonify({"certs": result, "total": len(result)}), 200
 
 
@@ -258,23 +280,33 @@ def get_asm_scan_diff(scan_id: int):
     if not db.asm_scans[scan_id]:
         return jsonify({"error": "Scan not found"}), 404
 
-    diff = db(db.asm_diffs.scan_id == scan_id).select(
-        orderby=~db.asm_diffs.created_at, limitby=(0, 1)
-    ).first()
+    diff = (
+        db(db.asm_diffs.scan_id == scan_id)
+        .select(orderby=~db.asm_diffs.created_at, limitby=(0, 1))
+        .first()
+    )
 
     if not diff:
-        return jsonify({"message": "No diff available for this scan", "scan_id": scan_id}), 200
+        return (
+            jsonify({"message": "No diff available for this scan", "scan_id": scan_id}),
+            200,
+        )
 
-    return jsonify({
-        "id": diff.id,
-        "scan_id": diff.scan_id,
-        "prev_scan_id": diff.prev_scan_id,
-        "new_services": diff.new_services or [],
-        "removed_services": diff.removed_services or [],
-        "new_certs": diff.new_certs or [],
-        "expired_certs": diff.expired_certs or [],
-        "created_at": diff.created_at.isoformat() if diff.created_at else None,
-    }), 200
+    return (
+        jsonify(
+            {
+                "id": diff.id,
+                "scan_id": diff.scan_id,
+                "prev_scan_id": diff.prev_scan_id,
+                "new_services": diff.new_services or [],
+                "removed_services": diff.removed_services or [],
+                "new_certs": diff.new_certs or [],
+                "expired_certs": diff.expired_certs or [],
+                "created_at": diff.created_at.isoformat() if diff.created_at else None,
+            }
+        ),
+        200,
+    )
 
 
 @asm_bp.route("/scans/<int:scan_id>/report", methods=["GET"])
@@ -288,11 +320,16 @@ def get_asm_scan_report(scan_id: int):
     s3_key = f"reports/{scan_id}/report.json"
     presigned_url = _generate_presigned_url(s3_key, expires_in=3600)
 
-    return jsonify({
-        "scan_id": scan_id,
-        "s3_key": s3_key,
-        "presigned_url": presigned_url,
-    }), 200
+    return (
+        jsonify(
+            {
+                "scan_id": scan_id,
+                "s3_key": s3_key,
+                "presigned_url": presigned_url,
+            }
+        ),
+        200,
+    )
 
 
 @asm_bp.route("/settings/ports", methods=["GET"])
@@ -315,12 +352,17 @@ def get_port_settings():
     extra_ports = _get_setting(db, "extra_ports", [])
     masscan_rate = _get_setting(db, "masscan_rate", 1000)
 
-    return jsonify({
-        "default_ports": default_ports,
-        "extra_ports": extra_ports,
-        "masscan_rate": masscan_rate,
-        "effective_ports": sorted(set(default_ports) | set(extra_ports)),
-    }), 200
+    return (
+        jsonify(
+            {
+                "default_ports": default_ports,
+                "extra_ports": extra_ports,
+                "masscan_rate": masscan_rate,
+                "effective_ports": sorted(set(default_ports) | set(extra_ports)),
+            }
+        ),
+        200,
+    )
 
 
 @asm_bp.route("/settings/ports", methods=["PUT"])
@@ -342,11 +384,16 @@ def update_port_settings():
     _set_setting(db, "masscan_rate", data["masscan_rate"])
     db.commit()
 
-    return jsonify({
-        "extra_ports": data["extra_ports"],
-        "masscan_rate": data["masscan_rate"],
-        "message": "Port settings updated",
-    }), 200
+    return (
+        jsonify(
+            {
+                "extra_ports": data["extra_ports"],
+                "masscan_rate": data["masscan_rate"],
+                "message": "Port settings updated",
+            }
+        ),
+        200,
+    )
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -403,7 +450,9 @@ def _generate_presigned_url(s3_key: str, expires_in: int = 3600) -> str | None:
 
         scanner = ScreenshotScanner(config={})
         loop = asyncio.new_event_loop()
-        url = loop.run_until_complete(scanner.generate_presigned_url(s3_key, expires_in))
+        url = loop.run_until_complete(
+            scanner.generate_presigned_url(s3_key, expires_in)
+        )
         loop.close()
         return url
     except Exception as e:

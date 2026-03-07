@@ -7,9 +7,8 @@ from typing import Any
 import aiobotocore.session
 import pyarrow as pa
 import pyarrow.parquet as pq
-from penguin_utils import get_logger
-
 from ocsf.schema import OCSFEvent
+from penguin_utils import get_logger
 
 logger = get_logger(__name__)
 
@@ -24,15 +23,17 @@ class ParquetWriter:
     - Cloudflare R2: S3_ENDPOINT_URL=https://<acct>.r2.cloudflarestorage.com
     """
 
-    SCHEMA = pa.schema([
-        ("class_uid", pa.int32()),
-        ("class_name", pa.string()),
-        ("time", pa.timestamp("us", tz="UTC")),
-        ("severity_id", pa.int8()),
-        ("status_id", pa.int8()),
-        ("message", pa.string()),
-        ("raw_data", pa.string()),   # JSON string
-    ])
+    SCHEMA = pa.schema(
+        [
+            ("class_uid", pa.int32()),
+            ("class_name", pa.string()),
+            ("time", pa.timestamp("us", tz="UTC")),
+            ("severity_id", pa.int8()),
+            ("status_id", pa.int8()),
+            ("message", pa.string()),
+            ("raw_data", pa.string()),  # JSON string
+        ]
+    )
 
     def __init__(
         self,
@@ -69,7 +70,9 @@ class ParquetWriter:
             {
                 "class_uid": [e.class_uid for e in events],
                 "class_name": [e.class_name for e in events],
-                "time": pa.array([e.time for e in events], type=pa.timestamp("us", tz="UTC")),
+                "time": pa.array(
+                    [e.time for e in events], type=pa.timestamp("us", tz="UTC")
+                ),
                 "severity_id": [e.severity_id for e in events],
                 "status_id": [e.status_id for e in events],
                 "message": [e.message for e in events],

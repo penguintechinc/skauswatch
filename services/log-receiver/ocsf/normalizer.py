@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from .schema import OCSFEvent, OCSF_CLASSES
+from .schema import OCSF_CLASSES, OCSFEvent
 
 
 def normalize(raw: dict[str, Any], source: str = "unknown") -> OCSFEvent:
@@ -32,7 +32,10 @@ def normalize(raw: dict[str, Any], source: str = "unknown") -> OCSFEvent:
         severity_id=severity,
         status_id=status,
         message=message,
-        metadata={"version": "1.3.0", "product": {"name": "SkausWatch", "vendor_name": "PenguinTech"}},
+        metadata={
+            "version": "1.3.0",
+            "product": {"name": "SkausWatch", "vendor_name": "PenguinTech"},
+        },
         raw_data=raw,
     )
 
@@ -52,11 +55,17 @@ def _detect_class(raw: dict[str, Any], source: str) -> int:
 def _detect_severity(raw: dict[str, Any]) -> int:
     level = str(raw.get("level") or raw.get("severity") or "").lower()
     mapping = {
-        "debug": 1, "info": 1, "informational": 1,
-        "low": 2, "warning": 2, "warn": 2,
+        "debug": 1,
+        "info": 1,
+        "informational": 1,
+        "low": 2,
+        "warning": 2,
+        "warn": 2,
         "medium": 3,
-        "error": 4, "high": 4,
-        "critical": 5, "fatal": 5,
+        "error": 4,
+        "high": 4,
+        "critical": 5,
+        "fatal": 5,
     }
     return mapping.get(level, 0)
 

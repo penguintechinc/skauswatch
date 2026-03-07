@@ -5,7 +5,6 @@ Queues: darwin_reviews, darwin_plans, darwin_polling
 """
 
 from celery import Celery
-
 from config.settings import settings
 
 

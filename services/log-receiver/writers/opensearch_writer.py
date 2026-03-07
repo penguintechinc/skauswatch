@@ -1,9 +1,8 @@
 from datetime import datetime, timezone
 
+from ocsf.schema import OCSFEvent
 from opensearchpy import AsyncOpenSearch, helpers
 from penguin_utils import get_logger
-
-from ocsf.schema import OCSFEvent
 
 logger = get_logger(__name__)
 
@@ -18,6 +17,7 @@ class OpenSearchWriter:
     async def ensure_ism_policy(self) -> None:
         """Create/update ISM hot→warm→delete policy (idempotent)."""
         from ism.policy import build_ism_policy
+
         policy = build_ism_policy(self._retention_days)
         try:
             await self._client.plugins.index_management.put_policy(  # type: ignore[attr-defined]
@@ -31,11 +31,10 @@ class OpenSearchWriter:
         """Bulk index events. Returns count indexed."""
         now = datetime.now(tz=timezone.utc)
         index = f"{INDEX_PATTERN}-{now.strftime('%Y.%m.%d')}"
-        actions = [
-            {"_index": index, "_source": e.to_dict()}
-            for e in events
-        ]
-        success, _ = await helpers.async_bulk(self._client, actions, raise_on_error=False)
+        actions = [{"_index": index, "_source": e.to_dict()} for e in events]
+        success, _ = await helpers.async_bulk(
+            self._client, actions, raise_on_error=False
+        )
         logger.info("opensearch_indexed", index=index, count=success)
         return success
 

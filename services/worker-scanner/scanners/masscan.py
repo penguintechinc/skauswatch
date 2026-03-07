@@ -12,8 +12,7 @@ from datetime import datetime
 from typing import Any
 
 import yaml
-
-from scanners.base import BaseScanner, NormalizedFinding, ScanResult, ScannerStatus
+from scanners.base import BaseScanner, NormalizedFinding, ScannerStatus, ScanResult
 
 
 class MasscanScanner(BaseScanner):
@@ -43,8 +42,27 @@ class MasscanScanner(BaseScanner):
                 defaults = yaml.safe_load(f)
             return defaults.get("asm", {}).get("default_ports", [80, 443, 22, 3389])
         except Exception:
-            self.logger.warning("Could not load scanner_defaults.yaml, using minimal defaults")
-            return [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 3306, 3389, 5432, 5900, 8080, 8443]
+            self.logger.warning(
+                "Could not load scanner_defaults.yaml, using minimal defaults"
+            )
+            return [
+                21,
+                22,
+                23,
+                25,
+                53,
+                80,
+                110,
+                143,
+                443,
+                445,
+                3306,
+                3389,
+                5432,
+                5900,
+                8080,
+                8443,
+            ]
 
     def _build_port_arg(self, config: dict) -> str:
         """Merge default ports with admin-configured extra ports.
@@ -95,7 +113,8 @@ class MasscanScanner(BaseScanner):
                 target,
                 f"-p{port_arg}",
                 f"--rate={rate}",
-                "--output-format", "json",
+                "--output-format",
+                "json",
                 f"--output-filename={out_path}",
                 "--wait=3",
             ]
@@ -111,7 +130,10 @@ class MasscanScanner(BaseScanner):
             if result.returncode not in (0, 1):
                 # masscan exits 1 on some systems even on success
                 error_msg = result.stderr.strip() or "masscan exited with error"
-                if "Operation not permitted" in error_msg or "permission" in error_msg.lower():
+                if (
+                    "Operation not permitted" in error_msg
+                    or "permission" in error_msg.lower()
+                ):
                     self.logger.error(
                         "Masscan requires NET_RAW capability. "
                         "Ensure cap_add: [NET_RAW] in docker-compose.yml "
@@ -228,13 +250,15 @@ class MasscanScanner(BaseScanner):
                         ip = entry.get("ip", "")
                         ts = entry.get("timestamp", "")
                         for port_info in entry.get("ports", []):
-                            results.append({
-                                "ip": ip,
-                                "port": port_info.get("port", 0),
-                                "proto": port_info.get("proto", "tcp"),
-                                "status": port_info.get("status", "open"),
-                                "timestamp": ts,
-                            })
+                            results.append(
+                                {
+                                    "ip": ip,
+                                    "port": port_info.get("port", 0),
+                                    "proto": port_info.get("proto", "tcp"),
+                                    "status": port_info.get("status", "open"),
+                                    "timestamp": ts,
+                                }
+                            )
             else:
                 # Line-by-line format
                 for line in content.split("\n"):
@@ -246,13 +270,15 @@ class MasscanScanner(BaseScanner):
                         ip = entry.get("ip", "")
                         ts = entry.get("timestamp", "")
                         for port_info in entry.get("ports", []):
-                            results.append({
-                                "ip": ip,
-                                "port": port_info.get("port", 0),
-                                "proto": port_info.get("proto", "tcp"),
-                                "status": port_info.get("status", "open"),
-                                "timestamp": ts,
-                            })
+                            results.append(
+                                {
+                                    "ip": ip,
+                                    "port": port_info.get("port", 0),
+                                    "proto": port_info.get("proto", "tcp"),
+                                    "status": port_info.get("status", "open"),
+                                    "timestamp": ts,
+                                }
+                            )
                     except json.JSONDecodeError:
                         continue
 
@@ -266,19 +292,60 @@ class MasscanScanner(BaseScanner):
     def _guess_service(self, port: int) -> str:
         """Guess service name from well-known port number."""
         service_map = {
-            21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns",
-            80: "http", 110: "pop3", 111: "rpc", 135: "msrpc", 139: "netbios",
-            143: "imap", 161: "snmp", 389: "ldap", 443: "https", 445: "smb",
-            465: "smtps", 587: "smtp-tls", 636: "ldaps", 993: "imaps", 995: "pop3s",
-            1433: "mssql", 1521: "oracle", 1883: "mqtt", 2049: "nfs", 2181: "zookeeper",
-            2375: "docker", 2376: "docker-tls", 2379: "etcd", 3000: "http-alt",
-            3306: "mysql", 3389: "rdp", 4369: "rabbitmq-epmd", 5000: "http-alt",
-            5432: "postgresql", 5601: "kibana", 5672: "rabbitmq-amqp",
-            5900: "vnc", 5901: "vnc", 5984: "couchdb", 6379: "redis",
-            6443: "k8s-api", 7474: "neo4j", 8080: "http-alt", 8443: "https-alt",
-            8500: "consul", 8888: "jupyter", 9000: "minio", 9042: "cassandra",
-            9090: "prometheus", 9092: "kafka", 9200: "elasticsearch",
-            11211: "memcached", 15672: "rabbitmq-mgmt", 27017: "mongodb",
+            21: "ftp",
+            22: "ssh",
+            23: "telnet",
+            25: "smtp",
+            53: "dns",
+            80: "http",
+            110: "pop3",
+            111: "rpc",
+            135: "msrpc",
+            139: "netbios",
+            143: "imap",
+            161: "snmp",
+            389: "ldap",
+            443: "https",
+            445: "smb",
+            465: "smtps",
+            587: "smtp-tls",
+            636: "ldaps",
+            993: "imaps",
+            995: "pop3s",
+            1433: "mssql",
+            1521: "oracle",
+            1883: "mqtt",
+            2049: "nfs",
+            2181: "zookeeper",
+            2375: "docker",
+            2376: "docker-tls",
+            2379: "etcd",
+            3000: "http-alt",
+            3306: "mysql",
+            3389: "rdp",
+            4369: "rabbitmq-epmd",
+            5000: "http-alt",
+            5432: "postgresql",
+            5601: "kibana",
+            5672: "rabbitmq-amqp",
+            5900: "vnc",
+            5901: "vnc",
+            5984: "couchdb",
+            6379: "redis",
+            6443: "k8s-api",
+            7474: "neo4j",
+            8080: "http-alt",
+            8443: "https-alt",
+            8500: "consul",
+            8888: "jupyter",
+            9000: "minio",
+            9042: "cassandra",
+            9090: "prometheus",
+            9092: "kafka",
+            9200: "elasticsearch",
+            11211: "memcached",
+            15672: "rabbitmq-mgmt",
+            27017: "mongodb",
         }
         return service_map.get(port, "unknown")
 
@@ -288,14 +355,16 @@ class MasscanScanner(BaseScanner):
         try:
             entries = json.loads(raw_output)
             for entry in entries:
-                findings.append(NormalizedFinding(
-                    finding_id=f"masscan-{entry['ip']}-{entry['port']}",
-                    severity="info",
-                    title=f"Open port {entry['port']}/{entry.get('proto', 'tcp')}",
-                    description=f"Port {entry['port']} is open on {entry['ip']}",
-                    affected_url=f"{entry['ip']}:{entry['port']}",
-                    raw_finding=entry,
-                ))
+                findings.append(
+                    NormalizedFinding(
+                        finding_id=f"masscan-{entry['ip']}-{entry['port']}",
+                        severity="info",
+                        title=f"Open port {entry['port']}/{entry.get('proto', 'tcp')}",
+                        description=f"Port {entry['port']} is open on {entry['ip']}",
+                        affected_url=f"{entry['ip']}:{entry['port']}",
+                        raw_finding=entry,
+                    )
+                )
         except Exception as e:
             self.logger.error(f"Error parsing masscan results: {e}")
         return findings
@@ -318,7 +387,9 @@ class MasscanScanner(BaseScanner):
                 name="masscan",
                 available=result.returncode == 0,
                 version=version,
-                message="masscan available" if result.returncode == 0 else "masscan error",
+                message=(
+                    "masscan available" if result.returncode == 0 else "masscan error"
+                ),
                 last_checked=datetime.utcnow(),
             )
         except FileNotFoundError:

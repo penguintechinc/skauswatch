@@ -9,12 +9,11 @@ Provides 6 routes:
 - PUT  /api/v1/siem/config  — update retention days (admin only)
 """
 
-import structlog
 import httpx
+import structlog
+from api.v1.auth import auth_required, role_required
 from opensearchpy import AsyncOpenSearch
 from quart import Blueprint, current_app, jsonify, request
-
-from api.v1.auth import auth_required, role_required
 
 logger = structlog.get_logger(__name__)
 
@@ -32,10 +31,12 @@ async def siem_health():
         except Exception:
             receiver_ok = False
 
-    return jsonify({
-        "log_receiver": "ok" if receiver_ok else "unavailable",
-        "status": "ok" if receiver_ok else "degraded",
-    })
+    return jsonify(
+        {
+            "log_receiver": "ok" if receiver_ok else "unavailable",
+            "status": "ok" if receiver_ok else "degraded",
+        }
+    )
 
 
 @bp.post("/ingest")
@@ -83,11 +84,13 @@ async def siem_stats():
     client = AsyncOpenSearch(hosts=[cfg.opensearch_url])
     try:
         resp = await client.search(index="skauswatch-logs-*", body=agg_body)
-        return jsonify({
-            "total_indexed": resp["hits"]["total"]["value"],
-            "by_class": resp["aggregations"]["by_class"]["buckets"],
-            "by_severity": resp["aggregations"]["by_severity"]["buckets"],
-        })
+        return jsonify(
+            {
+                "total_indexed": resp["hits"]["total"]["value"],
+                "by_class": resp["aggregations"]["by_class"]["buckets"],
+                "by_severity": resp["aggregations"]["by_severity"]["buckets"],
+            }
+        )
     finally:
         await client.close()
 
@@ -97,13 +100,15 @@ async def siem_stats():
 async def get_siem_config():
     """Return current SIEM configuration (non-sensitive fields)."""
     cfg = current_app.config["MANAGER_CONFIG"].siem
-    return jsonify({
-        "enabled": cfg.enabled,
-        "retention_days": cfg.retention_days,
-        "opensearch_url": cfg.opensearch_url,
-        "log_receiver_url": cfg.log_receiver_url,
-        "free_tier_user_cap": cfg.free_tier_user_cap,
-    })
+    return jsonify(
+        {
+            "enabled": cfg.enabled,
+            "retention_days": cfg.retention_days,
+            "opensearch_url": cfg.opensearch_url,
+            "log_receiver_url": cfg.log_receiver_url,
+            "free_tier_user_cap": cfg.free_tier_user_cap,
+        }
+    )
 
 
 @bp.put("/config")

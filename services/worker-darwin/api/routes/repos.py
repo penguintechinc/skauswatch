@@ -9,10 +9,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Tuple
 
-from flask import Blueprint, Response, jsonify, request
-
 from config.settings import settings
 from database.models import get_db
+from flask import Blueprint, Response, jsonify, request
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +31,7 @@ def _check_repo_cap() -> Tuple[bool, int, str]:
     # If license server is reachable and darwin_unlimited_repos is licensed, allow
     try:
         from penguin_licensing import get_license_client
+
         lc = get_license_client()
         if lc.has_feature("darwin_unlimited_repos"):
             return True, 200, ""
@@ -114,7 +114,13 @@ def update_repo(repo_id: int) -> Tuple[Response, int]:
 
     body = request.get_json(force=True, silent=True) or {}
     update_fields = {}
-    for field in ("repo_url", "repo_name", "webhook_secret", "auto_review", "is_active"):
+    for field in (
+        "repo_url",
+        "repo_name",
+        "webhook_secret",
+        "auto_review",
+        "is_active",
+    ):
         if field in body:
             update_fields[field] = body[field]
 

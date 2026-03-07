@@ -14,7 +14,7 @@ from typing import Any, Optional
 
 from database.models import get_configured_db
 from scanners.banner_grabber import grab_banners_batch
-from scanners.base import BaseScanner, NormalizedFinding, ScanResult, ScannerStatus
+from scanners.base import BaseScanner, NormalizedFinding, ScannerStatus, ScanResult
 from scanners.cert_inspector import inspect_cert
 from scanners.masscan import MasscanScanner
 from scanners.screenshot import ScreenshotScanner
@@ -81,7 +81,9 @@ class ASMScanner(BaseScanner):
             )
 
         all_findings.extend(masscan_result.findings)
-        open_ports = json.loads(masscan_result.raw_output) if masscan_result.raw_output else []
+        open_ports = (
+            json.loads(masscan_result.raw_output) if masscan_result.raw_output else []
+        )
         logger.info(f"Discovered {len(open_ports)} open ports")
 
         if not open_ports:
@@ -125,13 +127,9 @@ class ASMScanner(BaseScanner):
                     screenshotter.screenshot_http(scan_id, ip, port, use_https=True)
                 )
             if port in RDP_PORTS:
-                screenshot_tasks.append(
-                    screenshotter.screenshot_rdp(scan_id, ip, port)
-                )
+                screenshot_tasks.append(screenshotter.screenshot_rdp(scan_id, ip, port))
             if port in VNC_PORTS:
-                screenshot_tasks.append(
-                    screenshotter.screenshot_vnc(scan_id, ip, port)
-                )
+                screenshot_tasks.append(screenshotter.screenshot_vnc(scan_id, ip, port))
 
         if screenshot_tasks:
             results = await asyncio.gather(*screenshot_tasks, return_exceptions=True)
@@ -158,29 +156,33 @@ class ASMScanner(BaseScanner):
 
                 # Add cert findings for expired/expiring certs
                 if cert_data.get("is_expired"):
-                    all_findings.append(NormalizedFinding(
-                        finding_id=f"asm-cert-expired-{entry['ip']}-{entry['port']}",
-                        severity="high",
-                        title=f"Expired TLS certificate on {entry['ip']}:{entry['port']}",
-                        description=(
-                            f"The TLS certificate expired {abs(cert_data.get('days_until_expiry', 0))} days ago. "
-                            f"Subject: {cert_data.get('subject', 'unknown')}"
-                        ),
-                        affected_url=f"https://{entry['ip']}:{entry['port']}",
-                        raw_finding=cert_data,
-                    ))
+                    all_findings.append(
+                        NormalizedFinding(
+                            finding_id=f"asm-cert-expired-{entry['ip']}-{entry['port']}",
+                            severity="high",
+                            title=f"Expired TLS certificate on {entry['ip']}:{entry['port']}",
+                            description=(
+                                f"The TLS certificate expired {abs(cert_data.get('days_until_expiry', 0))} days ago. "
+                                f"Subject: {cert_data.get('subject', 'unknown')}"
+                            ),
+                            affected_url=f"https://{entry['ip']}:{entry['port']}",
+                            raw_finding=cert_data,
+                        )
+                    )
                 elif cert_data.get("days_until_expiry", 999) < 30:
-                    all_findings.append(NormalizedFinding(
-                        finding_id=f"asm-cert-expiring-{entry['ip']}-{entry['port']}",
-                        severity="medium",
-                        title=f"TLS certificate expiring soon on {entry['ip']}:{entry['port']}",
-                        description=(
-                            f"The TLS certificate expires in {cert_data.get('days_until_expiry')} days. "
-                            f"Subject: {cert_data.get('subject', 'unknown')}"
-                        ),
-                        affected_url=f"https://{entry['ip']}:{entry['port']}",
-                        raw_finding=cert_data,
-                    ))
+                    all_findings.append(
+                        NormalizedFinding(
+                            finding_id=f"asm-cert-expiring-{entry['ip']}-{entry['port']}",
+                            severity="medium",
+                            title=f"TLS certificate expiring soon on {entry['ip']}:{entry['port']}",
+                            description=(
+                                f"The TLS certificate expires in {cert_data.get('days_until_expiry')} days. "
+                                f"Subject: {cert_data.get('subject', 'unknown')}"
+                            ),
+                            affected_url=f"https://{entry['ip']}:{entry['port']}",
+                            raw_finding=cert_data,
+                        )
+                    )
 
         logger.info(f"Cert inspection complete: {len(cert_results)} certs")
 
@@ -225,6 +227,9 @@ class ASMScanner(BaseScanner):
         """Validate ASM config."""
         mode = config.get("mode", "external")
         if mode not in ("internal", "external", "both"):
-            return False, f"mode must be 'internal', 'external', or 'both', got '{mode}'"
+            return (
+                False,
+                f"mode must be 'internal', 'external', or 'both', got '{mode}'",
+            )
         masscan = MasscanScanner(config={})
         return masscan.validate_config(config)

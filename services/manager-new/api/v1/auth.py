@@ -91,8 +91,7 @@ def _require_sso_license(request_host: str = "") -> tuple[dict, int] | None:
     config = current_app.config["MANAGER_CONFIG"]
     exempt_domains = config.siem.exempt_domains
     is_exempt = any(
-        request_host == d or request_host.endswith(f".{d}")
-        for d in exempt_domains
+        request_host == d or request_host.endswith(f".{d}") for d in exempt_domains
     )
     if is_exempt:
         return None

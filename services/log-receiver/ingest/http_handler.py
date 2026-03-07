@@ -1,11 +1,10 @@
 from typing import Any
 
 from aiohttp import web
-from penguin_utils import get_logger
-
 from ocsf.normalizer import normalize
-from writers.parquet_writer import ParquetWriter
+from penguin_utils import get_logger
 from writers.opensearch_writer import OpenSearchWriter
+from writers.parquet_writer import ParquetWriter
 
 logger = get_logger(__name__)
 

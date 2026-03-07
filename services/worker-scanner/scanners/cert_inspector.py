@@ -85,8 +85,16 @@ def _parse_cert_der(cert_der: bytes) -> dict[str, Any]:
     issuer = _format_name(cert.issuer)
 
     # Validity dates (ensure timezone-aware)
-    not_before = cert.not_valid_before_utc if hasattr(cert, "not_valid_before_utc") else cert.not_valid_before.replace(tzinfo=timezone.utc)
-    not_after = cert.not_valid_after_utc if hasattr(cert, "not_valid_after_utc") else cert.not_valid_after.replace(tzinfo=timezone.utc)
+    not_before = (
+        cert.not_valid_before_utc
+        if hasattr(cert, "not_valid_before_utc")
+        else cert.not_valid_before.replace(tzinfo=timezone.utc)
+    )
+    not_after = (
+        cert.not_valid_after_utc
+        if hasattr(cert, "not_valid_after_utc")
+        else cert.not_valid_after.replace(tzinfo=timezone.utc)
+    )
 
     # Expiry
     is_expired = not_after < now
@@ -95,7 +103,9 @@ def _parse_cert_der(cert_der: bytes) -> dict[str, Any]:
     # SANs (Subject Alternative Names)
     sans: list[str] = []
     try:
-        san_ext = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+        san_ext = cert.extensions.get_extension_for_oid(
+            ExtensionOID.SUBJECT_ALTERNATIVE_NAME
+        )
         for name in san_ext.value:
             if hasattr(name, "value"):
                 sans.append(str(name.value))
@@ -126,10 +136,13 @@ def _format_name(name) -> str:
     """Format an x509 Name object as a string."""
     try:
         from cryptography.x509.oid import NameOID
+
         parts = []
         for attr in name:
             try:
-                oid_name = attr.oid._name if hasattr(attr.oid, "_name") else str(attr.oid)
+                oid_name = (
+                    attr.oid._name if hasattr(attr.oid, "_name") else str(attr.oid)
+                )
                 parts.append(f"{oid_name}={attr.value}")
             except Exception:
                 continue

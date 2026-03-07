@@ -9,10 +9,9 @@ IMPORTANT: migrate=False on all DAL instances — Alembic manages schema.
 import logging
 from typing import Optional
 
+from config.settings import settings
 from flask import g
 from pydal import DAL, Field
-
-from config.settings import settings
 
 logger = logging.getLogger(__name__)
 

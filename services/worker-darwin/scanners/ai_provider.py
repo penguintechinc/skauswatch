@@ -54,7 +54,9 @@ class AIProvider(ABC):
         """Validate provider configuration."""
 
     @abstractmethod
-    async def complete(self, prompt: str, system_prompt: Optional[str] = None) -> AIResponse:
+    async def complete(
+        self, prompt: str, system_prompt: Optional[str] = None
+    ) -> AIResponse:
         """Generate a completion for the given prompt."""
 
     async def stream(
@@ -87,13 +89,16 @@ class ClaudeProvider(AIProvider):
     def __init__(self, config: ProviderConfig) -> None:
         super().__init__(config)
         from anthropic import AsyncAnthropic
+
         self.client = AsyncAnthropic(api_key=config.api_key)
 
     def _validate_config(self) -> None:
         if not self.config.api_key:
             raise ValueError("Anthropic API key is required")
 
-    async def complete(self, prompt: str, system_prompt: Optional[str] = None) -> AIResponse:
+    async def complete(
+        self, prompt: str, system_prompt: Optional[str] = None
+    ) -> AIResponse:
         from anthropic import APIError, RateLimitError
 
         start = time.time()
@@ -142,13 +147,16 @@ class OpenAIProvider(AIProvider):
     def __init__(self, config: ProviderConfig) -> None:
         super().__init__(config)
         from openai import AsyncOpenAI
+
         self.client = AsyncOpenAI(api_key=config.api_key)
 
     def _validate_config(self) -> None:
         if not self.config.api_key:
             raise ValueError("OpenAI API key is required")
 
-    async def complete(self, prompt: str, system_prompt: Optional[str] = None) -> AIResponse:
+    async def complete(
+        self, prompt: str, system_prompt: Optional[str] = None
+    ) -> AIResponse:
         start = time.time()
         messages = []
         if system_prompt:
@@ -184,7 +192,9 @@ class OllamaProvider(AIProvider):
         if not self.config.base_url:
             raise ValueError("Ollama base URL is required")
 
-    async def complete(self, prompt: str, system_prompt: Optional[str] = None) -> AIResponse:
+    async def complete(
+        self, prompt: str, system_prompt: Optional[str] = None
+    ) -> AIResponse:
         import aiohttp
 
         start = time.time()
@@ -198,7 +208,11 @@ class OllamaProvider(AIProvider):
 
         async with aiohttp.ClientSession() as session:
             url = f"{self.config.base_url}/api/generate"
-            async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=self.config.timeout)) as resp:
+            async with session.post(
+                url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=self.config.timeout),
+            ) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
 
@@ -267,4 +281,6 @@ def create_provider(provider_name: Optional[str] = None) -> AIProvider:
         return OllamaProvider(config)
 
     else:
-        raise ValueError(f"Unknown AI provider: {name}. Supported: anthropic, openai, ollama")
+        raise ValueError(
+            f"Unknown AI provider: {name}. Supported: anthropic, openai, ollama"
+        )

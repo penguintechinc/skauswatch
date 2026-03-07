@@ -8,7 +8,6 @@ on:
       - v1.x
     paths:
       - 'services/**'
-      - 'shared/**'
       - 'deployment/**'
       - 'tests/**'
       - '.version'
@@ -20,7 +19,6 @@ on:
       - v1.x
     paths:
       - 'services/**'
-      - 'shared/**'
       - 'deployment/**'
       - 'tests/**'
       - '.version'
@@ -51,7 +49,7 @@ jobs:
       - name: Run bandit security scan
         id: bandit
         run: |
-          bandit -r services/ shared/ \
+          bandit -r services/ \
             -f json -o bandit-report.json \
             -ll || true
         continue-on-error: true
@@ -101,16 +99,16 @@ jobs:
         run: pip install flake8 black isort mypy
 
       - name: Run black check
-        run: black --check services/ shared/
+        run: black --check services/
 
       - name: Run isort check
-        run: isort --check-only services/ shared/
+        run: isort --check-only services/
 
       - name: Run flake8
-        run: flake8 services/ shared/ --count --select=E9,F63,F7,F82 --show-source
+        run: flake8 services/ --count --select=E9,F63,F7,F82 --show-source
 
       - name: Run mypy type checking
-        run: mypy services/ shared/ --ignore-missing-imports || true
+        run: mypy services/ --ignore-missing-imports || true
         continue-on-error: true
 
   build:
@@ -168,7 +166,7 @@ jobs:
         run: pip install pytest pytest-asyncio pytest-cov
 
       - name: Run tests
-        run: pytest tests/ -v --cov=services --cov=shared --cov-report=xml --ignore=tests/integration --ignore=tests/e2e
+        run: pytest tests/ -v --cov=services --cov-report=xml --ignore=tests/integration --ignore=tests/e2e
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3

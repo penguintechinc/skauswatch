@@ -435,7 +435,9 @@ def execute_asm_scan(self, scan_id: int) -> Dict[str, Any]:
                     if f"/{ip}/{port}-" in s3_key:
                         captured_at = None
                         try:
-                            captured_at = datetime.fromisoformat(ss.get("captured_at", ""))
+                            captured_at = datetime.fromisoformat(
+                                ss.get("captured_at", "")
+                            )
                         except Exception:
                             pass
 
@@ -456,8 +458,12 @@ def execute_asm_scan(self, scan_id: int) -> Dict[str, Any]:
                         not_before = None
                         not_after = None
                         try:
-                            not_before = datetime.fromisoformat(cert.get("not_before", ""))
-                            not_after = datetime.fromisoformat(cert.get("not_after", ""))
+                            not_before = datetime.fromisoformat(
+                                cert.get("not_before", "")
+                            )
+                            not_after = datetime.fromisoformat(
+                                cert.get("not_after", "")
+                            )
                         except Exception:
                             pass
 
@@ -476,11 +482,15 @@ def execute_asm_scan(self, scan_id: int) -> Dict[str, Any]:
                         db.commit()
 
             # Compute diff vs previous scan for same target
-            prev_scan = db(
-                (db.asm_scans.target_id == scan.target_id)
-                & (db.asm_scans.id != scan_id)
-                & (db.asm_scans.status == "completed")
-            ).select(orderby=~db.asm_scans.created_at, limitby=(0, 1)).first()
+            prev_scan = (
+                db(
+                    (db.asm_scans.target_id == scan.target_id)
+                    & (db.asm_scans.id != scan_id)
+                    & (db.asm_scans.status == "completed")
+                )
+                .select(orderby=~db.asm_scans.created_at, limitby=(0, 1))
+                .first()
+            )
 
             new_services = []
             removed_services = []

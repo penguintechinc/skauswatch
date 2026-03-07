@@ -246,7 +246,8 @@ class SIEMConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="Enable SIEM log pipeline")
     opensearch_url: str = Field(
-        default="http://opensearch:9200", description="OpenSearch endpoint for SIEM logs"
+        default="http://opensearch:9200",
+        description="OpenSearch endpoint for SIEM logs",
     )
     log_receiver_url: str = Field(
         default="http://log-receiver:5010", description="Log receiver service URL"
@@ -274,16 +275,16 @@ class ASMConfig(BaseModel):
 class DarwinConfig(BaseModel):
     """Darwin AI code review configuration."""
 
-    enabled: bool = Field(default=True, description="Enable Darwin AI review sub-module")
+    enabled: bool = Field(
+        default=True, description="Enable Darwin AI review sub-module"
+    )
     worker_darwin_url: str = Field(
         default="http://worker-darwin:5005", description="Darwin worker service URL"
     )
     free_tier_user_cap: int = Field(
         default=3, ge=1, description="Community user limit (darwin feature gate)"
     )
-    max_repos_free: int = Field(
-        default=3, ge=1, description="Community repo limit"
-    )
+    max_repos_free: int = Field(default=3, ge=1, description="Community repo limit")
     max_reviews_per_day: int = Field(
         default=10, ge=1, description="Community daily review limit"
     )
@@ -408,7 +409,9 @@ def load_config() -> ManagerConfig:
         ),
         darwin=DarwinConfig(
             enabled=os.getenv("DARWIN_ENABLED", "true").lower() == "true",
-            worker_darwin_url=os.getenv("WORKER_DARWIN_URL", "http://worker-darwin:5005"),
+            worker_darwin_url=os.getenv(
+                "WORKER_DARWIN_URL", "http://worker-darwin:5005"
+            ),
             free_tier_user_cap=int(os.getenv("DARWIN_FREE_TIER_USER_CAP", "3")),
             max_repos_free=int(os.getenv("DARWIN_MAX_REPOS_FREE", "3")),
             max_reviews_per_day=int(os.getenv("DARWIN_MAX_REVIEWS_PER_DAY", "10")),

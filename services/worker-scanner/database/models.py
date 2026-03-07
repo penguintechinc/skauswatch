@@ -152,7 +152,9 @@ def define_asm_tables(db: DAL) -> None:
     # asm_scans table
     db.define_table(
         "asm_scans",
-        db.Field("target_id", "reference scan_targets", notnull=True, ondelete="CASCADE"),
+        db.Field(
+            "target_id", "reference scan_targets", notnull=True, ondelete="CASCADE"
+        ),
         db.Field("mode", "string", length=20, default="external", notnull=True),
         db.Field("status", "string", length=50, default="pending", notnull=True),
         db.Field("ports_config", "json"),
@@ -193,7 +195,9 @@ def define_asm_tables(db: DAL) -> None:
     # asm_screenshots table
     db.define_table(
         "asm_screenshots",
-        db.Field("service_id", "reference asm_services", notnull=True, ondelete="CASCADE"),
+        db.Field(
+            "service_id", "reference asm_services", notnull=True, ondelete="CASCADE"
+        ),
         db.Field("s3_key", "string", length=1024, notnull=True),
         db.Field("url", "string", length=2048),
         db.Field("tool", "string", length=50, notnull=True),
@@ -208,7 +212,9 @@ def define_asm_tables(db: DAL) -> None:
     # asm_certs table
     db.define_table(
         "asm_certs",
-        db.Field("service_id", "reference asm_services", notnull=True, ondelete="CASCADE"),
+        db.Field(
+            "service_id", "reference asm_services", notnull=True, ondelete="CASCADE"
+        ),
         db.Field("subject", "string", length=512),
         db.Field("issuer", "string", length=512),
         db.Field("not_before", "datetime"),
@@ -239,7 +245,13 @@ def define_asm_tables(db: DAL) -> None:
         "asm_settings",
         db.Field("key", "string", length=255, notnull=True, unique=True),
         db.Field("value", "json"),
-        db.Field("updated_at", "datetime", default=datetime.utcnow, update=datetime.utcnow, notnull=True),
+        db.Field(
+            "updated_at",
+            "datetime",
+            default=datetime.utcnow,
+            update=datetime.utcnow,
+            notnull=True,
+        ),
         db.Field("updated_by", "string", length=255),
         migrate=False,
     )

@@ -161,7 +161,11 @@ async def create_user():
             user_count = db(db.users).count()
             if user_count >= siem_cfg.free_tier_user_cap:
                 return (
-                    jsonify({"error": "User limit reached. Upgrade to premium for more than 5 users."}),
+                    jsonify(
+                        {
+                            "error": "User limit reached. Upgrade to premium for more than 5 users."
+                        }
+                    ),
                     403,
                 )
 

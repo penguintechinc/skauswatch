@@ -29,6 +29,7 @@ def _check_darwin_license() -> tuple[bool, object]:
     """
     try:
         from penguin_licensing import get_license_client
+
         lc = get_license_client()
         if not lc.has_feature("darwin"):
             return False, (

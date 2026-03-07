@@ -11,15 +11,9 @@ class LogReceiverConfig:
     s3_endpoint_url: str | None = field(
         default_factory=lambda: os.getenv("S3_ENDPOINT_URL") or None
     )
-    s3_region: str = field(
-        default_factory=lambda: os.getenv("S3_REGION", "us-east-1")
-    )
-    s3_access_key: str = field(
-        default_factory=lambda: os.getenv("S3_ACCESS_KEY", "")
-    )
-    s3_secret_key: str = field(
-        default_factory=lambda: os.getenv("S3_SECRET_KEY", "")
-    )
+    s3_region: str = field(default_factory=lambda: os.getenv("S3_REGION", "us-east-1"))
+    s3_access_key: str = field(default_factory=lambda: os.getenv("S3_ACCESS_KEY", ""))
+    s3_secret_key: str = field(default_factory=lambda: os.getenv("S3_SECRET_KEY", ""))
     s3_siem_bucket: str = field(
         default_factory=lambda: os.getenv("S3_SIEM_BUCKET", "skauswatch-siem-logs")
     )
@@ -29,9 +23,7 @@ class LogReceiverConfig:
     log_retention_days: int = field(
         default_factory=lambda: int(os.getenv("LOG_RETENTION_DAYS", "90"))
     )
-    http_port: int = field(
-        default_factory=lambda: int(os.getenv("HTTP_PORT", "5010"))
-    )
+    http_port: int = field(default_factory=lambda: int(os.getenv("HTTP_PORT", "5010")))
     syslog_udp_port: int = field(
         default_factory=lambda: int(os.getenv("SYSLOG_UDP_PORT", "514"))
     )

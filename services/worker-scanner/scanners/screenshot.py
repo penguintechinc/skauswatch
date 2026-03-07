@@ -59,14 +59,17 @@ class ScreenshotScanner:
             "s3_region",
             os.environ.get("ASM_S3_REGION", "us-east-1"),
         )
-        self.timeout = int(config.get(
-            "screenshot_timeout",
-            os.environ.get("ASM_SCREENSHOT_TIMEOUT", "10"),
-        ))
+        self.timeout = int(
+            config.get(
+                "screenshot_timeout",
+                os.environ.get("ASM_SCREENSHOT_TIMEOUT", "10"),
+            )
+        )
 
     def _get_s3_client(self):
         """Create an aiobotocore S3 client."""
         import aiobotocore.session
+
         session = aiobotocore.session.get_session()
         return session.create_client(
             "s3",
@@ -107,7 +110,9 @@ class ScreenshotScanner:
                 )
             return True
         except Exception as e:
-            logger.error(f"Failed to upload {local_path} to s3://{self.s3_bucket}/{s3_key}: {e}")
+            logger.error(
+                f"Failed to upload {local_path} to s3://{self.s3_bucket}/{s3_key}: {e}"
+            )
             return False
 
     async def screenshot_http(
@@ -139,9 +144,12 @@ class ScreenshotScanner:
             cmd = [
                 "gowitness",
                 "single",
-                "--url", url,
-                "--screenshot-path", tmpdir,
-                "--timeout", str(self.timeout),
+                "--url",
+                url,
+                "--screenshot-path",
+                tmpdir,
+                "--timeout",
+                str(self.timeout),
             ]
 
             try:
@@ -207,7 +215,8 @@ class ScreenshotScanner:
             bmp_file = os.path.join(tmpdir, "rdp_capture.bmp")
 
             cmd = [
-                "xvfb-run", "-a",
+                "xvfb-run",
+                "-a",
                 "xfreerdp3",
                 f"/v:{host}:{port}",
                 "/auth-only",
@@ -272,8 +281,10 @@ class ScreenshotScanner:
 
             cmd = [
                 "vncsnapshot",
-                "-passwd", "/dev/null",
-                "-timeout", str(self.timeout),
+                "-passwd",
+                "/dev/null",
+                "-timeout",
+                str(self.timeout),
                 f"{host}:{display}",
                 out_file,
             ]
@@ -309,7 +320,9 @@ class ScreenshotScanner:
 
         return None
 
-    async def generate_presigned_url(self, s3_key: str, expires_in: int = 3600) -> Optional[str]:
+    async def generate_presigned_url(
+        self, s3_key: str, expires_in: int = 3600
+    ) -> Optional[str]:
         """Generate a presigned URL for an S3 object.
 
         Args:

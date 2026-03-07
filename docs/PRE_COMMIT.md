@@ -40,6 +40,7 @@ Before committing, run in this order (or use `./scripts/pre-commit/pre-commit.sh
   - All API health endpoints respond with 200 status
   - All services communicate successfully
   - Database connectivity verified
+  - IceBox: `icebox/tests/smoke/run-all.sh` (6-phase runner; flags: `--build-only`, `--skip-build`)
   - See: [Testing Documentation - Smoke Tests](TESTING.md#smoke-tests)
 
 ### Feature Testing & Documentation
@@ -93,6 +94,26 @@ Before committing, run in this order (or use `./scripts/pre-commit/pre-commit.sh
 - [ ] Audit log storage tests passing
 - [ ] Threat detection tests passing
 - [ ] Integration with Manager service verified
+
+**If modifying IceBox sub-module** (`icebox/services/flask-backend/` or `icebox/webui/`):
+- [ ] Python linting: `cd .worktrees/icebox/icebox/services/flask-backend && bandit -r . && flake8 . && black --check . && isort --check . && mypy .`
+- [ ] React/TS linting: `cd .worktrees/icebox/icebox/webui && npm run lint`
+- [ ] IceBox unit tests: `pytest icebox/services/flask-backend/tests/ -v`
+  - `test_envelope.py` — AES-256-GCM roundtrip, tamper detection, MEK rotation
+  - `test_jit_token.py` — HMAC token format, expiry, tamper detection
+- [ ] IceBox integration tests: `pytest icebox/services/flask-backend/tests/test_jit_flow_integration.py -v`
+- [ ] IceBox smoke tests (build-only): `icebox/tests/smoke/run-all.sh --build-only`
+- [ ] Verify PKI Server and SSH CA shims still proxy correctly to IceBox endpoints
+
+**If modifying PKI Server or SSH CA shims** (`services/pki-server-new/` or `services/ssh-ca/`):
+- [ ] Verify shim proxy still attaches `Deprecation:` and `Link:` headers
+- [ ] Verify requests still forward correctly to `$ICEBOX_PKI_URL` / `$ICEBOX_SSH_CA_URL`
+- [ ] PKI integration tests: `pytest tests/integration/pki-server/`
+- [ ] SSH CA integration tests: `pytest tests/integration/ssh-ca/`
+
+**If modifying Darwin sub-module** (`darwin/` or `services/worker-darwin/`):
+- [ ] Darwin unit tests: `cd darwin && pytest tests/ -v`
+- [ ] Worker-Darwin linting: `cd services/worker-darwin && bandit -r . && flake8 .`
 
 **If modifying shared libraries (py_libs)**:
 - [ ] All dependent services rebuild successfully
@@ -193,6 +214,8 @@ Before committing changes to any service:
   - `tests/api/pki-server/` - PKI server API tests
   - `tests/api/ssh-ca/` - SSH CA API tests
   - `tests/api/aaa-monitor/` - AAA Monitor API tests
+  - `tests/api/worker-scanner/` - Worker-Scanner API tests
+  - `tests/api/icebox/` - IceBox API tests (when IceBox installed)
 - **Run before commit**: Each test script should be executable and pass completely
 - **Test coverage**: Health checks, authentication, CRUD operations, error cases
 - **Command pattern**: `cd services/<service-name> && pytest tests/api/ -v`

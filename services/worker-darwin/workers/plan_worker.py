@@ -5,10 +5,9 @@ import traceback
 from typing import Any
 
 from celery import Task
-
-from workers.celery_app import celery_app
 from database.models import get_configured_db
 from scanners.ai_provider import create_provider
+from workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +22,9 @@ class PlanWorkerTask(Task):
     retry_jitter = True
 
 
-@celery_app.task(bind=True, base=PlanWorkerTask, name="workers.plan_worker.generate_plan")
+@celery_app.task(
+    bind=True, base=PlanWorkerTask, name="workers.plan_worker.generate_plan"
+)
 def generate_plan(self: Task, plan_id: int) -> dict[str, Any]:
     """Generate an AI implementation plan for a GitHub/GitLab issue.
 
@@ -67,6 +68,7 @@ def generate_plan(self: Task, plan_id: int) -> dict[str, Any]:
         )
 
         import asyncio
+
         ai_provider = create_provider(settings.ai.provider)
         response = asyncio.run(ai_provider.complete(prompt=prompt))
 
