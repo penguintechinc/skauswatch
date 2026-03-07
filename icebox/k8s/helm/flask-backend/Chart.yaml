@@ -1,0 +1,6 @@
+apiVersion: v2
+name: icebox-flask-backend
+description: IceBox Flask Backend — REST API for secrets, JIT, one-time secrets, and cloud sync
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

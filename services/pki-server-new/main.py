@@ -1,258 +1,141 @@
-"""SkausWatch PKI Server - Unified X.509 and SSH Certificate Authority.
+"""
+SkausWatch PKI Server — Deprecation Shim (v1.x)
 
-This service provides both REST API and gRPC endpoints for managing
-X.509 and SSH certificates.
+All PKI functionality has moved to icebox/services/pki-server/.
+This shim forwards all requests to the IceBox PKI server and adds
+deprecation headers to every response.
+
+Shim behaviour:
+  - Forwards GET/POST/PUT/PATCH/DELETE /api/v1/* → ICEBOX_PKI_URL
+  - Adds Deprecation: true header
+  - Adds Link: <{ICEBOX_PKI_URL}>; rel="successor-version" header
+  - Logs all forwarded requests at WARNING level
+
+This shim will be REMOVED in SkausWatch v2.0.0.
+Migration guide: https://docs.penguintech.io/skauswatch/icebox/pki-migration
 """
 
-import asyncio
-import signal
-from datetime import datetime
-from typing import List, Set
+from __future__ import annotations
 
-import structlog
-from hypercorn.asyncio import serve
-from hypercorn.config import Config as HypercornConfig
-from quart import Quart
+import logging
+import os
+from datetime import datetime
+
+import aiohttp
+from quart import Quart, Response, jsonify, request
 from quart_cors import cors
 
-from .api.v1 import api_v1
-from .ca import SSHCertificateAuthority, X509CertificateAuthority
-from .config import Settings, get_settings
-from .grpc.server import serve_grpc
-from .models.db import close_db, get_db, init_database_schema
-from .services.certificate_manager import CertificateManager
+logger = logging.getLogger(__name__)
 
-logger = structlog.get_logger()
+ICEBOX_PKI_URL = os.getenv("ICEBOX_PKI_URL", "http://icebox-pki:8081")
+HOST = os.getenv("API_HOST", "0.0.0.0")
+PORT = int(os.getenv("API_PORT", "8001"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "WARNING").upper()
 
-# Global instances
-config: Settings = None
-x509_ca: X509CertificateAuthority = None
-ssh_ca: SSHCertificateAuthority = None
-cert_manager: CertificateManager = None
-grpc_server = None
-background_tasks: Set[asyncio.Task] = set()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.WARNING))
 
+app = Quart(__name__)
+app = cors(app, allow_origin="*")
 
-def create_app() -> Quart:
-    """Create and configure the Quart application."""
-    global config
+_DEPRECATION_HEADERS = {
+    "Deprecation": "true",
+    "Link": f'<{ICEBOX_PKI_URL}>; rel="successor-version"',
+    "Sunset": "SkausWatch v2.0.0",
+}
 
-    config = get_settings()
-
-    app = Quart(__name__)
-    app = cors(app, allow_origin="*")
-
-    # Store config in app
-    app.config["settings"] = config
-
-    # Register blueprints
-    app.register_blueprint(api_v1)
-
-    # Register lifecycle hooks
-    app.before_serving(startup)
-    app.after_serving(shutdown)
-
-    # Register health endpoints
-    @app.route("/healthz")
-    async def healthz():
-        """Liveness probe."""
-        return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
-    @app.route("/readyz")
-    async def readyz():
-        """Readiness probe."""
-        checks = {
-            "database": False,
-            "x509_ca": False,
-            "ssh_ca": False,
-        }
-
-        try:
-            # Check database
-            db = get_db()
-            checks["database"] = db is not None
-
-            # Check CAs
-            checks["x509_ca"] = x509_ca is not None
-            checks["ssh_ca"] = ssh_ca is not None
-
-            all_healthy = all(checks.values())
-            status_code = 200 if all_healthy else 503
-
-            return {
-                "status": "ready" if all_healthy else "not_ready",
-                "checks": checks,
-                "timestamp": datetime.utcnow().isoformat(),
-            }, status_code
-
-        except Exception as e:
-            logger.error("Readiness check failed", error=str(e))
-            return {
-                "status": "not_ready",
-                "checks": checks,
-                "error": str(e),
-            }, 503
-
-    @app.route("/version")
-    async def version():
-        """Version information."""
-        return {
-            "app_name": config.app_name,
-            "version": config.version,
-            "environment": config.environment,
-        }
-
-    @app.route("/health")
-    async def health():
-        """Detailed health check."""
-        return {
-            "status": "healthy",
-            "version": config.version,
-            "timestamp": datetime.utcnow().isoformat(),
-            "components": {
-                "rest_api": True,
-                "grpc_server": grpc_server is not None,
-                "x509_ca": x509_ca is not None,
-                "ssh_ca": ssh_ca is not None,
-            },
-        }
-
-    return app
+# Hop-by-hop headers that must not be forwarded
+_HOP_BY_HOP = frozenset({
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade", "content-length",
+})
 
 
-async def startup() -> None:
-    """Application startup tasks."""
-    global x509_ca, ssh_ca, cert_manager, grpc_server
+@app.route("/healthz")
+async def healthz():
+    """Liveness probe — shim is always healthy if running."""
+    return jsonify({
+        "status": "healthy",
+        "mode": "deprecation-shim",
+        "successor": ICEBOX_PKI_URL,
+        "timestamp": datetime.utcnow().isoformat(),
+    })
 
-    logger.info("Starting PKI Server", version=config.version)
 
-    # Initialize database schema
-    logger.info("Initializing database schema")
-    init_database_schema(config.database.url)
+@app.route("/api/v1/<path:path>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+async def proxy_to_icebox(path: str):
+    """Forward all PKI API requests to IceBox pki-server with deprecation headers."""
+    target_url = f"{ICEBOX_PKI_URL}/api/v1/{path}"
+    query_string = request.query_string.decode("utf-8")
+    if query_string:
+        target_url = f"{target_url}?{query_string}"
 
-    # Initialize X.509 CA
-    logger.info("Initializing X.509 Certificate Authority")
-    x509_ca = X509CertificateAuthority(config.x509_ca)
-    await x509_ca.initialize()
+    forward_headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in _HOP_BY_HOP and k.lower() != "host"
+    }
+    forward_headers["X-Forwarded-By"] = "skauswatch-pki-shim/v1"
 
-    # Initialize SSH CA
-    logger.info("Initializing SSH Certificate Authority")
-    ssh_ca = SSHCertificateAuthority(config.ssh_ca)
-    await ssh_ca.initialize()
+    body = await request.get_data()
 
-    # Create certificate manager
-    cert_manager = CertificateManager(x509_ca, ssh_ca)
-
-    # Store cert_manager in app config for API access
-    from quart import current_app
-
-    current_app.config["cert_manager"] = cert_manager
-
-    # Start gRPC server
-    logger.info("Starting gRPC server", port=config.grpc.port)
-    grpc_server = await serve_grpc(cert_manager, config, port=config.grpc.port)
-
-    # Start background tasks
-    task = asyncio.create_task(cleanup_expired_certificates())
-    background_tasks.add(task)
-    task.add_done_callback(background_tasks.discard)
-
-    logger.info(
-        "PKI Server started successfully",
-        rest_port=config.api.port,
-        grpc_port=config.grpc.port,
+    logger.warning(
+        "PKI shim: forwarding %s /api/v1/%s → %s (DEPRECATED: migrate to IceBox)",
+        request.method,
+        path,
+        ICEBOX_PKI_URL,
     )
 
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.request(
+                method=request.method,
+                url=target_url,
+                headers=forward_headers,
+                data=body or None,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                content = await resp.read()
+                response_headers = {
+                    k: v for k, v in resp.headers.items()
+                    if k.lower() not in _HOP_BY_HOP
+                }
+                response_headers.update(_DEPRECATION_HEADERS)
 
-async def shutdown() -> None:
-    """Application shutdown tasks."""
-    logger.info("Shutting down PKI Server")
-
-    # Cancel background tasks
-    for task in background_tasks:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-    # Stop gRPC server
-    if grpc_server:
-        await grpc_server.stop(grace=5)
-        logger.info("gRPC server stopped")
-
-    # Close database connections
-    close_db()
-
-    logger.info("PKI Server shutdown complete")
-
-
-async def cleanup_expired_certificates() -> None:
-    """Background task to mark expired certificates."""
-    while True:
-        try:
-            await asyncio.sleep(3600)  # Run every hour
-
-            from .models.db import db_session
-
-            now = datetime.utcnow()
-            updated_count = 0
-
-            with db_session() as db:
-                # Update expired X.509 certificates
-                x509_updated = db(
-                    (db.x509_certificates.status == "active")
-                    & (db.x509_certificates.not_after < now)
-                ).update(status="expired", updated_at=now)
-                updated_count += x509_updated
-
-                # Update expired SSH certificates
-                ssh_updated = db(
-                    (db.ssh_certificates.status == "active")
-                    & (db.ssh_certificates.valid_before < now)
-                ).update(status="expired", updated_at=now)
-                updated_count += ssh_updated
-
-            if updated_count > 0:
-                logger.info(
-                    "Cleaned up expired certificates", updated_count=updated_count
+                return Response(
+                    content,
+                    status=resp.status,
+                    headers=response_headers,
+                    content_type=resp.content_type,
                 )
 
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error("Cleanup task error", error=str(e))
-            await asyncio.sleep(60)  # Wait before retry
+    except aiohttp.ClientConnectorError as exc:
+        logger.error("PKI shim: cannot reach IceBox PKI at %s: %s", ICEBOX_PKI_URL, exc)
+        resp = jsonify({
+            "error": "IceBox PKI service unavailable",
+            "detail": f"Cannot connect to {ICEBOX_PKI_URL}. Ensure IceBox pki-server is deployed.",
+            "migration": "https://docs.penguintech.io/skauswatch/icebox/pki-migration",
+        })
+        for k, v in _DEPRECATION_HEADERS.items():
+            resp.headers[k] = v
+        return resp, 503
 
-
-def run() -> None:
-    """Run the PKI Server."""
-    app = create_app()
-
-    hypercorn_config = HypercornConfig()
-    hypercorn_config.bind = [f"{config.api.host}:{config.api.port}"]
-    hypercorn_config.use_reloader = config.api.debug
-
-    # Handle signals
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    shutdown_event = asyncio.Event()
-
-    def signal_handler():
-        shutdown_event.set()
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    async def run_server():
-        await serve(app, hypercorn_config, shutdown_trigger=shutdown_event.wait)
-
-    try:
-        loop.run_until_complete(run_server())
-    finally:
-        loop.close()
+    except Exception as exc:
+        logger.error("PKI shim proxy error: %s", exc, exc_info=True)
+        return jsonify({"error": "Proxy error", "detail": str(exc)}), 500
 
 
 if __name__ == "__main__":
-    run()
+    import asyncio
+    import hypercorn.asyncio
+    from hypercorn.config import Config as HConfig
+
+    hconfig = HConfig()
+    hconfig.bind = [f"{HOST}:{PORT}"]
+    hconfig.loglevel = "warning"
+
+    logger.warning(
+        "SkausWatch PKI Server running as DEPRECATION SHIM. "
+        "Forwarding to IceBox PKI at %s. "
+        "Migrate to IceBox before v2.0.0.",
+        ICEBOX_PKI_URL,
+    )
+    asyncio.run(hypercorn.asyncio.serve(app, hconfig))

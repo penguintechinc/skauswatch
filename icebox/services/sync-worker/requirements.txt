@@ -1,0 +1,31 @@
+# Async Redis Streams consumer
+aioredis>=2.0.1
+
+# Cloud provider SDKs
+# AWS Secrets Manager + KMS
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Azure Key Vault
+azure-keyvault-secrets>=4.8.0
+azure-keyvault-keys>=4.9.0
+azure-identity>=1.16.0
+
+# GCP Secret Manager + KMS
+google-cloud-secret-manager>=2.20.0
+google-cloud-kms>=2.22.0
+
+# Oracle OCI Vault
+oci>=2.126.0
+
+# Kubernetes Secrets API
+kubernetes>=29.0.0
+
+# Database runtime (PyDAL — migrate=False always)
+pydal>=20240101.1
+
+# Encryption (same as flask-backend)
+cryptography>=42.0.5
+
+# Structured logging
+python-json-logger>=2.0.7

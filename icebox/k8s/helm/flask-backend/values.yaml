@@ -1,0 +1,81 @@
+replicaCount: 1
+
+image:
+  repository: registry-dal2.penguintech.cloud/skauswatch/icebox-flask-backend
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  host: icebox.skauswatch.localhost.local
+  annotations: {}
+  tls: []
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+env:
+  DB_TYPE: "postgresql"
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_NAME: "icebox"
+  DB_POOL_SIZE: "10"
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+  LOG_LEVEL: "info"
+  LICENSE_SERVER_URL: "https://license.penguintech.io"
+  PRODUCT_NAME: "icebox"
+  RELEASE_MODE: "false"
+  JIT_REVOCATION_INTERVAL: "60"
+  LICENSE_CHECK_INTERVAL: "21600"
+
+# Secrets — override in each environment or use External Secrets Operator
+secrets:
+  DB_USER: "icebox-backend"
+  DB_PASS: "changeme"
+  REDIS_PASS: ""
+  ICEBOX_MEK: "changeme-32-chars-minimum-length!"
+  JWT_SECRET: "changeme-jwt-secret"
+  LICENSE_KEY: ""
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 3
+
+migration:
+  enabled: true
+  image:
+    repository: registry-dal2.penguintech.cloud/skauswatch/icebox-flask-backend
+    tag: "latest"

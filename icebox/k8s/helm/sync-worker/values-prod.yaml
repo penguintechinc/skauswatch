@@ -1,0 +1,19 @@
+replicaCount: 2
+
+image:
+  repository: registry.skauswatch.app/icebox-sync-worker
+  pullPolicy: Always
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+env:
+  LOG_LEVEL: "warn"
+  SYNC_POLL_INTERVAL: "300"
+  MAX_CONCURRENT_SYNCS: "10"
+  RELEASE_MODE: "true"

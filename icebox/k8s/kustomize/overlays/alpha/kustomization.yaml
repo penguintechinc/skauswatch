@@ -1,0 +1,97 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: icebox
+
+resources:
+  - ../../base
+
+# Alpha image overrides — locally built images, never pulled from registry
+images:
+  - name: icebox-flask-backend
+    newTag: latest
+  - name: icebox-sync-worker
+    newTag: latest
+  - name: icebox-pki-server
+    newTag: latest
+  - name: icebox-ssh-ca
+    newTag: latest
+  - name: icebox-webui
+    newTag: latest
+
+# Alpha config patches — debug logging, minimal resources
+patches:
+  # flask-backend: debug logging + minimal pool
+  - target:
+      kind: ConfigMap
+      name: icebox-flask-backend-config
+    patch: |-
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "debug"
+      - op: replace
+        path: /data/DB_POOL_SIZE
+        value: "2"
+      - op: replace
+        path: /data/REDIS_POOL_SIZE
+        value: "2"
+      - op: add
+        path: /data/BASE_URL
+        value: "https://icebox.skauswatch.localhost.local"
+
+  # sync-worker: debug logging + minimal concurrency
+  - target:
+      kind: ConfigMap
+      name: icebox-sync-worker-config
+    patch: |-
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "debug"
+      - op: replace
+        path: /data/DB_POOL_SIZE
+        value: "2"
+      - op: replace
+        path: /data/MAX_CONCURRENT_SYNCS
+        value: "2"
+
+  # pki-server: debug logging + minimal pool
+  - target:
+      kind: ConfigMap
+      name: icebox-pki-server-config
+    patch: |-
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "debug"
+      - op: replace
+        path: /data/DB_POOL_SIZE
+        value: "2"
+
+  # ssh-ca: debug logging + minimal pool
+  - target:
+      kind: ConfigMap
+      name: icebox-ssh-ca-config
+    patch: |-
+      - op: replace
+        path: /data/LOG_LEVEL
+        value: "debug"
+      - op: replace
+        path: /data/DB_POOL_SIZE
+        value: "2"
+
+  # flask-backend deployment: reduce resources for alpha
+  - target:
+      kind: Deployment
+      name: icebox-flask-backend
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: "50m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: "128Mi"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "250m"
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: "256Mi"
