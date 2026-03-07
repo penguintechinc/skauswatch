@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+/* Scan shared library node_modules so Tailwind v4 does not purge classes used
+   only inside @penguintechinc/react-libs at build time */
+@source "../node_modules/@penguintechinc/react-libs";
+
+/* Design system CSS variables — matches Elder/SkausWatch dark theme */
+:root {
+  --bg-primary: #0f172a;      /* slate-900 */
+  --bg-secondary: #1e293b;    /* slate-800 */
+  --text-primary: #fbbf24;    /* amber-400 */
+  --text-secondary: #f59e0b;  /* amber-500 */
+  --primary-500: #0ea5e9;     /* sky-500 */
+  --border-color: #334155;    /* slate-700 */
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}

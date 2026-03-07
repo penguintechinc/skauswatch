@@ -1,0 +1,16 @@
+image:
+  repository: icebox-sync-worker
+  tag: "latest"
+  pullPolicy: Never
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+env:
+  LOG_LEVEL: "debug"
+  SYNC_POLL_INTERVAL: "60"

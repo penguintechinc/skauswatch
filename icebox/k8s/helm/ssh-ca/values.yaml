@@ -1,0 +1,43 @@
+replicaCount: 1
+
+image:
+  repository: registry.skauswatch.app/icebox-ssh-ca
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8082
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  host: icebox.skauswatch.app
+  path: /api/v1/ssh
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+env:
+  DB_TYPE: "postgresql"
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_NAME: "icebox"
+  DB_POOL_SIZE: "5"
+  LOG_LEVEL: "info"
+
+secrets:
+  DB_USER: "icebox-ssh"
+  DB_PASS: "changeme"
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false

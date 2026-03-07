@@ -1,0 +1,6 @@
+apiVersion: v2
+name: icebox-sync-worker
+description: IceBox Sync Worker — Redis Streams consumer for 5-provider cloud vault sync
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

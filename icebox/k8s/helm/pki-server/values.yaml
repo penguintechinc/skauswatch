@@ -1,0 +1,43 @@
+replicaCount: 1
+
+image:
+  repository: registry.skauswatch.app/icebox-pki-server
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8081
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  host: icebox.skauswatch.app
+  path: /api/v1/pki
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+env:
+  DB_TYPE: "postgresql"
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_NAME: "icebox"
+  DB_POOL_SIZE: "5"
+  LOG_LEVEL: "info"
+
+secrets:
+  DB_USER: "icebox-pki"
+  DB_PASS: "changeme"
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false

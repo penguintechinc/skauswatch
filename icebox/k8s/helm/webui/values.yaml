@@ -1,0 +1,35 @@
+replicaCount: 1
+
+image:
+  repository: registry.skauswatch.app/icebox-webui
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  host: icebox.skauswatch.app
+  tls: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 100m
+    memory: 128Mi
+
+# API backend URL for nginx proxy_pass
+env:
+  API_URL: "http://icebox-flask-backend:8080"
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70

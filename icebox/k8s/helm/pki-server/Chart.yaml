@@ -1,0 +1,6 @@
+apiVersion: v2
+name: icebox-pki-server
+description: IceBox PKI Server — X.509 certificate lifecycle management
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
