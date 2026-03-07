@@ -24,9 +24,9 @@ RUN NUCLEI_VERSION=$(curl -s https://api.github.com/repos/projectdiscovery/nucle
     chmod +x /usr/local/bin/nuclei && \
     rm nuclei.zip
 
-# gowitness (HTTP screenshot tool)
-ARG GOWITNESS_VERSION=2.5.1
-RUN curl -fsSL https://github.com/sensepost/gowitness/releases/download/${GOWITNESS_VERSION}/gowitness-linux-amd64 \
+# gowitness (HTTP screenshot tool) - fetch latest release dynamically
+RUN GOWITNESS_VERSION=$(curl -s https://api.github.com/repos/sensepost/gowitness/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/') && \
+    curl -fsSL "https://github.com/sensepost/gowitness/releases/download/v${GOWITNESS_VERSION}/gowitness-${GOWITNESS_VERSION}-linux-amd64" \
     -o /usr/local/bin/gowitness && chmod +x /usr/local/bin/gowitness
 
 # Masscan, Xvfb, xfreerdp, vncsnapshot for ASM scanning
