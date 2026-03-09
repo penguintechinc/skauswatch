@@ -25,8 +25,9 @@ RUN NUCLEI_VERSION=$(curl -s https://api.github.com/repos/projectdiscovery/nucle
     rm nuclei.zip
 
 # gowitness (HTTP screenshot tool) - fetch latest release dynamically
-RUN GOWITNESS_VERSION=$(curl -s https://api.github.com/repos/sensepost/gowitness/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/') && \
-    curl -fsSL "https://github.com/sensepost/gowitness/releases/download/v${GOWITNESS_VERSION}/gowitness-${GOWITNESS_VERSION}-linux-amd64" \
+# Tag format is bare "X.Y.Z" (no v prefix), asset is gowitness-X.Y.Z-linux-amd64
+RUN GOWITNESS_VERSION=$(curl -s https://api.github.com/repos/sensepost/gowitness/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' | tr -d 'v') && \
+    curl -fsSL "https://github.com/sensepost/gowitness/releases/download/${GOWITNESS_VERSION}/gowitness-${GOWITNESS_VERSION}-linux-amd64" \
     -o /usr/local/bin/gowitness && chmod +x /usr/local/bin/gowitness
 
 # Masscan, Xvfb, xfreerdp, vncsnapshot for ASM scanning
