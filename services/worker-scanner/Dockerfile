@@ -30,12 +30,13 @@ RUN GOWITNESS_VERSION=$(curl -s https://api.github.com/repos/sensepost/gowitness
     curl -fsSL "https://github.com/sensepost/gowitness/releases/download/${GOWITNESS_VERSION}/gowitness-${GOWITNESS_VERSION}-linux-amd64" \
     -o /usr/local/bin/gowitness && chmod +x /usr/local/bin/gowitness
 
-# Masscan, Xvfb, xfreerdp, vncsnapshot for ASM scanning
+# Masscan, Xvfb, xfreerdp for ASM scanning
+# Note: xfreerdp3-x11 is only in Debian trixie+; bookworm ships freerdp2-x11
+# vncsnapshot was removed from Debian after bullseye; not available in bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     masscan \
     xvfb \
-    xfreerdp3-x11 \
-    vncsnapshot \
+    freerdp2-x11 \
     libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 
@@ -74,8 +75,7 @@ COPY --from=builder /usr/local/bin/gowitness /usr/local/bin/gowitness
 RUN apt-get update && apt-get install -y --no-install-recommends \
     masscan \
     xvfb \
-    xfreerdp3-x11 \
-    vncsnapshot \
+    freerdp2-x11 \
     libcap2-bin \
     && rm -rf /var/lib/apt/lists/* \
     && setcap cap_net_raw+ep /usr/bin/masscan
