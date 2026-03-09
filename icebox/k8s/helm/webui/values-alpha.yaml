@@ -1,0 +1,15 @@
+image:
+  repository: icebox-webui
+  tag: "latest"
+  pullPolicy: Never
+
+ingress:
+  host: icebox.skauswatch.localhost.local
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 32Mi
+  limits:
+    cpu: 50m
+    memory: 64Mi

@@ -11,11 +11,11 @@ Blueprints:
     scanners_bp: Scanner status and health information
 """
 
-from api.routes.targets import targets_bp
-from api.routes.jobs import jobs_bp
 from api.routes.findings import findings_bp
-from api.routes.schedules import schedules_bp
+from api.routes.jobs import jobs_bp
 from api.routes.scanners import scanners_bp
+from api.routes.schedules import schedules_bp
+from api.routes.targets import targets_bp
 
 __all__ = [
     "targets_bp",

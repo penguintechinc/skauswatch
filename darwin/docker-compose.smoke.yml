@@ -1,0 +1,30 @@
+version: '3.8'
+
+# Smoke test override - uses simplified Dockerfile for quick validation
+# Disables monitoring services to avoid port conflicts during testing
+services:
+  flask-backend:
+    build:
+      context: .
+      dockerfile: services/flask-backend/Dockerfile.smoke
+    container_name: darwin-flask-smoke
+    volumes: !reset []  # Override volume mount to use containerized code
+
+  webui:
+    container_name: darwin-webui
+    volumes: !reset []  # Override volume mount to use containerized code
+
+  # Disable monitoring services for smoke tests
+  prometheus:
+    image: prom/prometheus:latest
+    deploy:
+      replicas: 0
+    profiles:
+      - monitoring
+
+  grafana:
+    image: grafana/grafana:latest
+    deploy:
+      replicas: 0
+    profiles:
+      - monitoring

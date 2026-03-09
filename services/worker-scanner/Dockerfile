@@ -24,6 +24,22 @@ RUN NUCLEI_VERSION=$(curl -s https://api.github.com/repos/projectdiscovery/nucle
     chmod +x /usr/local/bin/nuclei && \
     rm nuclei.zip
 
+# gowitness (HTTP screenshot tool) - fetch latest release dynamically
+# Tag format is bare "X.Y.Z" (no v prefix), asset is gowitness-X.Y.Z-linux-amd64
+RUN GOWITNESS_VERSION=$(curl -s https://api.github.com/repos/sensepost/gowitness/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/' | tr -d 'v') && \
+    curl -fsSL "https://github.com/sensepost/gowitness/releases/download/${GOWITNESS_VERSION}/gowitness-${GOWITNESS_VERSION}-linux-amd64" \
+    -o /usr/local/bin/gowitness && chmod +x /usr/local/bin/gowitness
+
+# Masscan, Xvfb, xfreerdp for ASM scanning
+# Note: xfreerdp3-x11 is only in Debian trixie+; bookworm ships freerdp2-x11
+# vncsnapshot was removed from Debian after bullseye; not available in bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    masscan \
+    xvfb \
+    freerdp2-x11 \
+    libcap2-bin \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
@@ -51,6 +67,18 @@ WORKDIR /app
 
 # Copy Nuclei binary from builder
 COPY --from=builder /usr/local/bin/nuclei /usr/local/bin/nuclei
+
+# Copy gowitness binary from builder
+COPY --from=builder /usr/local/bin/gowitness /usr/local/bin/gowitness
+
+# masscan needs raw socket capability - set during build, NET_RAW cap required at runtime via docker-compose
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    masscan \
+    xvfb \
+    freerdp2-x11 \
+    libcap2-bin \
+    && rm -rf /var/lib/apt/lists/* \
+    && setcap cap_net_raw+ep /usr/bin/masscan
 
 # Copy Python packages from builder
 COPY --from=builder /install /usr/local

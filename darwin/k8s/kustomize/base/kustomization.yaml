@@ -1,0 +1,30 @@
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: project-template-base
+
+namespace: project-template
+
+commonLabels:
+  app.kubernetes.io/name: project-template
+  app.kubernetes.io/managed-by: kustomize
+
+resources:
+- ../../manifests/namespace.yaml
+- ../../manifests/rbac.yaml
+- ../../manifests/configmap.yaml
+- ../../manifests/secrets.yaml
+- ../../manifests/postgresql/configmap.yaml
+- ../../manifests/postgresql/service.yaml
+- ../../manifests/postgresql/statefulset.yaml
+- ../../manifests/redis/deployment.yaml
+- ../../manifests/redis/pvc.yaml
+- ../../manifests/redis/secret.yaml
+- ../../manifests/redis/service.yaml
+- ../../manifests/flask-backend/deployment.yaml
+- ../../manifests/flask-backend/service.yaml
+- ../../manifests/webui/deployment.yaml
+- ../../manifests/webui/service.yaml
+- ../../manifests/webui/ingress.yaml

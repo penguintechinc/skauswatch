@@ -1,0 +1,52 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgresql-config
+  namespace: project-template
+  labels:
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/component: database
+    app.kubernetes.io/managed-by: kustomize
+data:
+  postgresql.conf: |
+    # PostgreSQL Configuration
+    # Database cluster management
+    max_connections = 100
+    superuser_reserved_connections = 3
+
+    # Memory Settings
+    shared_buffers = 256MB
+    effective_cache_size = 1GB
+    maintenance_work_mem = 64MB
+    checkpoint_completion_target = 0.9
+    wal_buffers = 16MB
+    default_statistics_target = 100
+
+    # WAL Settings
+    wal_level = replica
+    max_wal_senders = 3
+    wal_keep_segments = 64
+
+    # Query Planning
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+
+    # Logging
+    logging_collector = on
+    log_directory = 'pg_log'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_statement = 'mod'
+    log_duration = off
+    log_lock_waits = on
+    log_min_duration_statement = 1000
+
+    # Client Connection
+    listen_addresses = '*'
+    unix_socket_directories = '/var/run/postgresql'
+
+    # Performance
+    work_mem = 4MB
+    max_parallel_workers_per_gather = 2
+    max_worker_processes = 2
+    max_parallel_workers = 2

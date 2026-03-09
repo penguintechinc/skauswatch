@@ -12,10 +12,9 @@ Endpoints:
 import logging
 from typing import Any, Dict, List, Tuple
 
-from flask import Blueprint, jsonify
-
 from api.middleware.auth import jwt_required
 from config.settings import settings
+from flask import Blueprint, jsonify
 from scanners.nuclei import NucleiScanner
 from scanners.openvas import OpenvasScanner
 from scanners.zap import ZapScanner
@@ -254,10 +253,11 @@ def get_scanners_status() -> Tuple[Dict[str, Any], int]:
     )
     scanners_list.append(openvas_status)
 
-    logger.info(f"Scanner status check completed: {len(scanners_list)} scanners checked")
+    logger.info(
+        f"Scanner status check completed: {len(scanners_list)} scanners checked"
+    )
 
     return jsonify({"scanners": scanners_list}), 200
-
 
 
 # NOTE: The /healthz endpoint is registered directly in app.py (not via blueprint)

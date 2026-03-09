@@ -17,18 +17,17 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from flask import Blueprint, jsonify, request, Response
-from marshmallow import ValidationError
-
 from api.middleware.auth import jwt_required
 from api.schemas.finding import (
-    FindingResponseSchema,
-    UpdateFindingSchema,
-    FindingFilterSchema,
-    FindingStatsSchema,
     FindingExportSchema,
+    FindingFilterSchema,
+    FindingResponseSchema,
+    FindingStatsSchema,
+    UpdateFindingSchema,
 )
 from database.models import get_configured_db
+from flask import Blueprint, Response, jsonify, request
+from marshmallow import ValidationError
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -462,9 +461,9 @@ def export_findings() -> tuple[Any, int]:
 
         # Return as CSV attachment response
         response = Response(csv_content, mimetype="text/csv")
-        response.headers[
-            "Content-Disposition"
-        ] = "attachment; filename=findings_export.csv"
+        response.headers["Content-Disposition"] = (
+            "attachment; filename=findings_export.csv"
+        )
 
         return response, 200
 

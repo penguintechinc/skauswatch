@@ -1,0 +1,237 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flask-backend
+  namespace: darwin-dev
+  labels:
+    app: flask-backend
+spec:
+  ports:
+  - port: 5000
+    targetPort: 5000
+    name: http
+  selector:
+    app: flask-backend
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flask-backend
+  namespace: darwin-dev
+  labels:
+    app: flask-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flask-backend
+  template:
+    metadata:
+      labels:
+        app: flask-backend
+    spec:
+      containers:
+      - name: flask-backend
+        image: registry-dal2.penguintech.io/darwin/flask-backend:dev
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 5000
+          name: http
+        env:
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: LOG_LEVEL
+        - name: DB_TYPE
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DB_TYPE
+        - name: CORS_ORIGINS
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: CORS_ORIGINS
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DB_PORT
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DB_NAME
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: darwin-secrets
+              key: DB_USER
+        - name: DB_PASS
+          valueFrom:
+            secretKeyRef:
+              name: darwin-secrets
+              key: DB_PASS
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: darwin-secrets
+              key: SECRET_KEY
+        - name: SECURITY_PASSWORD_SALT
+          valueFrom:
+            secretKeyRef:
+              name: darwin-secrets
+              key: SECURITY_PASSWORD_SALT
+        - name: JWT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: darwin-secrets
+              key: JWT_SECRET_KEY
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: REDIS_HOST
+        - name: REDIS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: REDIS_PORT
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: darwin-secrets
+              key: REDIS_PASSWORD
+        - name: LICENSE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: darwin-secrets
+              key: LICENSE_KEY
+        - name: LICENSE_SERVER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: LICENSE_SERVER_URL
+        - name: RELEASE_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: RELEASE_MODE
+        - name: AI_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: AI_ENABLED
+        - name: DEFAULT_AI_PROVIDER
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DEFAULT_AI_PROVIDER
+        - name: OLLAMA_BASE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: OLLAMA_BASE_URL
+        - name: OLLAMA_SECURITY_LLM
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: OLLAMA_SECURITY_LLM
+        - name: OLLAMA_BEST_PRACTICES_LLM
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: OLLAMA_BEST_PRACTICES_LLM
+        - name: OLLAMA_FRAMEWORK_LLM
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: OLLAMA_FRAMEWORK_LLM
+        - name: OLLAMA_IAC_LLM
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: OLLAMA_IAC_LLM
+        - name: OLLAMA_FALLBACK_LLM
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: OLLAMA_FALLBACK_LLM
+        - name: OLLAMA_DEFAULT_LLM
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: OLLAMA_DEFAULT_LLM
+        - name: REVIEW_SECURITY_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: REVIEW_SECURITY_ENABLED
+        - name: REVIEW_BEST_PRACTICES_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: REVIEW_BEST_PRACTICES_ENABLED
+        - name: REVIEW_FRAMEWORK_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: REVIEW_FRAMEWORK_ENABLED
+        - name: REVIEW_IAC_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: REVIEW_IAC_ENABLED
+        - name: MAX_FILES_PER_REVIEW
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: MAX_FILES_PER_REVIEW
+        - name: MAX_LINES_PER_FILE
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: MAX_LINES_PER_FILE
+        - name: REVIEW_TIMEOUT_SECONDS
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: REVIEW_TIMEOUT_SECONDS
+        - name: DEFAULT_ADMIN_EMAIL
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DEFAULT_ADMIN_EMAIL
+        - name: DEFAULT_ADMIN_PASSWORD
+          valueFrom:
+            configMapKeyRef:
+              name: darwin-config
+              key: DEFAULT_ADMIN_PASSWORD
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+          requests:
+            cpu: 200m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 5000
+          initialDelaySeconds: 10
+          periodSeconds: 5

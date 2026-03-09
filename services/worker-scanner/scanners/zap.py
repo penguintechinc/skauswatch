@@ -11,8 +11,7 @@ import time
 from datetime import datetime
 
 import httpx
-
-from scanners.base import BaseScanner, NormalizedFinding, ScanResult, ScannerStatus
+from scanners.base import BaseScanner, NormalizedFinding, ScannerStatus, ScanResult
 from scanners.parsers.zap_parser import parse_zap_alert
 
 
@@ -44,13 +43,9 @@ class ZapScanner(BaseScanner):
 
         # Get ZAP configuration from config or environment
         self.base_url = config.get(
-            "base_url",
-            os.getenv("SCANNER_ZAP_URL", "http://zap:8080")
+            "base_url", os.getenv("SCANNER_ZAP_URL", "http://zap:8080")
         )
-        self.api_key = config.get(
-            "api_key",
-            os.getenv("SCANNER_ZAP_API_KEY", "")
-        )
+        self.api_key = config.get("api_key", os.getenv("SCANNER_ZAP_API_KEY", ""))
 
         # Create HTTP client with timeout
         timeout = config.get("timeout", 30)
@@ -59,20 +54,13 @@ class ZapScanner(BaseScanner):
             headers["X-ZAP-API-Key"] = self.api_key
 
         self.client = httpx.Client(
-            base_url=self.base_url,
-            timeout=timeout,
-            headers=headers
+            base_url=self.base_url, timeout=timeout, headers=headers
         )
 
-        self.logger.info(
-            f"Initialized ZAP scanner with base_url={self.base_url}"
-        )
+        self.logger.info(f"Initialized ZAP scanner with base_url={self.base_url}")
 
     def scan(
-        self,
-        target: str,
-        scan_type: str,
-        config: dict | None = None
+        self, target: str, scan_type: str, config: dict | None = None
     ) -> ScanResult:
         """Execute a security scan against the target.
 
@@ -87,9 +75,7 @@ class ZapScanner(BaseScanner):
         start_time = time.time()
         scan_config = config or {}
 
-        self.logger.info(
-            f"Starting ZAP {scan_type} scan of target: {target}"
-        )
+        self.logger.info(f"Starting ZAP {scan_type} scan of target: {target}")
 
         try:
             # Validate configuration
@@ -100,7 +86,7 @@ class ZapScanner(BaseScanner):
                     scanner_type=self.scanner_type,
                     scan_type=scan_type,
                     error_message=error,
-                    duration_seconds=int(time.time() - start_time)
+                    duration_seconds=int(time.time() - start_time),
                 )
 
             # Execute scan based on type
@@ -116,7 +102,7 @@ class ZapScanner(BaseScanner):
                     scanner_type=self.scanner_type,
                     scan_type=scan_type,
                     error_message=f"Unknown scan type: {scan_type}",
-                    duration_seconds=int(time.time() - start_time)
+                    duration_seconds=int(time.time() - start_time),
                 )
 
             # Parse results
@@ -126,9 +112,9 @@ class ZapScanner(BaseScanner):
             # Build summary
             severity_counts = {}
             for finding in findings:
-                severity_counts[finding.severity] = severity_counts.get(
-                    finding.severity, 0
-                ) + 1
+                severity_counts[finding.severity] = (
+                    severity_counts.get(finding.severity, 0) + 1
+                )
 
             summary = {
                 "total_findings": len(findings),
@@ -150,7 +136,7 @@ class ZapScanner(BaseScanner):
                 findings=findings,
                 duration_seconds=duration,
                 raw_output=raw_output,
-                summary=summary
+                summary=summary,
             )
 
         except httpx.ConnectError as e:
@@ -161,7 +147,7 @@ class ZapScanner(BaseScanner):
                 scanner_type=self.scanner_type,
                 scan_type=scan_type,
                 error_message=error_msg,
-                duration_seconds=int(time.time() - start_time)
+                duration_seconds=int(time.time() - start_time),
             )
 
         except httpx.TimeoutException as e:
@@ -172,7 +158,7 @@ class ZapScanner(BaseScanner):
                 scanner_type=self.scanner_type,
                 scan_type=scan_type,
                 error_message=error_msg,
-                duration_seconds=int(time.time() - start_time)
+                duration_seconds=int(time.time() - start_time),
             )
 
         except httpx.HTTPError as e:
@@ -183,7 +169,7 @@ class ZapScanner(BaseScanner):
                 scanner_type=self.scanner_type,
                 scan_type=scan_type,
                 error_message=error_msg,
-                duration_seconds=int(time.time() - start_time)
+                duration_seconds=int(time.time() - start_time),
             )
 
         except Exception as e:
@@ -194,7 +180,7 @@ class ZapScanner(BaseScanner):
                 scanner_type=self.scanner_type,
                 scan_type=scan_type,
                 error_message=error_msg,
-                duration_seconds=int(time.time() - start_time)
+                duration_seconds=int(time.time() - start_time),
             )
 
     def _run_baseline_scan(self, target: str, config: dict) -> list[dict]:
@@ -211,17 +197,14 @@ class ZapScanner(BaseScanner):
 
         # Step 1: Access the URL
         self.logger.debug("Accessing target URL")
-        self.client.post(
-            "/JSON/core/action/accessUrl/",
-            params={"url": target}
-        )
+        self.client.post("/JSON/core/action/accessUrl/", params={"url": target})
 
         # Step 2: Start spider scan
         self.logger.debug("Starting spider scan")
         max_children = config.get("max_children", 10)
         spider_response = self.client.post(
             "/JSON/spider/action/scan/",
-            params={"url": target, "maxChildren": max_children}
+            params={"url": target, "maxChildren": max_children},
         )
         spider_data = spider_response.json()
         spider_id = spider_data.get("scan")
@@ -238,8 +221,7 @@ class ZapScanner(BaseScanner):
         # Step 5: Retrieve alerts
         self.logger.debug("Retrieving alerts")
         alerts_response = self.client.get(
-            "/JSON/core/view/alerts/",
-            params={"baseurl": target}
+            "/JSON/core/view/alerts/", params={"baseurl": target}
         )
         alerts_data = alerts_response.json()
         alerts = alerts_data.get("alerts", [])
@@ -261,17 +243,14 @@ class ZapScanner(BaseScanner):
 
         # Step 1: Access the URL
         self.logger.debug("Accessing target URL")
-        self.client.post(
-            "/JSON/core/action/accessUrl/",
-            params={"url": target}
-        )
+        self.client.post("/JSON/core/action/accessUrl/", params={"url": target})
 
         # Step 2: Start spider scan
         self.logger.debug("Starting spider scan")
         max_children = config.get("max_children", 10)
         spider_response = self.client.post(
             "/JSON/spider/action/scan/",
-            params={"url": target, "maxChildren": max_children}
+            params={"url": target, "maxChildren": max_children},
         )
         spider_data = spider_response.json()
         spider_id = spider_data.get("scan")
@@ -288,8 +267,7 @@ class ZapScanner(BaseScanner):
         # Step 5: Start active scan
         self.logger.debug("Starting active scan")
         ascan_response = self.client.post(
-            "/JSON/ascan/action/scan/",
-            params={"url": target}
+            "/JSON/ascan/action/scan/", params={"url": target}
         )
         ascan_data = ascan_response.json()
         scan_id = ascan_data.get("scan")
@@ -302,8 +280,7 @@ class ZapScanner(BaseScanner):
         # Step 7: Retrieve alerts
         self.logger.debug("Retrieving alerts")
         alerts_response = self.client.get(
-            "/JSON/core/view/alerts/",
-            params={"baseurl": target}
+            "/JSON/core/view/alerts/", params={"baseurl": target}
         )
         alerts_data = alerts_response.json()
         alerts = alerts_data.get("alerts", [])
@@ -328,8 +305,7 @@ class ZapScanner(BaseScanner):
         if openapi_url:
             self.logger.debug(f"Importing OpenAPI spec from {openapi_url}")
             self.client.post(
-                "/JSON/openapi/action/importUrl/",
-                params={"url": openapi_url}
+                "/JSON/openapi/action/importUrl/", params={"url": openapi_url}
             )
 
         # Step 2: Start spider scan
@@ -337,7 +313,7 @@ class ZapScanner(BaseScanner):
         max_children = config.get("max_children", 10)
         spider_response = self.client.post(
             "/JSON/spider/action/scan/",
-            params={"url": target, "maxChildren": max_children}
+            params={"url": target, "maxChildren": max_children},
         )
         spider_data = spider_response.json()
         spider_id = spider_data.get("scan")
@@ -350,8 +326,7 @@ class ZapScanner(BaseScanner):
         # Step 4: Start active scan
         self.logger.debug("Starting active scan")
         ascan_response = self.client.post(
-            "/JSON/ascan/action/scan/",
-            params={"url": target}
+            "/JSON/ascan/action/scan/", params={"url": target}
         )
         ascan_data = ascan_response.json()
         scan_id = ascan_data.get("scan")
@@ -364,8 +339,7 @@ class ZapScanner(BaseScanner):
         # Step 6: Retrieve alerts
         self.logger.debug("Retrieving alerts")
         alerts_response = self.client.get(
-            "/JSON/core/view/alerts/",
-            params={"baseurl": target}
+            "/JSON/core/view/alerts/", params={"baseurl": target}
         )
         alerts_data = alerts_response.json()
         alerts = alerts_data.get("alerts", [])
@@ -373,7 +347,9 @@ class ZapScanner(BaseScanner):
         self.logger.info(f"API scan completed with {len(alerts)} alerts")
         return alerts
 
-    def _poll_spider(self, spider_id: str, interval: int = 5, timeout: int = 3600) -> bool:
+    def _poll_spider(
+        self, spider_id: str, interval: int = 5, timeout: int = 3600
+    ) -> bool:
         """Poll spider scan status until completion.
 
         Args:
@@ -392,8 +368,7 @@ class ZapScanner(BaseScanner):
                 return False
 
             response = self.client.get(
-                "/JSON/spider/view/status/",
-                params={"scanId": spider_id}
+                "/JSON/spider/view/status/", params={"scanId": spider_id}
             )
             data = response.json()
             status = data.get("status", "0")
@@ -405,7 +380,9 @@ class ZapScanner(BaseScanner):
             self.logger.debug(f"Spider {spider_id} progress: {status}%")
             time.sleep(interval)
 
-    def _poll_active_scan(self, scan_id: str, interval: int = 5, timeout: int = 3600) -> bool:
+    def _poll_active_scan(
+        self, scan_id: str, interval: int = 5, timeout: int = 3600
+    ) -> bool:
         """Poll active scan status until completion.
 
         Args:
@@ -424,8 +401,7 @@ class ZapScanner(BaseScanner):
                 return False
 
             response = self.client.get(
-                "/JSON/ascan/view/status/",
-                params={"scanId": scan_id}
+                "/JSON/ascan/view/status/", params={"scanId": scan_id}
             )
             data = response.json()
             status = data.get("status", "0")
@@ -485,8 +461,7 @@ class ZapScanner(BaseScanner):
                     findings.append(finding)
                 except Exception as e:
                     self.logger.warning(
-                        f"Failed to parse ZAP alert: {e}",
-                        extra={"alert": alert}
+                        f"Failed to parse ZAP alert: {e}", extra={"alert": alert}
                     )
                     continue
 
@@ -512,7 +487,7 @@ class ZapScanner(BaseScanner):
                 available=True,
                 version=version,
                 message="ZAP is available and responding",
-                last_checked=datetime.utcnow()
+                last_checked=datetime.utcnow(),
             )
 
         except httpx.ConnectError:
@@ -521,7 +496,7 @@ class ZapScanner(BaseScanner):
                 available=False,
                 version="",
                 message=f"Failed to connect to ZAP at {self.base_url}",
-                last_checked=datetime.utcnow()
+                last_checked=datetime.utcnow(),
             )
 
         except Exception as e:
@@ -530,7 +505,7 @@ class ZapScanner(BaseScanner):
                 available=False,
                 version="",
                 message=f"Error checking ZAP status: {e}",
-                last_checked=datetime.utcnow()
+                last_checked=datetime.utcnow(),
             )
 
     def validate_config(self, config: dict) -> tuple[bool, str]:

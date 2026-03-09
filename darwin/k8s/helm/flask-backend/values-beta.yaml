@@ -1,0 +1,105 @@
+# Beta environment overrides (dal2 cluster)
+# Flask Backend specific configuration for beta environment
+
+replicaCount: 2
+
+image:
+  registry: registry-dal2.penguintech.io
+  pullPolicy: Always
+  tag: beta
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 125m
+    memory: 256Mi
+
+configMapData:
+  db-type: "postgres"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "app_db"
+  db-pool-size: "10"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"
+  ai-enabled: "false"
+  default-ai-provider: "ollama"
+  review-security-enabled: "false"
+  review-best-practices-enabled: "false"
+  review-framework-enabled: "false"
+  review-iac-enabled: "false"
+
+env:
+  - name: FLASK_ENV
+    value: "production"
+  - name: FLASK_APP
+    value: "app:create_app()"
+  - name: SECRET_KEY
+    valueFrom:
+      secretKeyRef:
+        name: flask-backend-secret
+        key: secret-key
+  - name: SECURITY_PASSWORD_SALT
+    valueFrom:
+      secretKeyRef:
+        name: flask-backend-secret
+        key: password-salt
+  - name: DB_TYPE
+    valueFrom:
+      configMapKeyRef:
+        name: flask-backend-config
+        key: db-type
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: flask-backend-config
+        key: db-host
+  - name: DB_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: flask-backend-config
+        key: db-port
+  - name: DB_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: flask-backend-config
+        key: db-name
+  - name: DB_USER
+    valueFrom:
+      secretKeyRef:
+        name: flask-backend-secret
+        key: db-user
+  - name: DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: flask-backend-secret
+        key: db-pass
+  - name: DB_POOL_SIZE
+    valueFrom:
+      configMapKeyRef:
+        name: flask-backend-config
+        key: db-pool-size
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: flask-backend-secret
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: flask-backend-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: flask-backend-config
+        key: release-mode

@@ -1,0 +1,175 @@
+name: Build and Security Scan
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - v1.x
+    paths:
+      - 'services/**'
+      - 'deployment/**'
+      - 'tests/**'
+      - '.version'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches:
+      - main
+      - develop
+      - v1.x
+    paths:
+      - 'services/**'
+      - 'deployment/**'
+      - 'tests/**'
+      - '.version'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: read
+  packages: read
+  security-events: write
+
+jobs:
+  security-scan:
+    name: Security Scan (Bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install bandit
+        run: pip install bandit
+
+      - name: Run bandit security scan
+        id: bandit
+        run: |
+          bandit -r services/ \
+            -f json -o bandit-report.json \
+            -ll || true
+        continue-on-error: true
+
+      - name: Display bandit results
+        if: always()
+        run: |
+          python3 << 'EOF'
+          import json
+          try:
+              with open('bandit-report.json', 'r') as f:
+                  data = json.load(f)
+                  print(f"\nBandit Security Report Summary")
+                  print(f"==============================")
+                  print(f"Metrics: {data.get('metrics', {})}")
+                  if data.get('results'):
+                      print(f"\nIssues Found: {len(data['results'])}")
+                      for issue in data['results']:
+                          print(f"\n- {issue.get('issue_text')}")
+                          print(f"  Severity: {issue.get('severity')}")
+                          print(f"  Confidence: {issue.get('confidence')}")
+          except:
+              print("Could not parse bandit report")
+          EOF
+
+      - name: Upload bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+  lint:
+    name: Lint Python Code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install linting tools
+        run: pip install flake8 black isort mypy
+
+      - name: Run black check
+        run: black --check services/
+
+      - name: Run isort check
+        run: isort --check-only services/
+
+      - name: Run flake8
+        run: flake8 services/ --count --select=E9,F63,F7,F82 --show-source
+
+      - name: Run mypy type checking
+        run: mypy services/ --ignore-missing-imports || true
+        continue-on-error: true
+
+  build:
+    name: Build Services
+    runs-on: ubuntu-latest
+    needs: [security-scan, lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [manager-new, pki-server-new, ssh-ca, aaa-monitor, worker-s3, worker-scanner, webui, edr-agent]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(cat .version | xargs)
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "EPOCH64=$(date +%s)000" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image for ${{ matrix.service }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/${{ matrix.service }}
+          push: false
+          tags: |
+            ghcr.io/penguintechinc/skauswatch-${{ matrix.service }}:${{ steps.version.outputs.VERSION }}
+            ghcr.io/penguintechinc/skauswatch-${{ matrix.service }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ steps.version.outputs.VERSION }}
+            BUILD_TIME=${{ steps.version.outputs.EPOCH64 }}
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install pytest pytest-asyncio pytest-cov
+
+      - name: Run tests
+        run: pytest tests/ -v --cov=services --cov-report=xml --ignore=tests/integration --ignore=tests/e2e
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false

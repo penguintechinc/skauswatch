@@ -1,0 +1,113 @@
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: edr-agent
+  namespace: skauswatch
+  labels:
+    app.kubernetes.io/name: edr-agent
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: edr-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: edr-agent
+        app.kubernetes.io/component: agent
+        app.kubernetes.io/managed-by: kustomize
+    spec:
+      serviceAccountName: skauswatch
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+      - name: edr-agent
+        image: ghcr.io/penguintechinc/skauswatch-edr-agent:latest
+        imagePullPolicy: Always
+        env:
+        - name: MANAGER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: skauswatch-config
+              key: MANAGER_URL
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: skauswatch-config
+              key: LOG_LEVEL
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: LICENSE_SERVER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: skauswatch-config
+              key: LICENSE_SERVER_URL
+        - name: RELEASE_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: skauswatch-config
+              key: RELEASE_MODE
+        livenessProbe:
+          exec:
+            command:
+              - /bin/sh
+              - -c
+              - "pgrep -f edr-agent"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+              - /bin/sh
+              - -c
+              - "pgrep -f edr-agent"
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 2
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+              - SYS_PTRACE
+              - NET_ADMIN
+        volumeMounts:
+        - name: host-proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: host-sys
+          mountPath: /host/sys
+          readOnly: true
+      volumes:
+      - name: host-proc
+        hostPath:
+          path: /proc
+      - name: host-sys
+        hostPath:
+          path: /sys

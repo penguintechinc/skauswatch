@@ -1,0 +1,85 @@
+syntax = "proto3";
+package skauswatch.s3scan;
+option go_package = "github.com/penguintechinc/skauswatch/grpc/s3scan";
+
+// Messages for scan tasks and results
+message ScanTask {
+    string task_id = 1;
+    string job_id = 2;
+    int32 bucket_config_id = 3;
+    string object_key = 4;
+    int64 object_size = 5;
+    string endpoint_url = 6;
+    string bucket_name = 7;
+    string access_key = 8;
+    string secret_key = 9;
+    string region = 10;
+    bool use_ssl = 11;
+    bool path_style = 12;
+    bool yara_enabled = 13;
+}
+
+message ScanResult {
+    string task_id = 1;
+    string job_id = 2;
+    string object_key = 3;
+    string scan_status = 4;  // clean, infected, pup, error, skipped
+    bool is_malware = 5;
+    bool is_pup = 6;
+    bool is_threat = 7;
+    string detected_file_type = 8;
+    repeated string threat_names = 9;
+    string file_md5 = 10;
+    string file_sha1 = 11;
+    string file_sha256 = 12;
+    string clamav_result_json = 13;
+    string yara_matches_json = 14;
+    string ti_enrichment_json = 15;
+    int32 scan_duration_ms = 16;
+    bool tags_applied = 17;
+    string error_message = 18;
+}
+
+// Ad-hoc file upload messages
+message AdhocScanRequest {
+    string scan_id = 1;
+    bytes file_content = 2;
+    string filename = 3;
+    int32 uploaded_by = 4;
+}
+
+message AdhocScanResponse {
+    string scan_id = 1;
+    string status = 2;  // pending, scanning, complete, error
+    ScanResult result = 3;
+}
+
+// Service definition
+service S3ScanService {
+    // Submit a scan task (manager -> worker)
+    rpc SubmitScanTask(ScanTask) returns (TaskAck);
+
+    // Report scan result (worker -> manager)
+    rpc ReportScanResult(ScanResult) returns (ResultAck);
+
+    // Ad-hoc file scan (manager handles upload, stores in Minio, returns result)
+    rpc ScanAdhocFile(AdhocScanRequest) returns (AdhocScanResponse);
+
+    // Stream scan results (worker -> manager)
+    rpc StreamScanResults(stream ScanResult) returns (StreamAck);
+
+    // Get scan status
+    rpc GetScanStatus(ScanStatusRequest) returns (ScanStatusResponse);
+}
+
+message TaskAck { bool accepted = 1; string message = 2; }
+message ResultAck { bool accepted = 1; }
+message StreamAck { int32 results_received = 1; }
+message ScanStatusRequest { string job_id = 1; }
+message ScanStatusResponse {
+    string job_id = 1;
+    string status = 2;
+    int32 total = 3;
+    int32 scanned = 4;
+    int32 infected = 5;
+}

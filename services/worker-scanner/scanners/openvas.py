@@ -13,8 +13,7 @@ from datetime import datetime
 from gvm.connections import TLSConnection
 from gvm.errors import GvmError
 from gvm.protocols.gmp import Gmp
-
-from scanners.base import BaseScanner, NormalizedFinding, ScanResult, ScannerStatus
+from scanners.base import BaseScanner, NormalizedFinding, ScannerStatus, ScanResult
 from scanners.parsers.openvas_parser import parse_openvas_report
 
 
@@ -63,21 +62,13 @@ class OpenvasScanner(BaseScanner):
         super().__init__(config)
 
         # Get OpenVAS configuration from config or environment
-        self.host = config.get(
-            "host",
-            os.getenv("SCANNER_OPENVAS_HOST", "openvas")
-        )
-        self.port = int(config.get(
-            "port",
-            os.getenv("SCANNER_OPENVAS_PORT", "9390")
-        ))
+        self.host = config.get("host", os.getenv("SCANNER_OPENVAS_HOST", "openvas"))
+        self.port = int(config.get("port", os.getenv("SCANNER_OPENVAS_PORT", "9390")))
         self.username = config.get(
-            "username",
-            os.getenv("SCANNER_OPENVAS_USER", "admin")
+            "username", os.getenv("SCANNER_OPENVAS_USER", "admin")
         )
         self.password = config.get(
-            "password",
-            os.getenv("SCANNER_OPENVAS_PASSWORD", "admin")
+            "password", os.getenv("SCANNER_OPENVAS_PASSWORD", "admin")
         )
 
         # Scan timeout (OpenVAS scans can be very slow)
@@ -98,11 +89,7 @@ class OpenvasScanner(BaseScanner):
         """
         try:
             # Create TLS connection to OpenVAS GMP
-            connection = TLSConnection(
-                hostname=self.host,
-                port=self.port,
-                timeout=30
-            )
+            connection = TLSConnection(hostname=self.host, port=self.port, timeout=30)
 
             # Create GMP protocol instance
             gmp = Gmp(connection=connection)
@@ -111,7 +98,9 @@ class OpenvasScanner(BaseScanner):
             connection.connect()
             gmp.authenticate(self.username, self.password)
 
-            self.logger.debug(f"Successfully connected to OpenVAS at {self.host}:{self.port}")
+            self.logger.debug(
+                f"Successfully connected to OpenVAS at {self.host}:{self.port}"
+            )
             return gmp, connection
 
         except GvmError as e:
@@ -123,10 +112,7 @@ class OpenvasScanner(BaseScanner):
             raise
 
     def scan(
-        self,
-        target: str,
-        scan_type: str,
-        config: dict | None = None
+        self, target: str, scan_type: str, config: dict | None = None
     ) -> ScanResult:
         """Execute a security scan against the target.
 
@@ -141,9 +127,7 @@ class OpenvasScanner(BaseScanner):
         start_time = time.time()
         scan_config = config or {}
 
-        self.logger.info(
-            f"Starting OpenVAS {scan_type} scan of target: {target}"
-        )
+        self.logger.info(f"Starting OpenVAS {scan_type} scan of target: {target}")
 
         gmp = None
         connection = None
@@ -159,7 +143,7 @@ class OpenvasScanner(BaseScanner):
                     scanner_type=self.scanner_type,
                     scan_type=scan_type,
                     error_message=error,
-                    duration_seconds=int(time.time() - start_time)
+                    duration_seconds=int(time.time() - start_time),
                 )
 
             # Map scan type to OpenVAS config ID
@@ -173,10 +157,7 @@ class OpenvasScanner(BaseScanner):
             target_name = f"skauswatch-{target.replace('/', '_')}-{timestamp}"
 
             self.logger.debug(f"Creating target: {target_name}")
-            target_response = gmp.create_target(
-                name=target_name,
-                hosts=[target]
-            )
+            target_response = gmp.create_target(name=target_name, hosts=[target])
             target_id = self._extract_id_from_response(target_response)
             self.logger.info(f"Created target {target_name} with ID: {target_id}")
 
@@ -187,7 +168,7 @@ class OpenvasScanner(BaseScanner):
                 name=task_name,
                 config_id=config_id,
                 target_id=target_id,
-                scanner_id=self.DEFAULT_SCANNER_ID
+                scanner_id=self.DEFAULT_SCANNER_ID,
             )
             task_id = self._extract_id_from_response(task_response)
             self.logger.info(f"Created task {task_name} with ID: {task_id}")
@@ -207,7 +188,7 @@ class OpenvasScanner(BaseScanner):
                     scanner_type=self.scanner_type,
                     scan_type=scan_type,
                     error_message=error_msg,
-                    duration_seconds=int(time.time() - start_time)
+                    duration_seconds=int(time.time() - start_time),
                 )
 
             # Get task details to extract report ID
@@ -219,8 +200,7 @@ class OpenvasScanner(BaseScanner):
             # Get report in XML format
             self.logger.debug(f"Downloading report {report_id}")
             report_response = gmp.get_report(
-                report_id=report_id,
-                report_format_id=self.XML_REPORT_FORMAT_ID
+                report_id=report_id, report_format_id=self.XML_REPORT_FORMAT_ID
             )
 
             # Extract XML content from response
@@ -233,9 +213,9 @@ class OpenvasScanner(BaseScanner):
             # Build summary
             severity_counts = {}
             for finding in findings:
-                severity_counts[finding.severity] = severity_counts.get(
-                    finding.severity, 0
-                ) + 1
+                severity_counts[finding.severity] = (
+                    severity_counts.get(finding.severity, 0) + 1
+                )
 
             summary = {
                 "total_findings": len(findings),
@@ -262,7 +242,7 @@ class OpenvasScanner(BaseScanner):
                 findings=findings,
                 duration_seconds=duration,
                 raw_output=raw_output,
-                summary=summary
+                summary=summary,
             )
 
         except GvmError as e:
@@ -273,7 +253,7 @@ class OpenvasScanner(BaseScanner):
                 scanner_type=self.scanner_type,
                 scan_type=scan_type,
                 error_message=error_msg,
-                duration_seconds=int(time.time() - start_time)
+                duration_seconds=int(time.time() - start_time),
             )
 
         except Exception as e:
@@ -284,7 +264,7 @@ class OpenvasScanner(BaseScanner):
                 scanner_type=self.scanner_type,
                 scan_type=scan_type,
                 error_message=error_msg,
-                duration_seconds=int(time.time() - start_time)
+                duration_seconds=int(time.time() - start_time),
             )
 
         finally:
@@ -323,12 +303,7 @@ class OpenvasScanner(BaseScanner):
 
         return config_id
 
-    def _poll_task_status(
-        self,
-        gmp: Gmp,
-        task_id: str,
-        interval: int = 30
-    ) -> bool:
+    def _poll_task_status(self, gmp: Gmp, task_id: str, interval: int = 30) -> bool:
         """Poll task status until completion or timeout.
 
         Args:
@@ -344,9 +319,7 @@ class OpenvasScanner(BaseScanner):
         while True:
             elapsed = time.time() - start_time
             if elapsed > self.scan_timeout:
-                self.logger.warning(
-                    f"Task {task_id} timed out after {elapsed}s"
-                )
+                self.logger.warning(f"Task {task_id} timed out after {elapsed}s")
                 return False
 
             # Get task status
@@ -367,8 +340,7 @@ class OpenvasScanner(BaseScanner):
 
             # Continue polling
             self.logger.debug(
-                f"Task {task_id} still running ({status}), "
-                f"elapsed: {int(elapsed)}s"
+                f"Task {task_id} still running ({status}), " f"elapsed: {int(elapsed)}s"
             )
             time.sleep(interval)
 
@@ -386,22 +358,22 @@ class OpenvasScanner(BaseScanner):
         """
         try:
             # Response is an XML Element
-            if hasattr(response, 'attrib'):
-                resource_id = response.attrib.get('id')
+            if hasattr(response, "attrib"):
+                resource_id = response.attrib.get("id")
                 if resource_id:
                     return resource_id
 
             # Try to parse as string
             if isinstance(response, str):
                 root = ET.fromstring(response)
-                resource_id = root.attrib.get('id')
+                resource_id = root.attrib.get("id")
                 if resource_id:
                     return resource_id
 
             # Try to find first element with id attribute
-            if hasattr(response, 'find'):
+            if hasattr(response, "find"):
                 for elem in response.iter():
-                    resource_id = elem.attrib.get('id')
+                    resource_id = elem.attrib.get("id")
                     if resource_id:
                         return resource_id
 
@@ -448,14 +420,14 @@ class OpenvasScanner(BaseScanner):
             # Find the last report element (most recent report)
             report_elem = task_response.find(".//last_report/report")
             if report_elem is not None:
-                report_id = report_elem.attrib.get('id')
+                report_id = report_elem.attrib.get("id")
                 if report_id:
                     return report_id
 
             # Alternative: find any report element
             report_elem = task_response.find(".//report")
             if report_elem is not None:
-                report_id = report_elem.attrib.get('id')
+                report_id = report_elem.attrib.get("id")
                 if report_id:
                     return report_id
 
@@ -466,10 +438,7 @@ class OpenvasScanner(BaseScanner):
             raise ValueError(f"Failed to extract report ID: {e}")
 
     def _cleanup_resources(
-        self,
-        gmp: Gmp,
-        task_id: str | None,
-        target_id: str | None
+        self, gmp: Gmp, task_id: str | None, target_id: str | None
     ) -> None:
         """Clean up OpenVAS resources (task and target).
 
@@ -525,14 +494,18 @@ class OpenvasScanner(BaseScanner):
             try:
                 # Get GMP version
                 version_response = gmp.get_version()
-                version = version_response.text if hasattr(version_response, 'text') else "unknown"
+                version = (
+                    version_response.text
+                    if hasattr(version_response, "text")
+                    else "unknown"
+                )
 
                 return ScannerStatus(
                     name="OpenVAS",
                     available=True,
                     version=version,
                     message="OpenVAS is available and responding",
-                    last_checked=datetime.utcnow()
+                    last_checked=datetime.utcnow(),
                 )
 
             finally:
@@ -544,7 +517,7 @@ class OpenvasScanner(BaseScanner):
                 available=False,
                 version="",
                 message=f"GMP error: {e}",
-                last_checked=datetime.utcnow()
+                last_checked=datetime.utcnow(),
             )
 
         except Exception as e:
@@ -553,7 +526,7 @@ class OpenvasScanner(BaseScanner):
                 available=False,
                 version="",
                 message=f"Failed to connect to OpenVAS at {self.host}:{self.port}: {e}",
-                last_checked=datetime.utcnow()
+                last_checked=datetime.utcnow(),
             )
 
     def validate_config(self, config: dict) -> tuple[bool, str]:
@@ -575,7 +548,7 @@ class OpenvasScanner(BaseScanner):
             "full_and_fast",
             "full_and_deep",
             "baseline",
-            "full"
+            "full",
         ]
         if scan_type not in valid_scan_types:
             return False, f"scan_type must be one of {valid_scan_types}"
@@ -585,7 +558,11 @@ class OpenvasScanner(BaseScanner):
         if port_range:
             # Basic validation: should be like "1-65535" or "22,80,443"
             import re
-            if not re.match(r'^[\d,\-\s]+$', str(port_range)):
-                return False, "port_range must contain only numbers, commas, and hyphens"
+
+            if not re.match(r"^[\d,\-\s]+$", str(port_range)):
+                return (
+                    False,
+                    "port_range must contain only numbers, commas, and hyphens",
+                )
 
         return True, ""

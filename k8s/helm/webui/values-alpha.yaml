@@ -1,0 +1,33 @@
+# Alpha environment overrides (local MicroK8s)
+replicaCount: 1
+
+image:
+  pullPolicy: Never
+  tag: latest
+
+namespace: skauswatch
+
+env:
+  - name: NODE_ENV
+    value: "development"
+  - name: LOG_LEVEL
+    value: "DEBUG"
+
+ingress:
+  enabled: true
+  hosts:
+    - host: skauswatch.localhost.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: "500m"
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi

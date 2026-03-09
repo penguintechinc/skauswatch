@@ -1,0 +1,18 @@
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "skauswatch-worker-darwin.fullname" . }}
+  labels:
+    {{- include "skauswatch-worker-darwin.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "skauswatch-worker-darwin.selectorLabels" . | nindent 4 }}
+{{- end }}

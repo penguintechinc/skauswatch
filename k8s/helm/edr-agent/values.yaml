@@ -1,0 +1,139 @@
+image:
+  repository: ghcr.io/penguintechinc/skauswatch-edr-agent
+  pullPolicy: IfNotPresent
+  tag: latest
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: false
+
+# EDR agent requires elevated privileges to monitor host processes
+securityContext:
+  privileged: true
+  capabilities:
+    add:
+      - SYS_PTRACE
+      - NET_ADMIN
+
+# No service - agent reports to manager
+service:
+  enabled: false
+
+# No ingress - agent only
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: "500m"
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+# DaemonSet update strategy
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+
+nodeSelector: {}
+
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+affinity: {}
+
+env:
+  - name: MANAGER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-edr-agent-config
+        key: manager-url
+  - name: LOG_LEVEL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-edr-agent-config
+        key: log-level
+  - name: NODE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+  - name: POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-edr-agent-secret
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-edr-agent-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-edr-agent-config
+        key: release-mode
+
+livenessProbe:
+  exec:
+    command:
+      - /bin/sh
+      - -c
+      - "pgrep -f edr-agent"
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  exec:
+    command:
+      - /bin/sh
+      - -c
+      - "pgrep -f edr-agent"
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts:
+  - name: host-proc
+    mountPath: /host/proc
+    readOnly: true
+  - name: host-sys
+    mountPath: /host/sys
+    readOnly: true
+
+volumes:
+  - name: host-proc
+    hostPath:
+      path: /proc
+  - name: host-sys
+    hostPath:
+      path: /sys
+
+configMapData:
+  manager-url: "http://skauswatch-manager:5000"
+  log-level: "INFO"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"
+
+secretData:
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

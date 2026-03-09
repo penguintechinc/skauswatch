@@ -67,17 +67,11 @@ class DatabaseConfig:
         db_type = self.type.lower()
 
         if db_type == "postgres":
-            return (
-                f"postgres://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
-            )
+            return f"postgres://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
         elif db_type == "mysql":
-            return (
-                f"mysql://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
-            )
+            return f"mysql://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
         elif db_type == "mariadb":
-            return (
-                f"mysql://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
-            )
+            return f"mysql://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
         elif db_type == "sqlite":
             # SQLite uses file path, not network connection
             return f"sqlite://{self.name}"
@@ -220,9 +214,7 @@ class Settings:
 
         # Nuclei Configuration
         self.nuclei = NucleiConfig(
-            binary_path=os.environ.get(
-                "NUCLEI_BINARY_PATH", "/usr/local/bin/nuclei"
-            ),
+            binary_path=os.environ.get("NUCLEI_BINARY_PATH", "/usr/local/bin/nuclei"),
             templates_path=os.environ.get(
                 "NUCLEI_TEMPLATES_PATH", "/root/nuclei-templates"
             ),

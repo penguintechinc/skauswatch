@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "icebox-sync-worker.fullname" . }}
+  labels:
+    {{- include "icebox-sync-worker.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "icebox-sync-worker.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "icebox-sync-worker.selectorLabels" . | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        allowPrivilegeEscalation: false
+      containers:
+        - name: sync-worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            # Plain config env vars
+            - name: DB_TYPE
+              value: {{ .Values.env.DB_TYPE | quote }}
+            - name: DB_HOST
+              value: {{ .Values.env.DB_HOST | quote }}
+            - name: DB_PORT
+              value: {{ .Values.env.DB_PORT | quote }}
+            - name: DB_NAME
+              value: {{ .Values.env.DB_NAME | quote }}
+            - name: DB_POOL_SIZE
+              value: {{ .Values.env.DB_POOL_SIZE | quote }}
+            - name: REDIS_HOST
+              value: {{ .Values.env.REDIS_HOST | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.env.REDIS_PORT | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.env.LOG_LEVEL | quote }}
+            - name: SYNC_POLL_INTERVAL
+              value: {{ .Values.env.SYNC_POLL_INTERVAL | quote }}
+            - name: MAX_CONCURRENT_SYNCS
+              value: {{ .Values.env.MAX_CONCURRENT_SYNCS | quote }}
+            # Secret env vars
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: DB_USER
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: DB_PASS
+            - name: REDIS_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: REDIS_PASS
+                  optional: true
+            - name: ICEBOX_MEK
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: ICEBOX_MEK
+            # Cloud provider credentials
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: AWS_ACCESS_KEY_ID
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: AWS_SECRET_ACCESS_KEY
+                  optional: true
+            - name: AWS_REGION
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: AWS_REGION
+                  optional: true
+            - name: AZURE_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: AZURE_TENANT_ID
+                  optional: true
+            - name: AZURE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: AZURE_CLIENT_ID
+                  optional: true
+            - name: AZURE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: AZURE_CLIENT_SECRET
+                  optional: true
+            - name: GCP_SERVICE_ACCOUNT_JSON
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: GCP_SERVICE_ACCOUNT_JSON
+                  optional: true
+            - name: OCI_CONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: OCI_CONFIG
+                  optional: true
+            - name: K8S_KUBECONFIG
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "icebox-sync-worker.fullname" . }}-secrets
+                  key: K8S_KUBECONFIG
+                  optional: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

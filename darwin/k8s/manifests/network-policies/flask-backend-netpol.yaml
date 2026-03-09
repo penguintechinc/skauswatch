@@ -1,0 +1,70 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: flask-backend-netpol
+  namespace: darwin
+  labels:
+    app: darwin
+    component: network-policy
+    service: flask-backend
+spec:
+  podSelector:
+    matchLabels:
+      app: flask-backend
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow traffic from webui pods
+    - from:
+        - podSelector:
+            matchLabels:
+              app: webui
+      ports:
+        - protocol: TCP
+          port: 5000
+
+    # Allow traffic from prometheus pods for metrics
+    - from:
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 5000
+
+  egress:
+    # Allow egress to PostgreSQL service
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+
+    # Allow egress to Redis service
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+
+    # Allow external HTTPS traffic (443)
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443

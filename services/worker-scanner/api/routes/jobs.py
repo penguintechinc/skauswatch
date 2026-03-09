@@ -17,13 +17,12 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from flask import Blueprint, jsonify, request
-from marshmallow import ValidationError
-
 from api.middleware.auth import get_current_user_id, jwt_required
 from api.schemas.job import CreateJobSchema, JobFilterSchema, JobResponseSchema
 from config.settings import settings
 from database.models import get_configured_db
+from flask import Blueprint, jsonify, request
+from marshmallow import ValidationError
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -316,7 +315,9 @@ def delete_job(job_id: int) -> tuple[Any, int]:
             celery_app.control.revoke(str(job_id), terminate=True)
             logger.info("Revoked Celery task for job %d", job_id)
         except Exception as e:
-            logger.warning("Failed to revoke Celery task for job %d: %s", job_id, str(e))
+            logger.warning(
+                "Failed to revoke Celery task for job %d: %s", job_id, str(e)
+            )
             # Continue anyway - job is marked as cancelled
 
     # Handle pending jobs - just cancel them

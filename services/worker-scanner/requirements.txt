@@ -29,3 +29,4 @@ pyyaml==6.0.1
 croniter==6.0.0
 python-dotenv==1.0.0
 structlog==25.5.0
+aiobotocore==2.15.0

@@ -20,7 +20,6 @@ from unittest.mock import MagicMock, patch
 
 import jwt
 import pytest
-
 from app import create_app
 
 
@@ -341,7 +340,10 @@ class TestIntegrationAPI:
 
     # Jobs API Tests
 
-    @patch("workers.scan_worker.execute_scan.delay", return_value=MagicMock(id="mock-task-id"))
+    @patch(
+        "workers.scan_worker.execute_scan.delay",
+        return_value=MagicMock(id="mock-task-id"),
+    )
     def test_create_job(self, mock_celery, client, auth_headers):
         """Test creating a new scan job.
 
@@ -407,7 +409,10 @@ class TestIntegrationAPI:
         data = json.loads(response.data)
         assert "not found" in data["error"].lower()
 
-    @patch("workers.scan_worker.execute_scan.delay", return_value=MagicMock(id="mock-task-id"))
+    @patch(
+        "workers.scan_worker.execute_scan.delay",
+        return_value=MagicMock(id="mock-task-id"),
+    )
     def test_list_jobs(self, mock_celery, client, auth_headers):
         """Test listing all jobs with pagination.
 
@@ -450,7 +455,10 @@ class TestIntegrationAPI:
         assert "total" in data
         assert len(data["jobs"]) == 3
 
-    @patch("workers.scan_worker.execute_scan.delay", return_value=MagicMock(id="mock-task-id"))
+    @patch(
+        "workers.scan_worker.execute_scan.delay",
+        return_value=MagicMock(id="mock-task-id"),
+    )
     def test_get_job(self, mock_celery, client, auth_headers):
         """Test retrieving a specific job by ID.
 
@@ -552,7 +560,10 @@ class TestIntegrationAPI:
         assert "false_positive" in status_data
         assert "fixed" in status_data
 
-    @patch("workers.scan_worker.execute_scan.delay", return_value=MagicMock(id="mock-task-id"))
+    @patch(
+        "workers.scan_worker.execute_scan.delay",
+        return_value=MagicMock(id="mock-task-id"),
+    )
     def test_update_finding_status(self, mock_celery, client, auth_headers):
         """Test updating finding status.
 

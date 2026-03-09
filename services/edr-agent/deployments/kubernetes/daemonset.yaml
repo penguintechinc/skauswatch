@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: skauswatch-edr-agent
+  namespace: skauswatch
+  labels:
+    app: edr-agent
+    component: security
+spec:
+  selector:
+    matchLabels:
+      app: edr-agent
+  template:
+    metadata:
+      labels:
+        app: edr-agent
+        component: security
+    spec:
+      serviceAccountName: edr-agent
+      hostPID: true
+      hostNetwork: true
+      containers:
+      - name: edr-agent
+        image: penguintech/skauswatch-edr-agent:latest
+        imagePullPolicy: Always
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+              - SYS_PTRACE
+              - NET_ADMIN
+              - SYS_ADMIN
+        env:
+        - name: EDR_MANAGER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: edr-agent-config
+              key: manager_url
+        - name: EDR_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: edr-agent-secrets
+              key: api-key
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+        volumeMounts:
+        - name: host-proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: host-sys
+          mountPath: /host/sys
+          readOnly: true
+        - name: host-etc
+          mountPath: /host/etc
+          readOnly: true
+        - name: config
+          mountPath: /etc/skauswatch
+        livenessProbe:
+          exec:
+            command:
+            - /app/edr-agent
+            - --health
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+            - /app/edr-agent
+            - --health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      volumes:
+      - name: host-proc
+        hostPath:
+          path: /proc
+      - name: host-sys
+        hostPath:
+          path: /sys
+      - name: host-etc
+        hostPath:
+          path: /etc
+      - name: config
+        configMap:
+          name: edr-agent-config
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      - operator: Exists
+        effect: NoExecute
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: edr-agent-config
+  namespace: skauswatch
+data:
+  manager_url: "https://manager.skauswatch.svc.cluster.local:5000"
+  edr-agent.yaml: |
+    manager_url: "https://manager.skauswatch.svc.cluster.local:5000"
+    heartbeat_interval: 60
+    event_buffer_size: 1000
+    collectors:
+      process:
+        enabled: true
+      file:
+        enabled: true
+        watch_paths:
+          - "/host/etc"
+      network:
+        enabled: true
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: edr-agent-secrets
+  namespace: skauswatch
+type: Opaque
+stringData:
+  api-key: "CHANGE_ME_IN_PRODUCTION"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: edr-agent
+  namespace: skauswatch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: edr-agent
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: edr-agent
+subjects:
+- kind: ServiceAccount
+  name: edr-agent
+  namespace: skauswatch
+roleRef:
+  kind: ClusterRole
+  name: edr-agent
+  apiGroup: rbac.authorization.k8s.io

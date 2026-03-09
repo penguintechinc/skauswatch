@@ -43,9 +43,7 @@ class FindingFilterSchema(Schema):
     status = fields.String(
         validate=validate.OneOf(["open", "acknowledged", "false_positive", "fixed"])
     )
-    scanner_type = fields.String(
-        validate=validate.OneOf(["nuclei", "zap", "openvas"])
-    )
+    scanner_type = fields.String(validate=validate.OneOf(["nuclei", "zap", "openvas"]))
     target_id = fields.Integer()
     job_id = fields.Integer()
     page = fields.Integer(load_default=1, validate=validate.Range(min=1))
@@ -66,11 +64,15 @@ class FindingExportSchema(Schema):
 
     format = fields.String(required=True, validate=validate.OneOf(["json", "csv"]))
     severity = fields.List(
-        fields.String(validate=validate.OneOf(["critical", "high", "medium", "low", "info"])),
+        fields.String(
+            validate=validate.OneOf(["critical", "high", "medium", "low", "info"])
+        ),
         load_default=[],
     )
     status = fields.List(
-        fields.String(validate=validate.OneOf(["open", "acknowledged", "false_positive", "fixed"])),
+        fields.String(
+            validate=validate.OneOf(["open", "acknowledged", "false_positive", "fixed"])
+        ),
         load_default=[],
     )
     target_id = fields.Integer()

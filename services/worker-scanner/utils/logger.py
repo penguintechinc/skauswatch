@@ -12,9 +12,8 @@ import sys
 from typing import Any, Dict, Optional
 
 import structlog
-from structlog.processors import JSONRenderer
 from structlog.dev import ConsoleRenderer
-
+from structlog.processors import JSONRenderer
 
 # Environment configuration (read directly, avoid circular imports)
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()

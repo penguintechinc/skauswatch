@@ -1,0 +1,70 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: darwin-db-init
+  namespace: darwin-dev
+spec:
+  ttlSecondsAfterFinished: 300  # Clean up after 5 minutes
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: db-init
+        image: registry-dal2.penguintech.io/darwin/flask-backend:dev
+        command:
+        - python
+        - -c
+        - |
+          from app import create_app
+          from app.models import get_db, init_db
+          from app.auth import hash_password
+
+          print("Starting database initialization...")
+          app = create_app()
+
+          with app.app_context():
+              # Initialize database schema
+              print("Creating database tables...")
+              init_db(app)
+              print("Database tables created successfully")
+
+              # Create admin user if doesn't exist
+              db = get_db()
+              admin_count = db(db.users.role == "admin").count()
+
+              if admin_count == 0:
+                  print("Creating default admin user...")
+                  db.users.insert(
+                      email="admin@darwin.local",
+                      password_hash=hash_password("admin123"),
+                      full_name="Darwin Administrator",
+                      role="admin",
+                      is_active=True
+                  )
+                  db.commit()
+                  print("Admin user created: admin@darwin.local / admin123")
+                  print("IMPORTANT: Change the default password after first login!")
+              else:
+                  print(f"Admin users already exist ({admin_count} found), skipping creation")
+
+              print("Database initialization completed successfully")
+        env:
+        - name: RUN_DB_MIGRATIONS
+          value: "true"
+        - name: DB_HOST
+          value: "postgresql.darwin-dev.svc.cluster.local"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          value: "darwin"
+        - name: DB_USER
+          value: "devuser"
+        - name: DB_PASSWORD
+          value: "devpass"
+        - name: REDIS_URL
+          value: "redis://redis.darwin-dev.svc.cluster.local:6379/0"
+        - name: SECRET_KEY
+          value: "dev-secret-key-change-in-production"
+        - name: JWT_SECRET_KEY
+          value: "dev-jwt-secret-change-in-production"

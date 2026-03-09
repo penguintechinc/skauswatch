@@ -1,0 +1,60 @@
+# Alpha environment overrides (local MicroK8s)
+# WebUI specific configuration for alpha environment
+
+replicaCount: 1
+
+image:
+  pullPolicy: Never
+  tag: latest
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
+ingress:
+  enabled: false
+
+configMapData:
+  api-url: "http://flask-backend"
+  api-version: "v1"
+  theme: "gold"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"
+
+env:
+  - name: NODE_ENV
+    value: "development"
+  - name: PORT
+    value: "3000"
+  - name: REACT_APP_API_URL
+    valueFrom:
+      configMapKeyRef:
+        name: webui-config
+        key: api-url
+  - name: REACT_APP_API_VERSION
+    valueFrom:
+      configMapKeyRef:
+        name: webui-config
+        key: api-version
+  - name: REACT_APP_THEME
+    valueFrom:
+      configMapKeyRef:
+        name: webui-config
+        key: theme
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: webui-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: webui-config
+        key: release-mode
