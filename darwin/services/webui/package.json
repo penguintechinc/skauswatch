@@ -16,8 +16,12 @@
     "typecheck": "tsc --noEmit",
     "screenshots": "node ../../scripts/capture-screenshots.cjs"
   },
+  "overrides": {
+    "@remix-run/router": "^1.23.2",
+    "rollup": "^4.29.1"
+  },
   "dependencies": {
-    "axios": "^1.7.9",
+    "axios": "^1.13.5",
     "express": "^4.21.2",
     "http-proxy-middleware": "^3.0.3",
     "react": "^18.3.1",

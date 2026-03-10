@@ -9,12 +9,44 @@ namespace: skauswatch
 
 namePrefix: alpha-
 
-commonLabels:
-  environment: alpha
-  app.kubernetes.io/version: alpha
+labels:
+- pairs:
+    environment: alpha
+    app.kubernetes.io/version: alpha
+  includeSelectors: false
 
-bases:
+resources:
 - ../../base
+
+images:
+- name: registry-dal2.penguintech.io/skauswatch/manager
+  newName: localhost:32000/skauswatch-manager
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/pki-server
+  newName: localhost:32000/skauswatch-pki-server
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/ssh-ca
+  newName: localhost:32000/skauswatch-ssh-ca
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/aaa-monitor
+  newName: localhost:32000/skauswatch-aaa-monitor
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/worker-s3
+  newName: localhost:32000/skauswatch-worker-s3
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-worker-scanner
+  newName: localhost:32000/skauswatch-worker-scanner
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-worker-darwin
+  newName: localhost:32000/skauswatch-worker-darwin
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-webui
+  newName: localhost:32000/skauswatch-webui
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-edr-agent
+  newName: localhost:32000/skauswatch-edr-agent
+  newTag: latest
+
 
 replicas:
 - name: manager
@@ -34,8 +66,6 @@ replicas:
 - name: worker-darwin-celery
   count: 1
 - name: webui
-  count: 1
-- name: edr-agent
   count: 1
 
 configMapGenerator:

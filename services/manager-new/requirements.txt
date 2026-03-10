@@ -50,6 +50,9 @@ ipwhois>=1.2.0
 shodan>=1.30.0
 maltego-trx>=1.6.0
 
+# OpenSearch (SIEM integration)
+opensearch-py>=2.4.0
+
 # Logging
 structlog>=24.1.0
 

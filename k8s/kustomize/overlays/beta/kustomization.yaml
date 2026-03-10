@@ -9,11 +9,13 @@ namespace: skauswatch
 
 namePrefix: beta-
 
-commonLabels:
-  environment: beta
-  app.kubernetes.io/version: beta
+labels:
+- pairs:
+    environment: beta
+    app.kubernetes.io/version: beta
+  includeSelectors: false
 
-bases:
+resources:
 - ../../base
 
 replicas:
@@ -34,8 +36,6 @@ replicas:
 - name: worker-darwin-celery
   count: 1
 - name: webui
-  count: 2
-- name: edr-agent
   count: 2
 
 configMapGenerator:

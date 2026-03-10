@@ -9,10 +9,12 @@ namespace: skauswatch-prod
 
 namePrefix: prod-
 
-commonLabels:
-  environment: production
+labels:
+- pairs:
+    environment: production
+  includeSelectors: false
 
-bases:
+resources:
 - ../../base
 
 replicas:
@@ -29,8 +31,6 @@ replicas:
 - name: worker-scanner
   count: 3
 - name: webui
-  count: 2
-- name: edr-agent
   count: 2
 
 configMapGenerator:
