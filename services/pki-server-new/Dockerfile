@@ -82,4 +82,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:8001/healthz || exit 1
 
 # Run the application
-CMD ["python", "-m", "pki-server-new.main"]
+CMD ["python", "main.py"]

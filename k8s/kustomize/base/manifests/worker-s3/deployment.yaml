@@ -91,6 +91,11 @@ spec:
             configMapKeyRef:
               name: skauswatch-config
               key: RELEASE_MODE
+        - name: CONSUMER_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: skauswatch-config
+              key: CONSUMER_NAME
         volumeMounts:
         - name: clamav-db
           mountPath: /var/lib/clamav
