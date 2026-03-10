@@ -47,6 +47,7 @@ images:
   newName: localhost:32000/skauswatch-edr-agent
   newTag: latest
 
+
 replicas:
 - name: manager
   count: 1
