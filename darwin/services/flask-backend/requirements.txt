@@ -20,7 +20,7 @@ psycopg2-binary==2.9.10
 psycopg==3.2.3
 
 # Authentication
-PyJWT==2.10.1
+PyJWT==2.12.0
 bcrypt==4.2.1
 
 # Validation
