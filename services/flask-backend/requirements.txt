@@ -10,7 +10,7 @@ pydal==20241031.1
 psycopg2-binary==2.9.10
 
 # Authentication
-PyJWT==2.10.1
+PyJWT==2.12.0
 bcrypt==4.2.1
 
 # Validation
