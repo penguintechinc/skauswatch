@@ -1,6 +1,6 @@
 # Multi-stage build for SkausWatch Manager Service
 # Stage 1: Build stage
-FROM python:3.13-slim-bookworm as builder
+FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS builder
 
 # Set build arguments
 ARG BUILD_DATE
@@ -34,14 +34,13 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # Copy dependency files
-COPY pyproject.toml requirements-dev.txt ./
+COPY requirements.txt ./
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -e .[dev] && \
-    pip install --no-cache-dir -r requirements-dev.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Stage 2: Runtime stage
-FROM python:3.13-slim-bookworm as runtime
+FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS runtime
 
 # Set runtime arguments
 ARG BUILD_DATE

@@ -1,6 +1,6 @@
 # Multi-stage build for SkausWatch AAA Monitor Service
 # Stage 1: Build stage
-FROM python:3.13-slim-bookworm AS builder
+FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS builder
 
 # Set build arguments
 ARG BUILD_DATE
@@ -40,7 +40,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Stage 2: Runtime stage
-FROM python:3.13-slim-bookworm AS runtime
+FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS runtime
 
 # Set runtime arguments
 ARG BUILD_DATE

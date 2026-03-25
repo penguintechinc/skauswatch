@@ -1,5 +1,5 @@
 # Multi-stage build for worker-s3 service
-FROM python:3.13-slim-bookworm as base
+FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb as base
 
 # Install system dependencies including ClamAV, yara, and security tools
 RUN apt-get update && apt-get install -y --no-install-recommends \

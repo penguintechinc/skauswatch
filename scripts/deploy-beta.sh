@@ -8,7 +8,7 @@ set -euo pipefail
 
 # === Configuration ===
 RELEASE_NAME="skauswatch"
-NAMESPACE="skauswatch-beta"
+NAMESPACE="skauswatch"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHART_PATH="${PROJECT_ROOT}/k8s/helm"
 KUSTOMIZE_PATH="${PROJECT_ROOT}/k8s/kustomize/overlays/beta"
@@ -18,11 +18,17 @@ IMAGE_REGISTRY="registry-dal2.penguintech.io"
 KUBE_CONTEXT="dal2-beta"
 APP_HOST="skauswatch.penguintech.cloud"
 
-# Services configuration (from docker-compose.yml and helm charts)
+# Services configuration — one entry per Helm chart + Dockerfile
 SERVICES=(
-  "flask-backend:services/flask-backend"
-  "go-backend:services/go-backend"
+  "aaa-monitor:services/aaa-monitor"
+  "edr-agent:services/edr-agent"
+  "manager:services/manager"
+  "pki-server:services/pki-server"
+  "ssh-ca:services/ssh-ca"
   "webui:services/webui"
+  "worker-darwin:services/worker-darwin"
+  "worker-s3:services/worker-s3"
+  "worker-scanner:services/worker-scanner"
 )
 
 # Image defaults
@@ -142,14 +148,12 @@ check_prerequisites() {
         return 1
     fi
 
-    # Switch context
-    kubectl config use-context "${KUBE_CONTEXT}" > /dev/null
     log_success "Using Kubernetes context: ${KUBE_CONTEXT}"
 
     # Check namespace exists
-    if ! kubectl get namespace "${NAMESPACE}" &> /dev/null; then
+    if ! kubectl --context "${KUBE_CONTEXT}" get namespace "${NAMESPACE}" &> /dev/null; then
         log_warning "Namespace '${NAMESPACE}' does not exist, creating..."
-        kubectl create namespace "${NAMESPACE}"
+        kubectl --context "${KUBE_CONTEXT}" create namespace "${NAMESPACE}"
         log_success "Created namespace: ${NAMESPACE}"
     fi
 
@@ -232,6 +236,7 @@ do_deploy_helm() {
             "helm" "upgrade" "--install"
             "${release_name}"
             "${chart_path}"
+            "--kube-context" "${KUBE_CONTEXT}"
             "--namespace" "${NAMESPACE}"
             "--create-namespace"
             "--values" "${values_file}"
@@ -298,7 +303,7 @@ verify_deployment() {
         log_info "Checking deployment status (attempt $((retry_count + 1))/$max_retries)..."
 
         local deployments
-        deployments=$(kubectl get deployments -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}')
+        deployments=$(kubectl --context "${KUBE_CONTEXT}" get deployments -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}')
 
         if [ -z "$deployments" ]; then
             log_warning "No deployments found in namespace: ${NAMESPACE}"
@@ -309,7 +314,7 @@ verify_deployment() {
 
         local all_ready=true
         for deployment in $deployments; do
-            local ready=$(kubectl get deployment "$deployment" -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
+            local ready=$(kubectl --context "${KUBE_CONTEXT}" get deployment "$deployment" -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
             if [ "$ready" != "True" ]; then
                 all_ready=false
                 log_info "  Waiting for deployment: $deployment"
@@ -343,7 +348,7 @@ do_rollback() {
 
         log_info "Rolling back Helm release: ${release_name}"
 
-        if helm rollback "${release_name}" -n "${NAMESPACE}"; then
+        if helm rollback "${release_name}" --kube-context "${KUBE_CONTEXT}" -n "${NAMESPACE}"; then
             log_success "Rolled back: ${release_name}"
         else
             log_warning "Failed to rollback: ${release_name}"
@@ -458,9 +463,9 @@ main() {
     echo "  Go API:           https://go-api.penguintech.cloud/api/v1"
     echo ""
     echo "View deployment logs:"
-    echo "  kubectl logs -n ${NAMESPACE} -l app=skauswatch-flask-backend"
-    echo "  kubectl logs -n ${NAMESPACE} -l app=skauswatch-go-backend"
-    echo "  kubectl logs -n ${NAMESPACE} -l app=skauswatch-webui"
+    echo "  kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l app=skauswatch-manager"
+    echo "  kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l app=skauswatch-webui"
+    echo "  kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l app=skauswatch-aaa-monitor"
     echo ""
     echo "View Helm releases:"
     echo "  helm list -n ${NAMESPACE}"

@@ -1,3 +1,4 @@
+# TODO: migrate to pip-compile --generate-hashes
 # SkausWatch SSH CA Service Dependencies
 
 # FastAPI and ASGI server

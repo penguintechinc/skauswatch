@@ -7,8 +7,6 @@ metadata:
 
 namespace: skauswatch
 
-namePrefix: beta-
-
 labels:
 - pairs:
     environment: beta

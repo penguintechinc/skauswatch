@@ -1,8 +1,11 @@
 # Beta environment overrides (dal2 cluster)
 image:
-  registry: registry-dal2.penguintech.io
+  registry: ghcr.io/penguintechinc/skauswatch
   pullPolicy: Always
   tag: latest
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
 
 namespace: skauswatch
 

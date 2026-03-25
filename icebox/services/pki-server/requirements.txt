@@ -1,3 +1,4 @@
+# TODO: migrate to pip-compile --generate-hashes
 # SkausWatch PKI Server Dependencies
 
 # Web Framework (async Flask)

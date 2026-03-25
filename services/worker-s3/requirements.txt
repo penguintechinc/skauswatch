@@ -1,3 +1,4 @@
+# TODO: migrate to pip-compile --generate-hashes
 pydantic>=2.5.0
 redis>=5.0.0
 aiobotocore>=2.9.0
