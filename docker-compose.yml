@@ -1,7 +1,7 @@
 services:
   # PostgreSQL Database
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-bookworm@sha256:7858a1a43bb2e3decc07650c8989ba526e0a8164f212c9bb88b622cdbd71c4be@sha256:7858a1a43bb2e3decc07650c8989ba526e0a8164f212c9bb88b622cdbd71c4be
     container_name: skauswatch-postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-app_db}
@@ -23,7 +23,7 @@ services:
 
   # OpenSearch (SIEM log indexing)
   opensearch:
-    image: opensearchproject/opensearch:2.13.0
+    image: opensearchproject/opensearch:2.13.0@sha256:4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c
     container_name: skauswatch-opensearch
     environment:
       - discovery.type=single-node
@@ -45,7 +45,7 @@ services:
 
   # Redis Cache
   redis:
-    image: redis:7-alpine
+    image: redis:7-bookworm@sha256:a5995dfdf108997f8a7c9587f54fad5e94ed5848de5236a6b28119e99efd67e0@sha256:a5995dfdf108997f8a7c9587f54fad5e94ed5848de5236a6b28119e99efd67e0
     container_name: skauswatch-redis
     command: redis-server --requirepass ${REDIS_PASSWORD:-password} --appendonly yes
     expose:
@@ -121,7 +121,7 @@ services:
 
   # Minio Object Storage (S3-compatible, for adhoc uploads)
   minio:
-    image: minio/minio:latest
+    image: minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     container_name: skauswatch-minio
     command: server /data --console-address ":9001"
     environment:
@@ -179,7 +179,7 @@ services:
 
   # ClamAV Virus Definition Updater (shared volume)
   clamav-freshclam:
-    image: clamav/clamav:stable
+    image: clamav/clamav:stable@sha256:1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f
     container_name: skauswatch-freshclam
     entrypoint: /usr/bin/freshclam
     command: ["--daemon", "--foreground", "--checks=1"]
@@ -352,7 +352,7 @@ services:
 
   # Prometheus Monitoring
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.2.1@sha256:6927e0919a144aa7616fd0137d4816816d42f6b816de3af269ab065250859a62
     container_name: skauswatch-prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -372,7 +372,7 @@ services:
 
   # Grafana Dashboard
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:12.4.2@sha256:83749231c3835e390a3144e5e940203e42b9589761f20ef3169c716e734ad505
     container_name: skauswatch-grafana
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}

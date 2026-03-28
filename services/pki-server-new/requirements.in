@@ -1,0 +1,43 @@
+# SkausWatch PKI Server Dependencies
+
+# Web Framework (async Flask)
+quart>=0.19.0
+quart-cors>=0.7.0
+hypercorn>=0.16.0
+
+# Database
+pydal==20260313.1
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
+asyncpg>=0.29.0
+
+# Redis
+redis>=5.0.0
+hiredis>=2.3.0
+
+# Validation
+pydantic>=2.5.0
+email-validator>=2.1.0
+
+# Cryptography
+cryptography>=42.0.0
+pyOpenSSL>=24.0.0
+
+# gRPC
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.25.0
+
+# Logging
+structlog>=24.1.0
+
+# Configuration
+pyyaml>=6.0.1
+
+# Utilities
+python-dateutil>=2.8.0
+
+# Penguin Tech Libraries
+penguin-libs>=0.1.0          # Validation, HTTP, gRPC utilities
+penguin-licensing>=0.1.0     # License server client
+penguin-utils>=0.1.0         # Sanitized logging, Flask utils

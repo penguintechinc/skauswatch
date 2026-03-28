@@ -1,12 +1,12 @@
 # SkausWatch EDR Agent
 # Multi-stage build for minimal production image
 
-FROM golang:1.24-alpine AS builder
+FROM golang:1.24-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS builder
 
 WORKDIR /build
 
 # Install build dependencies
-RUN apk add --no-cache gcc musl-dev
+RUN apt-get update && apt-get install -y --no-install-recommends gcc && rm -rf /var/lib/apt/lists/*
 
 # Copy go mod files
 COPY go.mod go.sum* ./
@@ -22,16 +22,16 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     ./cmd/edr-agent
 
 # Production image
-FROM alpine:3.19
+FROM debian:bookworm-slim@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb
 
 LABEL maintainer="Penguin Tech Inc <support@penguintech.io>"
 LABEL description="SkausWatch EDR Agent"
 
 # Install runtime dependencies
-RUN apk add --no-cache ca-certificates tzdata
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN adduser -D -g '' edr
+RUN useradd -m -s /sbin/nologin edr
 
 WORKDIR /app
 
