@@ -17,15 +17,26 @@ def get_token_from_header() -> Optional[str]:
     return None
 
 
+def _validate_token(token: str) -> Optional[dict]:
+    """Validate JWT token using RS256 public key from OIDC keystore."""
+    from .auth import _get_oidc_components
+
+    provider, keystore, config = _get_oidc_components()
+    signing_key, _kid = keystore.get_signing_key()
+    public_key = signing_key.public_key()
+    return jwt.decode(
+        token,
+        public_key,
+        algorithms=["RS256"],
+        audience=["skauswatch"],
+        issuer=config.issuer,
+    )
+
+
 def decode_token(token: str) -> Optional[dict]:
     """Decode and validate JWT token."""
     try:
-        payload = jwt.decode(
-            token,
-            current_app.config["JWT_SECRET_KEY"],
-            algorithms=["HS256"],
-        )
-        return payload
+        return _validate_token(token)
     except jwt.ExpiredSignatureError:
         return None
     except jwt.InvalidTokenError:

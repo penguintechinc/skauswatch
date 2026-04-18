@@ -8,7 +8,12 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, validator
+from pydantic import Field, validator
+from penguin_libs.pydantic import (
+    ElderBaseModel,
+    ImmutableModel,
+    RequestModel,
+)
 
 # ============================================
 # Enums
@@ -57,7 +62,7 @@ class SandboxStatus(str, Enum):
 # ============================================
 
 
-class BucketConfigCreateRequest(BaseModel):
+class BucketConfigCreateRequest(RequestModel):
     """Bucket configuration creation request model."""
 
     name: str = Field(..., min_length=1, max_length=255)
@@ -91,7 +96,7 @@ class BucketConfigCreateRequest(BaseModel):
         return v
 
 
-class BucketConfigUpdateRequest(BaseModel):
+class BucketConfigUpdateRequest(RequestModel):
     """Bucket configuration update request model."""
 
     name: Optional[str] = Field(None, min_length=1, max_length=255)
@@ -127,7 +132,7 @@ class BucketConfigUpdateRequest(BaseModel):
         return v
 
 
-class BucketConfigResponse(BaseModel):
+class BucketConfigResponse(ImmutableModel):
     """Bucket configuration response model."""
 
     id: int
@@ -147,9 +152,6 @@ class BucketConfigResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
-
     @property
     def masked_secret(self) -> str:
         """Return masked secret access key."""
@@ -167,14 +169,14 @@ class BucketConfigResponse(BaseModel):
 # ============================================
 
 
-class TriggerScanRequest(BaseModel):
+class TriggerScanRequest(RequestModel):
     """Trigger S3 scan request model."""
 
     prefix_filter: Optional[str] = Field(None, max_length=500)
     force_rescan: bool = Field(default=False)
 
 
-class ScanResultsQueryRequest(BaseModel):
+class ScanResultsQueryRequest(ElderBaseModel):
     """Query scan results request model."""
 
     bucket_config_id: Optional[int] = None
@@ -199,7 +201,7 @@ class ScanResultsQueryRequest(BaseModel):
         return v
 
 
-class ScheduleSetRequest(BaseModel):
+class ScheduleSetRequest(RequestModel):
     """Set scan schedule request model."""
 
     cron_expression: str = Field(..., max_length=255)
@@ -224,13 +226,13 @@ class ScheduleSetRequest(BaseModel):
         return v
 
 
-class FileUploadScanRequest(BaseModel):
+class FileUploadScanRequest(RequestModel):
     """File upload scan request model (file comes via multipart)."""
 
     pass
 
 
-class HashLookupRequest(BaseModel):
+class HashLookupRequest(RequestModel):
     """Hash lookup request model."""
 
     hash_value: str = Field(..., min_length=32, max_length=256)
@@ -256,7 +258,7 @@ class HashLookupRequest(BaseModel):
 # ============================================
 
 
-class ScanJobResponse(BaseModel):
+class ScanJobResponse(ImmutableModel):
     """Scan job response model."""
 
     id: int
@@ -277,11 +279,8 @@ class ScanJobResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
 
-
-class ScanResultResponse(BaseModel):
+class ScanResultResponse(ImmutableModel):
     """Scan result response model."""
 
     id: int
@@ -306,11 +305,8 @@ class ScanResultResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
 
-
-class AdhocScanResponse(BaseModel):
+class AdhocScanResponse(ImmutableModel):
     """Adhoc scan result response model."""
 
     id: int
@@ -334,11 +330,8 @@ class AdhocScanResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
 
-
-class ScheduleResponse(BaseModel):
+class ScheduleResponse(ImmutableModel):
     """Scan schedule response model."""
 
     id: int
@@ -353,16 +346,13 @@ class ScheduleResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
-
 
 # ============================================
 # Statistics Models
 # ============================================
 
 
-class ScanStatisticsResponse(BaseModel):
+class ScanStatisticsResponse(ImmutableModel):
     """Scan statistics response model."""
 
     total_scanned: int
@@ -383,7 +373,7 @@ class ScanStatisticsResponse(BaseModel):
 # ============================================
 
 
-class PaginatedScanJobResponse(BaseModel):
+class PaginatedScanJobResponse(ImmutableModel):
     """Paginated scan job response model."""
 
     items: List[ScanJobResponse]
@@ -393,7 +383,7 @@ class PaginatedScanJobResponse(BaseModel):
     pages: int
 
 
-class PaginatedScanResultResponse(BaseModel):
+class PaginatedScanResultResponse(ImmutableModel):
     """Paginated scan result response model."""
 
     items: List[ScanResultResponse]
@@ -403,7 +393,7 @@ class PaginatedScanResultResponse(BaseModel):
     pages: int
 
 
-class PaginatedBucketConfigResponse(BaseModel):
+class PaginatedBucketConfigResponse(ImmutableModel):
     """Paginated bucket config response model."""
 
     items: List[BucketConfigResponse]

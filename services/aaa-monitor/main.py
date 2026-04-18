@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import redis.asyncio as redis
-import structlog
 import uvicorn
+from penguintechinc_utils import configure_logging, get_logger
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -65,25 +65,9 @@ from .threat_intel.threat_database import ThreatDatabase
 from .utils import get_version, setup_logging
 
 # Configure structured logging
-structlog.configure(
-    processors=[
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer(),
-    ],
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    wrapper_class=structlog.stdlib.BoundLogger,
-    cache_logger_on_first_use=True,
-)
+configure_logging(level=logging.INFO, json_output=True)
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 # Global instances
 config: Optional[AAAMonitorConfig] = None

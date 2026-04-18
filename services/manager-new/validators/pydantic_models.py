@@ -8,7 +8,14 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, EmailStr, Field, validator
+from pydantic import Field, validator
+from penguin_libs.pydantic import (
+    ElderBaseModel,
+    EmailStr,
+    ImmutableModel,
+    Name255,
+    RequestModel,
+)
 
 # ============================================
 # Enums
@@ -80,7 +87,7 @@ class EDRAgentStatus(str, Enum):
 # ============================================
 
 
-class LoginRequest(BaseModel):
+class LoginRequest(RequestModel):
     """Login request model."""
 
     email: EmailStr
@@ -93,7 +100,7 @@ class LoginRequest(BaseModel):
         return v
 
 
-class RegisterRequest(BaseModel):
+class RegisterRequest(RequestModel):
     """User registration request model."""
 
     email: EmailStr
@@ -107,7 +114,7 @@ class RegisterRequest(BaseModel):
         return v
 
 
-class TokenResponse(BaseModel):
+class TokenResponse(ImmutableModel):
     """Token response model."""
 
     access_token: str
@@ -116,13 +123,13 @@ class TokenResponse(BaseModel):
     expires_in: int
 
 
-class RefreshTokenRequest(BaseModel):
+class RefreshTokenRequest(RequestModel):
     """Refresh token request model."""
 
     refresh_token: str = Field(..., min_length=1)
 
 
-class UserResponse(BaseModel):
+class UserResponse(ImmutableModel):
     """User response model."""
 
     id: int
@@ -133,19 +140,16 @@ class UserResponse(BaseModel):
     mfa_enabled: bool = False
     created_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
-
 
 # ============================================
 # Alert Models
 # ============================================
 
 
-class AlertCreateRequest(BaseModel):
+class AlertCreateRequest(RequestModel):
     """Alert creation request model."""
 
-    title: str = Field(..., min_length=1, max_length=255)
+    title: Name255
     description: str = Field(..., max_length=4000)
     severity: AlertSeverity
     source: str = Field(..., min_length=1, max_length=100)
@@ -158,7 +162,7 @@ class AlertCreateRequest(BaseModel):
         return v.strip()
 
 
-class AlertUpdateRequest(BaseModel):
+class AlertUpdateRequest(RequestModel):
     """Alert update request model."""
 
     title: Optional[str] = Field(None, min_length=1, max_length=255)
@@ -169,7 +173,7 @@ class AlertUpdateRequest(BaseModel):
     resolution_notes: Optional[str] = Field(None, max_length=2000)
 
 
-class AlertResponse(BaseModel):
+class AlertResponse(ImmutableModel):
     """Alert response model."""
 
     id: int
@@ -186,11 +190,8 @@ class AlertResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
 
-
-class AlertSearchRequest(BaseModel):
+class AlertSearchRequest(ElderBaseModel):
     """Alert search request model."""
 
     query: Optional[str] = Field(None, max_length=500)
@@ -209,7 +210,7 @@ class AlertSearchRequest(BaseModel):
 # ============================================
 
 
-class IOCCreateRequest(BaseModel):
+class IOCCreateRequest(RequestModel):
     """IOC creation request model."""
 
     indicator_type: IndicatorType
@@ -253,7 +254,7 @@ class IOCCreateRequest(BaseModel):
         return v.strip().lower()
 
 
-class IOCResponse(BaseModel):
+class IOCResponse(ImmutableModel):
     """IOC response model."""
 
     id: int
@@ -268,11 +269,8 @@ class IOCResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
 
-
-class IOCSearchRequest(BaseModel):
+class IOCSearchRequest(ElderBaseModel):
     """IOC search request model."""
 
     query: Optional[str] = Field(None, max_length=500)
@@ -286,7 +284,7 @@ class IOCSearchRequest(BaseModel):
     per_page: int = Field(default=50, ge=1, le=500)
 
 
-class IOCBulkCreateRequest(BaseModel):
+class IOCBulkCreateRequest(RequestModel):
     """Bulk IOC creation request model."""
 
     indicators: List[IOCCreateRequest] = Field(..., max_items=1000)
@@ -297,7 +295,7 @@ class IOCBulkCreateRequest(BaseModel):
 # ============================================
 
 
-class ApprovalCreateRequest(BaseModel):
+class ApprovalCreateRequest(RequestModel):
     """Approval request creation model."""
 
     request_type: ApprovalType
@@ -308,14 +306,14 @@ class ApprovalCreateRequest(BaseModel):
     expires_hours: int = Field(default=24, ge=1, le=168)
 
 
-class ApprovalDecisionRequest(BaseModel):
+class ApprovalDecisionRequest(RequestModel):
     """Approval decision request model."""
 
     approved: bool
     reason: Optional[str] = Field(None, max_length=1000)
 
 
-class ApprovalResponse(BaseModel):
+class ApprovalResponse(ImmutableModel):
     """Approval response model."""
 
     id: int
@@ -334,16 +332,13 @@ class ApprovalResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
-
 
 # ============================================
 # EDR Models
 # ============================================
 
 
-class EDRAgentRegisterRequest(BaseModel):
+class EDRAgentRegisterRequest(RequestModel):
     """EDR agent registration request model."""
 
     agent_id: str = Field(..., min_length=1, max_length=128)
@@ -355,7 +350,7 @@ class EDRAgentRegisterRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-class EDRHeartbeatRequest(BaseModel):
+class EDRHeartbeatRequest(RequestModel):
     """EDR agent heartbeat request model."""
 
     agent_id: str = Field(..., min_length=1, max_length=128)
@@ -363,7 +358,7 @@ class EDRHeartbeatRequest(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-class EDREventRequest(BaseModel):
+class EDREventRequest(RequestModel):
     """EDR event report request model."""
 
     agent_id: str = Field(..., min_length=1, max_length=128)
@@ -380,7 +375,7 @@ class EDREventRequest(BaseModel):
     details: Dict[str, Any] = Field(default_factory=dict)
 
 
-class EDRAgentResponse(BaseModel):
+class EDRAgentResponse(ImmutableModel):
     """EDR agent response model."""
 
     id: int
@@ -396,11 +391,8 @@ class EDRAgentResponse(BaseModel):
     created_at: datetime
     updated_at: Optional[datetime]
 
-    class Config:
-        from_attributes = True
 
-
-class EDREventResponse(BaseModel):
+class EDREventResponse(ImmutableModel):
     """EDR event response model."""
 
     id: int
@@ -415,16 +407,13 @@ class EDREventResponse(BaseModel):
     details: Dict[str, Any] = {}
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 # ============================================
 # AI Analysis Models
 # ============================================
 
 
-class AIAnalysisRequest(BaseModel):
+class AIAnalysisRequest(RequestModel):
     """AI analysis request model."""
 
     alert_id: Optional[int] = None
@@ -439,7 +428,7 @@ class AIAnalysisRequest(BaseModel):
         return v
 
 
-class AIAnalysisResponse(BaseModel):
+class AIAnalysisResponse(ImmutableModel):
     """AI analysis response model."""
 
     job_id: str
@@ -448,7 +437,7 @@ class AIAnalysisResponse(BaseModel):
     submitted_at: datetime
 
 
-class AIAnalysisResult(BaseModel):
+class AIAnalysisResult(ImmutableModel):
     """AI analysis result model."""
 
     job_id: str
@@ -469,7 +458,7 @@ class AIAnalysisResult(BaseModel):
 # ============================================
 
 
-class PaginatedResponse(BaseModel):
+class PaginatedResponse(ImmutableModel):
     """Generic paginated response model."""
 
     items: List[Any]
@@ -479,7 +468,7 @@ class PaginatedResponse(BaseModel):
     pages: int
 
 
-class HealthResponse(BaseModel):
+class HealthResponse(ImmutableModel):
     """Health check response model."""
 
     status: str
@@ -490,7 +479,7 @@ class HealthResponse(BaseModel):
     timestamp: datetime
 
 
-class ErrorResponse(BaseModel):
+class ErrorResponse(ImmutableModel):
     """Error response model."""
 
     error: str
@@ -515,7 +504,7 @@ class ResearchIndicatorType(str, Enum):
     URL = "url"
 
 
-class ResearchLookupRequest(BaseModel):
+class ResearchLookupRequest(RequestModel):
     """Research lookup request model."""
 
     query: str = Field(..., min_length=1, max_length=500)
@@ -528,7 +517,7 @@ class ResearchLookupRequest(BaseModel):
     timeout: int = Field(default=30, ge=5, le=120)
 
 
-class ResearchLookupResponse(BaseModel):
+class ResearchLookupResponse(ImmutableModel):
     """Research lookup response model."""
 
     query: str
@@ -541,14 +530,14 @@ class ResearchLookupResponse(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
-class WhoisLookupRequest(BaseModel):
+class WhoisLookupRequest(RequestModel):
     """WHOIS lookup request model."""
 
     query: str = Field(..., min_length=1, max_length=500)
     indicator_type: ResearchIndicatorType = Field(..., description="domain or ip")
 
 
-class WhoisResultModel(BaseModel):
+class WhoisResultModel(ImmutableModel):
     """WHOIS result model."""
 
     success: bool
@@ -557,7 +546,7 @@ class WhoisResultModel(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
-class DnsLookupRequest(BaseModel):
+class DnsLookupRequest(RequestModel):
     """DNS lookup request model."""
 
     query: str = Field(..., min_length=1, max_length=500)
@@ -566,7 +555,7 @@ class DnsLookupRequest(BaseModel):
     )
 
 
-class DnsResultModel(BaseModel):
+class DnsResultModel(ImmutableModel):
     """DNS result model."""
 
     a_records: List[str] = Field(default_factory=list)
@@ -579,14 +568,14 @@ class DnsResultModel(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
-class AsnLookupRequest(BaseModel):
+class AsnLookupRequest(RequestModel):
     """ASN lookup request model."""
 
     query: str = Field(..., min_length=1, max_length=500)
     indicator_type: ResearchIndicatorType = Field(..., description="ip or asn")
 
 
-class AsnResultModel(BaseModel):
+class AsnResultModel(ImmutableModel):
     """ASN result model."""
 
     asn: Optional[str] = None
@@ -597,7 +586,7 @@ class AsnResultModel(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
-class ShodanResultModel(BaseModel):
+class ShodanResultModel(ImmutableModel):
     """Shodan result model."""
 
     success: bool = False
@@ -610,7 +599,7 @@ class ShodanResultModel(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
-class MaltegoResultModel(BaseModel):
+class MaltegoResultModel(ImmutableModel):
     """Maltego result model."""
 
     success: bool = False
@@ -622,7 +611,7 @@ class MaltegoResultModel(BaseModel):
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 
-class ResearchConfigResponse(BaseModel):
+class ResearchConfigResponse(ImmutableModel):
     """Research configuration response model."""
 
     research_enabled: bool

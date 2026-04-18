@@ -1,0 +1,1 @@
+"""Manager-new service tests."""

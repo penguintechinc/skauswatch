@@ -1,21 +1,24 @@
 """
-Authentication API endpoints.
+Authentication API endpoints using penguin-aaa OIDC provider.
 
 Provides:
-- Login/Logout
-- Token refresh
+- Login/Logout with RS256 JWT tokens via OIDCProvider
+- Token refresh with database-backed revocation
 - User registration
 - Current user profile
+- OIDC discovery endpoints (/.well-known/openid-configuration, /jwks)
 """
 
 import hashlib
 from datetime import datetime, timedelta
 from functools import wraps
+from pathlib import Path
 from typing import Optional
 
 import bcrypt
-import jwt
 from models.db import get_db
+from penguin_aaa.authn import Claims, OIDCProvider, OIDCProviderConfig, TokenSet
+from penguin_aaa.crypto import FileKeyStore, MemoryKeyStore
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
 from validators.pydantic_models import (
@@ -29,6 +32,51 @@ from validators.pydantic_models import (
 bp = Blueprint("auth", __name__)
 
 
+# ============================================
+# OIDC Provider (lazy initialization)
+# ============================================
+
+
+def _get_oidc_components():
+    """Get or create OIDC provider and keystore (lazy init per-app)."""
+    if "OIDC_PROVIDER" not in current_app.config:
+        config = current_app.config["MANAGER_CONFIG"]
+
+        # Create keystore (file-backed for persistence, or in-memory)
+        if config.auth.oidc_keystore_path:
+            keystore = FileKeyStore(
+                path=Path(config.auth.oidc_keystore_path),
+                algorithm=config.auth.oidc_algorithm,
+            )
+        else:
+            keystore = MemoryKeyStore(algorithm=config.auth.oidc_algorithm)
+
+        # Create OIDC provider
+        provider_config = OIDCProviderConfig(
+            issuer=config.auth.oidc_issuer,
+            audiences=config.auth.oidc_audiences,
+            algorithm=config.auth.oidc_algorithm,
+            token_ttl=config.auth.access_token_expires,
+            refresh_ttl=config.auth.refresh_token_expires,
+        )
+        provider = OIDCProvider(config=provider_config, keystore=keystore)
+
+        current_app.config["OIDC_PROVIDER"] = provider
+        current_app.config["OIDC_KEYSTORE"] = keystore
+        current_app.config["OIDC_PROVIDER_CONFIG"] = provider_config
+
+    return (
+        current_app.config["OIDC_PROVIDER"],
+        current_app.config["OIDC_KEYSTORE"],
+        current_app.config["OIDC_PROVIDER_CONFIG"],
+    )
+
+
+# ============================================
+# Password utilities (bcrypt stays in app)
+# ============================================
+
+
 def hash_password(password: str) -> str:
     """Hash password using bcrypt."""
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
@@ -39,36 +87,51 @@ def verify_password(password: str, password_hash: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
 
 
-def create_access_token(user_id: int, role: str, config) -> str:
-    """Create JWT access token."""
-    expires = datetime.utcnow() + config.auth.access_token_expires
-    payload = {
-        "sub": str(user_id),
-        "role": role,
-        "type": "access",
-        "exp": expires,
-        "iat": datetime.utcnow(),
-    }
-    return jwt.encode(
-        payload, config.auth.jwt_secret, algorithm=config.auth.jwt_algorithm
+# ============================================
+# Token creation via OIDCProvider
+# ============================================
+
+
+def create_token_set(user_id: int, role: str) -> TokenSet:
+    """Create OIDC token set (access + refresh) using penguin-aaa provider."""
+    provider, keystore, provider_config = _get_oidc_components()
+
+    claims = Claims(
+        sub=str(user_id),
+        iss=provider_config.issuer,
+        aud=provider_config.audiences,
+        iat=datetime.utcnow(),
+        exp=datetime.utcnow() + provider_config.token_ttl,
+        scope=["openid", "profile"],
+        roles=[role],
+        tenant="default",
     )
+
+    return provider.issue_token_set(claims)
+
+
+def create_access_token(user_id: int, role: str, config=None) -> str:
+    """Create JWT access token via OIDC provider.
+
+    The config parameter is accepted for backward compatibility but ignored
+    (configuration comes from the app's OIDC provider).
+    """
+    token_set = create_token_set(user_id, role)
+    return token_set.access_token
 
 
 def create_refresh_token(user_id: int, config, db) -> tuple[str, datetime]:
-    """Create JWT refresh token and store hash in database."""
-    expires = datetime.utcnow() + config.auth.refresh_token_expires
-    payload = {
-        "sub": str(user_id),
-        "type": "refresh",
-        "exp": expires,
-        "iat": datetime.utcnow(),
-    }
-    token = jwt.encode(
-        payload, config.auth.jwt_secret, algorithm=config.auth.jwt_algorithm
-    )
+    """Create refresh token and store hash in database for revocation."""
+    provider, keystore, provider_config = _get_oidc_components()
+
+    # Create a token set — we use the refresh_token from it
+    token_set = create_token_set(user_id, "refresh")
+    refresh_token = token_set.refresh_token
+
+    expires = datetime.utcnow() + provider_config.refresh_ttl
 
     # Store hash of token in database for revocation
-    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
     db.refresh_tokens.insert(
         user_id=user_id,
         token_hash=token_hash,
@@ -76,14 +139,46 @@ def create_refresh_token(user_id: int, config, db) -> tuple[str, datetime]:
     )
     db.commit()
 
-    return token, expires
+    return refresh_token, expires
+
+
+# ============================================
+# Auth decorators
+# ============================================
+
+
+def _validate_token(token: str) -> dict:
+    """Validate a JWT token using the OIDC keystore.
+
+    Returns the decoded payload dict.
+    Raises ValueError or jwt exceptions on failure.
+    """
+    import jwt as pyjwt
+
+    provider, keystore, provider_config = _get_oidc_components()
+
+    # Get the public key from our keystore for verification
+    signing_key, kid = keystore.get_signing_key()
+    public_key = signing_key.public_key()
+
+    payload = pyjwt.decode(
+        token,
+        public_key,
+        algorithms=[provider_config.algorithm],
+        audience=provider_config.audiences,
+        issuer=provider_config.issuer,
+    )
+
+    return payload
 
 
 def auth_required(f):
-    """Decorator to require authentication."""
+    """Decorator to require authentication via OIDC JWT."""
 
     @wraps(f)
     async def decorated(*args, **kwargs):
+        import jwt as pyjwt
+
         config = current_app.config["MANAGER_CONFIG"]
 
         auth_header = request.headers.get("Authorization")
@@ -93,28 +188,28 @@ def auth_required(f):
         token = auth_header.split(" ")[1]
 
         try:
-            payload = jwt.decode(
-                token,
-                config.auth.jwt_secret,
-                algorithms=[config.auth.jwt_algorithm],
-            )
-        except jwt.ExpiredSignatureError:
+            payload = _validate_token(token)
+        except pyjwt.ExpiredSignatureError:
             return jsonify({"error": "Token expired"}), 401
-        except jwt.InvalidTokenError:
+        except pyjwt.InvalidTokenError:
             return jsonify({"error": "Invalid token"}), 401
+        except Exception:
+            return jsonify({"error": "Token validation failed"}), 401
 
-        if payload.get("type") != "access":
-            return jsonify({"error": "Invalid token type"}), 401
+        # Extract user ID from claims
+        user_id = int(payload["sub"])
 
         # Get user from database
         db = get_db(config.database.uri)
-        user = db(db.users.id == int(payload["sub"])).select().first()
+        user = db(db.users.id == user_id).select().first()
 
         if not user or not user.is_active:
             return jsonify({"error": "User not found or inactive"}), 401
 
         g.current_user = user.as_dict()
         g.current_user_id = user.id
+        # Store roles from JWT claims for RBAC
+        g.current_user_roles = payload.get("roles", [])
 
         return await f(*args, **kwargs)
 
@@ -122,7 +217,10 @@ def auth_required(f):
 
 
 def role_required(*roles):
-    """Decorator to require specific roles."""
+    """Decorator to require specific roles.
+
+    Checks both the database role and JWT claims roles.
+    """
 
     def decorator(f):
         @wraps(f)
@@ -130,7 +228,11 @@ def role_required(*roles):
             if not hasattr(g, "current_user"):
                 return jsonify({"error": "Authentication required"}), 401
 
-            if g.current_user["role"] not in roles:
+            user_role = g.current_user["role"]
+            jwt_roles = getattr(g, "current_user_roles", [])
+
+            # Allow if user's DB role or any JWT role matches
+            if user_role not in roles and not any(r in roles for r in jwt_roles):
                 return jsonify({"error": "Insufficient permissions"}), 403
 
             return await f(*args, **kwargs)
@@ -140,9 +242,14 @@ def role_required(*roles):
     return decorator
 
 
+# ============================================
+# Auth endpoints
+# ============================================
+
+
 @bp.route("/login", methods=["POST"])
 async def login():
-    """Login endpoint - returns access and refresh tokens."""
+    """Login endpoint - returns OIDC access and refresh tokens."""
     config = current_app.config["MANAGER_CONFIG"]
 
     try:
@@ -162,7 +269,7 @@ async def login():
     if user.account_locked_until and user.account_locked_until > datetime.utcnow():
         return jsonify({"error": "Account is locked. Please try again later."}), 401
 
-    # Verify password
+    # Verify password (bcrypt stays in app, not in penguin-aaa)
     if not verify_password(login_data.password, user.password_hash):
         # Increment failed attempts
         db(db.users.id == user.id).update(
@@ -190,8 +297,8 @@ async def login():
     )
     db.commit()
 
-    # Generate tokens
-    access_token = create_access_token(user.id, user.role, config)
+    # Generate OIDC tokens
+    access_token = create_access_token(user.id, user.role)
     refresh_token, refresh_expires = create_refresh_token(user.id, config, db)
 
     return (
@@ -216,6 +323,8 @@ async def login():
 @bp.route("/refresh", methods=["POST"])
 async def refresh():
     """Refresh access token using refresh token."""
+    import jwt as pyjwt
+
     config = current_app.config["MANAGER_CONFIG"]
 
     try:
@@ -224,20 +333,13 @@ async def refresh():
     except ValidationError as e:
         return jsonify({"error": "Validation error", "details": e.errors()}), 400
 
-    # Decode token
+    # Decode token using OIDC keystore
     try:
-        payload = jwt.decode(
-            refresh_data.refresh_token,
-            config.auth.jwt_secret,
-            algorithms=[config.auth.jwt_algorithm],
-        )
-    except jwt.ExpiredSignatureError:
+        payload = _validate_token(refresh_data.refresh_token)
+    except pyjwt.ExpiredSignatureError:
         return jsonify({"error": "Refresh token expired"}), 401
-    except jwt.InvalidTokenError:
+    except pyjwt.InvalidTokenError:
         return jsonify({"error": "Invalid refresh token"}), 401
-
-    if payload.get("type") != "refresh":
-        return jsonify({"error": "Invalid token type"}), 401
 
     db = get_db(config.database.uri)
 
@@ -266,8 +368,8 @@ async def refresh():
     db(db.refresh_tokens.token_hash == token_hash).update(revoked=True)
     db.commit()
 
-    # Generate new tokens
-    access_token = create_access_token(user.id, user.role, config)
+    # Generate new OIDC tokens
+    access_token = create_access_token(user.id, user.role)
     new_refresh_token, refresh_expires = create_refresh_token(user.id, config, db)
 
     return (
@@ -376,3 +478,22 @@ async def register():
         ),
         201,
     )
+
+
+# ============================================
+# OIDC Discovery Endpoints
+# ============================================
+
+
+@bp.route("/.well-known/openid-configuration", methods=["GET"])
+async def oidc_discovery():
+    """OIDC discovery document endpoint."""
+    provider, _, _ = _get_oidc_components()
+    return jsonify(provider.discovery_document()), 200
+
+
+@bp.route("/jwks", methods=["GET"])
+async def jwks():
+    """JWKS endpoint for public key distribution."""
+    provider, _, _ = _get_oidc_components()
+    return jsonify(provider.jwks()), 200

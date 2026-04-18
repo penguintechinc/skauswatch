@@ -1,655 +1,343 @@
 # Testing Guide - SkausWatch
 
-Comprehensive testing documentation for SkausWatch's four-service architecture, including unit tests, integration tests, PKI testing, SSH CA testing, smoke tests, mock data, and cross-architecture validation.
+Comprehensive testing documentation for SkausWatch's 8-service architecture. Tests are organized by category across Python (pytest), Go (go test), TypeScript (Vitest), and browser (Playwright).
 
 ## Overview
 
-Testing is organized into multiple levels to ensure comprehensive coverage, fast feedback, and production-ready code:
-
-| Test Level | Purpose | Speed | Coverage |
-|-----------|---------|-------|----------|
-| **Smoke Tests** | Fast verification of basic functionality | <2 min | Build, run, API health, service communication |
-| **Unit Tests** | Isolated function/method testing | <1 min | Code logic, edge cases, security validation |
-| **Integration Tests** | Service interaction verification | 1-5 min | Inter-service communication, data flow |
-| **PKI Tests** | Certificate management validation | 2-5 min | Certificate generation, revocation, OCSP |
-| **SSH CA Tests** | SSH certificate authority validation | 2-5 min | SSH cert generation, validation, expiry |
-| **E2E Tests** | Critical workflows end-to-end | 5-10 min | User scenarios, business logic |
-| **Performance Tests** | Scalability and throughput validation | 5-15 min | Load, latency, resource usage |
-
----
-
-## Mock Data Scripts
-
-### Purpose
-
-Mock data scripts populate the development database with realistic test data, enabling:
-- Rapid local development without manual data entry
-- Consistent test data across the development team
-- Documentation of expected data structure and relationships
-- Quick feature iteration with pre-populated databases
-
-### Location & Structure
-
-```
-scripts/mock-data/
-├── seed-all.py             # Orchestrator: runs all seeders in order
-├── seed-users.py           # 3-4 users with different roles
-├── seed-certificates.py    # 3-4 certificates in various states
-├── seed-ssh-keys.py        # 3-4 SSH keys and certificates
-├── seed-audit-logs.py      # 3-4 audit log entries
-├── seed-[feature].py       # Additional feature-specific seeders
-└── README.md               # Instructions for running mock data
-```
-
-### Naming Convention
-
-- **Python**: `seed-{feature-name}.py`
-- **Shell**: `seed-{feature-name}.sh`
-- **Organization**: One seeder per logical entity/feature
-
-### Scope: 3-4 Items Per Service
-
-Each seeder should create **exactly 3-4 representative items** to test all feature variations:
-
-**Example (Users)**:
-```python
-# seed-users.py
-items = [
-    {"email": "admin@example.com", "role": "admin", "status": "active"},
-    {"email": "maintainer@example.com", "role": "maintainer", "status": "active"},
-    {"email": "viewer@example.com", "role": "viewer", "status": "active"},
-    {"email": "inactive@example.com", "role": "user", "status": "inactive"},
-]
-```
-
-**Example (Certificates)**:
-```python
-# seed-certificates.py
-items = [
-    {"subject": "cn=server1.example.com", "status": "active", "days_valid": 365},
-    {"subject": "cn=server2.example.com", "status": "active", "days_valid": 180},
-    {"subject": "cn=expired.example.com", "status": "revoked", "days_valid": 0},
-    {"subject": "cn=pending.example.com", "status": "pending", "days_valid": 365},
-]
-```
-
-### Execution
-
-**Seed all test data**:
-```bash
-make seed-mock-data          # Via Makefile
-python scripts/mock-data/seed-all.py  # Direct execution
-```
-
-**Seed specific feature**:
-```bash
-python scripts/mock-data/seed-users.py
-python scripts/mock-data/seed-certificates.py
-```
-
-### Implementation Pattern
-
-**Python (PyDAL)**:
-```python
-#!/usr/bin/env python3
-"""Seed mock data for users entity."""
-
-import os
-import sys
-from dal import DAL
-
-def seed_users():
-    db = DAL('sqlite:memory')  # or use DB_TYPE env var
-
-    users = [
-        {"email": "admin@example.com", "role": "admin"},
-        {"email": "user1@example.com", "role": "user"},
-        {"email": "user2@example.com", "role": "user"},
-        {"email": "viewer@example.com", "role": "viewer"},
-    ]
-
-    for user in users:
-        db.users.insert(**user)
-
-    print(f"✓ Seeded {len(users)} users")
-
-if __name__ == "__main__":
-    seed_users()
-```
-
-**Shell (curl/API)**:
-```bash
-#!/bin/bash
-# seed-certificates.sh
-
-API_URL="${API_URL:-http://localhost:8001}"
-TOKEN="${AUTH_TOKEN}"
-
-# Certificate 1
-curl -X POST "$API_URL/api/v1/certificates" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"subject": "cn=server1.example.com", "days_valid": 365}'
-
-# Certificate 2
-curl -X POST "$API_URL/api/v1/certificates" \
-  -H "Authorization: Bearer $TOKEN" \
-  -d '{"subject": "cn=server2.example.com", "days_valid": 180}'
-
-echo "✓ Seeded 2 certificates"
-```
-
-### Makefile Integration
-
-Add to your `Makefile`:
-
-```makefile
-.PHONY: seed-mock-data
-seed-mock-data:
-	@echo "Seeding mock data..."
-	@python scripts/mock-data/seed-all.py
-	@echo "✓ Mock data seeding complete"
-
-.PHONY: clean-data
-clean-data:
-	@echo "Clearing mock data..."
-	@rm -f data/dev.db
-	@echo "✓ Mock data cleared"
-```
-
-### When to Create Mock Data Scripts
-
-**Create a mock data script after each new feature/entity completion**:
-- After implementing users entity → create `seed-users.py`
-- After implementing certificate management → create `seed-certificates.py`
-- After implementing SSH keys → create `seed-ssh-keys.py`
+| Category | Framework | Speed | Marker | Files |
+|----------|-----------|-------|--------|-------|
+| **Build** | pytest + docker | 5-10 min | `@pytest.mark.build` | `tests/build/` |
+| **Smoke** | pytest | <2 min | `@pytest.mark.smoke` | `tests/smoke/` |
+| **Unit** | pytest / go test / vitest | 1-3 min | `@pytest.mark.unit` | Per-service `tests/unit/` |
+| **API** | pytest (test_client) | 1-2 min | `@pytest.mark.api` | `tests/api/` |
+| **Integration** | pytest + httpx | 2-5 min | `@pytest.mark.integration` | `tests/integration/` |
+| **Stream** | pytest + fakeredis | 1-2 min | `@pytest.mark.stream` | `tests/streams/` |
+| **Security** | pytest | 1-2 min | `@pytest.mark.security` | `tests/security/` |
+| **Performance** | pytest + fakeredis | 5-15 min | `@pytest.mark.performance` | `tests/performance/` |
+| **E2E** | pytest + httpx | 5-10 min | `@pytest.mark.e2e` | `tests/e2e/` |
+| **Lint** | pytest (subprocess) | 1-2 min | `@pytest.mark.lint` | `tests/lint/` |
 
 ---
 
-## Smoke Tests
+## Quick Start
 
-### Purpose
-
-Smoke tests provide fast verification that basic functionality works after code changes, preventing regressions in core features.
-
-### Requirements (Mandatory)
-
-All projects **MUST** implement smoke tests before committing:
-
-- ✅ **Build Tests**: All containers build successfully without errors
-- ✅ **Run Tests**: All containers start and remain healthy
-- ✅ **API Health Checks**: All API endpoints respond with 200/healthy status
-- ✅ **Service Communication**: Manager can communicate with PKI, SSH CA, AAA Monitor
-- ✅ **Database Connectivity**: All services connect to database successfully
-
-### Location & Structure
-
-```
-tests/smoke/
-├── build/          # Container build verification
-│   ├── test-manager-build.sh
-│   ├── test-pki-build.sh
-│   ├── test-ssh-ca-build.sh
-│   └── test-aaa-monitor-build.sh
-├── run/            # Container runtime and health
-│   ├── test-manager-run.sh
-│   ├── test-pki-run.sh
-│   ├── test-ssh-ca-run.sh
-│   └── test-aaa-monitor-run.sh
-├── api/            # API health endpoint validation
-│   ├── test-manager-health.sh
-│   ├── test-pki-health.sh
-│   ├── test-ssh-ca-health.sh
-│   ├── test-aaa-monitor-health.sh
-│   └── README.md
-├── integration/    # Service communication
-│   ├── test-service-communication.sh
-│   └── README.md
-├── run-all.sh      # Execute all smoke tests
-└── README.md       # Documentation
-```
-
-### Execution
-
-**Run all smoke tests**:
 ```bash
-make smoke-test              # Via Makefile
-./tests/smoke/run-all.sh     # Direct execution
-```
+# Run everything (no services needed)
+./scripts/test-controller.sh all
 
-**Run specific test category**:
-```bash
-./tests/smoke/build/test-manager-build.sh
-./tests/smoke/api/test-manager-health.sh
-./tests/smoke/integration/test-service-communication.sh
-```
+# Run specific category
+./scripts/test-controller.sh unit
+./scripts/test-controller.sh smoke
+./scripts/test-controller.sh api
 
-### Speed Requirement
-
-Complete smoke test suite **MUST run in under 2 minutes** to provide fast feedback during development.
-
-### Implementation Examples
-
-**Build Test (Shell)**:
-```bash
-#!/bin/bash
-# tests/smoke/build/test-manager-build.sh
-
-set -e
-
-echo "Testing Manager build..."
-cd services/manager
-
-# Attempt to build the container
-if docker build -t manager:test .; then
-    echo "✓ Manager builds successfully"
-    exit 0
-else
-    echo "✗ Manager build failed"
-    exit 1
-fi
-```
-
-**Health Check Test**:
-```bash
-#!/bin/bash
-# tests/smoke/api/test-manager-health.sh
-
-set -e
-
-echo "Checking Manager API health..."
-HEALTH_URL="http://localhost:8000/api/health"
-
-RESPONSE=$(curl -s -w "\n%{http_code}" "$HEALTH_URL")
-HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-
-if [ "$HTTP_CODE" = "200" ]; then
-    echo "✓ Manager API is healthy (HTTP $HTTP_CODE)"
-    exit 0
-else
-    echo "✗ Manager API is unhealthy (HTTP $HTTP_CODE)"
-    exit 1
-fi
-```
-
-**Service Communication Test**:
-```bash
-#!/bin/bash
-# tests/smoke/integration/test-service-communication.sh
-
-set -e
-
-echo "Testing inter-service communication..."
-
-# Manager → PKI Server
-curl -s http://localhost:8001/api/health || exit 1
-
-# Manager → SSH CA
-curl -s http://localhost:8002/api/health || exit 1
-
-# Manager → AAA Monitor
-curl -s http://localhost:8003/api/health || exit 1
-
-echo "✓ All services communicating correctly"
+# Run per-service
+./scripts/test-controller.sh unit manager-new
+./scripts/test-controller.sh unit webui
+./scripts/test-controller.sh unit edr-agent
 ```
 
 ---
 
-## Unit Tests
+## Test Controller CLI
 
-### Purpose
-
-Unit tests verify individual functions and methods in isolation with mocked dependencies.
-
-### Location
-
-```
-tests/unit/
-├── manager/
-│   ├── test_auth.py
-│   ├── test_models.py
-│   └── test_api.py
-├── pki-server/
-│   ├── test_certificate_generation.py
-│   ├── test_revocation.py
-│   └── test_ocsp.py
-├── ssh-ca/
-│   ├── test_ssh_key_generation.py
-│   ├── test_cert_issuance.py
-│   └── test_validation.py
-└── aaa-monitor/
-    ├── test_log_parsing.py
-    └── test_threat_detection.py
-```
-
-### Execution
+The unified entry point for all tests:
 
 ```bash
-make test-unit              # All unit tests
-pytest tests/unit/          # Python
-pytest tests/unit/manager   # Service-specific
+./scripts/test-controller.sh <type> [service]
 ```
 
-### Requirements
+**Types:** `build | unit | integration | functional | e2e | security | api | performance | smoke | lint | stream | all`
 
-- All dependencies must be mocked
-- Network calls must be stubbed
-- Database access must be isolated
-- Tests must run in parallel when possible
+**Exit codes:** 0 = pass, 1 = fail
 
 ---
 
-## Integration Tests
+## Test Categories
 
-### Purpose
+### 1. Smoke Tests (`tests/smoke/`)
 
-Integration tests verify that components work together correctly, including real database interactions and inter-service communication.
-
-### Location
-
-```
-tests/integration/
-├── manager/
-│   ├── test_auth_flow.py
-│   ├── test_user_creation.py
-│   └── test_api_contracts.py
-├── pki-server/
-│   ├── test_certificate_lifecycle.py
-│   ├── test_database_operations.py
-│   └── test_ocsp_integration.py
-├── ssh-ca/
-│   ├── test_ssh_cert_flow.py
-│   └── test_database_operations.py
-├── services/
-│   ├── test_manager_pki_communication.py
-│   ├── test_manager_ssh_ca_communication.py
-│   └── test_aaa_monitor_integration.py
-└── database/
-    ├── test_migrations.py
-    └── test_queries.py
-```
-
-### Execution
+Fast verification of basic functionality. **Must run <2 minutes.** Required before every commit.
 
 ```bash
-make test-integration       # All integration tests
-pytest tests/integration/   # Python
-pytest tests/integration/manager  # Service-specific
+pytest tests/smoke/ -v -m smoke
 ```
 
-### Requirements
+| File | What it tests |
+|------|--------------|
+| `test_compose_valid.py` | docker-compose config validation |
+| `test_python_imports.py` | Each service's main module imports without error |
+| `test_manager_smoke.py` | Quart test client: /healthz, /version, login+me |
+| `test_pki_smoke.py` | PKI server basic health |
+| `test_go_build.py` | `go build ./...` in edr-agent |
+| `test_webui_build.py` | `npm run build` in webui |
 
-- Use real databases (test instances)
-- Test complete workflows
-- Verify API contracts
-- Test error scenarios
+### 2. Unit Tests (per-service)
+
+Isolated function/method tests with mocked dependencies.
+
+**Python services** (pytest):
+```bash
+# All Python service unit tests
+pytest services/manager-new/tests/unit/ -v
+pytest services/pki-server-new/tests/unit/ -v
+pytest services/ssh-ca/tests/unit/ -v
+pytest services/aaa-monitor/tests/unit/ -v
+pytest services/worker-s3/tests/unit/ -v
+pytest services/worker-scanner/tests/unit/ -v
+```
+
+**Go service** (go test):
+```bash
+cd services/edr-agent && go test ./... -v
+```
+
+**TypeScript/React** (Vitest):
+```bash
+cd services/webui && npx vitest run
+```
+
+#### Per-Service Test Files
+
+| Service | Test Files | Test Count |
+|---------|-----------|------------|
+| manager-new | auth, users, alerts, config, s3scan, edr, threat-intel | ~80 |
+| pki-server-new | x509, ssh, config | ~100 |
+| ssh-ca | ssh_processor | ~46 |
+| aaa-monitor | health | ~43 |
+| worker-s3 | models, config | ~78 |
+| worker-scanner | parsers, validators, job_manager, findings | ~40 |
+| edr-agent (Go) | agent, collectors, rest_reporter | ~30 |
+| webui (Vitest) | useAuth, Button, RoleGuard, TabNav, ResearchInput, s3scan API | ~80 |
+
+### 3. API Tests (`tests/api/`)
+
+Test every API endpoint using Quart/Flask test_client (no running services needed).
+
+```bash
+pytest tests/api/ -v -m api
+```
+
+| File | Endpoints Covered |
+|------|------------------|
+| `test_manager_api.py` | 70+ tests: auth, users, alerts, s3-scan, EDR, approvals, threat-intel, research |
+| `test_pki_api.py` | 56 tests: X.509 lifecycle, SSH lifecycle, health |
+| `test_worker_scanner_api.py` | 82 tests: targets, jobs, findings, schedules, scanners |
+
+**Shared fixtures** in `conftest.py`: app factory, test client, admin/viewer/maintainer tokens.
+
+### 4. Integration Tests (`tests/integration/`)
+
+Test real service interactions. **Requires `docker-compose.test.yml` infrastructure.**
+
+```bash
+# Start test infrastructure
+docker compose -f docker-compose.test.yml up -d --wait
+
+# Run integration tests
+pytest tests/integration/ -v -m integration
+
+# Tear down
+docker compose -f docker-compose.test.yml down
+```
+
+| File | Flow Tested |
+|------|------------|
+| `test_s3_scan_flow.py` | Bucket CRUD → trigger scan → poll results → EICAR detection |
+| `test_edr_flow.py` | Agent register → heartbeat → batch events → list agents |
+| `test_redis_streams.py` | Publish/consume round-trip, consumer groups, ack, no-duplicate |
+| `test_alert_pipeline.py` | Alert CRUD → status update → search → statistics |
+| `test_service_health.py` | Health endpoints for all 6 services + Postgres/Redis/MinIO |
+
+Tests **skip gracefully** if services are not running.
+
+### 5. Stream Pipeline Tests (`tests/streams/`)
+
+Test data flow through Redis Streams, Celery, and gRPC.
+
+```bash
+pytest tests/streams/ -v -m stream
+```
+
+| File | Pipeline |
+|------|---------|
+| `test_s3_task_pipeline.py` | Manager publishes ScanTaskMessage → worker consumes → publishes result |
+| `test_celery_tasks.py` | Celery task dispatch, state transitions, retry behavior |
+| `test_grpc_pipeline.py` | gRPC client init, error handling, cert request round-trip |
+
+### 6. Security Tests (`tests/security/`)
+
+Test authentication, authorization, and input validation security.
+
+```bash
+pytest tests/security/ -v -m security
+```
+
+| File | Attack Vectors |
+|------|---------------|
+| `test_auth_security.py` | SQL injection, XSS, JWT alg:none, brute force, token replay, bcrypt DoS, mass assignment |
+| `test_input_validation.py` | Missing fields, null bytes, oversized payloads, invalid enums, negative integers, SQL chars |
+
+### 7. Performance Tests (`tests/performance/`)
+
+Test throughput and latency under load.
+
+```bash
+pytest tests/performance/ -v -m performance
+```
+
+| File | Metric |
+|------|--------|
+| `test_api_load.py` | Login p95<500ms, alerts list p95<200ms, s3-scan results p95<300ms |
+| `test_stream_throughput.py` | 1000 msg publish <5s, consume <5s, round-trip p95<50ms |
+
+### 8. E2E Tests (`tests/e2e/`)
+
+Full user journeys requiring the entire stack running.
+
+```bash
+pytest tests/e2e/ -v -m e2e
+```
+
+| File | Journey |
+|------|---------|
+| `test_full_scan_pipeline.py` | Login → create bucket → scan → results → create indicator |
+| `test_user_management.py` | Admin login → create user → new user login → delete → verify |
+| `test_pki_cert_lifecycle.py` | Issue X.509 → list → revoke → CRL → OCSP. Same for SSH |
+
+### 9. Lint Tests (`tests/lint/`)
+
+Verify code formatting and style compliance.
+
+```bash
+pytest tests/lint/ -v -m lint
+```
+
+| File | Tools |
+|------|-------|
+| `test_python_lint.py` | black --check, isort --check, flake8 |
+| `test_go_lint.py` | gofmt -l, go vet |
+| `test_typescript_lint.py` | eslint, tsc --noEmit |
+
+### 10. Build Tests (`tests/build/`)
+
+Verify Docker images build successfully.
+
+```bash
+pytest tests/build/ -v -m build
+```
+
+Parameterized across all 8 services. Also validates `docker-compose config` for all compose files.
 
 ---
 
-## PKI Testing Strategy
+## Test Infrastructure
 
-### Certificate Generation Testing
+### docker-compose.test.yml
 
-```bash
-# Test certificate generation
-pytest tests/integration/pki-server/test_certificate_lifecycle.py
+Ephemeral test infrastructure:
 
-# Test with different key sizes
-pytest tests/integration/pki-server/ -k "key_size"
-
-# Test certificate validation
-pytest tests/integration/pki-server/ -k "validation"
-```
-
-### Revocation Testing
+| Service | Port | Purpose |
+|---------|------|---------|
+| postgres-test | 5499 | Test database |
+| redis-test | 6399 | Test Redis/Streams |
+| minio-test | 9099 | Test S3 storage |
 
 ```bash
-# Test certificate revocation
-pytest tests/integration/pki-server/test_revocation.py
-
-# Test CRL generation
-pytest tests/integration/pki-server/ -k "crl"
-
-# Test OCSP responder
-pytest tests/integration/pki-server/test_ocsp_integration.py
+docker compose -f docker-compose.test.yml up -d --wait
+docker compose -f docker-compose.test.yml down
 ```
 
-### OCSP Testing
+### Test Helpers (`tests/helpers/`)
 
-Mock OCSP client and server interactions:
+| Module | Functions |
+|--------|----------|
+| `auth.py` | `create_test_token()`, `create_admin_token()`, `create_viewer_token()` |
+| `factories.py` | `make_user()`, `make_alert()`, `make_bucket_config()`, `make_scan_result()` |
+| `assertions.py` | `assert_pagination()`, `assert_error()`, `assert_json_keys()` |
+
+### Pytest Markers
+
+Defined in `conftest.py` and `pyproject.toml`:
+
+```
+unit, integration, e2e, smoke, api, functional, performance, security, lint, build, stream, slow
+```
+
+### Manager Test Client Pattern
+
+All Python API/unit tests follow this pattern:
 
 ```python
-# tests/integration/pki-server/test_ocsp_integration.py
-def test_ocsp_response_format():
-    """Verify OCSP response is properly formatted"""
-    # Generate certificate
-    cert = generate_test_certificate()
+@pytest.fixture
+async def app():
+    os.environ["DB_TYPE"] = "sqlite"
+    os.environ["DB_NAME"] = ":memory:"
+    os.environ["JWT_SECRET_KEY"] = "test-secret"
+    os.environ["GRPC_ENABLED"] = "false"
+    os.environ["AI_ENABLED"] = "false"
+    # Mock Redis StreamManager
+    with patch("path.to.RedisStreamManager", AsyncMock()):
+        app = create_app()
+    return app
 
-    # Request OCSP status
-    response = request_ocsp_status(cert)
+@pytest.fixture
+async def client(app):
+    return app.test_client()
+```
 
-    # Validate response format
-    assert response.status == 'successful'
-    assert response.cert_status == 'good'
+### WebUI Test Setup
+
+Vitest with jsdom environment:
+
+```typescript
+// vitest.config.ts
+export default defineConfig({
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: ['./src/client/__tests__/setup.ts'],
+    include: ['src/client/__tests__/**/*.{test,spec}.{ts,tsx}'],
+  },
+});
 ```
 
 ---
-
-## SSH CA Testing Strategy
-
-### SSH Key Generation Testing
-
-```bash
-# Test SSH key pair generation
-pytest tests/integration/ssh-ca/test_ssh_key_generation.py
-
-# Test with different key types
-pytest tests/integration/ssh-ca/ -k "key_type"
-
-# Test key validation
-pytest tests/integration/ssh-ca/ -k "validation"
-```
-
-### SSH Certificate Issuance Testing
-
-```bash
-# Test SSH certificate issuance
-pytest tests/integration/ssh-ca/test_ssh_cert_flow.py
-
-# Test certificate signing
-pytest tests/integration/ssh-ca/ -k "signing"
-
-# Test with different principals
-pytest tests/integration/ssh-ca/ -k "principals"
-```
-
-### SSH Certificate Validation Testing
-
-```python
-# tests/integration/ssh-ca/test_validation.py
-def test_ssh_cert_validation():
-    """Verify SSH certificate validates correctly"""
-    # Generate CA key
-    ca_key = generate_ca_key()
-
-    # Issue certificate
-    cert = issue_ssh_cert(ca_key, "user@example.com")
-
-    # Validate certificate
-    assert validate_ssh_cert(cert, ca_key)
-    assert not validate_ssh_cert(cert, wrong_key)
-```
-
----
-
-## End-to-End Tests
-
-### Purpose
-
-E2E tests verify critical user workflows from start to finish, testing the entire application stack.
-
-### Location
-
-```
-tests/e2e/
-├── certificate-lifecycle.spec.ts
-├── ssh-ca-flow.spec.ts
-├── user-authentication.spec.ts
-└── audit-logging.spec.ts
-```
-
-### Execution
-
-```bash
-make test-e2e               # All E2E tests
-npx playwright test tests/e2e/  # Playwright
-```
-
----
-
-## Performance Tests
-
-### Purpose
-
-Performance tests validate scalability, throughput, and resource usage under load.
-
-### Location
-
-```
-tests/performance/
-├── load-test.js
-├── stress-test.js
-└── profile-report.md
-```
-
-### Execution
-
-```bash
-make test-performance
-npm run test:performance
-```
-
----
-
-## Cross-Architecture Testing
-
-### Purpose
-
-Cross-architecture testing ensures the application builds and runs correctly on both amd64 and arm64 architectures, preventing platform-specific bugs.
-
-### When to Test
-
-**Before every final commit**, test on the alternate architecture:
-- Developing on amd64 → Build and test arm64 with QEMU
-- Developing on arm64 → Build and test amd64 with QEMU
-
-### Setup (First Time)
-
-Enable Docker buildx for multi-architecture builds:
-
-```bash
-docker buildx create --name multiarch --driver docker-container
-docker buildx use multiarch
-```
-
-### Single Architecture Build
-
-```bash
-# Test current architecture (native, fast)
-docker build -t manager:test services/manager/
-
-# Or explicitly specify architecture
-docker build --platform linux/amd64 -t manager:test services/manager/
-```
-
-### Cross-Architecture Build (QEMU)
-
-```bash
-# Test alternate architecture (uses QEMU emulation)
-docker buildx build --platform linux/arm64 -t manager:test services/manager/
-
-# Or test both simultaneously
-docker buildx build --platform linux/amd64,linux/arm64 -t manager:test services/manager/
-```
-
-### Multi-Architecture Build Script
-
-Create `scripts/build/test-multiarch.sh`:
-
-```bash
-#!/bin/bash
-# Test both architectures before commit
-
-set -e
-
-SERVICES=("manager" "pki-server" "ssh-ca" "aaa-monitor")
-ARCHITECTURES=("linux/amd64" "linux/arm64")
-
-for service in "${SERVICES[@]}"; do
-    echo "Testing $service on multiple architectures..."
-
-    for arch in "${ARCHITECTURES[@]}"; do
-        echo "  → Building for $arch..."
-        docker buildx build \
-            --platform "$arch" \
-            -t "$service:multiarch-test" \
-            "services/$service/" || {
-            echo "✗ Build failed for $service on $arch"
-            exit 1
-        }
-    done
-
-    echo "✓ $service builds successfully on amd64 and arm64"
-done
-
-echo "✓ All services passed multi-architecture testing"
-```
-
-### Makefile Integration
-
-```makefile
-.PHONY: test-multiarch
-test-multiarch:
-	@echo "Testing multi-architecture builds..."
-	@bash scripts/build/test-multiarch.sh
-
-.PHONY: build-multiarch
-build-multiarch:
-	@docker buildx build \
-		--platform linux/amd64,linux/arm64 \
-		-t $(IMAGE_NAME):$(VERSION) \
-		--push .
-```
-
----
-
-## Test Execution Order (Pre-Commit)
-
-Follow this order for efficient testing before commits:
-
-1. **Linters** (fast, <1 min)
-2. **Security scans** (fast, <1 min)
-3. **Secrets check** (fast, <1 min)
-4. **Build & Run** (5-10 min)
-5. **Smoke tests** (fast, <2 min) ← Gates further testing
-6. **Unit tests** (1-2 min)
-7. **Integration tests** (2-5 min)
-8. **PKI/SSH CA tests** (2-5 min)
-9. **E2E tests** (5-10 min)
-10. **Cross-architecture build** (optional, slow)
 
 ## CI/CD Integration
 
-All tests run automatically in GitHub Actions:
+Tests run in GitHub Actions (`.github/workflows/build.yml`):
 
-- **On PR**: Smoke + Unit + Integration tests
-- **On main merge**: All tests + Performance tests
-- **Nightly**: Performance + Cross-architecture tests
-- **Release**: Full suite + Manual sign-off
-
-See [Workflows](WORKFLOWS.md) for detailed CI/CD configuration.
+| Group | Jobs | Blocking |
+|-------|------|----------|
+| **1. Lint** | lint-python, lint-go, lint-typescript, secret-scan | Yes |
+| **2. Security** | bandit, gosec, npm audit | Yes |
+| **3. Build** | Docker build x 8 services | Yes |
+| **4. Container Scan** | Trivy (main branch only) | Yes |
+| **5. Tests** | Python unit/api, Go tests, Vitest, security suite | Yes |
 
 ---
 
-**Last Updated**: 2026-01-06
+## Pre-Commit Test Order
+
+1. `pytest tests/lint/ -m lint` (formatting check, <1 min)
+2. `pytest tests/smoke/ -m smoke` (basic checks, <2 min)
+3. `pytest tests/security/ -m security` (security validation, <2 min)
+4. `pytest tests/api/ -m api` (API contracts, <2 min)
+5. Per-service unit tests (1-3 min)
+
+**Total pre-commit time: <10 minutes**
+
+---
+
+## Adding New Tests
+
+1. Place test files in the appropriate category directory
+2. Use the correct pytest marker (`@pytest.mark.<category>`)
+3. Follow the existing test client pattern for the service
+4. Add `__init__.py` if creating a new test directory
+5. Verify with `python3 -c "import py_compile; py_compile.compile('path/to/test.py', doraise=True)"`
+
+---
+
+**Last Updated**: 2026-03-01
 **Maintained by**: Penguin Tech Inc

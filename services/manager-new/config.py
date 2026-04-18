@@ -64,17 +64,23 @@ class RedisConfig(BaseModel):
 
 
 class AuthConfig(BaseModel):
-    """Authentication configuration."""
+    """Authentication configuration with OIDC support via penguin-aaa."""
 
     secret_key: str = Field(default="change-me-in-production")
-    jwt_secret: str = Field(default="change-me-jwt-secret")
-    jwt_algorithm: str = Field(default="HS256")
     access_token_expires_minutes: int = Field(default=30, ge=1)
     refresh_token_expires_days: int = Field(default=7, ge=1)
     password_min_length: int = Field(default=8, ge=4)
     max_login_attempts: int = Field(default=5, ge=1)
     lockout_duration_minutes: int = Field(default=15, ge=1)
     mfa_enabled: bool = Field(default=False)
+
+    # OIDC Provider configuration (penguin-aaa RS256)
+    oidc_issuer: str = Field(default="https://skauswatch.local")
+    oidc_audiences: List[str] = Field(default_factory=lambda: ["skauswatch"])
+    oidc_algorithm: str = Field(default="RS256")
+    oidc_keystore_path: Optional[str] = Field(
+        default=None, description="Path to JWKS keystore file (None = in-memory)"
+    )
 
     @property
     def access_token_expires(self) -> timedelta:
@@ -317,7 +323,8 @@ def load_config() -> ManagerConfig:
         ),
         auth=AuthConfig(
             secret_key=os.getenv("SECRET_KEY", "change-me-in-production"),
-            jwt_secret=os.getenv("JWT_SECRET_KEY", "change-me-jwt-secret"),
+            oidc_issuer=os.getenv("OIDC_ISSUER", "https://skauswatch.local"),
+            oidc_keystore_path=os.getenv("OIDC_KEYSTORE_PATH"),
         ),
         grpc=GRPCConfig(
             enabled=os.getenv("GRPC_ENABLED", "true").lower() == "true",

@@ -4,13 +4,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/penguintech/skauswatch/edr-agent/internal/logging"
 	"github.com/shirou/gopsutil/v4/process"
 	"go.uber.org/zap"
 )
 
 // ProcessCollector monitors process creation and termination
 type ProcessCollector struct {
-	logger       *zap.Logger
+	logger       *logging.SanitizedLogger
 	events       chan Event
 	stopChan     chan struct{}
 	running      bool
@@ -27,7 +28,7 @@ type processInfo struct {
 }
 
 // NewProcessCollector creates a new process collector
-func NewProcessCollector(logger *zap.Logger) (*ProcessCollector, error) {
+func NewProcessCollector(logger *logging.SanitizedLogger) (*ProcessCollector, error) {
 	return &ProcessCollector{
 		logger:       logger,
 		events:       make(chan Event, 1000),

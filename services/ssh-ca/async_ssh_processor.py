@@ -11,6 +11,8 @@ import json
 import logging
 import struct
 import time
+
+from penguintechinc_utils import configure_logging, get_logger
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -40,7 +42,8 @@ from ...shared.performance import (
     cache_decorator,
 )
 
-logger = logging.getLogger(__name__)
+configure_logging(level=logging.INFO, json_output=True)
+logger = get_logger(__name__)
 
 
 class SSHCertificateType(Enum):

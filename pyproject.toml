@@ -81,6 +81,9 @@ test = [
     "factory-boy>=3.3.0",
     "faker>=20.1.0",
     "coverage[toml]>=7.3.0",
+    "fakeredis[lua]>=2.20.0",
+    "pytest-playwright>=0.4.0",
+    "respx>=0.21.0",
 ]
 
 [project.scripts]
@@ -177,7 +180,15 @@ ignore_errors = true
 [tool.pytest.ini_options]
 minversion = "7.0"
 addopts = "-ra -q --strict-markers --strict-config"
-testpaths = ["tests"]
+testpaths = [
+    "tests",
+    "services/manager-new/tests",
+    "services/pki-server-new/tests",
+    "services/ssh-ca/tests",
+    "services/aaa-monitor/tests",
+    "services/worker-s3/tests",
+    "services/worker-scanner/tests",
+]
 asyncio_mode = "auto"
 filterwarnings = [
     "error",
@@ -189,7 +200,14 @@ markers = [
     "unit: marks tests as unit tests",
     "integration: marks tests as integration tests",
     "e2e: marks tests as end-to-end tests",
-    "smoke: marks tests as smoke tests",
+    "smoke: marks tests as smoke tests (pre-commit, <2 min)",
+    "api: marks tests as API endpoint tests",
+    "functional: marks tests as functional/browser tests",
+    "performance: marks tests as performance/load tests",
+    "security: marks tests as security tests",
+    "lint: marks tests as lint validation tests",
+    "build: marks tests as Docker build tests",
+    "stream: marks tests as Redis Stream/pipeline tests",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
 

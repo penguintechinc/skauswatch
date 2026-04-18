@@ -1,7 +1,30 @@
+import { TokenManager } from '@penguintechinc/react-aaa';
+import type { TokenSet } from '@penguintechinc/react-aaa';
 import axios from 'axios';
 
 // API base URL - uses proxy in development, direct in production
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1';
+
+// TokenManager from react-aaa handles:
+// - sessionStorage persistence (more secure than localStorage)
+// - Automatic refresh scheduling (60s before expiry)
+// - JWT expiry checking
+export const tokenManager = new TokenManager({
+  onTokenExpired: () => {
+    window.location.href = '/login';
+  },
+  onRefresh: async (refreshToken: string): Promise<TokenSet> => {
+    const response = await axios.post(`${API_BASE_URL}/auth/refresh`, {
+      refresh_token: refreshToken,
+    });
+    return {
+      access_token: response.data.access_token,
+      refresh_token: response.data.refresh_token,
+      expires_in: response.data.expires_in || 1800,
+      token_type: 'Bearer' as const,
+    };
+  },
+});
 
 // Create axios instance
 const api = axios.create({
@@ -11,29 +34,10 @@ const api = axios.create({
   },
 });
 
-// Token management
-const TOKEN_KEYS = {
-  ACCESS: 'access_token',
-  REFRESH: 'refresh_token',
-};
-
-export const setTokens = (accessToken: string, refreshToken: string) => {
-  localStorage.setItem(TOKEN_KEYS.ACCESS, accessToken);
-  localStorage.setItem(TOKEN_KEYS.REFRESH, refreshToken);
-};
-
-export const getAccessToken = () => localStorage.getItem(TOKEN_KEYS.ACCESS);
-export const getRefreshToken = () => localStorage.getItem(TOKEN_KEYS.REFRESH);
-
-export const clearTokens = () => {
-  localStorage.removeItem(TOKEN_KEYS.ACCESS);
-  localStorage.removeItem(TOKEN_KEYS.REFRESH);
-};
-
 // Request interceptor to add authorization header
 api.interceptors.request.use(
   (config) => {
-    const token = getAccessToken();
+    const token = tokenManager.getAccessToken();
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -42,38 +46,41 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-// Response interceptor to handle token refresh
+// Response interceptor to handle token refresh on 401
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
 
-    // If 401 and we haven't retried yet, try to refresh token
     if (error.response?.status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
 
-      try {
-        const refreshToken = getRefreshToken();
-        if (!refreshToken) {
-          clearTokens();
-          window.location.href = '/login';
-          return Promise.reject(error);
-        }
+      const tokenSet = tokenManager.getTokenSet();
+      if (!tokenSet?.refresh_token) {
+        tokenManager.clear();
+        window.location.href = '/login';
+        return Promise.reject(error);
+      }
 
+      try {
         const response = await axios.post(`${API_BASE_URL}/auth/refresh`, {
-          refresh_token: refreshToken,
+          refresh_token: tokenSet.refresh_token,
         });
 
-        const { access_token, refresh_token } = response.data;
-        setTokens(access_token, refresh_token);
+        const newTokenSet: TokenSet = {
+          access_token: response.data.access_token,
+          refresh_token: response.data.refresh_token,
+          expires_in: response.data.expires_in || 1800,
+          token_type: 'Bearer' as const,
+        };
+        tokenManager.store(newTokenSet);
 
-        // Retry original request with new token
-        originalRequest.headers.Authorization = `Bearer ${access_token}`;
+        originalRequest.headers.Authorization = `Bearer ${newTokenSet.access_token}`;
         return api(originalRequest);
-      } catch (refreshError) {
-        clearTokens();
+      } catch {
+        tokenManager.clear();
         window.location.href = '/login';
-        return Promise.reject(refreshError);
+        return Promise.reject(error);
       }
     }
 

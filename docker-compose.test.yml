@@ -1,0 +1,67 @@
+# SkausWatch Test Infrastructure
+# Ephemeral services for integration/API testing
+# Usage: docker compose -f docker-compose.test.yml up -d --wait
+
+services:
+  # PostgreSQL Test Database
+  postgres-test:
+    image: postgres:16-bookworm@sha256:7858a1a43bb2e3decc07650c8989ba526e0a8164f212c9bb88b622cdbd71c4be
+    container_name: skauswatch-postgres-test
+    environment:
+      POSTGRES_DB: skauswatch_test
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    ports:
+      - "5499:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user -d skauswatch_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - test-network
+
+  # Redis Test Instance
+  redis-test:
+    image: redis:7-bookworm@sha256:a5995dfdf108997f8a7c9587f54fad5e94ed5848de5236a6b28119e99efd67e0
+    container_name: skauswatch-redis-test
+    command: redis-server --requirepass test_password --appendonly no --save ""
+    ports:
+      - "6399:6379"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "test_password", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - test-network
+
+  # MinIO Test Instance (S3-compatible)
+  minio-test:
+    image: minio/minio:latest
+    container_name: skauswatch-minio-test
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: test_access_key
+      MINIO_ROOT_PASSWORD: test_secret_key
+    ports:
+      - "9099:9000"
+      - "9098:9001"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - test-network
+
+networks:
+  test-network:
+    driver: bridge

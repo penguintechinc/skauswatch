@@ -14,7 +14,7 @@ PyJWT==2.10.1
 bcrypt==4.2.1
 
 # Validation
-email-validator==2.2.0
+email-validator==2.2.0          # kept for backward compat; also used by penguin-libs
 
 # WSGI Server
 gunicorn==23.0.0
@@ -33,6 +33,7 @@ flake8==7.1.1
 mypy==1.14.0
 
 # Penguin Tech Libraries
+penguin-aaa>=0.1.0           # OIDC / RS256 token issuance and validation
 penguin-libs>=0.1.0          # Validation, HTTP, gRPC utilities
 penguin-licensing>=0.1.0     # License server client
 penguin-utils>=0.1.0         # Sanitized logging, Flask utils

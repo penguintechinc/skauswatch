@@ -9,7 +9,9 @@ import signal
 from datetime import datetime
 from typing import List, Set
 
-import structlog
+import logging
+
+from penguintechinc_utils import configure_logging, get_logger
 from hypercorn.asyncio import serve
 from hypercorn.config import Config as HypercornConfig
 from quart import Quart
@@ -22,7 +24,8 @@ from .grpc.server import serve_grpc
 from .models.db import close_db, get_db, init_database_schema
 from .services.certificate_manager import CertificateManager
 
-logger = structlog.get_logger()
+configure_logging(level=logging.INFO, json_output=True)
+logger = get_logger(__name__)
 
 # Global instances
 config: Settings = None

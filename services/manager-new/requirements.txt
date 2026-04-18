@@ -19,9 +19,10 @@ hiredis>=2.3.0
 pydantic>=2.5.0
 email-validator>=2.1.0
 
-# Authentication
+# Authentication (OIDC via penguin-aaa)
 bcrypt>=4.1.0
 PyJWT>=2.8.0
+penguin-aaa>=0.1.0
 
 # gRPC
 grpcio>=1.60.0

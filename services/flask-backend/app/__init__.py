@@ -2,6 +2,7 @@
 
 from flask import Flask
 from flask_cors import CORS
+from penguin_licensing import LicenseClient
 from prometheus_client import make_wsgi_app
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
@@ -13,6 +14,9 @@ def create_app(config_class: type = Config) -> Flask:
     """Create and configure the Flask application."""
     app = Flask(__name__)
     app.config.from_object(config_class)
+
+    # Initialize license client
+    app.config["LICENSE_CLIENT"] = LicenseClient(product="skauswatch")
 
     # Initialize CORS
     CORS(

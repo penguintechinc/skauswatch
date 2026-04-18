@@ -1,0 +1,1 @@
+"""Manager-new unit tests."""

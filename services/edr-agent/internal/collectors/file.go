@@ -9,12 +9,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/penguintech/skauswatch/edr-agent/internal/logging"
 	"go.uber.org/zap"
 )
 
 // FileCollector monitors file system changes
 type FileCollector struct {
-	logger       *zap.Logger
+	logger       *logging.SanitizedLogger
 	events       chan Event
 	stopChan     chan struct{}
 	running      bool
@@ -25,7 +26,7 @@ type FileCollector struct {
 }
 
 // NewFileCollector creates a new file collector
-func NewFileCollector(logger *zap.Logger) (*FileCollector, error) {
+func NewFileCollector(logger *logging.SanitizedLogger) (*FileCollector, error) {
 	// Default paths to watch
 	watchPaths := []string{
 		"/etc",

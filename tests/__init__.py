@@ -1,0 +1,1 @@
+"""SkausWatch test suite."""

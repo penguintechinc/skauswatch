@@ -1,6 +1,6 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
-import api, { setTokens, clearTokens, getAccessToken } from '../lib/api';
+import type { TokenSet } from '@penguintechinc/react-aaa';
+import api, { tokenManager } from '../lib/api';
 import type { User, LoginCredentials, AuthState } from '../types';
 
 interface AuthStore extends AuthState {
@@ -12,110 +12,110 @@ interface AuthStore extends AuthState {
 }
 
 export const useAuthStore = create<AuthStore>()(
-  persist(
-    (set) => ({
-      user: null,
-      accessToken: null,
-      refreshToken: null,
-      isAuthenticated: false,
-      isLoading: true,
+  (set) => ({
+    user: null,
+    accessToken: null,
+    refreshToken: null,
+    isAuthenticated: false,
+    isLoading: true,
 
-      login: async (credentials: LoginCredentials) => {
-        try {
-          const response = await api.post('/auth/login', credentials);
-          const { access_token, refresh_token, user } = response.data;
+    login: async (credentials: LoginCredentials) => {
+      try {
+        const response = await api.post('/auth/login', credentials);
+        const { access_token, refresh_token, expires_in, user } = response.data;
 
-          setTokens(access_token, refresh_token);
+        // Store tokens via react-aaa TokenManager (sessionStorage + auto-refresh)
+        const tokenSet: TokenSet = {
+          access_token,
+          refresh_token,
+          expires_in: expires_in || 1800,
+          token_type: 'Bearer' as const,
+        };
+        tokenManager.store(tokenSet);
 
-          set({
-            user,
-            accessToken: access_token,
-            refreshToken: refresh_token,
-            isAuthenticated: true,
-            isLoading: false,
-          });
-        } catch (error) {
-          clearTokens();
-          set({
-            user: null,
-            accessToken: null,
-            refreshToken: null,
-            isAuthenticated: false,
-            isLoading: false,
-          });
-          throw error;
-        }
-      },
+        set({
+          user,
+          accessToken: access_token,
+          refreshToken: refresh_token,
+          isAuthenticated: true,
+          isLoading: false,
+        });
+      } catch (error) {
+        tokenManager.clear();
+        set({
+          user: null,
+          accessToken: null,
+          refreshToken: null,
+          isAuthenticated: false,
+          isLoading: false,
+        });
+        throw error;
+      }
+    },
 
-      logout: async () => {
-        try {
-          await api.post('/auth/logout');
-        } catch {
-          // Ignore logout errors
-        } finally {
-          clearTokens();
-          set({
-            user: null,
-            accessToken: null,
-            refreshToken: null,
-            isAuthenticated: false,
-            isLoading: false,
-          });
-        }
-      },
+    logout: async () => {
+      try {
+        await api.post('/auth/logout');
+      } catch {
+        // Ignore logout errors
+      } finally {
+        tokenManager.clear();
+        set({
+          user: null,
+          accessToken: null,
+          refreshToken: null,
+          isAuthenticated: false,
+          isLoading: false,
+        });
+      }
+    },
 
-      fetchUser: async () => {
-        try {
-          const response = await api.get('/auth/me');
-          set({ user: response.data, isLoading: false });
-        } catch {
-          set({ user: null, isLoading: false });
-        }
-      },
+    fetchUser: async () => {
+      try {
+        const response = await api.get('/auth/me');
+        set({ user: response.data, isLoading: false });
+      } catch {
+        set({ user: null, isLoading: false });
+      }
+    },
 
-      checkAuth: async () => {
-        const token = getAccessToken();
-        if (!token) {
-          set({ isAuthenticated: false, isLoading: false });
-          return false;
-        }
+    checkAuth: async () => {
+      const token = tokenManager.getAccessToken();
+      if (!token || tokenManager.isExpired()) {
+        tokenManager.clear();
+        set({ isAuthenticated: false, isLoading: false });
+        return false;
+      }
 
-        try {
-          const response = await api.get('/auth/me');
-          set({
-            user: response.data,
-            isAuthenticated: true,
-            isLoading: false,
-          });
-          return true;
-        } catch {
-          clearTokens();
-          set({
-            user: null,
-            accessToken: null,
-            refreshToken: null,
-            isAuthenticated: false,
-            isLoading: false,
-          });
-          return false;
-        }
-      },
+      try {
+        const response = await api.get('/auth/me');
+        set({
+          user: response.data,
+          accessToken: token,
+          isAuthenticated: true,
+          isLoading: false,
+        });
+        return true;
+      } catch {
+        tokenManager.clear();
+        set({
+          user: null,
+          accessToken: null,
+          refreshToken: null,
+          isAuthenticated: false,
+          isLoading: false,
+        });
+        return false;
+      }
+    },
 
-      setUser: (user: User | null) => {
-        set({ user });
-      },
-    }),
-    {
-      name: 'auth-storage',
-      partialize: (state) => ({
-        accessToken: state.accessToken,
-        refreshToken: state.refreshToken,
-      }),
-    }
-  )
+    setUser: (user: User | null) => {
+      set({ user });
+    },
+  })
 );
 
-// Hook for components
+// Hook for components — same interface as before
 export const useAuth = () => {
   const store = useAuthStore();
 

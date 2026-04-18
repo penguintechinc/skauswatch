@@ -6,19 +6,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/penguintech/skauswatch/edr-agent/internal/logging"
 	psutilnet "github.com/shirou/gopsutil/v4/net"
 	"go.uber.org/zap"
 )
 
 // NetworkCollector monitors network connections
 type NetworkCollector struct {
-	logger         *zap.Logger
-	events         chan Event
-	stopChan       chan struct{}
-	running        bool
-	mu             sync.Mutex
-	knownConns     map[string]connInfo
-	pollInterval   time.Duration
+	logger          *logging.SanitizedLogger
+	events          chan Event
+	stopChan        chan struct{}
+	running         bool
+	mu              sync.Mutex
+	knownConns      map[string]connInfo
+	pollInterval    time.Duration
 	suspiciousPorts map[uint32]string
 }
 
@@ -32,7 +33,7 @@ type connInfo struct {
 }
 
 // NewNetworkCollector creates a new network collector
-func NewNetworkCollector(logger *zap.Logger) (*NetworkCollector, error) {
+func NewNetworkCollector(logger *logging.SanitizedLogger) (*NetworkCollector, error) {
 	// Suspicious ports commonly used by malware/attackers
 	suspiciousPorts := map[uint32]string{
 		4444:  "Metasploit default",

@@ -10,6 +10,7 @@ import (
 
 	"github.com/elastic/go-sysinfo"
 	"github.com/penguintech/skauswatch/edr-agent/internal/collectors"
+	"github.com/penguintech/skauswatch/edr-agent/internal/logging"
 	"github.com/penguintech/skauswatch/edr-agent/internal/reporters"
 	"go.uber.org/zap"
 )
@@ -35,7 +36,7 @@ type CollectorConfig struct {
 // Agent is the main EDR agent struct
 type Agent struct {
 	config     Config
-	logger     *zap.Logger
+	logger     *logging.SanitizedLogger
 	reporter   *reporters.RESTReporter
 	collectors []collectors.Collector
 	events     chan Event
@@ -55,7 +56,7 @@ type Event struct {
 }
 
 // New creates a new EDR agent
-func New(config Config, logger *zap.Logger) (*Agent, error) {
+func New(config Config, logger *logging.SanitizedLogger) (*Agent, error) {
 	// Get host information
 	host, err := sysinfo.Host()
 	if err != nil {

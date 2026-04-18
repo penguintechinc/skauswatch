@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/penguintech/skauswatch/edr-agent/internal/agent"
+	"github.com/penguintech/skauswatch/edr-agent/internal/logging"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
@@ -17,7 +18,7 @@ import (
 
 var (
 	cfgFile string
-	logger  *zap.Logger
+	logger  *logging.SanitizedLogger
 )
 
 func main() {
@@ -72,13 +73,9 @@ func initConfig() {
 
 	// Initialize logger
 	var err error
-	if viper.GetBool("debug") {
-		logger, err = zap.NewDevelopment()
-	} else {
-		logger, err = zap.NewProduction()
-	}
+	logger, err = logging.NewSanitizedLogger("edr-agent")
 	if err != nil {
-		fmt.Printf("Failed to initialize logger: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to create logger: %v\n", err)
 		os.Exit(1)
 	}
 }

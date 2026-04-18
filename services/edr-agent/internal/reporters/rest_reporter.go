@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/penguintech/skauswatch/edr-agent/internal/logging"
 	"go.uber.org/zap"
 )
 
@@ -18,7 +19,7 @@ type RESTReporter struct {
 	managerURL string
 	apiKey     string
 	agentID    string
-	logger     *zap.Logger
+	logger     *logging.SanitizedLogger
 }
 
 // AgentRegistration contains agent registration data
@@ -44,7 +45,7 @@ type EventBatch struct {
 }
 
 // NewRESTReporter creates a new REST reporter
-func NewRESTReporter(managerURL, apiKey, agentID string, logger *zap.Logger) *RESTReporter {
+func NewRESTReporter(managerURL, apiKey, agentID string, logger *logging.SanitizedLogger) *RESTReporter {
 	return &RESTReporter{
 		client: &http.Client{
 			Timeout: 30 * time.Second,

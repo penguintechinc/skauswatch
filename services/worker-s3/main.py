@@ -12,16 +12,14 @@ import signal
 import sys
 from typing import Optional
 
+from penguintechinc_utils import configure_logging, get_logger
 from worker import S3ScanWorker
 
 from config import load_worker_config
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+configure_logging(level=logging.INFO, json_output=False)
+logger = get_logger(__name__)
 
 
 class WorkerManager:

@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-import structlog
+from penguintechinc_utils import configure_logging, get_logger
 from models.db import close_db, get_db, init_database_schema
 from quart import Quart, jsonify, request
 from quart_cors import cors
@@ -32,25 +32,9 @@ from services.streams.redis_streams import (
 )
 
 # Configure structured logging
-structlog.configure(
-    processors=[
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.UnicodeDecoder(),
-        structlog.processors.JSONRenderer(),
-    ],
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    wrapper_class=structlog.stdlib.BoundLogger,
-    cache_logger_on_first_use=True,
-)
+configure_logging(level=logging.INFO, json_output=True)
 
-logger = structlog.get_logger(__name__)
+logger = get_logger(__name__)
 
 # Global instances
 config: Optional[ManagerConfig] = None

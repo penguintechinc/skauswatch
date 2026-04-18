@@ -119,18 +119,52 @@ test-unit: ## Testing - Run unit tests
 	@echo "$(BLUE)Running unit tests...$(RESET)"
 	@pytest tests/unit/ -v
 
-test-integration: ## Testing - Run integration tests
+test-integration: ## Testing - Run integration tests (requires test infra)
+	@echo "$(BLUE)Starting test infrastructure...$(RESET)"
+	@docker compose -f docker-compose.test.yml up -d --wait
 	@echo "$(BLUE)Running integration tests...$(RESET)"
-	@docker-compose -f docker-compose.test.yml up --build --abort-on-container-exit
-	@docker-compose -f docker-compose.test.yml down
+	@pytest tests/integration/ -v -m integration; rc=$$?; \
+		docker compose -f docker-compose.test.yml down; exit $$rc
 
 test-e2e: ## Testing - Run end-to-end tests
 	@echo "$(BLUE)Running E2E tests...$(RESET)"
-	@pytest tests/e2e/ -v
+	@pytest tests/e2e/ -v -m e2e
 
-smoke-test: ## Testing - Run smoke tests
+smoke-test: ## Testing - Run smoke tests (<2 min, pre-commit)
 	@echo "$(BLUE)Running smoke tests...$(RESET)"
-	@pytest tests/smoke/ -v
+	@pytest tests/smoke/ services/*/tests/smoke/ -v -m smoke --ignore=services/webui 2>/dev/null || \
+		pytest tests/smoke/ -v -m smoke
+
+test-api: ## Testing - Run API endpoint tests
+	@echo "$(BLUE)Running API tests...$(RESET)"
+	@pytest tests/api/ -v -m api
+
+test-functional: ## Testing - Run Playwright functional tests
+	@echo "$(BLUE)Running functional tests...$(RESET)"
+	@cd services/webui && npx playwright test tests/functional/
+
+test-security: ## Testing - Run security tests
+	@echo "$(BLUE)Running security tests...$(RESET)"
+	@pytest tests/security/ -v -m security
+
+test-lint: ## Testing - Run lint validation tests
+	@echo "$(BLUE)Running lint tests...$(RESET)"
+	@pytest tests/lint/ -v -m lint
+
+test-go: ## Testing - Run Go tests (edr-agent)
+	@echo "$(BLUE)Running Go tests...$(RESET)"
+	@cd services/edr-agent && go test ./... -v
+
+test-webui: ## Testing - Run WebUI TypeScript tests (Vitest)
+	@echo "$(BLUE)Running WebUI tests...$(RESET)"
+	@cd services/webui && npx vitest run
+
+test-streams: ## Testing - Run stream/pipeline tests
+	@echo "$(BLUE)Running stream tests...$(RESET)"
+	@pytest tests/streams/ -v -m stream
+
+test-all: ## Testing - Run ALL test types via test-controller
+	@./scripts/test-controller.sh all
 
 test-coverage: ## Testing - Generate coverage report
 	@$(MAKE) test-python
@@ -282,7 +316,7 @@ health: ## Health - Check all service health endpoints
 	@curl -sf http://localhost:5001/health && echo "$(GREEN)pki-server: OK$(RESET)" || echo "$(RED)pki-server (5001): FAILED$(RESET)"
 	@curl -sf http://localhost:5002/health && echo "$(GREEN)ssh-ca: OK$(RESET)" || echo "$(RED)ssh-ca (5002): FAILED$(RESET)"
 	@curl -sf http://localhost:5003/health && echo "$(GREEN)aaa-monitor: OK$(RESET)" || echo "$(RED)aaa-monitor (5003): FAILED$(RESET)"
-	@curl -sf http://localhost:5004/health && echo "$(GREEN)worker-scanner: OK$(RESET)" || echo "$(RED)worker-scanner (5004): FAILED$(RESET)"
+	@curl -sf http://localhost:5005/health && echo "$(GREEN)worker-scanner: OK$(RESET)" || echo "$(RED)worker-scanner (5005): FAILED$(RESET)"
 	@curl -sf http://localhost:3000/health && echo "$(GREEN)webui: OK$(RESET)" || echo "$(RED)webui (3000): FAILED$(RESET)"
 
 logs: ## Logs - Show all service logs
@@ -376,7 +410,7 @@ info: ## Info - Show project information and service URLs
 	@echo "  PKI Server:     http://localhost:5001"
 	@echo "  SSH CA:         http://localhost:5002"
 	@echo "  AAA Monitor:    http://localhost:5003"
-	@echo "  Worker Scanner: http://localhost:5004"
+	@echo "  Worker Scanner: http://localhost:5005"
 	@echo "  WebUI:          http://localhost:3000"
 	@echo "  Prometheus:     http://localhost:9090"
 	@echo "  Grafana:        http://localhost:3001"
