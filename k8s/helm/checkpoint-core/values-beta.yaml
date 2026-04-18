@@ -1,0 +1,29 @@
+image:
+  repository: registry-dal2.penguintech.io/skauswatch/checkpoint-core
+  pullPolicy: Always
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+env:
+  CHECKPOINT_ISSUER_URL: "https://checkpoint.skauswatch.penguintech.cloud"
+  CHECKPOINT_SAML_ENTITY_ID: "https://checkpoint.skauswatch.penguintech.cloud/saml"
+  CHECKPOINT_LDAP_BASE_DN: "dc=skauswatch,dc=app"
+  LOG_LEVEL: "INFO"
+  RELEASE_MODE: "false"
+
+ingress:
+  enabled: true
+  host: "checkpoint.skauswatch.penguintech.cloud"
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"

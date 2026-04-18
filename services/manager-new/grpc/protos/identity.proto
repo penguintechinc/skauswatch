@@ -1,0 +1,241 @@
+syntax = "proto3";
+package identity;
+option go_package = "github.com/penguintechinc/skauswatch/checkpoint/proto;identitypb";
+
+// Called by Checkpoint sub-module (checkpoint-core and checkpoint-ldap-agent)
+// to authenticate users and read/write identity data.
+
+service IdentityService {
+  // Auth
+  rpc AuthenticateUser(AuthenticateRequest) returns (AuthenticateResponse);
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
+
+  // Users (read)
+  rpc GetUser(GetUserRequest) returns (UserResponse);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
+  rpc SearchUsers(SearchUsersRequest) returns (ListUsersResponse);
+
+  // Users (write — for SCIM provisioning)
+  rpc CreateUser(CreateUserRequest) returns (UserResponse);
+  rpc UpdateUser(UpdateUserRequest) returns (UserResponse);
+  rpc DeleteUser(DeleteUserRequest) returns (DeleteResponse);
+
+  // Groups (read)
+  rpc GetGroup(GetGroupRequest) returns (GroupResponse);
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+  rpc GetUserGroups(GetUserRequest) returns (ListGroupsResponse);
+
+  // Groups (write)
+  rpc CreateGroup(CreateGroupRequest) returns (GroupResponse);
+  rpc UpdateGroup(UpdateGroupRequest) returns (GroupResponse);
+  rpc DeleteGroup(DeleteGroupRequest) returns (DeleteResponse);
+
+  // Memberships
+  rpc AddMembership(AddMembershipRequest) returns (MembershipResponse);
+  rpc RemoveMembership(RemoveMembershipRequest) returns (DeleteResponse);
+
+  // Attributes
+  rpc GetAttributes(GetAttributesRequest) returns (AttributesResponse);
+  rpc SetAttribute(SetAttributeRequest) returns (AttributeResponse);
+}
+
+message AuthenticateRequest {
+  string email = 1;
+  string password = 2;    // plaintext sent over mTLS gRPC
+  string client_ip = 3;
+  string user_agent = 4;
+}
+
+message AuthenticateResponse {
+  bool success = 1;
+  string user_uuid = 2;
+  string error = 3;       // empty on success
+  UserRecord user = 4;
+}
+
+message VerifyTokenRequest {
+  string token_hash = 1;  // SHA-256 of JWT jti
+}
+
+message VerifyTokenResponse {
+  bool valid = 1;
+  string user_uuid = 2;
+  string scopes = 3;
+  int64 expires_at = 4;
+}
+
+message RevokeTokenRequest {
+  string token_hash = 1;
+}
+
+message DeleteResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetUserRequest {
+  string uuid = 1;
+}
+
+message ListUsersRequest {
+  int32 page = 1;
+  int32 per_page = 2;     // max 100
+  string status = 3;      // filter: active, suspended, pending, "" = all
+}
+
+message SearchUsersRequest {
+  string query = 1;       // searches email, display_name, external_id
+  int32 limit = 2;
+}
+
+message UserRecord {
+  string uuid = 1;
+  string email = 2;
+  string display_name = 3;
+  string given_name = 4;
+  string family_name = 5;
+  string phone = 6;
+  string status = 7;
+  bool mfa_enabled = 8;
+  string locale = 9;
+  string timezone = 10;
+  string avatar_url = 11;
+  string external_id = 12;
+  string external_provider = 13;
+  int64 created_at = 14;
+  int64 updated_at = 15;
+  int64 last_login_at = 16;
+  repeated string scopes = 17;    // computed from group memberships
+}
+
+message UserResponse {
+  UserRecord user = 1;
+  string error = 2;
+}
+
+message ListUsersResponse {
+  repeated UserRecord users = 1;
+  int32 total = 2;
+  string error = 3;
+}
+
+message CreateUserRequest {
+  string email = 1;
+  string password = 2;
+  string display_name = 3;
+  string given_name = 4;
+  string family_name = 5;
+  string phone = 6;
+  string locale = 7;
+  string timezone = 8;
+  string external_id = 9;
+  string external_provider = 10;
+}
+
+message UpdateUserRequest {
+  string uuid = 1;
+  string display_name = 2;
+  string given_name = 3;
+  string family_name = 4;
+  string phone = 5;
+  string status = 6;
+  string locale = 7;
+  string timezone = 8;
+  string avatar_url = 9;
+}
+
+message GetGroupRequest {
+  string uuid = 1;
+}
+
+message ListGroupsRequest {
+  int32 page = 1;
+  int32 per_page = 2;
+}
+
+message GroupRecord {
+  string uuid = 1;
+  string name = 2;
+  string display_name = 3;
+  string description = 4;
+  string type = 5;         // local, external
+  string external_id = 6;
+  string external_provider = 7;
+  int64 created_at = 8;
+  int64 member_count = 9;
+}
+
+message GroupResponse {
+  GroupRecord group = 1;
+  string error = 2;
+}
+
+message ListGroupsResponse {
+  repeated GroupRecord groups = 1;
+  int32 total = 2;
+  string error = 3;
+}
+
+message CreateGroupRequest {
+  string name = 1;
+  string display_name = 2;
+  string description = 3;
+  string type = 4;
+  string external_id = 5;
+  string external_provider = 6;
+}
+
+message UpdateGroupRequest {
+  string uuid = 1;
+  string display_name = 2;
+  string description = 3;
+}
+
+message AddMembershipRequest {
+  string user_uuid = 1;
+  string group_uuid = 2;
+  string role = 3;         // member, owner, admin
+  string added_by_uuid = 4;
+  string source = 5;       // local, synced
+}
+
+message RemoveMembershipRequest {
+  string user_uuid = 1;
+  string group_uuid = 2;
+}
+
+message MembershipResponse {
+  string uuid = 1;
+  string error = 2;
+}
+
+message GetAttributesRequest {
+  string subject_uuid = 1;
+  string subject_type = 2;  // user, group
+}
+
+message AttributeRecord {
+  string uuid = 1;
+  string key = 2;
+  string value = 3;
+  string source = 4;
+}
+
+message AttributesResponse {
+  repeated AttributeRecord attributes = 1;
+  string error = 2;
+}
+
+message SetAttributeRequest {
+  string subject_uuid = 1;
+  string subject_type = 2;
+  string key = 3;
+  string value = 4;
+  string source = 5;
+}
+
+message AttributeResponse {
+  AttributeRecord attribute = 1;
+  string error = 2;
+}

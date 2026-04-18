@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: {{ .Values.deploymentKind | default "Deployment" }}
+metadata:
+  name: {{ include "checkpoint-ldap-agent.fullname" . }}
+  labels:
+    {{- include "checkpoint-ldap-agent.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  {{- if and (not .Values.autoscaling.enabled) (ne (.Values.deploymentKind | default "Deployment") "DaemonSet") }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "checkpoint-ldap-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "checkpoint-ldap-agent.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "checkpoint-ldap-agent.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: checkpoint-ldap-agent
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: ldap
+          containerPort: {{ .Values.service.ldapPort }}
+          protocol: TCP
+        - name: metrics
+          containerPort: {{ .Values.service.metricsPort }}
+          protocol: TCP
+        livenessProbe:
+          tcpSocket:
+            port: {{ .Values.service.ldapPort }}
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: {{ .Values.service.ldapPort }}
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        resources:
+          {{- toYaml .Values.resources | nindent 12 }}
+        env:
+        {{- range $key, $value := .Values.env }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
+        - name: AGENT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: checkpoint-ldap-agent-secrets
+              key: AGENT_TOKEN
+        - name: LDAP_BIND_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: checkpoint-ldap-agent-secrets
+              key: LDAP_BIND_PASSWORD

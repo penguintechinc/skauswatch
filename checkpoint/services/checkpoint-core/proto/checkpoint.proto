@@ -1,0 +1,137 @@
+syntax = "proto3";
+package checkpoint;
+option go_package = "github.com/penguintechinc/skauswatch/checkpoint/proto;checkpointpb";
+
+// CheckpointService is called by checkpoint-ldap-agent → checkpoint-core.
+// checkpoint-core uses CoreIdentityClient to proxy identity lookups to
+// skauswatch-core — it never owns user/group data directly.
+service CheckpointService {
+  // LDAP operations (proxied from ldap-agent)
+  rpc LdapBind(LdapBindRequest)       returns (LdapBindResponse);
+  rpc LdapSearch(LdapSearchRequest)   returns (LdapSearchResponse);
+  rpc LdapCompare(LdapCompareRequest) returns (LdapCompareResponse);
+  rpc LdapModify(LdapModifyRequest)   returns (LdapModifyResponse);
+
+  // Token introspection (used by ldap-agent and other services)
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+
+  // Agent lifecycle
+  rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+  rpc AgentHeartbeat(HeartbeatRequest)    returns (HeartbeatResponse);
+}
+
+// ── LDAP Bind ──────────────────────────────────────────────────────────────
+
+message LdapBindRequest {
+  string dn        = 1;  // e.g. uid=alice,ou=users,dc=skauswatch,dc=app
+  string password  = 2;  // plaintext — always over mTLS
+  string agent_id  = 3;  // ldap-agent registration ID
+  string client_ip = 4;  // original LDAP client IP (for audit)
+}
+
+message LdapBindResponse {
+  bool   success   = 1;
+  string user_uuid = 2;  // populated on success
+  string error     = 3;  // populated on failure
+}
+
+// ── LDAP Search ────────────────────────────────────────────────────────────
+
+message LdapSearchRequest {
+  string          base_dn    = 1;  // search base
+  string          filter     = 2;  // LDAP filter string, e.g. (uid=alice)
+  repeated string attributes = 3;  // empty = return all attributes
+  int32           scope      = 4;  // 0=base, 1=onelevel, 2=subtree
+  int32           size_limit = 5;  // 0 = server default (100)
+  string          agent_id   = 6;
+}
+
+message LdapSearchResponse {
+  repeated LdapEntry entries = 1;
+  string             error   = 2;
+}
+
+message LdapEntry {
+  string                  dn         = 1;
+  repeated LdapAttribute  attributes = 2;
+}
+
+message LdapAttribute {
+  string          type   = 1;  // attribute name, e.g. "mail"
+  repeated string values = 2;
+}
+
+// ── LDAP Compare ───────────────────────────────────────────────────────────
+
+message LdapCompareRequest {
+  string dn        = 1;
+  string attribute = 2;  // attribute to compare
+  string value     = 3;  // assertion value
+  string agent_id  = 4;
+}
+
+message LdapCompareResponse {
+  bool   matches = 1;
+  string error   = 2;
+}
+
+// ── LDAP Modify ────────────────────────────────────────────────────────────
+// NOTE: checkpoint-core is read-only for identity data.
+// Modify requests are rejected with an error unless they target
+// checkpoint-owned attributes (e.g. password change via OIDC).
+
+message LdapModifyRequest {
+  string                   dn            = 1;
+  repeated LdapModification modifications = 2;
+  string                   agent_id      = 3;
+}
+
+message LdapModification {
+  int32           operation = 1;  // 0=add, 1=delete, 2=replace
+  string          attribute = 2;
+  repeated string values    = 3;
+}
+
+message LdapModifyResponse {
+  bool   success = 1;
+  string error   = 2;
+}
+
+// ── Token Verification ─────────────────────────────────────────────────────
+
+message VerifyTokenRequest {
+  string token     = 1;  // raw Bearer token (access or opaque refresh)
+  string client_id = 2;  // optional: verify token was issued to this client
+}
+
+message VerifyTokenResponse {
+  bool   valid      = 1;
+  string user_uuid  = 2;
+  string scopes     = 3;  // space-separated
+  int64  expires_at = 4;  // Unix timestamp
+  string error      = 5;
+}
+
+// ── Agent Lifecycle ────────────────────────────────────────────────────────
+
+message RegisterAgentRequest {
+  string agent_id  = 1;  // unique agent identifier (e.g. UUIDv4)
+  string hostname  = 2;
+  string version   = 3;  // agent software version
+  string site_name = 4;  // logical site / location label
+}
+
+message RegisterAgentResponse {
+  bool   success = 1;
+  string error   = 2;
+}
+
+message HeartbeatRequest {
+  string agent_id  = 1;
+  int64  timestamp = 2;  // Unix timestamp of heartbeat
+  string status    = 3;  // "ok" | "degraded" | "error"
+}
+
+message HeartbeatResponse {
+  bool ok = 1;
+}

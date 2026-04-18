@@ -18,6 +18,41 @@ labels:
 resources:
 - ../../base
 
+images:
+- name: registry-dal2.penguintech.io/skauswatch/manager
+  newName: registry-dal2.penguintech.io/skauswatch/manager
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/pki-server
+  newName: registry-dal2.penguintech.io/skauswatch/pki-server
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/ssh-ca
+  newName: registry-dal2.penguintech.io/skauswatch/ssh-ca
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/aaa-monitor
+  newName: registry-dal2.penguintech.io/skauswatch/aaa-monitor
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/worker-s3
+  newName: registry-dal2.penguintech.io/skauswatch/worker-s3
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-worker-scanner
+  newName: registry-dal2.penguintech.io/skauswatch/worker-scanner
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-worker-darwin
+  newName: registry-dal2.penguintech.io/skauswatch/worker-darwin
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-webui
+  newName: registry-dal2.penguintech.io/skauswatch/webui
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-edr-agent
+  newName: registry-dal2.penguintech.io/skauswatch/edr-agent
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/checkpoint-core
+  newName: registry-dal2.penguintech.io/skauswatch/checkpoint-core
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/checkpoint-ldap-agent
+  newName: registry-dal2.penguintech.io/skauswatch/checkpoint-ldap-agent
+  newTag: latest
+
 replicas:
 - name: manager
   count: 2
@@ -37,6 +72,10 @@ replicas:
   count: 1
 - name: webui
   count: 2
+- name: checkpoint-core
+  count: 2
+- name: checkpoint-ldap-agent
+  count: 2
 
 configMapGenerator:
 - name: skauswatch-config
@@ -47,6 +86,9 @@ configMapGenerator:
   # IceBox shim env vars — pki-server and ssh-ca now proxy to IceBox services
   - ICEBOX_PKI_URL=http://icebox-pki-server.icebox.svc.cluster.local:8081
   - ICEBOX_SSH_CA_URL=http://icebox-ssh-ca.icebox.svc.cluster.local:8082
+  - CHECKPOINT_ISSUER_URL=https://checkpoint.skauswatch.penguintech.cloud
+  - CHECKPOINT_SAML_ENTITY_ID=https://checkpoint.skauswatch.penguintech.cloud/saml
+  - CHECKPOINT_LDAP_BASE_DN=dc=skauswatch,dc=app
 
 secretGenerator:
 - name: skauswatch-secrets

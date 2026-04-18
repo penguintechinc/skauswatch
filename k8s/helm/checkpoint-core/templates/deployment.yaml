@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "checkpoint-core.fullname" . }}
+  labels:
+    {{- include "checkpoint-core.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "checkpoint-core.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      annotations:
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "checkpoint-core.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "checkpoint-core.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: checkpoint-core
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.service.httpPort }}
+          protocol: TCP
+        - name: grpc
+          containerPort: {{ .Values.service.grpcPort }}
+          protocol: TCP
+        - name: ldap
+          containerPort: {{ .Values.service.ldapPort }}
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.service.httpPort }}
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: {{ .Values.service.httpPort }}
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        resources:
+          {{- toYaml .Values.resources | nindent 12 }}
+        env:
+        {{- range $key, $value := .Values.env }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
+        - name: CHECKPOINT_DB_HOST
+          value: {{ .Values.db.host | quote }}
+        - name: CHECKPOINT_DB_PORT
+          value: {{ .Values.db.port | quote }}
+        - name: CHECKPOINT_DB_NAME
+          value: {{ .Values.db.name | quote }}
+        - name: CHECKPOINT_DB_USER
+          value: {{ .Values.db.user | quote }}
+        - name: CHECKPOINT_DB_POOL_SIZE
+          value: {{ .Values.db.pool_size | quote }}
+        - name: CHECKPOINT_DB_TYPE
+          value: {{ .Values.db.type | quote }}
+        - name: CHECKPOINT_DB_PASS
+          valueFrom:
+            secretKeyRef:
+              name: checkpoint-core-secrets
+              key: DB_PASS
+        - name: CHECKPOINT_SIGNING_MEK
+          valueFrom:
+            secretKeyRef:
+              name: checkpoint-core-secrets
+              key: CHECKPOINT_SIGNING_MEK
+        - name: CHECKPOINT_LICENSE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: checkpoint-core-secrets
+              key: CHECKPOINT_LICENSE_KEY

@@ -17,6 +17,41 @@ labels:
 resources:
 - ../../base
 
+images:
+- name: registry-dal2.penguintech.io/skauswatch/manager
+  newName: registry.penguincloud.io/skauswatch/manager
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/pki-server
+  newName: registry.penguincloud.io/skauswatch/pki-server
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/ssh-ca
+  newName: registry.penguincloud.io/skauswatch/ssh-ca
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/aaa-monitor
+  newName: registry.penguincloud.io/skauswatch/aaa-monitor
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/worker-s3
+  newName: registry.penguincloud.io/skauswatch/worker-s3
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-worker-scanner
+  newName: registry.penguincloud.io/skauswatch/worker-scanner
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-worker-darwin
+  newName: registry.penguincloud.io/skauswatch/worker-darwin
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-webui
+  newName: registry.penguincloud.io/skauswatch/webui
+  newTag: latest
+- name: ghcr.io/penguintechinc/skauswatch-edr-agent
+  newName: registry.penguincloud.io/skauswatch/edr-agent
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/checkpoint-core
+  newName: registry.penguincloud.io/skauswatch/checkpoint-core
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/checkpoint-ldap-agent
+  newName: registry.penguincloud.io/skauswatch/checkpoint-ldap-agent
+  newTag: latest
+
 replicas:
 - name: manager
   count: 3
@@ -32,6 +67,10 @@ replicas:
   count: 3
 - name: webui
   count: 2
+- name: checkpoint-core
+  count: 3
+- name: checkpoint-ldap-agent
+  count: 3
 
 configMapGenerator:
 - name: skauswatch-config
@@ -39,6 +78,9 @@ configMapGenerator:
   literals:
   - LOG_LEVEL=WARN
   - RELEASE_MODE=true
+  - CHECKPOINT_ISSUER_URL=https://checkpoint.skauswatch.app
+  - CHECKPOINT_SAML_ENTITY_ID=https://checkpoint.skauswatch.app/saml
+  - CHECKPOINT_LDAP_BASE_DN=dc=skauswatch,dc=app
 
 secretGenerator:
 - name: skauswatch-secrets

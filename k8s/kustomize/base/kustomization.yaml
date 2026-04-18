@@ -34,6 +34,12 @@ resources:
 - manifests/webui/deployment.yaml
 - manifests/webui/service.yaml
 - manifests/edr-agent/daemonset.yaml
+- manifests/checkpoint-core/deployment.yaml
+- manifests/checkpoint-core/service.yaml
+- manifests/checkpoint-core/secret.yaml
+- manifests/checkpoint-ldap-agent/deployment.yaml
+- manifests/checkpoint-ldap-agent/service.yaml
+- manifests/checkpoint-ldap-agent/secret.yaml
 
 configMapGenerator:
 - name: skauswatch-config

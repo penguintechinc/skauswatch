@@ -1,0 +1,87 @@
+image:
+  repository: localhost:32000/checkpoint-core
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  httpPort: 8080
+  grpcPort: 50051
+  ldapPort: 389
+  ldapsPort: 636
+
+ingress:
+  enabled: false
+  host: ""
+  tlsSecret: ""
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+podSecurityContext: {}
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+
+env:
+  CHECKPOINT_PORT: "8080"
+  CHECKPOINT_GRPC_PORT: "50051"
+  CHECKPOINT_LDAP_PORT: "389"
+  CHECKPOINT_LDAP_ENABLED: "true"
+  CHECKPOINT_CORE_GRPC_HOST: "skauswatch-manager"
+  CHECKPOINT_CORE_GRPC_PORT: "50051"
+  CHECKPOINT_REQUIRE_PKCE: "true"
+  CHECKPOINT_TOKEN_TTL: "3600"
+  CHECKPOINT_REFRESH_TOKEN_TTL: "86400"
+  CHECKPOINT_AUTH_RATE_LIMIT_PER_MIN: "10"
+  CHECKPOINT_WATCHER_ENABLED: "false"
+  CHECKPOINT_ISSUER_URL: ""
+  CHECKPOINT_SAML_ENTITY_ID: ""
+  CHECKPOINT_LDAP_BASE_DN: "dc=skauswatch,dc=app"
+  LOG_LEVEL: "INFO"
+  RELEASE_MODE: "false"
+
+secrets:
+  DB_PASS: ""
+  CHECKPOINT_SIGNING_MEK: ""
+  CHECKPOINT_LICENSE_KEY: ""
+
+db:
+  host: "postgres"
+  port: "5432"
+  name: "skauswatch"
+  user: "checkpoint-rw"
+  pool_size: "10"
+  type: "postgresql"
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+ldapService:
+  type: ClusterIP
+  nodePort: null
+
+serviceAccount:
+  create: false
+  name: "skauswatch"
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"

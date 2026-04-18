@@ -347,6 +347,20 @@ async def serve(
             "./grpc/proto/s3_scan.proto"
         )
 
+    # Check if identity stubs are available
+    identity_available = False
+    try:
+        from grpc.generated import identity_pb2_grpc  # noqa: F401
+
+        identity_available = True
+    except ImportError:
+        logger.warning(
+            "Identity gRPC stubs not generated. Run: "
+            "python -m grpc_tools.protoc -I./grpc/protos "
+            "--python_out=./grpc/generated --grpc_python_out=./grpc/generated "
+            "./grpc/protos/identity.proto"
+        )
+
     server = grpc.aio.server(
         futures.ThreadPoolExecutor(max_workers=config.grpc.max_workers),
         options=[
@@ -379,6 +393,26 @@ async def serve(
         logger.info("S3ScanService registered")
     elif s3_scan_available:
         logger.warning("S3ScanService stubs available but managers not provided")
+
+    # Register IdentityService (always registered — consumed by Checkpoint sub-module)
+    if identity_available:
+        from grpc.generated.identity_pb2_grpc import (
+            add_IdentityServiceServicer_to_server,
+        )
+        from grpc.identity_service import IdentityServiceServicerImpl
+
+        add_IdentityServiceServicer_to_server(
+            IdentityServiceServicerImpl(db_uri=config.database.uri),
+            server,
+        )
+        logger.info("IdentityService registered")
+    else:
+        logger.warning(
+            "IdentityService unavailable — generate stubs with: "
+            "python -m grpc_tools.protoc -I./grpc/protos "
+            "--python_out=./grpc/generated --grpc_python_out=./grpc/generated "
+            "./grpc/protos/identity.proto"
+        )
 
     listen_addr = f"{config.grpc.host}:{config.grpc.port}"
     server.add_insecure_port(listen_addr)

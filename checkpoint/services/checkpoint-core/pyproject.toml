@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "checkpoint-core"
+version = "1.0.0"
+description = "checkpoint-core — OIDC/SAML/LDAP identity service"
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "--strict-markers --tb=short"
+
+[tool.coverage.run]
+source = ["."]
+omit = [
+    "tests/*",
+    "alembic/*",
+    "*/generated/*",
+    "*/__pycache__/*",
+    "*/venv/*",
+    # Infrastructure requiring live gRPC/LDAP/IDP connections — not unit-testable
+    "checkpoint_grpc/server.py",
+    "checkpoint_grpc/core_client.py",
+    "ldap/server.py",
+    "federation/sync.py",
+    "federation/proxy.py",
+]
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
+precision = 2
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]

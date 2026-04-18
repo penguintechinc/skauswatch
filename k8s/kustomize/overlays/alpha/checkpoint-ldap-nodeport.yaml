@@ -1,0 +1,17 @@
+---
+# Alpha overlay patch: expose checkpoint-core-ldap as NodePort for local development
+# Allows direct LDAP client access on the host at port 30389 without ingress.
+# NodePort is permitted in alpha/local environments per security standards.
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkpoint-core-ldap
+  namespace: skauswatch
+spec:
+  type: NodePort
+  ports:
+    - name: ldap
+      port: 389
+      targetPort: 389
+      nodePort: 30389
+      protocol: TCP

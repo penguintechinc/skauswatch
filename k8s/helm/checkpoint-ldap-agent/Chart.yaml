@@ -1,0 +1,14 @@
+apiVersion: v2
+name: checkpoint-ldap-agent
+description: SkausWatch Checkpoint LDAP Agent - remote VPC LDAP bridge
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skauswatch
+  - checkpoint
+  - ldap
+  - agent
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io

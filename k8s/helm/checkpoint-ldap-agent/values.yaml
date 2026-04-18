@@ -1,0 +1,60 @@
+image:
+  repository: localhost:32000/checkpoint-ldap-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# "Deployment" for single-node; "DaemonSet" for one-agent-per-node in a VPC
+deploymentKind: Deployment
+
+replicaCount: 1
+
+env:
+  AGENT_ID: "default-agent"
+  CHECKPOINT_GRPC_HOST: "checkpoint-core"
+  CHECKPOINT_GRPC_PORT: "50051"
+  SKAUSWATCH_CORE_URL: "http://skauswatch-manager:8080"
+  LDAP_PORT: "389"
+  LDAP_BASE_DN: "dc=skauswatch,dc=app"
+  AGENT_SITE_NAME: "default"
+  METRICS_PORT: "9090"
+  LOG_LEVEL: "INFO"
+
+secrets:
+  AGENT_TOKEN: ""
+  LDAP_BIND_PASSWORD: ""
+
+service:
+  ldapPort: 389
+  metricsPort: 9090
+  type: ClusterIP
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+podSecurityContext: {}
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+
+serviceAccount:
+  create: false
+  name: "skauswatch"
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"

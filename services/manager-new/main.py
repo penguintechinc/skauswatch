@@ -118,6 +118,13 @@ def create_app(config_instance: ManagerConfig = None) -> Quart:
             # Initialize database schema (SQLAlchemy - one time only)
             init_database_schema(config.database.uri)
 
+            # Register identity tables on the shared PyDAL instance so
+            # all Quart request handlers (and the Checkpoint auth routes)
+            # can query identity_* tables without each creating a fresh DAL.
+            from models.identity import init_identity_tables
+
+            init_identity_tables(get_db(config.database.uri))
+
             # Initialize Redis Stream Manager
             stream_manager = RedisStreamManager(
                 redis_url=config.redis.full_url,
@@ -278,6 +285,7 @@ def _register_blueprints(app: Quart) -> None:
         auth,
         darwin,
         edr,
+        modules,
         research,
         s3_scan,
         siem,
@@ -296,6 +304,7 @@ def _register_blueprints(app: Quart) -> None:
     app.register_blueprint(siem.bp, url_prefix="/api/v1/siem")
     app.register_blueprint(asm.bp, url_prefix="/api/v1/asm")
     app.register_blueprint(darwin.bp, url_prefix="/api/v1/darwin")
+    app.register_blueprint(modules.bp, url_prefix="/api/v1/modules")
 
 
 async def _start_background_tasks() -> None:
@@ -328,6 +337,14 @@ async def _start_background_tasks() -> None:
         process_alert,
     )
     background_tasks.append(task)
+
+    # Elder push loop — syncs identity_users changes to the Elder REST API.
+    # ElderPushLoop.run() returns immediately when ELDER_PUSH_ENABLED != "true",
+    # so it is safe to schedule unconditionally on every startup.
+    from integrations.elder_push import ElderPushLoop
+
+    elder_loop = ElderPushLoop(config.database.uri)
+    background_tasks.append(asyncio.create_task(elder_loop.run()))
 
     logger.info("Background tasks started", count=len(background_tasks))
 

@@ -75,6 +75,9 @@ export interface NavCategory {
   roles?: UserRole[];
 }
 
+// Module registry types
+export type { ModuleMap } from './modules';
+
 // Tab types
 export interface Tab {
   id: string;

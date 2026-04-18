@@ -1,0 +1,20 @@
+image:
+  repository: registry.penguincloud.io/skauswatch/checkpoint-ldap-agent
+  pullPolicy: Always
+
+# DaemonSet for prod: one agent per node for LDAP proxying
+deploymentKind: DaemonSet
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+env:
+  CHECKPOINT_GRPC_HOST: "checkpoint-core"
+  LDAP_BASE_DN: "dc=skauswatch,dc=app"
+  AGENT_SITE_NAME: "production"
+  LOG_LEVEL: "WARN"

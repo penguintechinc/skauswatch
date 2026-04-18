@@ -1,0 +1,12 @@
+image:
+  repository: localhost:32000/checkpoint-ldap-agent
+  pullPolicy: IfNotPresent
+
+deploymentKind: Deployment
+replicaCount: 1
+
+env:
+  CHECKPOINT_GRPC_HOST: "checkpoint-core"
+  LDAP_BASE_DN: "dc=skauswatch,dc=app"
+  AGENT_SITE_NAME: "alpha-local"
+  LOG_LEVEL: "DEBUG"

@@ -1,0 +1,29 @@
+image:
+  repository: localhost:32000/checkpoint-core
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+env:
+  CHECKPOINT_ISSUER_URL: "https://checkpoint.skauswatch.localhost.local"
+  CHECKPOINT_SAML_ENTITY_ID: "https://checkpoint.skauswatch.localhost.local/saml"
+  CHECKPOINT_LDAP_BASE_DN: "dc=skauswatch,dc=app"
+  LOG_LEVEL: "DEBUG"
+  RELEASE_MODE: "false"
+
+ingress:
+  enabled: true
+  host: "checkpoint.skauswatch.localhost.local"
+  className: nginx
+
+ldapService:
+  type: NodePort
+  nodePort: 30389

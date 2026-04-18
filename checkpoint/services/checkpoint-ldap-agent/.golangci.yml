@@ -1,0 +1,22 @@
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - staticcheck
+    - gosec
+    - errcheck
+    - ineffassign
+    - unused
+
+linters-settings:
+  gosec:
+    excludes:
+      - G402  # TLS MinVersion — handled explicitly at the service mesh layer
+
+issues:
+  exclude-rules:
+    - path: proto/
+      linters:
+        - errcheck
+        - unused  # generated stub code

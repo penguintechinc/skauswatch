@@ -17,6 +17,7 @@ labels:
 
 resources:
 - ../../base
+- checkpoint-ldap-nodeport.yaml
 
 images:
 - name: registry-dal2.penguintech.io/skauswatch/manager
@@ -46,6 +47,12 @@ images:
 - name: ghcr.io/penguintechinc/skauswatch-edr-agent
   newName: localhost:32000/skauswatch-edr-agent
   newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/checkpoint-core
+  newName: localhost:32000/checkpoint-core
+  newTag: latest
+- name: registry-dal2.penguintech.io/skauswatch/checkpoint-ldap-agent
+  newName: localhost:32000/checkpoint-ldap-agent
+  newTag: latest
 
 
 replicas:
@@ -67,6 +74,10 @@ replicas:
   count: 1
 - name: webui
   count: 1
+- name: checkpoint-core
+  count: 1
+- name: checkpoint-ldap-agent
+  count: 1
 
 configMapGenerator:
 - name: skauswatch-config
@@ -77,6 +88,9 @@ configMapGenerator:
   # IceBox shim env vars — pki-server and ssh-ca now proxy to IceBox services
   - ICEBOX_PKI_URL=http://icebox-pki-server.icebox.svc.cluster.local:8081
   - ICEBOX_SSH_CA_URL=http://icebox-ssh-ca.icebox.svc.cluster.local:8082
+  - CHECKPOINT_ISSUER_URL=https://checkpoint.skauswatch.localhost.local
+  - CHECKPOINT_SAML_ENTITY_ID=https://checkpoint.skauswatch.localhost.local/saml
+  - CHECKPOINT_LDAP_BASE_DN=dc=skauswatch,dc=app
 
 secretGenerator:
 - name: skauswatch-secrets

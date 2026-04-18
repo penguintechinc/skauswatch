@@ -1,0 +1,57 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "checkpoint-core.fullname" . }}-netpol
+  labels:
+    {{- include "checkpoint-core.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "checkpoint-core.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow intra-namespace traffic (webui, manager, other skauswatch pods)
+    - from:
+        - podSelector: {}
+    # Allow from checkpoint-ldap-agent namespace
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: checkpoint-ldap-agent
+  egress:
+    # Allow intra-namespace traffic (postgres, redis, manager)
+    - to:
+        - podSelector: {}
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow gRPC to skauswatch-manager (port 50051) in same namespace
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: manager
+      ports:
+        - protocol: TCP
+          port: 50051
+    # Allow license server access
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443

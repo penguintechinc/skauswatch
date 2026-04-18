@@ -1,0 +1,20 @@
+image:
+  repository: registry-dal2.penguintech.io/skauswatch/checkpoint-ldap-agent
+  pullPolicy: Always
+
+deploymentKind: Deployment
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+env:
+  CHECKPOINT_GRPC_HOST: "checkpoint-core"
+  LDAP_BASE_DN: "dc=skauswatch,dc=app"
+  AGENT_SITE_NAME: "beta"
+  LOG_LEVEL: "INFO"
