@@ -4,7 +4,7 @@
 # ============================================================================
 # Stage 1: Builder - Install dependencies and download tools
 # ============================================================================
-FROM python:3.13-slim-bookworm AS builder
+FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS builder
 
 WORKDIR /build
 
@@ -31,7 +31,7 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # ============================================================================
 # Stage 2: Runtime - Minimal production image
 # ============================================================================
-FROM python:3.13-slim-bookworm
+FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb
 
 # Labels
 LABEL maintainer="Penguin Tech Inc"
