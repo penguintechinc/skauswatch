@@ -35,14 +35,14 @@ resources:
     memory: 256Mi
 
 ingress:
+  enabled: false
+
+httproute:
   enabled: true
-  className: "nginx"
-  hosts:
-    - host: skauswatch.penguintech.cloud
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - secretName: penguintech-wildcard-tls
-      hosts:
-        - skauswatch.penguintech.cloud
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.penguintech.cloud
+  rules:
+    - path: /api
+      service: skauswatch-manager
+      port: 5000
