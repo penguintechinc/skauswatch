@@ -348,8 +348,8 @@ class EDRAgentRegisterRequest(BaseModel):
 
     agent_id: str = Field(..., min_length=1, max_length=128)
     hostname: str = Field(..., max_length=255)
-    ip_address: str = Field(..., max_length=45)
-    os_type: str = Field(..., max_length=50)
+    ip_address: str = Field(default="", max_length=45)
+    os_type: str = Field(default="unknown", max_length=50)
     os_version: str = Field(default="", max_length=100)
     agent_version: str = Field(..., max_length=32)
     metadata: Dict[str, Any] = Field(default_factory=dict)

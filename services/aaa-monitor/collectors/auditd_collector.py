@@ -41,11 +41,11 @@ logger = structlog.get_logger(__name__)
 class AuditdCollector:
     """Completely clientless auditd log collector for hypervisor AAA monitoring"""
 
-    def __init__(self, config: Dict[str, Any], log_processor, analysis_engine):
+    def __init__(self, config, log_processor, analysis_engine):
         """Initialize Auditd collector
 
         Args:
-            config: Auditd collector configuration
+            config: Auditd collector configuration (dataclass)
             log_processor: Log processor instance
             analysis_engine: Analysis engine instance
         """

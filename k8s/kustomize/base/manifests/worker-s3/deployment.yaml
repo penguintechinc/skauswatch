@@ -81,6 +81,8 @@ spec:
             secretKeyRef:
               name: skauswatch-secrets
               key: REDIS_PASSWORD
+        - name: REDIS_URL
+          value: "redis://default:$(REDIS_PASSWORD)@$(REDIS_HOST):$(REDIS_PORT)/0"
         - name: LICENSE_SERVER_URL
           valueFrom:
             configMapKeyRef:

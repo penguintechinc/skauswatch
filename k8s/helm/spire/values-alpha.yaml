@@ -1,0 +1,17 @@
+spire:
+  enabled: true
+  environment: "alpha"
+
+  server:
+    replicaCount: 1
+    dataStore:
+      type: sqlite
+
+  federation:
+    enabled: false
+
+  oidcProvider:
+    enabled: false
+
+  autoEnroll:
+    enabled: true

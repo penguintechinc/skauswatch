@@ -17,7 +17,6 @@ from urllib.parse import urlparse
 import stix2
 import structlog
 from stix2 import MemoryStore
-from stix2.utils import new_version
 
 from ..models import IOC, ThreatLevel
 
@@ -428,6 +427,37 @@ class STIXParser:
 
         except Exception as e:
             logger.error("Error parsing STIX malware", error=str(e))
+            return None
+
+    async def _parse_malware_analysis(self, obj: Dict[str, Any]) -> Optional[IOC]:
+        """Parse STIX malware-analysis object"""
+        try:
+            name = obj.get("result_name", "") or obj.get("name", "")
+            description = obj.get("analysis", "")
+
+            if not name:
+                return None
+
+            # Extract threat level based on analysis result
+            threat_level = ThreatLevel.MEDIUM
+            result = obj.get("result", "").lower()
+            if result in ["malicious", "suspicious"]:
+                threat_level = ThreatLevel.HIGH
+            elif result in ["clean", "benign"]:
+                threat_level = ThreatLevel.LOW
+
+            return IOC(
+                type="malware-analysis",
+                value=name,
+                description=description,
+                threat_level=threat_level,
+                confidence=0.7,
+                tags=["malware-analysis"],
+                kill_chain_phases=self._extract_kill_chain_phases(obj),
+            )
+
+        except Exception as e:
+            logger.error("Error parsing STIX malware-analysis", error=str(e))
             return None
 
     async def _parse_attack_pattern(self, obj: Dict[str, Any]) -> Optional[IOC]:

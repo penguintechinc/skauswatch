@@ -34,6 +34,9 @@ structlog>=24.1.0
 # Configuration
 pyyaml>=6.0.1
 
+# HTTP Client
+aiohttp>=3.9.0
+
 # Utilities
 python-dateutil>=2.8.0
 
@@ -41,3 +44,6 @@ python-dateutil>=2.8.0
 penguin-libs>=0.1.0          # Validation, HTTP, gRPC utilities
 penguin-licensing>=0.1.0     # License server client
 penguin-utils>=0.1.0         # Sanitized logging, Flask utils
+
+# Build tools (pinned for grpcio-tools)
+setuptools>=77.0.1

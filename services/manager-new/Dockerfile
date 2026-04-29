@@ -1,7 +1,7 @@
 # SkausWatch Manager Service
 # Multi-stage build for production deployment
 
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS builder
+FROM python:3.13-slim-bookworm@sha256:bb73517d48bd32016e15eade0c009b2724ec3a025a9975b5cd9b251d0dcadb33 AS builder
 
 WORKDIR /build
 
@@ -35,7 +35,7 @@ RUN mkdir -p ./grpc/generated && \
     fi
 
 # Production image
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb
+FROM python:3.13-slim-bookworm@sha256:bb73517d48bd32016e15eade0c009b2724ec3a025a9975b5cd9b251d0dcadb33
 
 LABEL maintainer="Penguin Tech Inc <support@penguintech.io>"
 LABEL description="SkausWatch Manager Service"

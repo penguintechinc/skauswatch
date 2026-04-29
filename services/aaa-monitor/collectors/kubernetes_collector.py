@@ -10,10 +10,12 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import re
 import ssl
 import traceback
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 from urllib.parse import urlencode, urljoin
 
@@ -37,11 +39,11 @@ logger = structlog.get_logger(__name__)
 class KubernetesCollector:
     """Kubernetes log collector for AAA monitoring"""
 
-    def __init__(self, config: Dict[str, Any], log_processor, analysis_engine):
+    def __init__(self, config, log_processor, analysis_engine):
         """Initialize Kubernetes collector
 
         Args:
-            config: Kubernetes collector configuration
+            config: Kubernetes collector configuration (dataclass)
             log_processor: Log processor instance
             analysis_engine: Analysis engine instance
         """
@@ -116,12 +118,22 @@ class KubernetesCollector:
                 session_id = f"k8s-{i}"
 
                 # Create SSL context
-                ssl_context = ssl.create_default_context()
-                if not api_config.verify_ssl:
+                ssl_context = None
+
+                # Check for Kubernetes in-cluster CA certificate (most common)
+                k8s_ca_file = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+                if Path(k8s_ca_file).exists():
+                    ssl_context = ssl.create_default_context(cafile=k8s_ca_file)
+                elif not api_config.verify_ssl:
+                    # Skip SSL verification in development (alpha)
+                    ssl_context = ssl.create_default_context()
                     ssl_context.check_hostname = False
                     ssl_context.verify_mode = ssl.CERT_NONE
                 elif api_config.ca_file:
+                    ssl_context = ssl.create_default_context()
                     ssl_context.load_verify_locations(api_config.ca_file)
+                else:
+                    ssl_context = ssl.create_default_context()
 
                 if api_config.cert_file and api_config.key_file:
                     ssl_context.load_cert_chain(
@@ -244,19 +256,19 @@ class KubernetesCollector:
 
         try:
             # Start different collection streams
-            if self.config.get("collect_pod_logs", True):
+            if getattr(self.config, "collect_pod_logs", True):
                 task = asyncio.create_task(self._collect_pod_logs())
                 self.collection_tasks.append(task)
 
-            if self.config.get("collect_events", True):
+            if getattr(self.config, "collect_events", True):
                 task = asyncio.create_task(self._collect_events())
                 self.collection_tasks.append(task)
 
-            if self.config.get("collect_audit_logs", True):
+            if getattr(self.config, "collect_audit_logs", True):
                 task = asyncio.create_task(self._collect_audit_logs())
                 self.collection_tasks.append(task)
 
-            if self.config.get("monitor_rbac", True):
+            if getattr(self.config, "monitor_rbac", True):
                 task = asyncio.create_task(self._monitor_rbac_violations())
                 self.collection_tasks.append(task)
 
@@ -1143,7 +1155,7 @@ class KubernetesCollector:
                 try:
                     # Check for RBAC-related events
                     # This could monitor specific patterns in logs or events
-                    await asyncio.sleep(self.config.get("rbac_check_interval", 60))
+                    await asyncio.sleep(getattr(self.config, "rbac_check_interval", 60))
 
                     # TODO: Implement specific RBAC violation detection
                     # This would analyze recent events/logs for RBAC patterns

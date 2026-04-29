@@ -1,7 +1,7 @@
 # SkausWatch EDR Agent
 # Multi-stage build for minimal production image
 
-FROM golang:1.24-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS builder
+FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS builder
 
 WORKDIR /build
 
@@ -22,7 +22,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     ./cmd/edr-agent
 
 # Production image
-FROM debian:bookworm-slim@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb
+FROM debian:bookworm-slim@sha256:f9c6a2fd2ddbc23e336b6257a5245e31f996953ef06cd13a59fa0a1df2d5c252
 
 LABEL maintainer="Penguin Tech Inc <support@penguintech.io>"
 LABEL description="SkausWatch EDR Agent"

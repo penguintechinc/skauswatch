@@ -1,0 +1,86 @@
+{{- if .Values.spire.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-server-config
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+data:
+  server.conf: |
+    server {
+      bind_address = "0.0.0.0"
+      bind_port = "{{ .Values.spire.server.ports.grpc }}"
+      socket_path = "/tmp/spire-server/private/api.sock"
+      trust_domain = "{{ .Values.spire.trustDomain }}"
+      data_dir = "/run/spire/data"
+      log_level = "INFO"
+      ca_ttl = "168h"
+      default_svid_ttl = "1h"
+      {{- if .Values.spire.federation.enabled }}
+      federation {
+        bundle_endpoint {
+          address = "0.0.0.0"
+          port = {{ .Values.spire.federation.bundleEndpoint.port }}
+        }
+        {{- range .Values.spire.federation.peers }}
+        federates_with "{{ .trustDomain }}" {
+          bundle_endpoint_url = "{{ .bundleEndpointURL }}"
+          bundle_endpoint_profile "{{ .bundleEndpointProfile | default "https_spiffe" }}" {
+            endpoint_spiffe_id = "{{ .endpointSPIFFEID }}"
+          }
+        }
+        {{- end }}
+      }
+      {{- end }}
+    }
+
+    plugins {
+      DataStore "sql" {
+        plugin_data {
+          {{- if eq .Values.spire.server.dataStore.type "postgresql" }}
+          database_type = "postgres"
+          connection_string = "dbname={{ .Values.spire.server.dataStore.postgresql.dbName }} host={{ .Values.spire.server.dataStore.postgresql.host }} user=${SPIRE_DB_USER} password=${SPIRE_DB_PASS} port={{ .Values.spire.server.dataStore.postgresql.port }} sslmode=disable"
+          {{- else }}
+          database_type = "sqlite3"
+          connection_string = "{{ .Values.spire.server.dataStore.sqlite.path }}"
+          {{- end }}
+        }
+      }
+      {{- if .Values.spire.server.nodeAttestation.k8sSat.enabled }}
+      NodeAttestor "k8s_sat" {
+        plugin_data {
+          clusters = {
+            "{{ .Values.spire.server.nodeAttestation.k8sSat.cluster }}" = {
+              service_account_allow_list = [{{ range .Values.spire.server.nodeAttestation.k8sSat.serviceAccountAllowList }}"{{ . }}", {{ end }}]
+            }
+          }
+        }
+      }
+      {{- end }}
+      {{- if .Values.spire.server.nodeAttestation.joinToken.enabled }}
+      NodeAttestor "join_token" {
+        plugin_data {}
+      }
+      {{- end }}
+      KeyManager "disk" {
+        plugin_data {
+          keys_path = "/run/spire/data/keys.json"
+        }
+      }
+      Notifier "k8sbundle" {
+        plugin_data {
+          namespace = "{{ .Release.Namespace }}"
+          config_map = "{{ include "skauswatch-spire.fullname" . }}-bundle"
+        }
+      }
+    }
+
+    health_checks {
+      listener_enabled = true
+      bind_address = "0.0.0.0"
+      bind_port = "{{ .Values.spire.server.ports.healthCheck }}"
+      live_path = "/live"
+      ready_path = "/ready"
+    }
+{{- end }}

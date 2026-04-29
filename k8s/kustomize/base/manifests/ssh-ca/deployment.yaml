@@ -104,6 +104,13 @@ spec:
             configMapKeyRef:
               name: skauswatch-config
               key: RELEASE_MODE
+        - name: API_PORT
+          value: "5002"
+        - name: ICEBOX_SSH_CA_URL
+          valueFrom:
+            configMapKeyRef:
+              name: skauswatch-config
+              key: ICEBOX_SSH_CA_URL
         livenessProbe:
           httpGet:
             path: /healthz

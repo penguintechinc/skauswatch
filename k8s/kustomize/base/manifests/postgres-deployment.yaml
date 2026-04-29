@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
       - name: postgres
-        image: postgres:16-alpine
+        image: postgres:16-bookworm@sha256:aefb61c5ac3326e56a7b769fa655fe00af0e335c1b9b65182bd6f6233dd12aad
         imagePullPolicy: IfNotPresent
         ports:
         - name: postgres

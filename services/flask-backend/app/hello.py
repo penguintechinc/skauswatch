@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from flask import Blueprint, jsonify
+from quart import Blueprint, jsonify
 
 from .middleware import auth_required, get_current_user, maintainer_or_admin_required
 
@@ -11,7 +11,7 @@ hello_bp = Blueprint("hello", __name__)
 
 @hello_bp.route("/hello", methods=["GET"])
 @auth_required
-def hello():
+async def hello():
     """Hello world endpoint - requires authentication."""
     user = get_current_user()
 
@@ -34,7 +34,7 @@ def hello():
 @hello_bp.route("/hello/protected", methods=["GET"])
 @auth_required
 @maintainer_or_admin_required
-def hello_protected():
+async def hello_protected():
     """Protected hello - requires maintainer or admin role."""
     user = get_current_user()
 
@@ -52,7 +52,7 @@ def hello_protected():
 
 
 @hello_bp.route("/status", methods=["GET"])
-def status():
+async def status():
     """Public status endpoint - no authentication required."""
     return (
         jsonify(

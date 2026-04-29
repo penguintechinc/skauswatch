@@ -202,8 +202,8 @@ class SSHConnection:
     """SSH connection for direct log access"""
 
     host: str
-    port: int = 22
     username: str
+    port: int = 22
     password: Optional[str] = None
     key_file: Optional[str] = None
     key_passphrase: Optional[str] = None
@@ -347,7 +347,7 @@ class LogProcessingConfig:
 class ClassificationConfig:
     """Event classification configuration"""
 
-    model_dir: str = "/app/models"
+    model_dir: str = "/workspace/models"
     max_training_samples: int = 10000
     retrain_interval: int = 1000
     max_features: int = 1000
@@ -378,7 +378,7 @@ class TAXIIConfig:
 class ThreatIntelConfig:
     """Threat intelligence configuration"""
 
-    database_path: str = "/app/data/threat.db"
+    database_path: str = "/workspace/data/threat.db"
     minimum_confidence: float = 0.3
     enable_fuzzy_matching: bool = True
     fuzzy_threshold: float = 0.8

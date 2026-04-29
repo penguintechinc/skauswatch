@@ -17,6 +17,12 @@ resources:
 - manifests/namespace.yaml
 - manifests/rbac.yaml
 - manifests/tls-secret.yaml
+- manifests/postgres-deployment.yaml
+- manifests/postgres-service.yaml
+- manifests/postgres-secrets.yaml
+- manifests/redis-deployment.yaml
+- manifests/redis-service.yaml
+- manifests/redis-secrets.yaml
 - manifests/manager/deployment.yaml
 - manifests/manager/service.yaml
 - manifests/pki-server/deployment.yaml

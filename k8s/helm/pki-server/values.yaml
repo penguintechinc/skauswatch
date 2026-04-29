@@ -43,6 +43,13 @@ ingress:
   hosts: []
   tls: []
 
+httproute:
+  enabled: false
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.example.com
+  rules: []
+
 resources:
   limits:
     cpu: 500m

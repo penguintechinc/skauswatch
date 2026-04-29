@@ -1,0 +1,54 @@
+{{- if .Values.spire.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-agent
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: agent
+  namespace: {{ .Release.Namespace }}
+data:
+  agent.hcl: |
+    agent {
+      data_dir = "/run/spire/agent"
+      log_level = "INFO"
+      server_address = "{{ include "skauswatch-spire.fullname" . }}-server"
+      server_port = "{{ .Values.spire.server.ports.grpc }}"
+      socket_path = "{{ .Values.spire.agent.socketPath }}"
+      trust_domain = "{{ .Values.spire.trustDomain }}"
+      trust_bundle_path = "/run/spire/bundle/bundle.crt"
+      insecure_bootstrap = false
+    }
+
+    plugins {
+      NodeAttestor "k8s_sat" {
+        plugin_data {
+          cluster = "{{ .Values.spire.server.nodeAttestation.k8sSat.cluster }}"
+        }
+      }
+
+      KeyManager "memory" {
+        plugin_data {}
+      }
+      {{- if .Values.spire.agent.workloadAttestors.k8s.enabled }}
+      WorkloadAttestor "k8s" {
+        plugin_data {
+          skip_kubelet_verification = {{ .Values.spire.agent.workloadAttestors.k8s.skipKubeletVerification }}
+        }
+      }
+      {{- end }}
+      {{- if .Values.spire.agent.workloadAttestors.unix.enabled }}
+      WorkloadAttestor "unix" {
+        plugin_data {}
+      }
+      {{- end }}
+    }
+
+    health_checks {
+      listener_enabled = true
+      bind_address = "0.0.0.0"
+      bind_port = "8080"
+      live_path = "/live"
+      ready_path = "/ready"
+    }
+{{- end }}

@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 
-import aioredis
+from redis import asyncio as aioredis
 import structlog
 
 from ..models import AIProvider

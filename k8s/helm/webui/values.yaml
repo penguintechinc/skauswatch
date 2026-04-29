@@ -47,6 +47,16 @@ ingress:
           pathType: Prefix
   tls: []
 
+httproute:
+  enabled: false
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.example.com
+  rules:
+    - path: /
+      service: skauswatch-webui
+      port: 3000
+
 resources:
   limits:
     cpu: "1"

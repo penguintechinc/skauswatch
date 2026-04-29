@@ -41,6 +41,8 @@ spec:
             configMapKeyRef:
               name: skauswatch-config
               key: MANAGER_URL
+        - name: EDR_MANAGER_URL
+          value: "$(MANAGER_URL)"
         - name: LOG_LEVEL
           valueFrom:
             configMapKeyRef:
@@ -64,6 +66,11 @@ spec:
             configMapKeyRef:
               name: skauswatch-config
               key: RELEASE_MODE
+        - name: EDR_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: skauswatch-secrets
+              key: EDR_API_KEY
         livenessProbe:
           exec:
             command:

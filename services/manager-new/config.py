@@ -53,11 +53,10 @@ class RedisConfig(BaseModel):
     @property
     def full_url(self) -> str:
         """Build Redis URL with password if provided."""
-        if self.password and "://:@" not in self.url:
-            # Insert password into URL
+        if self.password and "@" not in self.url:
             if "://" in self.url:
                 protocol, rest = self.url.split("://", 1)
-                return f"{protocol}://:{self.password}@{rest}"
+                return f"{protocol}://default:{self.password}@{rest}"
         return self.url
 
 

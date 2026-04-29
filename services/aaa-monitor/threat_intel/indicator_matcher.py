@@ -525,12 +525,25 @@ class IndicatorMatcher:
             self.match_cache[cache_key] = matches
             self.cache_timestamps[cache_key] = datetime.utcnow()
 
-            # Clean old cache entries periodically
             if len(self.match_cache) > 10000:  # Arbitrary limit
-                await self._cleanup_cache()
+                self._cleanup_cache_sync()
 
         except Exception as e:
             logger.error("Error caching matches", error=str(e))
+
+    def _cleanup_cache_sync(self):
+        """Clean up expired cache entries (sync version for non-async callers)."""
+        try:
+            current_time = datetime.utcnow()
+            expired_keys = [
+                k for k, ts in self.cache_timestamps.items()
+                if (current_time - ts).total_seconds() > self.match_cache_ttl
+            ]
+            for k in expired_keys:
+                self.match_cache.pop(k, None)
+                self.cache_timestamps.pop(k, None)
+        except Exception as e:
+            logger.error("Error cleaning cache", error=str(e))
 
     async def _cleanup_cache(self):
         """Clean up expired cache entries"""

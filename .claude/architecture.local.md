@@ -106,6 +106,23 @@ SkausWatch is an S3 malware and threat-intelligence scanning platform. Core func
 - **JIT token**: Just-in-time access token; format `jit:{grant_id}:{grantee_id}:{expires_epoch}`; SHA-256 stored in DB
 - **One-time secret**: Secret viewable exactly once; SHA-256(URL token) stored; `viewed_at` set atomically before decrypt
 
+## Alpha Cluster (Local Development)
+
+Alpha uses a local single-node Kubernetes cluster. The exact runtime depends on the developer machine:
+
+| Platform | Runtime | API endpoint |
+|----------|---------|-------------|
+| Linux workstations | MicroK8s | `192.168.2.234:16443` (or `127.0.0.1:16443` via snap socket) |
+| macOS (Docker Desktop) | Docker Desktop K8s | `127.0.0.1:6443` |
+
+Both expose as kubectl context `local-alpha`. Start commands:
+- MicroK8s: `microk8s start`
+- Docker Desktop: Enable Kubernetes in Docker Desktop → Preferences → Kubernetes
+
+Registry for alpha images: `localhost:32000` (MicroK8s built-in) or `localhost:5000` (Docker Desktop — run a local registry container). Enable MicroK8s registry: `microk8s enable registry`.
+
+All `kubectl --context local-alpha` commands work identically regardless of runtime.
+
 ## Integration Patterns
 
 - **Manager to Worker-S3**: Manager publishes scan jobs to Redis Streams; Worker-S3 consumes and processes

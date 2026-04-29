@@ -1,6 +1,6 @@
 # Multi-stage build for SkausWatch PKI Server Service
 # Stage 1: Build stage
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb as builder
+FROM python:3.13-slim-bookworm@sha256:bb73517d48bd32016e15eade0c009b2724ec3a025a9975b5cd9b251d0dcadb33 as builder
 
 # Set build arguments
 ARG BUILD_DATE
@@ -41,7 +41,7 @@ RUN pip install --no-cache-dir -e .[dev] && \
     pip install --no-cache-dir -r requirements-dev.txt
 
 # Stage 2: Runtime stage
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb as runtime
+FROM python:3.13-slim-bookworm@sha256:bb73517d48bd32016e15eade0c009b2724ec3a025a9975b5cd9b251d0dcadb33 as runtime
 
 # Set runtime arguments
 ARG BUILD_DATE

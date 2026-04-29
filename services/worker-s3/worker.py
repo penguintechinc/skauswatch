@@ -458,22 +458,22 @@ class S3ScanWorker:
             self.file_detector = FileTypeDetector()
             logger.info("FileTypeDetector initialized")
 
-            # Initialize ClamAV scanner
+            # Initialize ClamAV scanner (optional — degrades gracefully if daemon absent)
             try:
                 self.clamav_scanner = ClamAVScanner(
                     socket_path=self.config.clamd_socket,
                     timeout=self.config.clamd_timeout,
                 )
-                # Test connectivity
                 if self.clamav_scanner.ping():
                     logger.info(
                         f"ClamAV scanner initialized: {self.config.clamd_socket}"
                     )
                 else:
-                    raise RuntimeError("ClamAV daemon not responding to ping")
+                    logger.warning("ClamAV daemon not responding — scanning disabled")
+                    self.clamav_scanner = None
             except Exception as e:
-                logger.error(f"Failed to initialize ClamAV: {e}")
-                raise
+                logger.warning(f"ClamAV unavailable ({e}) — scanning disabled")
+                self.clamav_scanner = None
 
             # Initialize YARA scanner (optional)
             if self.config.yara_enabled:

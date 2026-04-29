@@ -1,0 +1,87 @@
+{{- if and .Values.spire.enabled .Values.spire.autoEnroll.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-enroll-script
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+data:
+  enroll.sh: |
+    #!/bin/sh
+    set -e
+
+    NAMESPACE="{{ .Release.Namespace }}"
+    TRUST_DOMAIN="{{ .Values.spire.trustDomain }}"
+    ENV="{{ .Values.spire.environment }}"
+    SERVER_POD=$(kubectl get pod -n $NAMESPACE -l "component=server,app.kubernetes.io/name=skauswatch-spire" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+
+    if [ -z "$SERVER_POD" ]; then
+      echo "ERROR: spire-server pod not found in namespace $NAMESPACE"
+      exit 1
+    fi
+
+    echo "Found spire-server pod: $SERVER_POD"
+
+    # Wait for server to be ready
+    RETRY_COUNT=0
+    MAX_RETRIES=30
+    until kubectl exec -n $NAMESPACE $SERVER_POD -- /opt/spire/bin/spire-server healthcheck -socketPath /tmp/spire-server/private/api.sock > /dev/null 2>&1; do
+      RETRY_COUNT=$((RETRY_COUNT+1))
+      if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
+        echo "ERROR: spire-server failed to become ready after $MAX_RETRIES attempts"
+        exit 1
+      fi
+      echo "Waiting for spire-server to be ready... (attempt $RETRY_COUNT/$MAX_RETRIES)"
+      sleep 2
+    done
+
+    echo "spire-server is ready"
+
+    register_entry() {
+      local svc_name="$1"
+      local ns="$2"
+      local sa="$3"
+
+      # Check if entry already exists
+      EXISTING=$(kubectl exec -n $NAMESPACE $SERVER_POD -- /opt/spire/bin/spire-server entry show \
+        -socketPath /tmp/spire-server/private/api.sock \
+        -spiffeID "spiffe://${TRUST_DOMAIN}/${ENV}/${svc_name}" 2>/dev/null | grep -c "Entry ID" || echo 0)
+
+      if [ "$EXISTING" -eq 0 ]; then
+        if kubectl exec -n $NAMESPACE $SERVER_POD -- /opt/spire/bin/spire-server entry create \
+          -socketPath /tmp/spire-server/private/api.sock \
+          -spiffeID "spiffe://${TRUST_DOMAIN}/${ENV}/${svc_name}" \
+          -parentID "spiffe://${TRUST_DOMAIN}/spire/agent/k8s_sat/${ns}/${sa}" \
+          -selector "k8s:ns:${ns}" \
+          -selector "k8s:sa:${sa}" > /dev/null 2>&1; then
+          echo "✓ Registered: ${svc_name} in namespace ${ns}"
+        else
+          echo "✗ Failed to register: ${svc_name} in namespace ${ns}"
+          return 1
+        fi
+      else
+        echo "~ Already registered: ${svc_name}"
+      fi
+      return 0
+    }
+
+    echo ""
+    echo "Registering SkausWatch services..."
+    {{- range .Values.spire.autoEnroll.services }}
+    register_entry "{{ .name }}" "{{ .namespace }}" "{{ .serviceAccount }}"
+    {{- end }}
+
+    echo ""
+    echo "Registering cross-suite PenguinCloud services (best-effort)..."
+    {{- range .Values.spire.autoEnroll.suiteServices }}
+    if kubectl get namespace "{{ .namespace }}" > /dev/null 2>&1; then
+      register_entry "{{ .name }}" "{{ .namespace }}" "{{ .serviceAccount }}"
+    else
+      echo "~ Skipped {{ .name }}: namespace {{ .namespace }} not found"
+    fi
+    {{- end }}
+
+    echo ""
+    echo "Auto-enrollment complete."
+{{- end }}

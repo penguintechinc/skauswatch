@@ -1,0 +1,57 @@
+{{- if and .Values.spire.enabled .Values.spire.autoEnroll.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-auto-enroll
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: auto-enroll
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "skauswatch-spire.selectorLabels" . | nindent 8 }}
+        component: auto-enroll
+    spec:
+      {{- with .Values.spire.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "skauswatch-spire.fullname" . }}-auto-enroll
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+      - name: auto-enroll
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        image: "bitnami/kubectl:latest"
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -c
+        - |
+          /scripts/enroll.sh
+        volumeMounts:
+        - name: enroll-script
+          mountPath: /scripts
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: enroll-script
+        configMap:
+          name: {{ include "skauswatch-spire.fullname" . }}-enroll-script
+          defaultMode: 0755
+      - name: tmp
+        emptyDir: {}
+{{- end }}

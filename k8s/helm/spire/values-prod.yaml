@@ -1,0 +1,40 @@
+spire:
+  enabled: true
+  environment: "prod"
+
+  server:
+    replicaCount: 3
+    image:
+      repository: ghcr.io/spiffe/spire-server@sha256:6936324dacd7dcd800dec0641db8f0e48c75204b2dfbb21201b111ef2e2490a8
+      tag: "1.9.4"  # Reference only
+      pullPolicy: IfNotPresent
+    dataStore:
+      # Preferred: NEST via marchproxy. Fallback: any PostgreSQL host.
+      type: postgresql
+      postgresql:
+        host: "marchproxy.nest.svc"
+        port: 5432
+        dbName: spire
+        secretName: spire-db-credentials
+
+  agent:
+    image:
+      repository: ghcr.io/spiffe/spire-agent@sha256:66d73a745b3875f7e68f0dd48de9924231aab9a79a632f98f5c9479f95688110
+      tag: "1.9.4"  # Reference only
+      pullPolicy: IfNotPresent
+
+  imagePullSecrets:
+    - name: ghcr-pull-secret
+
+  federation:
+    enabled: true
+
+  oidcProvider:
+    enabled: true
+    image:
+      repository: ghcr.io/spiffe/oidc-discovery-provider@sha256:1da5c3f80c6772d731a00fe33035baa77ce515991d28e23576f4f86d8d8a4759
+      tag: "1.9.4"  # Reference only
+      pullPolicy: IfNotPresent
+
+  autoEnroll:
+    enabled: true

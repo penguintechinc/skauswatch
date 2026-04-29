@@ -1,6 +1,6 @@
 # Multi-stage build for SkausWatch AAA Monitor Service
 # Stage 1: Build stage
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS builder
+FROM python:3.13-slim-bookworm@sha256:bb73517d48bd32016e15eade0c009b2724ec3a025a9975b5cd9b251d0dcadb33 AS builder
 
 # Set build arguments
 ARG BUILD_DATE
@@ -40,7 +40,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Stage 2: Runtime stage
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS runtime
+FROM python:3.13-slim-bookworm@sha256:bb73517d48bd32016e15eade0c009b2724ec3a025a9975b5cd9b251d0dcadb33 AS runtime
 
 # Set runtime arguments
 ARG BUILD_DATE
@@ -58,89 +58,43 @@ LABEL org.label-schema.build-date=$BUILD_DATE \
 
 # Install runtime system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
     ca-certificates \
-    netcat-traditional \
-    rsyslog \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
-RUN groupadd -r skauswatch && \
-    useradd -r -g skauswatch -d /app -s /bin/bash skauswatch
+RUN groupadd -g 1000 skauswatch && \
+    useradd -u 1000 -g skauswatch -d /workspace -s /bin/bash skauswatch
 
-# Create application directories
-RUN mkdir -p /app/logs /app/certs /app/keys /app/data /app/audit && \
-    chown -R skauswatch:skauswatch /app && \
-    chmod 750 /app/audit
+# Create workspace and log directories
+RUN mkdir -p /workspace/logs /workspace/audit /workspace/data /workspace/models && \
+    chown -R skauswatch:skauswatch /workspace
 
 # Copy virtual environment from builder stage
 COPY --from=builder --chown=skauswatch:skauswatch /opt/venv /opt/venv
 
 # Set environment variables
 ENV PATH="/opt/venv/bin:$PATH" \
-    PYTHONPATH="/app" \
+    PYTHONPATH="/workspace" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    SERVICE_NAME="aaa-monitor" \
-    SERVICE_PORT="8003" \
-    LOG_LEVEL="INFO" \
-    ENVIRONMENT="production" \
-    AUDIT_LOG_DIR="/app/audit"
+    SERVICE_NAME="aaa-monitor"
 
 # Switch to non-root user
 USER skauswatch
 
 # Set working directory
-WORKDIR /app
+WORKDIR /workspace
 
-# Copy application code with proper ownership
-COPY --chown=skauswatch:skauswatch . .
+# Copy application code as a Python package (enables relative imports)
+COPY --chown=skauswatch:skauswatch . /workspace/aaa_monitor/
 
-# Create entrypoint script
-RUN echo '#!/bin/bash\n\
-set -e\n\
-\n\
-# Wait for dependencies\n\
-echo "Waiting for database..."\n\
-while ! nc -z ${DATABASE_HOST:-postgres} ${DATABASE_PORT:-5432}; do\n\
-  sleep 1\n\
-done\n\
-echo "Database is ready!"\n\
-\n\
-echo "Waiting for Redis..."\n\
-while ! nc -z ${REDIS_HOST:-redis} ${REDIS_PORT:-6379}; do\n\
-  sleep 1\n\
-done\n\
-echo "Redis is ready!"\n\
-\n\
-# Initialize audit logging directory\n\
-mkdir -p "$AUDIT_LOG_DIR"\n\
-\n\
-# Run database migrations\n\
-if [ "$ENVIRONMENT" != "development" ]; then\n\
-  echo "Running database migrations..."\n\
-  python -m alembic upgrade head\n\
-fi\n\
-\n\
-# Start the application\n\
-echo "Starting SkausWatch AAA Monitor Service on port $SERVICE_PORT..."\n\
-exec uvicorn skauswatch.services.aaa_monitor.main:app \\\n\
-  --host 0.0.0.0 \\\n\
-  --port $SERVICE_PORT \\\n\
-  --log-level ${LOG_LEVEL,,} \\\n\
-  --access-log \\\n\
-  --use-colors false\n\
-' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD curl -f http://localhost:$SERVICE_PORT/health || exit 1
+# Health check using native Python
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:5003/health')" || exit 1
 
 # Expose port
-EXPOSE $SERVICE_PORT
+EXPOSE 5003
 
-# Set entrypoint
-ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["python3", "-m", "aaa_monitor.main", "--host", "0.0.0.0", "--port", "5003"]

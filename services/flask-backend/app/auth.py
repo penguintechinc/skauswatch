@@ -1,23 +1,24 @@
 """Authentication Endpoints."""
 
-import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import bcrypt
-import jwt
-from flask import Blueprint, current_app, jsonify, request
+from penguin_aaa import Claims
+from quart import Blueprint, current_app, jsonify, request
 
 from .middleware import auth_required, get_current_user
-from .models import (
-    create_user,
-    get_user_by_email,
-    is_refresh_token_valid,
-    revoke_all_user_tokens,
-    revoke_refresh_token,
-    store_refresh_token,
-)
+from .models import create_user, get_user_by_email, get_user_by_id
 
 auth_bp = Blueprint("auth", __name__)
+
+# Scope mapping for roles
+ROLE_SCOPES: dict[str, list[str]] = {
+    "admin": ["*:read", "*:write", "*:admin", "*:delete", "settings:write", "users:admin"],
+    "maintainer": ["*:read", "*:write", "teams:read", "reports:read", "analytics:read"],
+    "viewer": ["*:read"],
+}
+
+DEFAULT_TENANT = "default"
 
 
 def hash_password(password: str) -> str:
@@ -30,41 +31,27 @@ def verify_password(password: str, password_hash: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
 
 
-def create_access_token(user_id: int, role: str) -> str:
-    """Create JWT access token."""
-    expires = datetime.utcnow() + current_app.config["JWT_ACCESS_TOKEN_EXPIRES"]
-    payload = {
-        "sub": str(user_id),
-        "role": role,
-        "type": "access",
-        "exp": expires,
-        "iat": datetime.utcnow(),
-    }
-    return jwt.encode(payload, current_app.config["JWT_SECRET_KEY"], algorithm="HS256")
-
-
-def create_refresh_token(user_id: int) -> tuple[str, datetime]:
-    """Create JWT refresh token and store hash in database."""
-    expires = datetime.utcnow() + current_app.config["JWT_REFRESH_TOKEN_EXPIRES"]
-    payload = {
-        "sub": str(user_id),
-        "type": "refresh",
-        "exp": expires,
-        "iat": datetime.utcnow(),
-    }
-    token = jwt.encode(payload, current_app.config["JWT_SECRET_KEY"], algorithm="HS256")
-
-    # Store hash of token in database for revocation
-    token_hash = hashlib.sha256(token.encode()).hexdigest()
-    store_refresh_token(user_id, token_hash, expires)
-
-    return token, expires
+def _build_claims(user: dict) -> Claims:
+    """Build OIDC Claims from user data."""
+    role = user.get("role", "viewer")
+    return Claims(
+        sub=str(user["id"]),
+        iss=current_app.config["ISSUER_URL"],
+        aud=[current_app.config["JWT_AUDIENCE"]],
+        iat=datetime.now(timezone.utc),
+        exp=datetime.now(timezone.utc) + timedelta(minutes=30),  # OIDCProvider sets real exp
+        scope=ROLE_SCOPES.get(role, ["*:read"]),
+        roles=[role],
+        tenant=DEFAULT_TENANT,
+        teams=[],
+        ext={},
+    )
 
 
 @auth_bp.route("/login", methods=["POST"])
-def login():
+async def login():
     """Login endpoint - returns access and refresh tokens."""
-    data = request.get_json()
+    data = await request.get_json()
 
     if not data:
         return jsonify({"error": "Request body required"}), 400
@@ -76,7 +63,7 @@ def login():
         return jsonify({"error": "Email and password required"}), 400
 
     # Find user
-    user = get_user_by_email(email)
+    user = await get_user_by_email(email)
     if not user:
         return jsonify({"error": "Invalid email or password"}), 401
 
@@ -88,19 +75,18 @@ def login():
     if not user.get("is_active"):
         return jsonify({"error": "Account is deactivated"}), 401
 
-    # Generate tokens
-    access_token = create_access_token(user["id"], user["role"])
-    refresh_token, refresh_expires = create_refresh_token(user["id"])
+    # Generate tokens via OIDCProvider
+    provider = current_app.extensions["oidc_provider"]
+    claims = _build_claims(user)
+    token_set = provider.issue_token_set(claims)
 
     return (
         jsonify(
             {
-                "access_token": access_token,
-                "refresh_token": refresh_token,
+                "access_token": token_set.access_token,
+                "refresh_token": token_set.refresh_token,
                 "token_type": "Bearer",
-                "expires_in": int(
-                    current_app.config["JWT_ACCESS_TOKEN_EXPIRES"].total_seconds()
-                ),
+                "expires_in": token_set.expires_in,
                 "user": {
                     "id": user["id"],
                     "email": user["email"],
@@ -114,9 +100,9 @@ def login():
 
 
 @auth_bp.route("/refresh", methods=["POST"])
-def refresh():
+async def refresh():
     """Refresh access token using refresh token."""
-    data = request.get_json()
+    data = await request.get_json()
 
     if not data:
         return jsonify({"error": "Request body required"}), 400
@@ -126,86 +112,44 @@ def refresh():
     if not refresh_token:
         return jsonify({"error": "Refresh token required"}), 400
 
-    # Decode token
+    # Use OIDCProvider to refresh token
     try:
-        payload = jwt.decode(
-            refresh_token,
-            current_app.config["JWT_SECRET_KEY"],
-            algorithms=["HS256"],
+        provider = current_app.extensions["oidc_provider"]
+        token_set = provider.refresh(refresh_token)
+        return (
+            jsonify(
+                {
+                    "access_token": token_set.access_token,
+                    "refresh_token": token_set.refresh_token,
+                    "token_type": "Bearer",
+                    "expires_in": token_set.expires_in,
+                }
+            ),
+            200,
         )
-    except jwt.ExpiredSignatureError:
-        return jsonify({"error": "Refresh token expired"}), 401
-    except jwt.InvalidTokenError:
-        return jsonify({"error": "Invalid refresh token"}), 401
-
-    # Verify token type
-    if payload.get("type") != "refresh":
-        return jsonify({"error": "Invalid token type"}), 401
-
-    # Check if token is revoked
-    token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
-    if not is_refresh_token_valid(token_hash):
-        return jsonify({"error": "Refresh token has been revoked"}), 401
-
-    # Get user
-    user_id = int(payload["sub"])
-    user = get_user_by_email_by_id(user_id)
-    if not user or not user.get("is_active"):
-        return jsonify({"error": "User not found or deactivated"}), 401
-
-    # Revoke old refresh token
-    revoke_refresh_token(token_hash)
-
-    # Generate new tokens
-    access_token = create_access_token(user["id"], user["role"])
-    new_refresh_token, refresh_expires = create_refresh_token(user["id"])
-
-    return (
-        jsonify(
-            {
-                "access_token": access_token,
-                "refresh_token": new_refresh_token,
-                "token_type": "Bearer",
-                "expires_in": int(
-                    current_app.config["JWT_ACCESS_TOKEN_EXPIRES"].total_seconds()
-                ),
-            }
-        ),
-        200,
-    )
-
-
-# Fix: Import the correct function
-def get_user_by_email_by_id(user_id: int):
-    """Get user by ID - wrapper for import issue."""
-    from .models import get_user_by_id
-
-    return get_user_by_id(user_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 401
 
 
 @auth_bp.route("/logout", methods=["POST"])
 @auth_required
-def logout():
-    """Logout endpoint - revokes all refresh tokens for user."""
-    user = get_current_user()
-
-    # Revoke all user's refresh tokens
-    revoked_count = revoke_all_user_tokens(user["id"])
-
+async def logout():
+    """Logout endpoint - revokes token."""
+    # Get the token from Authorization header and revoke it
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+    if token:
+        provider = current_app.extensions["oidc_provider"]
+        provider.revoke(token)
     return (
-        jsonify(
-            {
-                "message": "Successfully logged out",
-                "tokens_revoked": revoked_count,
-            }
-        ),
+        jsonify({"message": "Successfully logged out"}),
         200,
     )
 
 
 @auth_bp.route("/me", methods=["GET"])
 @auth_required
-def get_me():
+async def get_me():
     """Get current user profile."""
     user = get_current_user()
 
@@ -227,9 +171,9 @@ def get_me():
 
 
 @auth_bp.route("/register", methods=["POST"])
-def register():
+async def register():
     """Register new user (creates viewer role by default)."""
-    data = request.get_json()
+    data = await request.get_json()
 
     if not data:
         return jsonify({"error": "Request body required"}), 400
@@ -246,23 +190,32 @@ def register():
         return jsonify({"error": "Password must be at least 8 characters"}), 400
 
     # Check if user exists
-    existing = get_user_by_email(email)
+    existing = await get_user_by_email(email)
     if existing:
         return jsonify({"error": "Email already registered"}), 409
 
     # Create user
     password_hash = hash_password(password)
-    user = create_user(
+    user = await create_user(
         email=email,
         password_hash=password_hash,
         full_name=full_name,
         role="viewer",  # Default role for self-registration
     )
 
+    # Generate tokens via OIDCProvider
+    provider = current_app.extensions["oidc_provider"]
+    claims = _build_claims(user)
+    token_set = provider.issue_token_set(claims)
+
     return (
         jsonify(
             {
                 "message": "Registration successful",
+                "access_token": token_set.access_token,
+                "refresh_token": token_set.refresh_token,
+                "token_type": "Bearer",
+                "expires_in": token_set.expires_in,
                 "user": {
                     "id": user["id"],
                     "email": user["email"],

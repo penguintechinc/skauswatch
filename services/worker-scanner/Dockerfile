@@ -4,7 +4,7 @@
 # ============================================================================
 # Stage 1: Builder - Install dependencies and download tools
 # ============================================================================
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS builder
+FROM python:3.13-slim-bookworm@sha256:bb73517d48bd32016e15eade0c009b2724ec3a025a9975b5cd9b251d0dcadb33 AS builder
 
 WORKDIR /build
 
@@ -47,7 +47,7 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # ============================================================================
 # Stage 2: Runtime - Minimal production image
 # ============================================================================
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb
+FROM python:3.13-slim-bookworm@sha256:bb73517d48bd32016e15eade0c009b2724ec3a025a9975b5cd9b251d0dcadb33
 
 # Labels
 LABEL maintainer="Penguin Tech Inc"
@@ -60,8 +60,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN groupadd -r scanner && useradd -r -g scanner -d /app -s /sbin/nologin scanner
+# Create non-root user with UID 1000 to match K8s securityContext runAsUser: 1000
+RUN groupadd -g 1000 scanner && useradd -u 1000 -g scanner -d /app -s /sbin/nologin scanner
 
 WORKDIR /app
 
@@ -102,13 +102,13 @@ USER scanner
 # Environment defaults
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    WORKER_SCANNER_PORT=5001
+    WORKER_SCANNER_PORT=5004
 
-EXPOSE 5001
+EXPOSE 5004
 
-# Healthcheck
+# Healthcheck — use env var so K8s port overrides work
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:5001/api/v1/scanner/healthz || exit 1
+    CMD curl -f "http://localhost:${WORKER_SCANNER_PORT:-5004}/health" || exit 1
 
-# Run with gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:5001", "--workers", "2", "--threads", "4", "--timeout", "120", "--access-logfile", "-", "app:create_app()"]
+# Shell-form CMD so ${WORKER_SCANNER_PORT} is expanded at runtime
+CMD gunicorn --bind "0.0.0.0:${WORKER_SCANNER_PORT:-5004}" --workers 2 --threads 4 --timeout 120 --access-logfile - "app:create_app()"

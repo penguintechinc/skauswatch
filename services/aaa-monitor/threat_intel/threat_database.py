@@ -253,7 +253,7 @@ class ThreatDatabase:
             await self._create_performance_indexes()
 
             # Load statistics with enhanced metrics
-            await self._load_enhanced_statistics()
+            await self.get_enhanced_statistics()
 
             # Test Redis connection and initialize cache
             if self.redis_client:

@@ -41,7 +41,7 @@ class HealthChecker:
         # Health check state
         self.last_check = None
         self.check_history = []
-        self.max_history = config.get("max_history", 100)
+        self.max_history = getattr(config, 'max_history', None) or (config.get("max_history", 100) if hasattr(config, 'get') else 100)
 
         # Component health status
         self.component_status = {}
@@ -76,7 +76,7 @@ class HealthChecker:
                     overall_status = "degraded"
 
             # Component health checks
-            for component_name in self.config.get("checks", []):
+            for component_name in getattr(self.config, "checks", []):
                 if component_name in self.components:
                     checks[component_name] = await self._check_component_health(
                         component_name, self.components[component_name]
@@ -472,7 +472,7 @@ class HealthChecker:
                     await self.check_all()
 
                     # Wait for next check
-                    await asyncio.sleep(self.config.get("check_interval", 30))
+                    await asyncio.sleep(getattr(self.config, "check_interval", 30))
 
                 except asyncio.CancelledError:
                     break

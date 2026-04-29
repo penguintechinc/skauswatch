@@ -1,35 +1,56 @@
 """Authentication and Authorization Middleware."""
 
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Callable, Optional
 
-import jwt
-from flask import current_app, g, jsonify, request
+import jwt as pyjwt
+from penguin_aaa import Claims
+from quart import current_app, g, jsonify, request
 
 from .models import get_user_by_id
 
 
-def get_token_from_header() -> Optional[str]:
-    """Extract JWT token from Authorization header."""
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        return auth_header[7:]
-    return None
+# Scope required per role group
+_ROLE_SCOPE_MAP: dict[str, str] = {
+    "admin": "users:admin",
+    "maintainer": "*:write",
+}
 
 
-def decode_token(token: str) -> Optional[dict]:
-    """Decode and validate JWT token."""
-    try:
-        payload = jwt.decode(
+class LocalTokenValidator:
+    """Validates RS256 JWTs issued by the local OIDCProvider without HTTP discovery."""
+
+    def __init__(self, provider, issuer: str, audiences: list[str]) -> None:
+        self._provider = provider
+        self._issuer = issuer
+        self._audiences = audiences
+
+    async def verify_token(self, token: str) -> Claims:
+        """Verify and decode RS256 JWT token, returning Claims object."""
+        signing_key, _kid = self._provider._keystore.get_signing_key()
+        public_key = signing_key.public_key()
+
+        payload = pyjwt.decode(
             token,
-            current_app.config["JWT_SECRET_KEY"],
-            algorithms=["HS256"],
+            public_key,
+            algorithms=["RS256"],
+            audience=self._audiences,
+            issuer=self._issuer,
         )
-        return payload
-    except jwt.ExpiredSignatureError:
-        return None
-    except jwt.InvalidTokenError:
-        return None
+
+        return Claims(
+            sub=payload["sub"],
+            iss=payload["iss"],
+            aud=payload["aud"] if isinstance(payload["aud"], list) else [payload["aud"]],
+            iat=datetime.fromtimestamp(payload["iat"], tz=timezone.utc),
+            exp=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
+            scope=payload.get("scope", []),
+            roles=payload.get("roles", []),
+            tenant=payload.get("tenant", "default"),
+            teams=payload.get("teams", []),
+            ext=payload.get("ext", {}),
+        )
 
 
 def get_current_user() -> Optional[dict]:
@@ -38,68 +59,81 @@ def get_current_user() -> Optional[dict]:
 
 
 def auth_required(f: Callable) -> Callable:
-    """Decorator to require authentication."""
+    """Decorator to require authentication and validate JWT token."""
 
     @wraps(f)
-    def decorated(*args, **kwargs):
-        token = get_token_from_header()
+    async def decorated(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
 
-        if not token:
+        if not auth_header.startswith("Bearer "):
             return jsonify({"error": "Missing authorization token"}), 401
 
-        payload = decode_token(token)
-        if not payload:
+        token = auth_header[7:]
+
+        try:
+            validator = current_app.extensions.get("token_validator")
+            if not validator:
+                return jsonify({"error": "Token validator not configured"}), 500
+            claims = await validator.verify_token(token)
+        except pyjwt.ExpiredSignatureError:
+            return jsonify({"error": "Token has expired"}), 401
+        except pyjwt.InvalidTokenError:
+            return jsonify({"error": "Invalid or malformed token"}), 401
+        except Exception as e:
             return jsonify({"error": "Invalid or expired token"}), 401
 
-        # Check token type
-        if payload.get("type") != "access":
-            return jsonify({"error": "Invalid token type"}), 401
-
         # Get user from database
-        user_id = payload.get("sub")
+        user_id = claims.sub
         if not user_id:
             return jsonify({"error": "Invalid token payload"}), 401
 
-        user = get_user_by_id(int(user_id))
+        user = await get_user_by_id(int(user_id))
         if not user:
             return jsonify({"error": "User not found"}), 401
 
         if not user.get("is_active"):
             return jsonify({"error": "User account is deactivated"}), 401
 
-        # Store user in request context
+        # Store user and claims in request context
         g.current_user = user
+        g.claims = claims
 
-        return f(*args, **kwargs)
+        return await f(*args, **kwargs)
 
     return decorated
 
 
 def role_required(*allowed_roles: str) -> Callable:
-    """Decorator to require specific roles."""
+    """Decorator to require specific roles using OIDC scopes."""
 
     def decorator(f: Callable) -> Callable:
         @wraps(f)
-        def decorated(*args, **kwargs):
-            user = get_current_user()
+        async def decorated(*args, **kwargs):
+            claims = getattr(g, "claims", None)
 
-            if not user:
+            if claims is None:
                 return jsonify({"error": "Authentication required"}), 401
 
-            user_role = user.get("role", "")
-            if user_role not in allowed_roles:
+            # Check if any allowed role's required scope is present
+            user_scopes = set(claims.scope)
+            has_access = any(
+                _ROLE_SCOPE_MAP.get(role, f"{role}:access") in user_scopes
+                or "*:admin" in user_scopes  # admin always has access
+                for role in allowed_roles
+            )
+
+            if not has_access:
                 return (
                     jsonify(
                         {
                             "error": "Insufficient permissions",
                             "required_roles": list(allowed_roles),
-                            "your_role": user_role,
                         }
                     ),
                     403,
                 )
 
-            return f(*args, **kwargs)
+            return await f(*args, **kwargs)
 
         return decorated
 

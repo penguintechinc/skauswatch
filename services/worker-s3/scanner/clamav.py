@@ -70,8 +70,10 @@ class ClamAVScanner:
         if self._client is None:
             try:
                 self._client = clamd.ClamdUnixSocket(self.socket_path)
-                self._client.socket.settimeout(self.timeout)
-            except (clamd.ClamdNetworkException, OSError) as e:
+                # clamd API varies by version; socket attr may not exist
+                if hasattr(self._client, 'socket'):
+                    self._client.socket.settimeout(self.timeout)
+            except (clamd.ClamdError, OSError) as e:
                 logger.error(
                     f"Failed to connect to ClamAV daemon at {self.socket_path}: {e}"
                 )
@@ -91,7 +93,7 @@ class ClamAVScanner:
             result = client.ping()
             logger.debug(f"ClamAV ping result: {result}")
             return result == "PONG"
-        except (ConnectionError, clamd.ClamdNetworkException, OSError) as e:
+        except (ConnectionError, clamd.ClamdError, OSError) as e:
             logger.warning(f"ClamAV ping failed: {e}")
             self._client = None
             return False
@@ -147,7 +149,7 @@ class ClamAVScanner:
                 is_malware=is_malware, is_pup=is_pup, threat_names=threat_names
             )
 
-        except (clamd.ClamdNetworkException, OSError) as e:
+        except (clamd.ClamdError, OSError) as e:
             logger.error(f"ClamAV scan failed for {file_path}: {e}")
             self._client = None
             raise ConnectionError(f"ClamAV scan failed: {e}") from e

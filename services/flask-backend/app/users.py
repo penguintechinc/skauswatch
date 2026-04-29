@@ -1,6 +1,6 @@
 """User Management Endpoints (Admin Only)."""
 
-from flask import Blueprint, jsonify, request
+from quart import Blueprint, jsonify, request
 
 from .auth import hash_password
 from .middleware import admin_required, auth_required
@@ -20,7 +20,7 @@ users_bp = Blueprint("users", __name__)
 @users_bp.route("", methods=["GET"])
 @auth_required
 @admin_required
-def get_users():
+async def get_users():
     """List all users with pagination (Admin only)."""
     page = request.args.get("page", 1, type=int)
     per_page = request.args.get("per_page", 20, type=int)
@@ -28,7 +28,7 @@ def get_users():
     # Limit per_page to reasonable bounds
     per_page = min(max(per_page, 1), 100)
 
-    users, total = list_users(page=page, per_page=per_page)
+    users, total = await list_users(page=page, per_page=per_page)
 
     # Remove password hashes from response
     for user in users:
@@ -53,9 +53,9 @@ def get_users():
 @users_bp.route("/<int:user_id>", methods=["GET"])
 @auth_required
 @admin_required
-def get_user(user_id: int):
+async def get_user(user_id: int):
     """Get single user by ID (Admin only)."""
-    user = get_user_by_id(user_id)
+    user = await get_user_by_id(user_id)
 
     if not user:
         return jsonify({"error": "User not found"}), 404
@@ -69,9 +69,9 @@ def get_user(user_id: int):
 @users_bp.route("", methods=["POST"])
 @auth_required
 @admin_required
-def create_new_user():
+async def create_new_user():
     """Create new user (Admin only)."""
-    data = request.get_json()
+    data = await request.get_json()
 
     if not data:
         return jsonify({"error": "Request body required"}), 400
@@ -97,13 +97,13 @@ def create_new_user():
         )
 
     # Check if user exists
-    existing = get_user_by_email(email)
+    existing = await get_user_by_email(email)
     if existing:
         return jsonify({"error": "Email already registered"}), 409
 
     # Create user
     password_hash = hash_password(password)
-    user = create_user(
+    user = await create_user(
         email=email,
         password_hash=password_hash,
         full_name=full_name,
@@ -127,14 +127,14 @@ def create_new_user():
 @users_bp.route("/<int:user_id>", methods=["PUT"])
 @auth_required
 @admin_required
-def update_existing_user(user_id: int):
+async def update_existing_user(user_id: int):
     """Update user by ID (Admin only)."""
-    user = get_user_by_id(user_id)
+    user = await get_user_by_id(user_id)
 
     if not user:
         return jsonify({"error": "User not found"}), 404
 
-    data = request.get_json()
+    data = await request.get_json()
 
     if not data:
         return jsonify({"error": "Request body required"}), 400
@@ -145,7 +145,7 @@ def update_existing_user(user_id: int):
     if "email" in data:
         email = data["email"].strip().lower()
         if email != user["email"]:
-            existing = get_user_by_email(email)
+            existing = await get_user_by_email(email)
             if existing:
                 return jsonify({"error": "Email already in use"}), 409
             update_data["email"] = email
@@ -180,7 +180,7 @@ def update_existing_user(user_id: int):
     if not update_data:
         return jsonify({"error": "No valid fields to update"}), 400
 
-    updated_user = update_user(user_id, **update_data)
+    updated_user = await update_user(user_id, **update_data)
 
     # Remove password hash from response
     updated_user.pop("password_hash", None)
@@ -199,7 +199,7 @@ def update_existing_user(user_id: int):
 @users_bp.route("/<int:user_id>", methods=["DELETE"])
 @auth_required
 @admin_required
-def delete_existing_user(user_id: int):
+async def delete_existing_user(user_id: int):
     """Delete user by ID (Admin only)."""
     from .middleware import get_current_user
 
@@ -209,12 +209,12 @@ def delete_existing_user(user_id: int):
     if current_user["id"] == user_id:
         return jsonify({"error": "Cannot delete your own account"}), 400
 
-    user = get_user_by_id(user_id)
+    user = await get_user_by_id(user_id)
 
     if not user:
         return jsonify({"error": "User not found"}), 404
 
-    success = delete_user(user_id)
+    success = await delete_user(user_id)
 
     if not success:
         return jsonify({"error": "Failed to delete user"}), 500
@@ -225,7 +225,7 @@ def delete_existing_user(user_id: int):
 @users_bp.route("/roles", methods=["GET"])
 @auth_required
 @admin_required
-def get_roles():
+async def get_roles():
     """Get list of valid roles (Admin only)."""
     return (
         jsonify(

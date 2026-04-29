@@ -373,11 +373,13 @@ def get_db(database_uri: str = None) -> DAL:
             database_uri,
             migrate=False,  # Schema managed by SQLAlchemy init
             pool_size=10,
-            check_reserved=["all"],
         )
 
-        # Define tables for runtime use
-        define_pydal_tables(_thread_local.db)
+        try:
+            define_pydal_tables(_thread_local.db)
+        except Exception:
+            _thread_local.db = None
+            raise
 
     return _thread_local.db
 

@@ -42,11 +42,11 @@ logger = structlog.get_logger(__name__)
 class LXCCollector:
     """LXC/LXD container log collector for AAA monitoring"""
 
-    def __init__(self, config: Dict[str, Any], log_processor, analysis_engine):
+    def __init__(self, config, log_processor, analysis_engine):
         """Initialize LXC collector
 
         Args:
-            config: LXC collector configuration
+            config: LXC collector configuration (dataclass)
             log_processor: Log processor instance
             analysis_engine: Analysis engine instance
         """
@@ -406,7 +406,7 @@ class LXCCollector:
             while self.running:
                 try:
                     await self._update_container_list()
-                    await asyncio.sleep(self.config.get("discovery_interval", 60))
+                    await asyncio.sleep(getattr(self.config, "discovery_interval", 60))
 
                 except Exception as e:
                     logger.error("Error in container discovery", error=str(e))
@@ -789,7 +789,7 @@ class LXCCollector:
                     # Monitor systemd logs for LXC/LXD services
                     await self._monitor_systemd_logs()
 
-                    await asyncio.sleep(self.config.get("system_log_interval", 60))
+                    await asyncio.sleep(getattr(self.config, "system_log_interval", 60))
 
                 except Exception as e:
                     logger.error("Error in system logs collection", error=str(e))
@@ -944,7 +944,7 @@ class LXCCollector:
             # Read events for a limited time
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), timeout=self.config.get("event_timeout", 30)
+                    process.communicate(), timeout=getattr(self.config, "event_timeout", 30)
                 )
 
                 if stdout:

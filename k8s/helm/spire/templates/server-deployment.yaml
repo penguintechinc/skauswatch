@@ -1,0 +1,122 @@
+{{- if .Values.spire.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-server
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: server
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: {{ .Values.spire.server.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "skauswatch-spire.selectorLabels" . | nindent 6 }}
+      component: server
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/server-configmap.yaml") . | sha256sum }}
+        {{- with .Values.spire.server.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "skauswatch-spire.selectorLabels" . | nindent 8 }}
+        component: server
+    spec:
+      {{- with .Values.spire.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "skauswatch-spire.serverServiceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.spire.server.podSecurityContext | nindent 8 }}
+      containers:
+      - name: spire-server
+        securityContext:
+          {{- toYaml .Values.spire.server.securityContext | nindent 12 }}
+        image: "{{ .Values.spire.server.image.repository }}:{{ .Values.spire.server.image.tag | default .Chart.AppVersion }}"
+        imagePullPolicy: {{ .Values.spire.server.image.pullPolicy }}
+        ports:
+        - name: grpc
+          containerPort: {{ .Values.spire.server.ports.grpc }}
+          protocol: TCP
+        - name: healthcheck
+          containerPort: {{ .Values.spire.server.ports.healthCheck }}
+          protocol: TCP
+        {{- if .Values.spire.federation.enabled }}
+        - name: federation
+          containerPort: {{ .Values.spire.federation.bundleEndpoint.port }}
+          protocol: TCP
+        {{- end }}
+        {{- with .Values.spire.server.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- else }}
+        livenessProbe:
+          httpGet:
+            path: /live
+            port: healthcheck
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        {{- end }}
+        {{- with .Values.spire.server.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- else }}
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: healthcheck
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        {{- end }}
+        {{- with .Values.spire.server.resources }}
+        resources:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- if eq .Values.spire.server.dataStore.type "postgresql" }}
+        env:
+        - name: SPIRE_DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.spire.server.dataStore.postgresql.secretName }}
+              key: username
+        - name: SPIRE_DB_PASS
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.spire.server.dataStore.postgresql.secretName }}
+              key: password
+        {{- end }}
+        args:
+        - "-config"
+        - "/run/spire/config/server.conf"
+        volumeMounts:
+        - name: spire-config
+          mountPath: /run/spire/config
+          readOnly: true
+        - name: spire-data
+          mountPath: /run/spire/data
+        - name: spire-socket
+          mountPath: /tmp/spire-server/private
+      volumes:
+      - name: spire-config
+        configMap:
+          name: {{ include "skauswatch-spire.fullname" . }}-server-config
+      - name: spire-data
+        emptyDir: {}
+      - name: spire-socket
+        emptyDir: {}
+      {{- with .Values.spire.server.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.spire.server.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.spire.server.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

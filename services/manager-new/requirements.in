@@ -67,6 +67,9 @@ penguin-libs>=0.1.0          # Validation, HTTP, gRPC utilities
 penguin-licensing>=0.1.0     # License server client
 penguin-utils>=0.1.0         # Sanitized logging, Flask utils
 
+# Build tools (pinned for grpcio-tools)
+setuptools>=77.0.1
+
 # Development only (not included in production)
 # pytest>=7.4.0
 # pytest-asyncio>=0.23.0

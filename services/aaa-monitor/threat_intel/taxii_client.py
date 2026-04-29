@@ -24,8 +24,20 @@ import aiohttp
 import certifi
 import stix2
 import structlog
-from aiohttp.client_exceptions import ClientError, ClientTimeout
-from cabby import create_client
+from aiohttp import ClientTimeout
+from aiohttp.client_exceptions import ClientError
+try:
+    from cabby import create_client as _cabby_create_client
+    _CABBY_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    _cabby_create_client = None  # type: ignore[assignment]
+    _CABBY_AVAILABLE = False
+
+
+def create_client(*args, **kwargs):  # type: ignore[return]
+    if not _CABBY_AVAILABLE:
+        raise RuntimeError("cabby is not available (cgi module removed in Python 3.13)")
+    return _cabby_create_client(*args, **kwargs)
 from tenacity import (
     retry,
     retry_if_exception_type,

@@ -13,6 +13,7 @@ import Settings from './pages/Settings';
 import ThreatIntel from './pages/ThreatIntel';
 import S3Scan from './pages/S3Scan';
 import Darwin from './pages/Darwin';
+import Spire from './pages/Spire';
 
 function App() {
   const { isAuthenticated, isLoading, checkAuth } = useAuth();
@@ -67,6 +68,16 @@ function App() {
 
         {/* Darwin AI Code Review - all authenticated users */}
         <Route path="/darwin" element={<Darwin />} />
+
+        {/* SPIRE Identity Management - Maintainer and Admin */}
+        <Route
+          path="/security/spire"
+          element={
+            <RoleGuard allowedRoles={['admin', 'maintainer']}>
+              <Spire />
+            </RoleGuard>
+          }
+        />
 
         {/* Profile - all authenticated users */}
         <Route path="/profile" element={<Profile />} />

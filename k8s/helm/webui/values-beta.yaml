@@ -18,12 +18,17 @@ env:
     value: "INFO"
 
 ingress:
+  enabled: false
+
+httproute:
   enabled: true
-  hosts:
-    - host: skauswatch.penguintech.cloud
-      paths:
-        - path: /
-          pathType: Prefix
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.penguintech.cloud
+  rules:
+    - path: /
+      service: skauswatch-webui
+      port: 3000
 
 autoscaling:
   enabled: false

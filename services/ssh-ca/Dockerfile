@@ -1,6 +1,6 @@
 # Multi-stage build for SkausWatch SSH CA Service
 # Stage 1: Build stage
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS builder
+FROM python:3.13-slim-bookworm@sha256:bb73517d48bd32016e15eade0c009b2724ec3a025a9975b5cd9b251d0dcadb33 AS builder
 
 # Set build arguments
 ARG BUILD_DATE
@@ -40,7 +40,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Stage 2: Runtime stage
-FROM python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb AS runtime
+FROM python:3.13-slim-bookworm@sha256:bb73517d48bd32016e15eade0c009b2724ec3a025a9975b5cd9b251d0dcadb33 AS runtime
 
 # Set runtime arguments
 ARG BUILD_DATE
@@ -56,25 +56,18 @@ LABEL org.label-schema.build-date=$BUILD_DATE \
       org.label-schema.schema-version="1.0" \
       maintainer="SkausWatch Team <support@skauswatch.io>"
 
-# Install runtime system dependencies including SSH utilities
+# Install runtime system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
     ca-certificates \
-    netcat-traditional \
-    openssh-client \
-    openssl \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
 RUN groupadd -r skauswatch && \
     useradd -r -g skauswatch -d /app -s /bin/bash skauswatch
 
-# Create application directories with strict permissions for SSH key operations
-RUN mkdir -p /app/logs /app/certs /app/keys /app/data /app/ssh-ca && \
-    chown -R skauswatch:skauswatch /app && \
-    chmod 700 /app/keys /app/ssh-ca && \
-    chmod 750 /app/certs
+# Create application directories
+RUN mkdir -p /app/logs && \
+    chown -R skauswatch:skauswatch /app
 
 # Copy virtual environment from builder stage
 COPY --from=builder --chown=skauswatch:skauswatch /opt/venv /opt/venv
@@ -88,10 +81,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     SERVICE_NAME="ssh-ca" \
     SERVICE_PORT="8002" \
-    LOG_LEVEL="INFO" \
-    ENVIRONMENT="production" \
-    SSH_CA_DIR="/app/ssh-ca" \
-    SSH_KEYS_DIR="/app/keys"
+    LOG_LEVEL="INFO"
 
 # Switch to non-root user
 USER skauswatch
@@ -102,51 +92,11 @@ WORKDIR /app
 # Copy application code with proper ownership
 COPY --chown=skauswatch:skauswatch . .
 
-# Create entrypoint script
-RUN echo '#!/bin/bash\n\
-set -e\n\
-\n\
-# Wait for dependencies\n\
-echo "Waiting for database..."\n\
-while ! nc -z ${DATABASE_HOST:-postgres} ${DATABASE_PORT:-5432}; do\n\
-  sleep 1\n\
-done\n\
-echo "Database is ready!"\n\
-\n\
-echo "Waiting for Redis..."\n\
-while ! nc -z ${REDIS_HOST:-redis} ${REDIS_PORT:-6379}; do\n\
-  sleep 1\n\
-done\n\
-echo "Redis is ready!"\n\
-\n\
-# Initialize SSH CA if needed\n\
-if [ "$ENVIRONMENT" != "development" ] && [ ! -f "$SSH_CA_DIR/ssh_ca_key" ]; then\n\
-  echo "Initializing SSH CA infrastructure..."\n\
-  python -m skauswatch.services.ssh_ca.cli init-ca\n\
-fi\n\
-\n\
-# Run database migrations\n\
-if [ "$ENVIRONMENT" != "development" ]; then\n\
-  echo "Running database migrations..."\n\
-  python -m alembic upgrade head\n\
-fi\n\
-\n\
-# Start the application\n\
-echo "Starting SkausWatch SSH CA Service on port $SERVICE_PORT..."\n\
-exec uvicorn skauswatch.services.ssh_ca.main:app \\\n\
-  --host 0.0.0.0 \\\n\
-  --port $SERVICE_PORT \\\n\
-  --log-level ${LOG_LEVEL,,} \\\n\
-  --access-log \\\n\
-  --use-colors false\n\
-' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD curl -f http://localhost:$SERVICE_PORT/health || exit 1
+# Health check using native Python
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD python3 -c "import urllib.request, os; urllib.request.urlopen('http://localhost:' + os.environ.get('API_PORT', '5002') + '/healthz')" || exit 1
 
 # Expose port
-EXPOSE $SERVICE_PORT
+EXPOSE 5002
 
-# Set entrypoint
-ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["sh", "-c", "python3 -m hypercorn async_ssh_processor:app --bind 0.0.0.0:${API_PORT:-5002}"]

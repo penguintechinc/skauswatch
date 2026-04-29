@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import redis.asyncio as redis
 import structlog
 import uvicorn
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -158,39 +158,57 @@ async def startup():
             await redis_client.ping()
             logger.info("Redis connection established")
 
-        # Initialize threat intelligence components
-        await _init_threat_intelligence()
+        # Initialize threat intelligence components (optional — degrades gracefully)
+        try:
+            await _init_threat_intelligence()
+        except Exception as e:
+            logger.warning("Threat intelligence init failed, continuing without it", error=str(e))
 
-        # Initialize AI providers
-        await _init_ai_providers()
+        # Initialize AI providers (optional)
+        try:
+            await _init_ai_providers()
+        except Exception as e:
+            logger.warning("AI provider init failed, continuing without it", error=str(e))
 
         # Initialize core processing components
-        await _init_core_components()
+        try:
+            await _init_core_components()
+        except Exception as e:
+            logger.warning("Core components init failed", error=str(e))
 
         # Initialize log collectors
-        await _init_log_collectors()
+        try:
+            await _init_log_collectors()
+        except Exception as e:
+            logger.warning("Log collectors init failed", error=str(e))
 
-        # Initialize health checker
-        health_checker = HealthChecker(
-            config.health_check,
-            redis_client,
-            {
-                "log_processor": log_processor,
-                "kubernetes_collector": kubernetes_collector,
-                "lxc_collector": lxc_collector,
-                "auditd_collector": auditd_collector,
-                "syslog_collector": syslog_collector,
-                "journald_collector": journald_collector,
-                "file_collector": file_collector,
-                "database_collector": database_collector,
-                "threat_database": threat_database,
-                "ai_provider_manager": ai_provider_manager,
-                "ai_analysis_engine": ai_analysis_engine,
-            },
-        )
+        # Initialize health checker (optional)
+        try:
+            health_checker = HealthChecker(
+                config.health_check,
+                redis_client,
+                {
+                    "log_processor": log_processor,
+                    "kubernetes_collector": kubernetes_collector,
+                    "lxc_collector": lxc_collector,
+                    "auditd_collector": auditd_collector,
+                    "syslog_collector": syslog_collector,
+                    "journald_collector": journald_collector,
+                    "file_collector": file_collector,
+                    "database_collector": database_collector,
+                    "threat_database": threat_database,
+                    "ai_provider_manager": ai_provider_manager,
+                    "ai_analysis_engine": ai_analysis_engine,
+                },
+            )
+        except Exception as e:
+            logger.warning("Health checker init failed", error=str(e))
 
         # Start background services
-        await _start_background_services()
+        try:
+            await _start_background_services()
+        except Exception as e:
+            logger.warning("Background services start failed", error=str(e))
 
         logger.info("AAA Monitor Service startup completed successfully")
 
@@ -421,16 +439,19 @@ async def _start_background_services():
         background_tasks.append(task)
 
     # Start analysis engine
-    task = asyncio.create_task(analysis_engine.start_processing())
-    background_tasks.append(task)
+    if analysis_engine:
+        task = asyncio.create_task(analysis_engine.start_processing())
+        background_tasks.append(task)
 
     # Start buffer manager
-    task = asyncio.create_task(buffer_manager.start_processing())
-    background_tasks.append(task)
+    if buffer_manager:
+        task = asyncio.create_task(buffer_manager.start_processing())
+        background_tasks.append(task)
 
     # Start alert processing
-    task = asyncio.create_task(alert_manager.start_processing())
-    background_tasks.append(task)
+    if alert_manager:
+        task = asyncio.create_task(alert_manager.start_processing())
+        background_tasks.append(task)
 
     # Start health monitoring
     if health_checker:
@@ -498,7 +519,7 @@ def _add_routes(app: FastAPI):
     """Add routes to the FastAPI app"""
 
     # Health and status endpoints
-    @app.get("/health", response_model=HealthStatus)
+    @app.get("/health")
     async def health_check():
         """Health check endpoint"""
         try:
@@ -524,7 +545,7 @@ def _add_routes(app: FastAPI):
 
     @app.get("/metrics/dashboard", response_model=DashboardMetrics)
     @limiter.limit("30/minute")
-    async def get_dashboard_metrics(request):
+    async def get_dashboard_metrics(request: Request):
         """Get dashboard metrics"""
         try:
             metrics = await analysis_engine.get_dashboard_metrics()
@@ -536,10 +557,10 @@ def _add_routes(app: FastAPI):
     # Event management endpoints
     @app.post("/events/search", response_model=EventSearchResponse)
     @limiter.limit("60/minute")
-    async def search_events(request: EventSearchRequest):
+    async def search_events(request: Request, event_request: EventSearchRequest):
         """Search events"""
         try:
-            response = await log_processor.search_events(request)
+            response = await log_processor.search_events(event_request)
             return response
         except Exception as e:
             logger.error("Failed to search events", error=str(e))
@@ -547,7 +568,7 @@ def _add_routes(app: FastAPI):
 
     @app.get("/events/{event_id}")
     @limiter.limit("100/minute")
-    async def get_event(event_id: str):
+    async def get_event(request: Request, event_id: str):
         """Get event by ID"""
         try:
             event = await log_processor.get_event_by_id(event_id)
@@ -561,7 +582,9 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to retrieve event")
 
     @app.get("/events/stream")
+    @limiter.limit("30/minute")
     async def stream_events(
+        request: Request,
         sources: Optional[List[LogSource]] = Query(None),
         event_types: Optional[List[EventType]] = Query(None),
         severities: Optional[List[Severity]] = Query(None),
@@ -590,10 +613,10 @@ def _add_routes(app: FastAPI):
     # Alert management endpoints
     @app.post("/alerts/search", response_model=AlertSearchResponse)
     @limiter.limit("60/minute")
-    async def search_alerts(request: AlertSearchRequest):
+    async def search_alerts(request: Request, alert_request: AlertSearchRequest):
         """Search alerts"""
         try:
-            response = await alert_manager.search_alerts(request)
+            response = await alert_manager.search_alerts(alert_request)
             return response
         except Exception as e:
             logger.error("Failed to search alerts", error=str(e))
@@ -601,7 +624,7 @@ def _add_routes(app: FastAPI):
 
     @app.get("/alerts/{alert_id}")
     @limiter.limit("100/minute")
-    async def get_alert(alert_id: str):
+    async def get_alert(request: Request, alert_id: str):
         """Get alert by ID"""
         try:
             alert = await alert_manager.get_alert_by_id(alert_id)
@@ -617,6 +640,7 @@ def _add_routes(app: FastAPI):
     @app.put("/alerts/{alert_id}/status")
     @limiter.limit("30/minute")
     async def update_alert_status(
+        request: Request,
         alert_id: str,
         status: AlertStatus,
         background_tasks: BackgroundTasks,
@@ -644,8 +668,9 @@ def _add_routes(app: FastAPI):
     # Enhanced Threat Intelligence Management Endpoints
 
     @app.get("/threat-intel/iocs")
-    @limiter.limit("30/minute")
+    @limiter.limit("60/minute")
     async def get_iocs(
+        request: Request,
         limit: int = Query(100, ge=1, le=1000),
         offset: int = Query(0, ge=0),
         threat_level: Optional[ThreatLevel] = None,
@@ -675,9 +700,11 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to retrieve IOCs")
 
     @app.post("/threat-intel/iocs")
-    @limiter.limit("10/minute")
+    @limiter.limit("30/minute")
     async def create_ioc(
-        ioc: IOC, credentials: HTTPAuthorizationCredentials = Depends(security)
+        request: Request,
+        ioc: IOC,
+        credentials: HTTPAuthorizationCredentials = Depends(security),
     ):
         """Create a new IOC"""
         try:
@@ -689,8 +716,8 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to create IOC")
 
     @app.get("/threat-intel/iocs/{ioc_id}")
-    @limiter.limit("60/minute")
-    async def get_ioc(ioc_id: str):
+    @limiter.limit("100/minute")
+    async def get_ioc(request: Request, ioc_id: str):
         """Get specific IOC by ID"""
         try:
             ioc = await threat_database.get_ioc_by_id(ioc_id)
@@ -704,8 +731,8 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to retrieve IOC")
 
     @app.post("/threat-intel/iocs/search")
-    @limiter.limit("20/minute")
-    async def search_iocs(search_request: Dict[str, Any]):
+    @limiter.limit("60/minute")
+    async def search_iocs(request: Request, search_request: Dict[str, Any]):
         """Advanced IOC search with complex queries"""
         try:
             results = await threat_database.search_iocs_advanced(search_request)
@@ -717,7 +744,9 @@ def _add_routes(app: FastAPI):
     @app.post("/threat-intel/iocs/bulk")
     @limiter.limit("5/minute")
     async def bulk_create_iocs(
-        iocs: List[IOC], credentials: HTTPAuthorizationCredentials = Depends(security)
+        request: Request,
+        iocs: List[IOC],
+        credentials: HTTPAuthorizationCredentials = Depends(security),
     ):
         """Bulk create IOCs"""
         try:
@@ -742,7 +771,7 @@ def _add_routes(app: FastAPI):
 
     @app.get("/threat-intel/statistics")
     @limiter.limit("30/minute")
-    async def get_threat_statistics():
+    async def get_threat_statistics(request: Request):
         """Get comprehensive threat intelligence statistics"""
         try:
             stats = await threat_database.get_enhanced_statistics()
@@ -752,8 +781,8 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to retrieve statistics")
 
     @app.get("/threat-intel/matches/{event_id}")
-    @limiter.limit("60/minute")
-    async def get_event_matches(event_id: str):
+    @limiter.limit("100/minute")
+    async def get_event_matches(request: Request, event_id: str):
         """Get threat matches for a specific event"""
         try:
             matches = await threat_database.get_matches_by_event(event_id)
@@ -765,6 +794,7 @@ def _add_routes(app: FastAPI):
     @app.post("/threat-intel/database/optimize")
     @limiter.limit("2/hour")
     async def optimize_database(
+        request: Request,
         credentials: HTTPAuthorizationCredentials = Depends(security),
     ):
         """Manually trigger database optimization"""
@@ -777,9 +807,11 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to optimize database")
 
     @app.get("/threat-intel/feeds")
-    @limiter.limit("20/minute")
+    @limiter.limit("30/minute")
     async def get_threat_feeds(
-        include_stats: bool = Query(True), enabled_only: bool = Query(False)
+        request: Request,
+        include_stats: bool = Query(True),
+        enabled_only: bool = Query(False),
     ):
         """Get threat feeds with quality assessment"""
         try:
@@ -794,9 +826,11 @@ def _add_routes(app: FastAPI):
             )
 
     @app.post("/threat-intel/feeds")
-    @limiter.limit("5/minute")
+    @limiter.limit("30/minute")
     async def create_threat_feed(
-        feed: ThreatFeed, credentials: HTTPAuthorizationCredentials = Depends(security)
+        request: Request,
+        feed: ThreatFeed,
+        credentials: HTTPAuthorizationCredentials = Depends(security),
     ):
         """Create a new threat feed"""
         try:
@@ -813,8 +847,8 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to create threat feed")
 
     @app.get("/threat-intel/feeds/{feed_id}")
-    @limiter.limit("30/minute")
-    async def get_threat_feed(feed_id: str):
+    @limiter.limit("100/minute")
+    async def get_threat_feed(request: Request, feed_id: str):
         """Get specific threat feed"""
         try:
             feed = await threat_database.get_feed_by_id(feed_id)
@@ -828,8 +862,9 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to retrieve feed")
 
     @app.put("/threat-intel/feeds/{feed_id}")
-    @limiter.limit("5/minute")
+    @limiter.limit("30/minute")
     async def update_threat_feed_config(
+        request: Request,
         feed_id: str,
         feed_update: ThreatFeed,
         credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -855,6 +890,7 @@ def _add_routes(app: FastAPI):
     @app.post("/threat-intel/feeds/{feed_id}/update")
     @limiter.limit("5/minute")
     async def trigger_feed_update(
+        request: Request,
         feed_id: str,
         background_tasks: BackgroundTasks,
         force: bool = Query(False),
@@ -883,8 +919,8 @@ def _add_routes(app: FastAPI):
             )
 
     @app.get("/threat-intel/feeds/{feed_id}/quality")
-    @limiter.limit("30/minute")
-    async def get_feed_quality(feed_id: str):
+    @limiter.limit("100/minute")
+    async def get_feed_quality(request: Request, feed_id: str):
         """Get feed quality assessment"""
         try:
             if not taxii_client:
@@ -903,8 +939,10 @@ def _add_routes(app: FastAPI):
             )
 
     @app.get("/threat-intel/feeds/quality/top")
-    @limiter.limit("20/minute")
-    async def get_top_quality_feeds(limit: int = Query(10, ge=1, le=50)):
+    @limiter.limit("30/minute")
+    async def get_top_quality_feeds(
+        request: Request, limit: int = Query(10, ge=1, le=50)
+    ):
         """Get top quality threat feeds"""
         try:
             if not taxii_client:
@@ -924,7 +962,7 @@ def _add_routes(app: FastAPI):
 
     @app.get("/monitor/threat-intel/performance")
     @limiter.limit("30/minute")
-    async def get_threat_intel_performance():
+    async def get_threat_intel_performance(request: Request):
         """Get comprehensive threat intelligence performance metrics"""
         try:
             metrics = {
@@ -950,8 +988,9 @@ def _add_routes(app: FastAPI):
             )
 
     @app.post("/monitor/threat-intel/diagnostics")
-    @limiter.limit("10/minute")
+    @limiter.limit("2/hour")
     async def run_threat_intel_diagnostics(
+        request: Request,
         credentials: HTTPAuthorizationCredentials = Depends(security),
     ):
         """Run comprehensive threat intelligence diagnostics"""
@@ -1017,8 +1056,9 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to run diagnostics")
 
     @app.post("/monitor/threat-intel/maintenance")
-    @limiter.limit("5/minute")
+    @limiter.limit("2/hour")
     async def perform_maintenance(
+        request: Request,
         background_tasks: BackgroundTasks,
         maintenance_type: str = Query(..., regex="^(cleanup|optimize|reindex|vacuum)$"),
         credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -1058,7 +1098,7 @@ def _add_routes(app: FastAPI):
 
     @app.get("/monitor/threat-intel/alerts")
     @limiter.limit("30/minute")
-    async def get_threat_intel_alerts():
+    async def get_threat_intel_alerts(request: Request):
         """Get threat intelligence system alerts and warnings"""
         try:
             alerts = []
@@ -1133,6 +1173,7 @@ def _add_routes(app: FastAPI):
     @app.get("/monitor/threat-intel/export")
     @limiter.limit("5/minute")
     async def export_threat_data(
+        request: Request,
         export_format: str = Query("json", regex="^(json|csv|stix)$"),
         threat_level: Optional[ThreatLevel] = None,
         limit: int = Query(1000, ge=1, le=10000),
@@ -1200,8 +1241,8 @@ def _add_routes(app: FastAPI):
     # AI Analysis and Management Endpoints
 
     @app.get("/ai/status")
-    @limiter.limit("60/minute")
-    async def get_ai_status():
+    @limiter.limit("30/minute")
+    async def get_ai_status(request: Request):
         """Get AI integration status and provider health"""
         try:
             if not ai_provider_manager:
@@ -1231,8 +1272,9 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to retrieve AI status")
 
     @app.post("/ai/analyze/events", response_model=Dict[str, Any])
-    @limiter.limit("20/minute")
+    @limiter.limit("30/minute")
     async def analyze_events_ai(
+        request: Request,
         events: List[BaseEvent],
         analysis_type: AIAnalysisType,
         priority: int = Query(1, ge=1, le=5),
@@ -1278,6 +1320,7 @@ def _add_routes(app: FastAPI):
     @app.post("/ai/analyze/text", response_model=Dict[str, Any])
     @limiter.limit("30/minute")
     async def analyze_text_ai(
+        request: Request,
         text: str,
         analysis_type: AIAnalysisType,
         priority: int = Query(1, ge=1, le=5),
@@ -1332,7 +1375,7 @@ def _add_routes(app: FastAPI):
 
     @app.get("/ai/analysis/{job_id}", response_model=Dict[str, Any])
     @limiter.limit("100/minute")
-    async def get_ai_analysis_result(job_id: str):
+    async def get_ai_analysis_result(request: Request, job_id: str):
         """Get AI analysis result by job ID"""
         try:
             if not ai_analysis_engine:
@@ -1385,8 +1428,9 @@ def _add_routes(app: FastAPI):
             )
 
     @app.get("/ai/analysis", response_model=Dict[str, Any])
-    @limiter.limit("30/minute")
+    @limiter.limit("60/minute")
     async def list_ai_analyses(
+        request: Request,
         limit: int = Query(50, ge=1, le=500),
         offset: int = Query(0, ge=0),
         status: Optional[str] = Query(None),
@@ -1419,6 +1463,7 @@ def _add_routes(app: FastAPI):
     @app.get("/ai/templates", response_model=List[Dict[str, Any]])
     @limiter.limit("60/minute")
     async def get_ai_templates(
+        request: Request,
         category: Optional[str] = Query(None),
         analysis_type: Optional[AIAnalysisType] = Query(None),
         complexity: Optional[str] = Query(None),
@@ -1476,9 +1521,12 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to retrieve templates")
 
     @app.post("/ai/templates/format", response_model=Dict[str, str])
-    @limiter.limit("30/minute")
+    @limiter.limit("60/minute")
     async def format_ai_template(
-        template_name: str, data: Dict[str, Any], validate_fields: bool = Query(True)
+        request: Request,
+        template_name: str,
+        data: Dict[str, Any],
+        validate_fields: bool = Query(True),
     ):
         """Format an AI prompt template with provided data"""
         try:
@@ -1517,8 +1565,9 @@ def _add_routes(app: FastAPI):
             raise HTTPException(status_code=500, detail="Failed to format template")
 
     @app.post("/ai/templates/suggest", response_model=List[str])
-    @limiter.limit("30/minute")
+    @limiter.limit("60/minute")
     async def suggest_ai_templates(
+        request: Request,
         analysis_type: AIAnalysisType,
         data_characteristics: Optional[Dict[str, Any]] = None,
     ):
@@ -1541,8 +1590,8 @@ def _add_routes(app: FastAPI):
             )
 
     @app.get("/ai/statistics", response_model=Dict[str, Any])
-    @limiter.limit("60/minute")
-    async def get_ai_statistics():
+    @limiter.limit("30/minute")
+    async def get_ai_statistics(request: Request):
         """Get comprehensive AI analysis statistics"""
         try:
             stats = {}
@@ -1599,8 +1648,9 @@ def _add_routes(app: FastAPI):
             )
 
     @app.post("/ai/providers/{provider_name}/test")
-    @limiter.limit("10/minute")
+    @limiter.limit("5/minute")
     async def test_ai_provider(
+        request: Request,
         provider_name: str,
         credentials: HTTPAuthorizationCredentials = Depends(security),
     ):
