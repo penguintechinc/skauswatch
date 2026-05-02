@@ -18,8 +18,8 @@ from config import ManagerConfig
 
 logger = logging.getLogger(__name__)
 
-# Note: Generated stubs will be in ./generated/ after running protoc
-# For now, we define a placeholder implementation
+# Implements the ManagerService gRPC interface defined in manager.proto.
+# Generated stubs are produced at ./generated/ by protoc during Docker build.
 
 
 class ManagerServiceServicer:

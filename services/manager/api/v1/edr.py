@@ -10,8 +10,13 @@ Provides REST API for external EDR agents to:
 
 from datetime import datetime, timedelta
 from typing import Optional
+import hashlib
+import hmac
+import logging
 
 from models.db import get_db
+
+logger = logging.getLogger(__name__)
 from pydantic import ValidationError
 from quart import Blueprint, current_app, g, jsonify, request
 from validators.pydantic_models import (
@@ -27,7 +32,7 @@ bp = Blueprint("edr", __name__)
 
 
 def verify_api_key(f):
-    """Decorator to verify EDR agent API key."""
+    """Decorator to verify EDR agent API key using HMAC-SHA256."""
     from functools import wraps
 
     @wraps(f)
@@ -35,12 +40,14 @@ def verify_api_key(f):
         api_key = request.headers.get("X-API-Key")
         agent_id = request.headers.get("X-Agent-ID")
 
-        if not api_key:
-            return jsonify({"error": "Missing API key"}), 401
+        if not api_key or not agent_id:
+            return jsonify({"error": "Missing API key or Agent ID"}), 401
 
-        # TODO: Implement proper API key validation
-        # For now, accept any non-empty key
-        if len(api_key) < 10:
+        config = current_app.config["MANAGER_CONFIG"]
+        secret = config.edr.api_secret.encode()
+        expected = hmac.new(secret, agent_id.encode(), hashlib.sha256).hexdigest()
+
+        if not hmac.compare_digest(api_key, expected):
             return jsonify({"error": "Invalid API key"}), 401
 
         g.agent_id = agent_id
@@ -208,7 +215,21 @@ async def report_events():
 
     db.commit()
 
-    # TODO: Publish events to Redis Stream for processing
+    # Publish batch summary to EDR events stream for background processing
+    stream_manager = current_app.config.get("STREAM_MANAGER")
+    if stream_manager and created_count > 0:
+        try:
+            await stream_manager.publish_event(
+                "edr:events",
+                {
+                    "agent_id": g.agent_id or "unknown",
+                    "events_count": created_count,
+                    "severity": max((e.severity for e in events if hasattr(e, "severity") and e.severity), default="low"),
+                    "submitted_at": datetime.utcnow().isoformat(),
+                },
+            )
+        except Exception as stream_err:
+            logger.warning("Failed to publish EDR events to stream", error=str(stream_err))
 
     return (
         jsonify(
@@ -239,22 +260,19 @@ async def get_agent_config():
     if not agent:
         return jsonify({"error": "Agent not registered"}), 404
 
-    # Return agent configuration
-    # TODO: Implement configurable agent settings
+    # Return agent configuration — merge global defaults with per-agent metadata overrides
+    agent_config = agent.metadata or {}
+    config = current_app.config["MANAGER_CONFIG"]
     return (
         jsonify(
             {
                 "agent_id": agent_id,
                 "config": {
-                    "reporting_interval": 60,  # seconds
-                    "heartbeat_interval": 30,  # seconds
-                    "event_batch_size": 50,
-                    "enabled_collectors": [
-                        "process",
-                        "network",
-                        "file",
-                    ],
-                    "severity_threshold": "low",
+                    "reporting_interval": agent_config.get("reporting_interval", config.edr.reporting_interval),
+                    "heartbeat_interval": agent_config.get("heartbeat_interval", config.edr.heartbeat_interval),
+                    "event_batch_size": agent_config.get("event_batch_size", config.edr.event_batch_size),
+                    "enabled_collectors": agent_config.get("enabled_collectors", config.edr.enabled_collectors),
+                    "severity_threshold": agent_config.get("severity_threshold", config.edr.severity_threshold),
                 },
             }
         ),

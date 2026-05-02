@@ -767,30 +767,62 @@ class STIXParser:
             logger.error("Error extracting kill chain phases", error=str(e))
             return []
 
-    # Observable extraction methods (placeholders for more complex parsing)
+    # Observable extraction methods — parse STIX SCO (Cyber Observable) objects
     def _extract_file_observables(self, obj: Dict[str, Any]) -> List[Dict[str, str]]:
-        """Extract file observables"""
-        return []
+        """Extract file observables from a STIX file SCO."""
+        results: List[Dict[str, str]] = []
+        name = obj.get("name")
+        if name:
+            results.append({"type": "filename", "value": name})
+        hashes = obj.get("hashes", {})
+        for algo, value in hashes.items():
+            results.append({"type": algo.lower(), "value": value})
+        return results
 
     def _extract_ip_observables(self, obj: Dict[str, Any]) -> List[Dict[str, str]]:
-        """Extract IP observables"""
+        """Extract IP address observables from a STIX ipv4-addr or ipv6-addr SCO."""
+        value = obj.get("value")
+        if value:
+            obj_type = obj.get("type", "")
+            ip_type = "ipv6" if "ipv6" in obj_type else "ipv4"
+            return [{"type": ip_type, "value": value}]
         return []
 
     def _extract_domain_observables(self, obj: Dict[str, Any]) -> List[Dict[str, str]]:
-        """Extract domain observables"""
+        """Extract domain-name observables from a STIX domain-name SCO."""
+        value = obj.get("value")
+        if value:
+            return [{"type": "domain", "value": value}]
         return []
 
     def _extract_url_observables(self, obj: Dict[str, Any]) -> List[Dict[str, str]]:
-        """Extract URL observables"""
+        """Extract URL observables from a STIX url SCO."""
+        value = obj.get("value")
+        if value:
+            return [{"type": "url", "value": value}]
         return []
 
     def _extract_email_observables(self, obj: Dict[str, Any]) -> List[Dict[str, str]]:
-        """Extract email observables"""
-        return []
+        """Extract email address observables from a STIX email-addr SCO."""
+        value = obj.get("value")
+        display_name = obj.get("display_name")
+        results: List[Dict[str, str]] = []
+        if value:
+            results.append({"type": "email", "value": value})
+        if display_name:
+            results.append({"type": "email_display_name", "value": display_name})
+        return results
 
     def _extract_user_observables(self, obj: Dict[str, Any]) -> List[Dict[str, str]]:
-        """Extract user account observables"""
-        return []
+        """Extract user-account observables from a STIX user-account SCO."""
+        results: List[Dict[str, str]] = []
+        user_id = obj.get("user_id")
+        account_login = obj.get("account_login")
+        if user_id:
+            results.append({"type": "user_id", "value": user_id})
+        if account_login:
+            results.append({"type": "username", "value": account_login})
+        return results
 
     def _extract_process_observables(self, obj: Dict[str, Any]) -> List[Dict[str, str]]:
         """Extract process observables"""

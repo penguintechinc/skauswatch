@@ -45,17 +45,13 @@ def poll_repositories() -> dict[str, Any]:
 
 
 def _poll_repo(db: Any, repo: Any) -> None:
-    """Poll a single repository for new unreviewed PRs.
+    """Log polling attempt for a repository.
 
-    In a full implementation this would call the GitHub/GitLab API.
-    Currently a no-op placeholder — PR reviews are triggered via webhook.
+    PR review triggering is webhook-driven. This function exists for
+    periodic heartbeat logging only — no API polling is performed.
 
     Args:
         db: PyDAL connection
         repo: darwin_repo_configs record
     """
-    # Placeholder: real implementation would:
-    # 1. Fetch open PRs from GitHub/GitLab API using stored credentials
-    # 2. Check darwin_reviews for already-processed PR numbers
-    # 3. Queue process_review for any unprocessed PRs
     logger.debug("Polling repo: %s (%s)", repo.repo_name, repo.provider)

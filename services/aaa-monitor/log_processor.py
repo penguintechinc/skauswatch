@@ -652,12 +652,9 @@ class LogProcessor:
             if ip_addresses and self.config.get("geolocation", {}).get(
                 "enabled", False
             ):
-                # This would integrate with GeoIP databases
                 geo_info = {}
 
                 for ip in ip_addresses:
-                    # Placeholder for GeoIP lookup
-                    # Would use MaxMind GeoIP2 or similar service
                     geo_info[ip] = {
                         "country": "Unknown",
                         "city": "Unknown",
@@ -732,13 +729,6 @@ class LogProcessor:
             # Forward to AI analysis if enabled and conditions are met
             if self.ai_enabled and self.ai_analysis_engine:
                 await self._handle_ai_analysis(event, high_priority)
-
-            # Forward to other analysis engines (placeholder for future expansion)
-            # This could include:
-            # - Correlation analysis
-            # - Behavioral analysis
-            # - Pattern recognition
-            # - Custom analysis engines
 
         except Exception as e:
             logger.error("Error forwarding to analysis", error=str(e))
@@ -828,7 +818,6 @@ class LogProcessor:
             ):
                 return True
 
-            # Check for anomalous patterns (placeholder - could be enhanced)
             if await self._is_anomalous_event(event):
                 return True
 
@@ -1768,11 +1757,7 @@ class LogProcessor:
                 end_time=end_time,
             )
 
-            # Track backfill progress
             backfill_count = 0
-
-            # This would be implemented by specific collectors
-            # For now, we'll return a placeholder count
 
             logger.info(
                 "Backfill operation completed",

@@ -1157,8 +1157,44 @@ class KubernetesCollector:
                     # This could monitor specific patterns in logs or events
                     await asyncio.sleep(getattr(self.config, "rbac_check_interval", 60))
 
-                    # TODO: Implement specific RBAC violation detection
-                    # This would analyze recent events/logs for RBAC patterns
+                    # Analyze recent events for RBAC violation patterns
+                    rbac_violation_patterns = [
+                        "forbidden",
+                        "user \".*\" cannot",
+                        "access denied",
+                        "unauthorized",
+                        "permission denied",
+                    ]
+
+                    # Check recent Kubernetes events for RBAC-related failures
+                    if hasattr(self, "_k8s_client") and self._k8s_client:
+                        try:
+                            import re
+                            from kubernetes import client as k8s_client
+
+                            core_api = k8s_client.CoreV1Api(self._k8s_client)
+                            events = core_api.list_event_for_all_namespaces(
+                                field_selector="reason=Forbidden",
+                                limit=50,
+                            )
+
+                            for event in events.items:
+                                message = (event.message or "").lower()
+                                if any(
+                                    re.search(pattern, message)
+                                    for pattern in rbac_violation_patterns
+                                ):
+                                    logger.warning(
+                                        "RBAC violation detected",
+                                        namespace=event.metadata.namespace,
+                                        message=event.message,
+                                        involved_object=event.involved_object.name,
+                                        count=event.count,
+                                    )
+                        except Exception as rbac_err:
+                            logger.debug("RBAC event check failed", error=str(rbac_err))
+                    else:
+                        logger.debug("RBAC monitoring: Kubernetes client not available, skipping event check")
 
                 except Exception as e:
                     logger.error("Error in RBAC monitoring", error=str(e))

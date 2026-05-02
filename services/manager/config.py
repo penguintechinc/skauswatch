@@ -1,428 +1,443 @@
 """
-Configuration management for SkausWatch Manager Service
+SkausWatch Manager Service Configuration
 
-This module handles loading and validation of configuration settings
-from files, environment variables, and defaults.
+Quart-based configuration with Pydantic validation.
+Supports environment variables and YAML configuration files.
 """
 
-import logging
 import os
-import sys
-from dataclasses import dataclass, field
-from pathlib import Path
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
-import yaml
-
-logger = logging.getLogger(__name__)
+from pydantic import BaseModel, Field
 
 
-@dataclass
-class DatabaseConfig:
-    """Database configuration"""
+class DatabaseConfig(BaseModel):
+    """Database configuration with PyDAL-compatible URI."""
 
-    uri: str = "sqlite://storage.db"
-    migrate: bool = True
-    fake_migrate: bool = False
-    init_default_data: bool = True
-    pool_size: int = 10
-    connection_timeout: int = 30
+    type: str = Field(default="postgres", description="Database type")
+    host: str = Field(default="postgres", description="Database host")
+    port: int = Field(default=5432, description="Database port")
+    name: str = Field(default="skauswatch", description="Database name")
+    user: str = Field(default="skauswatch", description="Database user")
+    password: str = Field(default="", description="Database password")
+    pool_size: int = Field(default=10, ge=1, le=100)
+    migrate: bool = Field(default=True)
 
+    @property
+    def uri(self) -> str:
+        """Build PyDAL-compatible database URI."""
+        type_map = {"postgresql": "postgres", "mysql": "mysql", "sqlite": "sqlite"}
+        db_type = type_map.get(self.type, self.type)
 
-@dataclass
-class AuthConfig:
-    """Authentication configuration"""
+        if db_type == "sqlite":
+            return f"sqlite://{self.name}.db"
 
-    session_timeout: int = 3600  # seconds
-    remember_me_timeout: int = 86400 * 30  # 30 days
-    password_min_length: int = 8
-    password_complexity: bool = True
-    max_login_attempts: int = 5
-    lockout_duration: int = 900  # 15 minutes
-    mfa_required: bool = False
-    mfa_issuer: str = "SkausWatch"
-    backup_codes_count: int = 10
-    jwt_secret: Optional[str] = None
-    jwt_expiration: int = 3600
-    jwt_algorithm: str = "HS256"
+        return f"{db_type}://{self.user}:{self.password}@{self.host}:{self.port}/{self.name}"
 
 
-@dataclass
-class SecurityConfig:
-    """Security configuration"""
+class RedisConfig(BaseModel):
+    """Redis configuration with Streams and ACL support."""
 
-    secret_key: str = ""
-    secure_cookies: bool = True
-    csrf_protection: bool = True
-    csrf_timeout: int = 3600
-    rate_limit_enabled: bool = True
-    rate_limit_requests_per_minute: int = 60
-    rate_limit_burst: int = 100
-    content_security_policy: Dict[str, str] = field(
-        default_factory=lambda: {
-            "default-src": "'self'",
-            "script-src": "'self' 'unsafe-inline'",
-            "style-src": "'self' 'unsafe-inline'",
-            "img-src": "'self' data:",
-            "font-src": "'self'",
-            "connect-src": "'self'",
-            "frame-ancestors": "'none'",
-        }
+    url: str = Field(default="redis://redis:6379/0")
+    password: Optional[str] = None
+    key_prefix: str = Field(
+        default="skauswatch", description="Key prefix for namespacing"
     )
-    trusted_proxies: List[str] = field(default_factory=list)
-    audit_log_retention_days: int = 365
+    max_connections: int = Field(default=20, ge=1, le=100)
+
+    # Redis Streams configuration
+    streams_enabled: bool = Field(default=True)
+    consumer_group_prefix: str = Field(default="manager")
+
+    @property
+    def full_url(self) -> str:
+        """Build Redis URL with password if provided."""
+        if self.password and "@" not in self.url:
+            if "://" in self.url:
+                protocol, rest = self.url.split("://", 1)
+                return f"{protocol}://default:{self.password}@{rest}"
+        return self.url
 
 
-@dataclass
-class CacheConfig:
-    """Cache configuration"""
+class AuthConfig(BaseModel):
+    """Authentication configuration."""
 
-    default_expiration: int = 300  # 5 minutes
-    redis_url: Optional[str] = None
-    memory_cache_size: int = 1000
+    secret_key: str = Field(default="change-me-in-production")
+    jwt_secret: str = Field(default="change-me-jwt-secret")
+    jwt_algorithm: str = Field(default="HS256")
+    access_token_expires_minutes: int = Field(default=30, ge=1)
+    refresh_token_expires_days: int = Field(default=7, ge=1)
+    password_min_length: int = Field(default=8, ge=4)
+    max_login_attempts: int = Field(default=5, ge=1)
+    lockout_duration_minutes: int = Field(default=15, ge=1)
+    mfa_enabled: bool = Field(default=False)
 
+    @property
+    def access_token_expires(self) -> timedelta:
+        return timedelta(minutes=self.access_token_expires_minutes)
 
-@dataclass
-class LoggingConfig:
-    """Logging configuration"""
-
-    level: str = "INFO"
-    format: str = "json"
-    file: Optional[str] = None
-    max_size: int = 100 * 1024 * 1024  # 100MB
-    backup_count: int = 5
-    structured: bool = True
-
-
-@dataclass
-class HealthCheckConfig:
-    """Health check configuration"""
-
-    enabled: bool = True
-    interval: int = 30  # seconds
-    timeout: int = 10  # seconds
-    failure_threshold: int = 3
-    success_threshold: int = 1
-    external_checks: List[Dict[str, Any]] = field(default_factory=list)
+    @property
+    def refresh_token_expires(self) -> timedelta:
+        return timedelta(days=self.refresh_token_expires_days)
 
 
-@dataclass
-class UIConfig:
-    """UI configuration"""
+class GRPCConfig(BaseModel):
+    """gRPC server configuration."""
 
-    theme: str = "light"
-    language: str = "en"
-    items_per_page: int = 25
-    enable_tooltips: bool = True
-    enable_animations: bool = True
-    accessibility_mode: bool = False
+    enabled: bool = Field(default=True)
+    host: str = Field(default="0.0.0.0")
+    port: int = Field(default=50051)
+    max_workers: int = Field(default=10, ge=1)
+    max_message_length: int = Field(default=4 * 1024 * 1024)  # 4MB
 
-
-@dataclass
-class NotificationConfig:
-    """Notification configuration"""
-
-    enabled: bool = True
-    email_backend: str = "smtp"
-    smtp_host: str = "localhost"
-    smtp_port: int = 587
-    smtp_username: str = ""
-    smtp_password: str = ""
-    smtp_use_tls: bool = True
-    smtp_use_ssl: bool = False
-    from_email: str = "noreply@skauswatch.local"
-    webhook_url: Optional[str] = None
-    slack_token: Optional[str] = None
+    # PKI Server gRPC client
+    pki_server_address: str = Field(default="pki-server:50052")
 
 
-@dataclass
-class APIConfig:
-    """API configuration"""
+class AIConfig(BaseModel):
+    """AI provider configuration for alert review."""
 
-    enabled: bool = True
-    version: str = "v1"
-    docs_enabled: bool = True
-    cors_enabled: bool = True
-    cors_origins: List[str] = field(default_factory=lambda: ["*"])
-    cors_methods: List[str] = field(
-        default_factory=lambda: ["GET", "POST", "PUT", "DELETE"]
+    enabled: bool = Field(default=True)
+    default_provider: str = Field(default="ollama")
+
+    # Ollama configuration (supports remote)
+    ollama_url: str = Field(default="http://localhost:11434")
+    ollama_model: str = Field(default="llama3")
+    ollama_timeout: int = Field(default=120, ge=10)
+
+    # Anthropic (Claude) configuration
+    anthropic_api_key: Optional[str] = None
+    anthropic_model: str = Field(default="claude-3-sonnet-20240229")
+
+    # OpenAI configuration
+    openai_api_key: Optional[str] = None
+    openai_model: str = Field(default="gpt-4-turbo")
+
+    # Analysis settings
+    max_events_per_analysis: int = Field(default=50, ge=1, le=200)
+    analysis_timeout: int = Field(default=60, ge=10)
+
+
+class ThreatIntelConfig(BaseModel):
+    """Threat intelligence configuration."""
+
+    enabled: bool = Field(default=True)
+
+    # Free sources
+    dns_blacklist_enabled: bool = Field(default=True)
+    ip_blacklist_enabled: bool = Field(default=True)
+
+    # AlienVault OTX
+    otx_enabled: bool = Field(default=False)
+    otx_api_key: Optional[str] = None
+
+    # VirusTotal
+    virustotal_enabled: bool = Field(default=False)
+    virustotal_api_key: Optional[str] = None
+
+    # STIX/TAXII
+    taxii_enabled: bool = Field(default=False)
+    taxii_servers: List[Dict[str, Any]] = Field(default_factory=list)
+
+    # Cache settings
+    ioc_cache_ttl_hours: int = Field(default=1, ge=1)
+    feed_update_interval_minutes: int = Field(default=30, ge=5)
+
+    # Research feature settings
+    research_enabled: bool = Field(default=True)
+    whois_timeout: int = Field(default=10, ge=1)
+    dns_timeout: int = Field(default=5, ge=1)
+    asn_timeout: int = Field(default=5, ge=1)
+    shodan_enabled: bool = Field(default=False)
+    shodan_api_key: Optional[str] = None
+    maltego_enabled: bool = Field(default=False)
+    maltego_trx_server: Optional[str] = None
+
+
+class OpenSearchConfig(BaseModel):
+    """OpenSearch/KillKrill configuration."""
+
+    # If KILLKRILL_SERVER_API_URL is set, use KillKrill's cluster
+    killkrill_url: Optional[str] = None
+
+    # Embedded OpenSearch (used when killkrill_url is empty)
+    opensearch_url: str = Field(default="http://opensearch:9200")
+    opensearch_user: Optional[str] = None
+    opensearch_password: Optional[str] = None
+
+    index_prefix: str = Field(default="skauswatch")
+
+    @property
+    def is_killkrill_mode(self) -> bool:
+        """Check if using KillKrill's OpenSearch cluster."""
+        return bool(self.killkrill_url)
+
+    @property
+    def effective_url(self) -> str:
+        """Get the effective OpenSearch URL."""
+        return self.killkrill_url or self.opensearch_url
+
+
+class APIConfig(BaseModel):
+    """REST API configuration."""
+
+    host: str = Field(default="0.0.0.0")
+    port: int = Field(default=5000)
+    debug: bool = Field(default=False)
+    cors_enabled: bool = Field(default=True)
+    cors_origins: List[str] = Field(default_factory=lambda: ["*"])
+    docs_enabled: bool = Field(default=True)
+    rate_limit_enabled: bool = Field(default=True)
+    rate_limit_per_minute: int = Field(default=60, ge=1)
+
+
+class S3ScanConfig(BaseModel):
+    """S3 bucket scanning configuration."""
+
+    enabled: bool = Field(default=True, description="Enable S3 scanning")
+    max_file_size_mb: int = Field(
+        default=100, ge=1, le=500, description="Maximum file size in MB"
     )
-    cors_headers: List[str] = field(default_factory=lambda: ["*"])
+    max_concurrent_jobs: int = Field(
+        default=5, ge=1, le=20, description="Maximum concurrent scan jobs"
+    )
+    scannable_types: List[str] = Field(
+        default_factory=lambda: [
+            "application/pdf",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.*",
+            "application/vnd.ms-*",
+            "application/x-executable",
+            "application/x-dosexec",
+            "application/x-msdos-program",
+            "application/zip",
+            "application/x-rar-compressed",
+            "application/x-7z-compressed",
+        ],
+        description="Scannable MIME types",
+    )
+    skip_large_files: bool = Field(
+        default=True, description="Skip files exceeding max_file_size_mb"
+    )
+    rescan_after_hours: int = Field(
+        default=24, ge=1, description="Hours before rescanning files"
+    )
+    credential_encryption_key: str = Field(
+        default="change-me", description="Encryption key for S3 credentials"
+    )
+    yara_rules_path: Optional[str] = Field(
+        default=None, description="Path to YARA rules file"
+    )
+    auto_create_ti_indicators: bool = Field(
+        default=True, description="Auto-create threat intelligence indicators"
+    )
+    sandbox_enabled: bool = Field(default=False, description="Enable sandbox analysis")
+    sandbox_api_url: Optional[str] = Field(default=None, description="Sandbox API URL")
+    sandbox_api_key: Optional[str] = Field(default=None, description="Sandbox API key")
+    sandbox_risk_threshold: float = Field(
+        default=0.7, ge=0.0, le=1.0, description="Risk threshold for sandbox results"
+    )
 
 
-@dataclass
-class CertificateConfig:
-    """Certificate management configuration"""
+class SIEMConfig(BaseModel):
+    """SIEM / log pipeline configuration."""
 
-    default_validity_days: int = 365
-    auto_renewal_threshold_days: int = 30
-    max_validity_days: int = 3650  # 10 years
-    require_approval: bool = True
-    allowed_key_algorithms: List[str] = field(default_factory=lambda: ["rsa", "ec"])
-    default_key_algorithm: str = "rsa"
-    default_key_size: int = 2048
-    ca_cert_path: Optional[str] = None
-    ca_key_path: Optional[str] = None
+    enabled: bool = Field(default=True, description="Enable SIEM log pipeline")
+    opensearch_url: str = Field(
+        default="http://opensearch:9200",
+        description="OpenSearch endpoint for SIEM logs",
+    )
+    log_receiver_url: str = Field(
+        default="http://log-receiver:5010", description="Log receiver service URL"
+    )
+    retention_days: int = Field(
+        default=90, ge=1, le=400, description="Log retention in days (1–400)"
+    )
+    free_tier_user_cap: int = Field(
+        default=5, ge=1, description="Maximum users on free tier"
+    )
+    exempt_domains: List[str] = Field(
+        default_factory=lambda: ["skauswatch.penguintech.cloud", "skauswatch.app"],
+        description="Domains exempt from free-tier user cap and SSO license requirement",
+    )
 
 
-class ManagerConfig:
-    """Main configuration class for SkausWatch Manager Service"""
+class ASMConfig(BaseModel):
+    """ASM (Attack Surface Management) configuration."""
 
-    def __init__(self, config_path: Optional[str] = None):
-        """Initialize configuration
+    enabled: bool = Field(default=True)
+    worker_scanner_url: str = Field(default="http://worker-scanner:5001")
+    s3_bucket: str = Field(default="skauswatch-asm-artifacts")
 
-        Args:
-            config_path: Optional path to configuration file
-        """
-        self.config_path = config_path
 
-        # Initialize with defaults
-        self.database = DatabaseConfig()
-        self.auth = AuthConfig()
-        self.security = SecurityConfig()
-        self.cache = CacheConfig()
-        self.logging = LoggingConfig()
-        self.health_check = HealthCheckConfig()
-        self.ui = UIConfig()
-        self.notification = NotificationConfig()
-        self.api = APIConfig()
-        self.certificate = CertificateConfig()
+class DarwinConfig(BaseModel):
+    """Darwin AI code review configuration."""
 
-        # Load configuration from file if provided
-        if config_path:
-            self.load_from_file(config_path)
+    enabled: bool = Field(
+        default=True, description="Enable Darwin AI review sub-module"
+    )
+    worker_darwin_url: str = Field(
+        default="http://worker-darwin:5005", description="Darwin worker service URL"
+    )
+    free_tier_user_cap: int = Field(
+        default=3, ge=1, description="Community user limit (darwin feature gate)"
+    )
+    max_repos_free: int = Field(default=3, ge=1, description="Community repo limit")
+    max_reviews_per_day: int = Field(
+        default=10, ge=1, description="Community daily review limit"
+    )
 
-        # Override with environment variables
-        self.load_from_env()
 
-        # Validate configuration
-        self.validate()
+class EDRConfig(BaseModel):
+    """EDR agent management configuration."""
 
-        # Generate secrets if needed
-        self._ensure_secrets()
+    api_secret: str = Field(
+        default="change-me-edr-secret",
+        description="Shared secret for EDR agent API key validation",
+    )
+    reporting_interval: int = Field(default=60, ge=5, description="Event reporting interval in seconds")
+    heartbeat_interval: int = Field(default=30, ge=5, description="Agent heartbeat interval in seconds")
+    event_batch_size: int = Field(default=50, ge=1, le=500, description="Maximum events per batch")
+    enabled_collectors: list = Field(
+        default_factory=lambda: ["process", "network", "file"],
+        description="Active collector modules",
+    )
+    severity_threshold: str = Field(default="low", description="Minimum event severity to report")
 
-    def load_from_file(self, config_path: str) -> None:
-        """Load configuration from YAML file
 
-        Args:
-            config_path: Path to configuration file
-        """
-        try:
-            config_file = Path(config_path)
-            if not config_file.exists():
-                logger.warning(f"Configuration file not found: {config_path}")
-                return
+class ManagerConfig(BaseModel):
+    """Main Manager service configuration."""
 
-            with open(config_file, "r", encoding="utf-8") as f:
-                config_data = yaml.safe_load(f) or {}
+    # Service info
+    service_name: str = Field(default="skauswatch-manager")
+    environment: str = Field(default="production")
+    log_level: str = Field(default="INFO")
 
-            # Update configuration sections
-            self._update_from_dict(config_data)
+    # Sub-configurations
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    redis: RedisConfig = Field(default_factory=RedisConfig)
+    auth: AuthConfig = Field(default_factory=AuthConfig)
+    grpc: GRPCConfig = Field(default_factory=GRPCConfig)
+    ai: AIConfig = Field(default_factory=AIConfig)
+    threat_intel: ThreatIntelConfig = Field(default_factory=ThreatIntelConfig)
+    opensearch: OpenSearchConfig = Field(default_factory=OpenSearchConfig)
+    api: APIConfig = Field(default_factory=APIConfig)
+    s3_scan: S3ScanConfig = Field(default_factory=S3ScanConfig)
+    siem: SIEMConfig = Field(default_factory=SIEMConfig)
+    asm: ASMConfig = Field(default_factory=ASMConfig)
+    darwin: DarwinConfig = Field(default_factory=DarwinConfig)
+    edr: EDRConfig = Field(default_factory=EDRConfig)
 
-            logger.info(f"Configuration loaded from: {config_path}")
+    class Config:
+        env_prefix = "SKAUSWATCH_"
 
-        except Exception as e:
-            logger.error(f"Failed to load configuration from {config_path}: {e}")
-            raise
 
-    def load_from_env(self) -> None:
-        """Load configuration from environment variables"""
-        # Database configuration
-        if os.getenv("SKAUSWATCH_DB_URI"):
-            self.database.uri = os.getenv("SKAUSWATCH_DB_URI")
-        if os.getenv("SKAUSWATCH_DB_MIGRATE"):
-            self.database.migrate = os.getenv("SKAUSWATCH_DB_MIGRATE").lower() == "true"
+def _build_s3_scan_config() -> S3ScanConfig:
+    """Build S3ScanConfig, only setting scannable_types if env var is provided."""
+    config_kwargs = {
+        "enabled": os.getenv("S3_SCAN_ENABLED", "true").lower() == "true",
+        "max_file_size_mb": int(os.getenv("S3_SCAN_MAX_FILE_SIZE_MB", "100")),
+        "max_concurrent_jobs": int(os.getenv("S3_SCAN_MAX_CONCURRENT_JOBS", "5")),
+        "skip_large_files": os.getenv("S3_SCAN_SKIP_LARGE_FILES", "true").lower()
+        == "true",
+        "rescan_after_hours": int(os.getenv("S3_SCAN_RESCAN_HOURS", "24")),
+        "credential_encryption_key": os.getenv("S3_CRED_ENCRYPTION_KEY", "change-me"),
+        "yara_rules_path": os.getenv("S3_SCAN_YARA_RULES_PATH"),
+        "auto_create_ti_indicators": os.getenv("S3_SCAN_AUTO_TI", "true").lower()
+        == "true",
+        "sandbox_enabled": os.getenv("S3_SANDBOX_ENABLED", "false").lower() == "true",
+        "sandbox_api_url": os.getenv("S3_SANDBOX_API_URL"),
+        "sandbox_api_key": os.getenv("S3_SANDBOX_API_KEY"),
+        "sandbox_risk_threshold": float(os.getenv("S3_SANDBOX_RISK_THRESHOLD", "0.7")),
+    }
 
-        # Security configuration
-        if os.getenv("SKAUSWATCH_SECRET_KEY"):
-            self.security.secret_key = os.getenv("SKAUSWATCH_SECRET_KEY")
-        if os.getenv("SKAUSWATCH_SECURE_COOKIES"):
-            self.security.secure_cookies = (
-                os.getenv("SKAUSWATCH_SECURE_COOKIES").lower() == "true"
-            )
+    # Only set scannable_types if explicitly provided, otherwise use default
+    s3_scan_types = os.getenv("S3_SCAN_TYPES")
+    if s3_scan_types:
+        config_kwargs["scannable_types"] = [
+            t.strip() for t in s3_scan_types.split(",") if t.strip()
+        ]
 
-        # Authentication configuration
-        if os.getenv("SKAUSWATCH_JWT_SECRET"):
-            self.auth.jwt_secret = os.getenv("SKAUSWATCH_JWT_SECRET")
-        if os.getenv("SKAUSWATCH_SESSION_TIMEOUT"):
-            self.auth.session_timeout = int(os.getenv("SKAUSWATCH_SESSION_TIMEOUT"))
+    return S3ScanConfig(**config_kwargs)
 
-        # Cache configuration
-        if os.getenv("SKAUSWATCH_REDIS_URL"):
-            self.cache.redis_url = os.getenv("SKAUSWATCH_REDIS_URL")
 
-        # Logging configuration
-        if os.getenv("SKAUSWATCH_LOG_LEVEL"):
-            self.logging.level = os.getenv("SKAUSWATCH_LOG_LEVEL").upper()
-        if os.getenv("SKAUSWATCH_LOG_FILE"):
-            self.logging.file = os.getenv("SKAUSWATCH_LOG_FILE")
-
-        # Notification configuration
-        if os.getenv("SKAUSWATCH_SMTP_HOST"):
-            self.notification.smtp_host = os.getenv("SKAUSWATCH_SMTP_HOST")
-        if os.getenv("SKAUSWATCH_SMTP_PORT"):
-            self.notification.smtp_port = int(os.getenv("SKAUSWATCH_SMTP_PORT"))
-        if os.getenv("SKAUSWATCH_SMTP_USERNAME"):
-            self.notification.smtp_username = os.getenv("SKAUSWATCH_SMTP_USERNAME")
-        if os.getenv("SKAUSWATCH_SMTP_PASSWORD"):
-            self.notification.smtp_password = os.getenv("SKAUSWATCH_SMTP_PASSWORD")
-
-    def _update_from_dict(self, config_data: Dict[str, Any]) -> None:
-        """Update configuration from dictionary
-
-        Args:
-            config_data: Configuration dictionary
-        """
-        # Database section
-        if "database" in config_data:
-            db_config = config_data["database"]
-            self.database = DatabaseConfig(**{**self.database.__dict__, **db_config})
-
-        # Auth section
-        if "auth" in config_data:
-            auth_config = config_data["auth"]
-            self.auth = AuthConfig(**{**self.auth.__dict__, **auth_config})
-
-        # Security section
-        if "security" in config_data:
-            security_config = config_data["security"]
-            self.security = SecurityConfig(
-                **{**self.security.__dict__, **security_config}
-            )
-
-        # Cache section
-        if "cache" in config_data:
-            cache_config = config_data["cache"]
-            self.cache = CacheConfig(**{**self.cache.__dict__, **cache_config})
-
-        # Logging section
-        if "logging" in config_data:
-            logging_config = config_data["logging"]
-            self.logging = LoggingConfig(**{**self.logging.__dict__, **logging_config})
-
-        # Health check section
-        if "health_check" in config_data:
-            health_config = config_data["health_check"]
-            self.health_check = HealthCheckConfig(
-                **{**self.health_check.__dict__, **health_config}
-            )
-
-        # UI section
-        if "ui" in config_data:
-            ui_config = config_data["ui"]
-            self.ui = UIConfig(**{**self.ui.__dict__, **ui_config})
-
-        # Notification section
-        if "notification" in config_data:
-            notification_config = config_data["notification"]
-            self.notification = NotificationConfig(
-                **{**self.notification.__dict__, **notification_config}
-            )
-
-        # API section
-        if "api" in config_data:
-            api_config = config_data["api"]
-            self.api = APIConfig(**{**self.api.__dict__, **api_config})
-
-        # Certificate section
-        if "certificate" in config_data:
-            cert_config = config_data["certificate"]
-            self.certificate = CertificateConfig(
-                **{**self.certificate.__dict__, **cert_config}
-            )
-
-    def validate(self) -> None:
-        """Validate configuration settings"""
-        errors = []
-
-        # Validate database URI
-        if not self.database.uri:
-            errors.append("Database URI is required")
-
-        # Validate authentication settings
-        if self.auth.password_min_length < 4:
-            errors.append("Password minimum length must be at least 4")
-
-        if self.auth.session_timeout < 60:
-            errors.append("Session timeout must be at least 60 seconds")
-
-        # Validate security settings
-        if not self.security.secret_key:
-            logger.warning("No secret key configured, will generate random key")
-
-        # Validate certificate settings
-        if self.certificate.default_validity_days < 1:
-            errors.append("Certificate default validity must be at least 1 day")
-
-        if self.certificate.max_validity_days < self.certificate.default_validity_days:
-            errors.append("Certificate max validity must be >= default validity")
-
-        if errors:
-            error_msg = "Configuration validation errors:\n" + "\n".join(
-                f"- {error}" for error in errors
-            )
-            logger.error(error_msg)
-            raise ValueError(error_msg)
-
-    def _ensure_secrets(self) -> None:
-        """Generate secrets if not provided"""
-        import secrets
-        import string
-
-        if not self.security.secret_key:
-            # Generate 64-character secret key
-            alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
-            self.security.secret_key = "".join(
-                secrets.choice(alphabet) for _ in range(64)
-            )
-            logger.info("Generated random secret key")
-
-        if not self.auth.jwt_secret:
-            # Generate JWT secret
-            self.auth.jwt_secret = secrets.token_urlsafe(64)
-            logger.info("Generated random JWT secret")
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert configuration to dictionary
-
-        Returns:
-            Configuration as dictionary
-        """
-        return {
-            "database": self.database.__dict__,
-            "auth": self.auth.__dict__,
-            "security": {
-                k: v
-                for k, v in self.security.__dict__.items()
-                if not k.endswith("_key") and not k.endswith("_secret")
-            },
-            "cache": self.cache.__dict__,
-            "logging": self.logging.__dict__,
-            "health_check": self.health_check.__dict__,
-            "ui": self.ui.__dict__,
-            "notification": {
-                k: v
-                for k, v in self.notification.__dict__.items()
-                if not k.endswith("_password") and not k.endswith("_token")
-            },
-            "api": self.api.__dict__,
-            "certificate": self.certificate.__dict__,
-        }
-
-    def save_to_file(self, file_path: str) -> None:
-        """Save configuration to YAML file (excluding secrets)
-
-        Args:
-            file_path: Path to save configuration file
-        """
-        try:
-            config_dict = self.to_dict()
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                yaml.dump(config_dict, f, default_flow_style=False, indent=2)
-
-            logger.info(f"Configuration saved to: {file_path}")
-
-        except Exception as e:
-            logger.error(f"Failed to save configuration to {file_path}: {e}")
-            raise
+def load_config() -> ManagerConfig:
+    """Load configuration from environment variables."""
+    return ManagerConfig(
+        service_name=os.getenv("SERVICE_NAME", "skauswatch-manager"),
+        environment=os.getenv("QUART_ENV", "production"),
+        log_level=os.getenv("LOG_LEVEL", "INFO"),
+        database=DatabaseConfig(
+            type=os.getenv("DB_TYPE", "postgres"),
+            host=os.getenv("DB_HOST", "postgres"),
+            port=int(os.getenv("DB_PORT", "5432")),
+            name=os.getenv("DB_NAME", "skauswatch"),
+            user=os.getenv("DB_USER", "skauswatch"),
+            password=os.getenv("DB_PASS", os.getenv("DB_PASSWORD", "")),
+            pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+        ),
+        redis=RedisConfig(
+            url=os.getenv("REDIS_URL", "redis://redis:6379/0"),
+            password=os.getenv("REDIS_PASSWORD"),
+            key_prefix=os.getenv("REDIS_KEY_PREFIX", "skauswatch"),
+        ),
+        auth=AuthConfig(
+            secret_key=os.getenv("SECRET_KEY", "change-me-in-production"),
+            jwt_secret=os.getenv("JWT_SECRET_KEY", "change-me-jwt-secret"),
+        ),
+        grpc=GRPCConfig(
+            enabled=os.getenv("GRPC_ENABLED", "true").lower() == "true",
+            port=int(os.getenv("GRPC_PORT", "50051")),
+            pki_server_address=os.getenv("PKI_GRPC_ADDR", "pki-server:50052"),
+        ),
+        ai=AIConfig(
+            enabled=os.getenv("AI_ENABLED", "true").lower() == "true",
+            ollama_url=os.getenv("OLLAMA_URL", "http://localhost:11434"),
+            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+        ),
+        threat_intel=ThreatIntelConfig(
+            otx_api_key=os.getenv("OTX_API_KEY"),
+            virustotal_api_key=os.getenv("VIRUSTOTAL_API_KEY"),
+            research_enabled=os.getenv("RESEARCH_ENABLED", "true").lower() == "true",
+            whois_timeout=int(os.getenv("WHOIS_TIMEOUT", "10")),
+            dns_timeout=int(os.getenv("DNS_TIMEOUT", "5")),
+            asn_timeout=int(os.getenv("ASN_TIMEOUT", "5")),
+            shodan_enabled=os.getenv("SHODAN_ENABLED", "false").lower() == "true",
+            shodan_api_key=os.getenv("SHODAN_API_KEY"),
+            maltego_enabled=os.getenv("MALTEGO_ENABLED", "false").lower() == "true",
+            maltego_trx_server=os.getenv("MALTEGO_TRX_SERVER"),
+        ),
+        opensearch=OpenSearchConfig(
+            killkrill_url=os.getenv("KILLKRILL_SERVER_API_URL"),
+            opensearch_url=os.getenv("OPENSEARCH_URL", "http://opensearch:9200"),
+        ),
+        api=APIConfig(
+            debug=os.getenv("QUART_DEBUG", "false").lower() == "true",
+            port=int(os.getenv("API_PORT", "5000")),
+        ),
+        s3_scan=_build_s3_scan_config(),
+        siem=SIEMConfig(
+            enabled=os.getenv("SIEM_ENABLED", "true").lower() == "true",
+            opensearch_url=os.getenv("OPENSEARCH_URL", "http://opensearch:9200"),
+            log_receiver_url=os.getenv("LOG_RECEIVER_URL", "http://log-receiver:5010"),
+            retention_days=int(os.getenv("LOG_RETENTION_DAYS", "90")),
+        ),
+        darwin=DarwinConfig(
+            enabled=os.getenv("DARWIN_ENABLED", "true").lower() == "true",
+            worker_darwin_url=os.getenv(
+                "WORKER_DARWIN_URL", "http://worker-darwin:5005"
+            ),
+            free_tier_user_cap=int(os.getenv("DARWIN_FREE_TIER_USER_CAP", "3")),
+            max_repos_free=int(os.getenv("DARWIN_MAX_REPOS_FREE", "3")),
+            max_reviews_per_day=int(os.getenv("DARWIN_MAX_REVIEWS_PER_DAY", "10")),
+        ),
+        edr=EDRConfig(
+            api_secret=os.getenv("EDR_API_SECRET", "change-me-edr-secret"),
+            reporting_interval=int(os.getenv("EDR_REPORTING_INTERVAL", "60")),
+            heartbeat_interval=int(os.getenv("EDR_HEARTBEAT_INTERVAL", "30")),
+            event_batch_size=int(os.getenv("EDR_EVENT_BATCH_SIZE", "50")),
+            severity_threshold=os.getenv("EDR_SEVERITY_THRESHOLD", "low"),
+        ),
+    )

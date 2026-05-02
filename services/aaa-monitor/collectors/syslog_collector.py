@@ -323,9 +323,34 @@ class SyslogCollector:
                         await writer.wait_closed()
 
                     else:
-                        # UDP client connection would be different
-                        logger.warning("UDP client connections not implemented yet")
-                        break
+                        # UDP: receive datagrams from the syslog server
+                        import socket
+
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        sock.settimeout(5.0)
+                        sock.bind(("0.0.0.0", server_config.port))
+                        loop = asyncio.get_event_loop()
+
+                        while self.running:
+                            try:
+                                data, addr = await loop.run_in_executor(
+                                    None, sock.recvfrom, 65535
+                                )
+                                message = data.decode("utf-8", errors="ignore").strip()
+                                if message:
+                                    await self._process_syslog_message(
+                                        message, "udp-client", addr
+                                    )
+                            except socket.timeout:
+                                continue
+                            except Exception as e:
+                                logger.debug(
+                                    "Error reading UDP syslog datagram",
+                                    session_id=session_id,
+                                    error=str(e),
+                                )
+                                break
+                        sock.close()
 
                 except Exception as e:
                     logger.error(

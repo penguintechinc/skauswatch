@@ -1,29 +1,32 @@
 """
 SkausWatch Manager Service - Main Application
 
-This module contains the main py4web application setup and configuration
-for the SkausWatch Manager service.
+Quart-based unified Manager service providing:
+- REST API for external clients
+- gRPC server for inter-service communication
+- Alert management with AI review
+- Threat intelligence aggregation
+- EDR agent management
+- Approval workflows
 """
 
+import asyncio
 import logging
 import os
-import sys
-from pathlib import Path
-from typing import Any, Dict, Optional
+from datetime import datetime
+from typing import List, Optional
 
 import structlog
-from py4web import DAL, URL, Cache, Flash, Session, Translator, action, redirect
-from py4web.core import Fixture
-from py4web.utils.auth import Auth
-from py4web.utils.publisher import Publisher
-from pydal.tools.tags import Tags
+from models.db import close_db, get_db, init_database_schema
+from quart import Quart, jsonify
+from quart_cors import cors
 
-from .auth import SkausWatchAuth
-from .config import ManagerConfig
-from .health import HealthChecker
-from .models import close_database, get_database
-from .security import SecurityManager
-from .utils import get_version, setup_logging
+from config import ManagerConfig, load_config
+from services.streams.redis_streams import (
+    AuditLogPublisher,
+    RedisStreamManager,
+    create_stream_consumer,
+)
 
 # Configure structured logging
 structlog.configure(
@@ -46,326 +49,399 @@ structlog.configure(
 
 logger = structlog.get_logger(__name__)
 
-# Application globals
+# Global instances
 config: Optional[ManagerConfig] = None
-db: Optional[DAL] = None
-auth: Optional[SkausWatchAuth] = None
-security: Optional[SecurityManager] = None
-health_checker: Optional[HealthChecker] = None
-
-# py4web fixtures
-session: Optional[Session] = None
-cache: Optional[Cache] = None
-translator: Optional[Translator] = None
-flash: Optional[Flash] = None
-tags: Optional[Tags] = None
+stream_manager: Optional[RedisStreamManager] = None
+audit_publisher: Optional[AuditLogPublisher] = None
+background_tasks: List[asyncio.Task] = []
 
 
-class SkausWatchManagerApp:
-    """Main SkausWatch Manager Application class"""
+def get_version() -> str:
+    """Get application version."""
+    version_file = os.path.join(os.path.dirname(__file__), "..", "..", ".version")
+    try:
+        with open(version_file) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return "0.0.0-dev"
 
-    def __init__(self, config_path: Optional[str] = None):
-        """Initialize the application
 
-        Args:
-            config_path: Path to configuration file
-        """
-        global config
+def create_app(config_instance: ManagerConfig = None) -> Quart:
+    """
+    Create and configure the Quart application.
 
-        # Load configuration
-        config = ManagerConfig(config_path)
+    Args:
+        config_instance: Optional configuration instance
 
-        # Setup logging
-        setup_logging(config.logging)
+    Returns:
+        Configured Quart application
+    """
+    global config
+
+    # Load configuration
+    config = config_instance or load_config()
+
+    # Configure logging
+    log_level = getattr(logging, config.log_level.upper(), logging.INFO)
+    logging.basicConfig(level=log_level)
+
+    # Create Quart app
+    app = Quart(__name__)
+    app.config["SECRET_KEY"] = config.auth.secret_key
+    app.config["JSON_SORT_KEYS"] = False
+
+    # Enable CORS if configured
+    if config.api.cors_enabled:
+        app = cors(
+            app,
+            allow_origin=config.api.cors_origins,
+            allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            allow_headers=["Content-Type", "Authorization", "X-API-Key", "X-Agent-ID"],
+        )
+
+    # Store config in app
+    app.config["MANAGER_CONFIG"] = config
+
+    # Register lifecycle hooks
+    @app.before_serving
+    async def startup():
+        """Application startup."""
+        global stream_manager, audit_publisher
 
         logger.info(
-            "Initializing SkausWatch Manager Service",
+            "Starting SkausWatch Manager Service",
             version=get_version(),
-            config_path=config_path,
+            environment=config.environment,
         )
 
         try:
-            # Initialize database
-            self._init_database()
+            # Initialize database schema (SQLAlchemy - one time only)
+            init_database_schema(config.database.uri)
 
-            # Initialize py4web fixtures
-            self._init_fixtures()
-
-            # Initialize authentication
-            self._init_auth()
-
-            # Initialize security manager
-            self._init_security()
-
-            # Initialize health checker
-            self._init_health_checker()
-
-            # Register error handlers
-            self._register_error_handlers()
-
-            logger.info("SkausWatch Manager Service initialized successfully")
-
-        except Exception as e:
-            logger.error(
-                "Failed to initialize SkausWatch Manager Service", error=str(e)
+            # Initialize Redis Stream Manager
+            stream_manager = RedisStreamManager(
+                redis_url=config.redis.full_url,
+                prefix=config.redis.key_prefix,
+                max_connections=config.redis.max_connections,
             )
-            raise
+            await stream_manager.connect()
 
-    def _init_database(self) -> None:
-        """Initialize database connection"""
-        global db
+            # Initialize publishers
+            audit_publisher = AuditLogPublisher(stream_manager)
 
-        try:
-            # Get database instance
-            db_manager = get_database(
-                db_uri=config.database.uri,
-                migrate=config.database.migrate,
-                fake_migrate=config.database.fake_migrate,
+            # Store stream_manager in app config
+            app.config["STREAM_MANAGER"] = stream_manager
+
+            # Create consumer groups
+            await stream_manager.create_consumer_group(
+                RedisStreamManager.STREAM_EDR_EVENTS,
+                f"{config.redis.consumer_group_prefix}-edr",
+            )
+            await stream_manager.create_consumer_group(
+                RedisStreamManager.STREAM_ALERTS_PENDING,
+                f"{config.redis.consumer_group_prefix}-alerts",
+            )
+            await stream_manager.create_consumer_group(
+                RedisStreamManager.STREAM_AI_TASKS,
+                f"{config.redis.consumer_group_prefix}-ai",
             )
 
-            db = db_manager.db
-
-            # Initialize default data if requested
-            if config.database.init_default_data:
-                db_manager.init_default_data()
-
-            logger.info("Database initialized successfully")
-
-        except Exception as e:
-            logger.error("Failed to initialize database", error=str(e))
-            raise
-
-    def _init_fixtures(self) -> None:
-        """Initialize py4web fixtures"""
-        global session, cache, translator, flash, tags
-
-        try:
-            # Session management
-            session = Session(
-                secret=config.security.secret_key,
-                expiration=config.auth.session_timeout,
-                secure=config.security.secure_cookies,
-                same_site="Lax",
+            # Create S3 scan consumer groups
+            await stream_manager.create_consumer_group(
+                RedisStreamManager.STREAM_S3_SCAN_TASKS,
+                f"{config.redis.consumer_group_prefix}-s3scan",
+            )
+            await stream_manager.create_consumer_group(
+                RedisStreamManager.STREAM_S3_SCAN_RESULTS,
+                f"{config.redis.consumer_group_prefix}-s3scan-results",
             )
 
-            # Caching
-            cache = Cache(
-                default_expiration=config.cache.default_expiration,
-                redis=config.cache.redis_url if config.cache.redis_url else None,
-            )
+            # Start background tasks
+            await _start_background_tasks()
 
-            # Internationalization
-            translator = Translator(path=Path(__file__).parent / "translations")
-
-            # Flash messages
-            flash = Flash()
-
-            # Tags for content tagging
-            tags = Tags(db)
-
-            logger.info("py4web fixtures initialized successfully")
+            logger.info("SkausWatch Manager Service started successfully")
 
         except Exception as e:
-            logger.error("Failed to initialize py4web fixtures", error=str(e))
+            logger.error("Failed to start Manager Service", error=str(e))
             raise
 
-    def _init_auth(self) -> None:
-        """Initialize authentication system"""
-        global auth
+    @app.after_serving
+    async def shutdown():
+        """Application shutdown."""
+        logger.info("Shutting down SkausWatch Manager Service...")
 
+        # Cancel background tasks
+        for task in background_tasks:
+            task.cancel()
+
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+
+        # Close Redis connection
+        if stream_manager:
+            await stream_manager.close()
+
+        # Close database connections
+        close_db()
+
+        logger.info("SkausWatch Manager Service shutdown complete")
+
+    # Register error handlers
+    @app.errorhandler(400)
+    async def bad_request(error):
+        return jsonify({"error": "Bad Request", "detail": str(error)}), 400
+
+    @app.errorhandler(401)
+    async def unauthorized(error):
+        return jsonify({"error": "Unauthorized", "detail": str(error)}), 401
+
+    @app.errorhandler(403)
+    async def forbidden(error):
+        return jsonify({"error": "Forbidden", "detail": str(error)}), 403
+
+    @app.errorhandler(404)
+    async def not_found(error):
+        return jsonify({"error": "Not Found", "detail": str(error)}), 404
+
+    @app.errorhandler(500)
+    async def internal_error(error):
+        logger.error("Internal server error", error=str(error))
+        return jsonify({"error": "Internal Server Error"}), 500
+
+    # Register blueprints
+    _register_blueprints(app)
+
+    # Health check endpoints
+    @app.route("/healthz")
+    async def health_check():
+        """Health check endpoint."""
         try:
-            auth = SkausWatchAuth(db=db, config=config.auth, session=session)
-
-            logger.info("Authentication system initialized successfully")
-
+            # Check database
+            db = get_db(config.database.uri)
+            db.executesql("SELECT 1")
+            db_status = "connected"
         except Exception as e:
-            logger.error("Failed to initialize authentication", error=str(e))
-            raise
+            db_status = f"error: {str(e)}"
 
-    def _init_security(self) -> None:
-        """Initialize security manager"""
-        global security
-
+        # Check Redis
         try:
-            security = SecurityManager(db=db, config=config.security, auth=auth)
-
-            logger.info("Security manager initialized successfully")
-
+            if stream_manager and stream_manager._client:
+                await stream_manager._client.ping()
+                redis_status = "connected"
+            else:
+                redis_status = "not initialized"
         except Exception as e:
-            logger.error("Failed to initialize security manager", error=str(e))
-            raise
+            redis_status = f"error: {str(e)}"
 
-    def _init_health_checker(self) -> None:
-        """Initialize health checker"""
-        global health_checker
+        status = (
+            "healthy"
+            if db_status == "connected" and redis_status == "connected"
+            else "unhealthy"
+        )
+        status_code = 200 if status == "healthy" else 503
 
-        try:
-            health_checker = HealthChecker(db=db, config=config.health_check)
+        return (
+            jsonify(
+                {
+                    "status": status,
+                    "version": get_version(),
+                    "database": db_status,
+                    "redis": redis_status,
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            ),
+            status_code,
+        )
 
-            logger.info("Health checker initialized successfully")
+    @app.route("/readyz")
+    async def readiness_check():
+        """Readiness check endpoint."""
+        return jsonify({"status": "ready"}), 200
 
-        except Exception as e:
-            logger.error("Failed to initialize health checker", error=str(e))
-            raise
-
-    def _register_error_handlers(self) -> None:
-        """Register global error handlers"""
-        # This will be implemented when we create the controllers
-        pass
-
-    def get_fixtures(self) -> Dict[str, Fixture]:
-        """Get all fixtures for controllers"""
-        return {
-            "db": db,
-            "auth": auth,
-            "security": security,
-            "session": session,
-            "cache": cache,
-            "translator": translator,
-            "flash": flash,
-            "tags": tags,
-            "health_checker": health_checker,
-        }
-
-    def close(self) -> None:
-        """Close application and cleanup resources"""
-        try:
-            # Close health checker
-            if health_checker:
-                health_checker.close()
-
-            # Close database
-            close_database()
-
-            logger.info("SkausWatch Manager Service closed successfully")
-
-        except Exception as e:
-            logger.error("Error closing SkausWatch Manager Service", error=str(e))
-
-
-# Global application instance
-app: Optional[SkausWatchManagerApp] = None
-
-
-def create_app(config_path: Optional[str] = None) -> SkausWatchManagerApp:
-    """Create and configure the SkausWatch Manager application
-
-    Args:
-        config_path: Optional path to configuration file
-
-    Returns:
-        Configured application instance
-    """
-    global app
-
-    if app is None:
-        app = SkausWatchManagerApp(config_path)
+    @app.route("/version")
+    async def version_info():
+        """Version information endpoint."""
+        return jsonify(
+            {
+                "name": "SkausWatch Manager Service",
+                "version": get_version(),
+                "environment": config.environment,
+            }
+        )
 
     return app
 
 
-def get_app() -> SkausWatchManagerApp:
-    """Get the current application instance"""
-    if app is None:
-        raise RuntimeError("Application not initialized. Call create_app() first.")
+def _register_blueprints(app: Quart) -> None:
+    """Register API blueprints."""
+    from api.v1 import (
+        alerts,
+        approvals,
+        asm,
+        auth,
+        darwin,
+        edr,
+        research,
+        s3_scan,
+        siem,
+        threat_intel,
+        users,
+    )
 
-    return app
-
-
-@action("health", method="GET")
-@action.uses()
-def health_check():
-    """Health check endpoint"""
-    try:
-        app = get_app()
-        health_status = app.health_checker.check_all()
-
-        # Return appropriate HTTP status
-        status_code = 200 if health_status["status"] == "healthy" else 503
-
-        return {
-            "status": health_status["status"],
-            "timestamp": health_status["timestamp"],
-            "version": get_version(),
-            "checks": health_status["checks"],
-        }, status_code
-
-    except Exception as e:
-        logger.error("Health check failed", error=str(e))
-        return {"status": "error", "error": str(e), "version": get_version()}, 500
+    app.register_blueprint(auth.bp, url_prefix="/api/v1/auth")
+    app.register_blueprint(users.bp, url_prefix="/api/v1/users")
+    app.register_blueprint(alerts.bp, url_prefix="/api/v1/alerts")
+    app.register_blueprint(threat_intel.bp, url_prefix="/api/v1/threat-intel")
+    app.register_blueprint(research.research_bp, url_prefix="/api/v1/research")
+    app.register_blueprint(approvals.bp, url_prefix="/api/v1/approvals")
+    app.register_blueprint(edr.bp, url_prefix="/api/v1/edr")
+    app.register_blueprint(s3_scan.bp, url_prefix="/api/v1/s3-scan")
+    app.register_blueprint(siem.bp, url_prefix="/api/v1/siem")
+    app.register_blueprint(asm.bp, url_prefix="/api/v1/asm")
+    app.register_blueprint(darwin.bp, url_prefix="/api/v1/darwin")
 
 
-@action("version", method="GET")
-@action.uses()
-def version_info():
-    """Version information endpoint"""
-    return {
-        "name": "SkausWatch Manager Service",
-        "version": get_version(),
-        "status": "running",
-    }
+async def _start_background_tasks() -> None:
+    """Start background processing tasks."""
+
+    # EDR event processor
+    async def process_edr_event(message):
+        logger.info("Processing EDR event from stream", message_id=message.id, agent_id=message.data.get("agent_id"))
+        # Events are already persisted to DB when received via HTTP endpoint.
+        # Background processing: alert on high-severity events.
+        severity = message.data.get("severity", "low")
+        if severity in ("high", "critical"):
+            event_type = message.data.get("event_type", "unknown")
+            agent_id = message.data.get("agent_id", "unknown")
+            logger.warning(
+                "High-severity EDR event received",
+                severity=severity,
+                event_type=event_type,
+                agent_id=agent_id,
+                message_id=message.id,
+            )
+
+    task = await create_stream_consumer(
+        stream_manager,
+        RedisStreamManager.STREAM_EDR_EVENTS,
+        f"{config.redis.consumer_group_prefix}-edr",
+        "processor-1",
+        process_edr_event,
+    )
+    background_tasks.append(task)
+
+    # Alert processor
+    async def process_alert(message):
+        alert_id = message.data.get("alert_id")
+        severity = message.data.get("severity", "low")
+        logger.info("Processing pending alert", message_id=message.id, alert_id=alert_id, severity=severity)
+        if severity in ("high", "critical") and config and config.ai.enabled:
+            logger.info("High-severity alert queued for AI review", alert_id=alert_id)
+            if stream_manager:
+                import uuid
+                await stream_manager.publish_event(
+                    RedisStreamManager.STREAM_AI_TASKS,
+                    {
+                        "job_id": str(uuid.uuid4()),
+                        "alert_id": alert_id,
+                        "task_type": "alert_review",
+                        "priority": 1,
+                        "submitted_at": datetime.utcnow().isoformat(),
+                    },
+                )
+
+    task = await create_stream_consumer(
+        stream_manager,
+        RedisStreamManager.STREAM_ALERTS_PENDING,
+        f"{config.redis.consumer_group_prefix}-alerts",
+        "processor-1",
+        process_alert,
+    )
+    background_tasks.append(task)
+
+    logger.info("Background tasks started", count=len(background_tasks))
 
 
-@action("metrics", method="GET")
-@action.uses(auth.user)
-def metrics():
-    """Prometheus metrics endpoint (requires authentication)"""
-    try:
-        # TODO: Implement metrics collection
-        return "# Prometheus metrics not yet implemented", {
-            "Content-Type": "text/plain"
-        }
-
-    except Exception as e:
-        logger.error("Failed to generate metrics", error=str(e))
-        return "# Error generating metrics", {"Content-Type": "text/plain"}
+# ============================================
+# gRPC Server (separate process)
+# ============================================
 
 
-# Main entry point for development server
+async def run_grpc_server(config: ManagerConfig) -> None:
+    """Run the gRPC server."""
+    if not config.grpc.enabled:
+        logger.info("gRPC server disabled")
+        return
+
+    # Import here to avoid circular imports
+    from grpc.server import serve
+
+    logger.info(
+        "Starting gRPC server",
+        host=config.grpc.host,
+        port=config.grpc.port,
+    )
+
+    await serve(config)
+
+
+# ============================================
+# Application Entry Points
+# ============================================
+
+
 def main():
-    """Main entry point for running the application"""
+    """Main entry point for the Manager service."""
     import argparse
 
-    import uvicorn
-    from py4web import start_server
+    import hypercorn.asyncio
+    from hypercorn.config import Config as HypercornConfig
 
     parser = argparse.ArgumentParser(description="SkausWatch Manager Service")
-    parser.add_argument("--config", "-c", type=str, help="Configuration file path")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
-    parser.add_argument("--port", "-p", type=int, default=8000, help="Port to bind to")
-    parser.add_argument(
-        "--reload", action="store_true", help="Enable auto-reload for development"
-    )
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        default="INFO",
-        help="Log level",
-    )
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--port", "-p", type=int, default=5000, help="Port to bind to")
+    parser.add_argument("--grpc-port", type=int, default=50051, help="gRPC port")
+    parser.add_argument("--workers", type=int, default=1, help="Number of workers")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode")
 
     args = parser.parse_args()
 
+    # Load configuration
+    config = load_config()
+    config.api.port = args.port
+    config.api.debug = args.debug
+    config.grpc.port = args.grpc_port
+
+    # Create Quart app
+    app = create_app(config)
+
+    # Configure Hypercorn
+    hypercorn_config = HypercornConfig()
+    hypercorn_config.bind = [f"{args.host}:{args.port}"]
+    hypercorn_config.workers = args.workers
+
+    if args.debug:
+        hypercorn_config.use_reloader = True
+
+    async def run_all():
+        """Run both REST and gRPC servers."""
+        # Start gRPC server as separate task
+        grpc_task = asyncio.create_task(run_grpc_server(config))
+
+        # Run Quart with Hypercorn
+        try:
+            await hypercorn.asyncio.serve(app, hypercorn_config)
+        finally:
+            grpc_task.cancel()
+            try:
+                await grpc_task
+            except asyncio.CancelledError:
+                pass
+
     try:
-        # Create application
-        app = create_app(args.config)
-
-        # Start py4web server
-        start_server(
-            host=args.host,
-            port=args.port,
-            reload=args.reload,
-            logging_level=getattr(logging, args.log_level),
-        )
-
+        asyncio.run(run_all())
     except KeyboardInterrupt:
-        logger.info("Shutting down SkausWatch Manager Service...")
-    except Exception as e:
-        logger.error("Failed to start SkausWatch Manager Service", error=str(e))
-        sys.exit(1)
-    finally:
-        if app:
-            app.close()
+        logger.info("Received shutdown signal")
 
 
 if __name__ == "__main__":

@@ -693,10 +693,25 @@ class AuditdCollector:
                                 break
 
                     elif config.protocol.lower() == "udp":
-                        # UDP syslog collection would need different approach
-                        # For now, we'll skip UDP implementation
-                        logger.info("UDP syslog collection not implemented yet")
-                        break
+                        import socket as _socket
+
+                        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+                        sock.settimeout(5.0)
+                        sock.bind(("0.0.0.0", config.port))
+                        loop = asyncio.get_event_loop()
+
+                        while self.running:
+                            try:
+                                data, _ = await loop.run_in_executor(
+                                    None, sock.recvfrom, 65535
+                                )
+                                message = data.decode("utf-8", errors="ignore")
+                                await self._process_syslog_message(message, session_id)
+                            except _socket.timeout:
+                                continue
+                            except Exception:
+                                break
+                        sock.close()
 
                 except Exception as e:
                     logger.error(

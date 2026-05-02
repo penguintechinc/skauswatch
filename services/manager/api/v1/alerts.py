@@ -10,6 +10,7 @@ Provides:
 
 from datetime import datetime
 from typing import List, Optional
+import logging
 
 from api.v1.auth import auth_required, role_required
 from models.db import get_db
@@ -23,6 +24,8 @@ from validators.pydantic_models import (
     AlertStatus,
     AlertUpdateRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 bp = Blueprint("alerts", __name__)
 
@@ -171,8 +174,22 @@ async def create_alert():
 
     alert = db(db.alerts.id == alert_id).select().first()
 
-    # Publish to alert stream for processing
-    # TODO: Publish to Redis Stream
+    # Publish to alerts stream for background processing
+    stream_manager = current_app.config.get("STREAM_MANAGER")
+    if stream_manager:
+        try:
+            await stream_manager.publish_event(
+                "alerts:pending",
+                {
+                    "alert_id": alert.id,
+                    "title": alert.title,
+                    "severity": alert.severity,
+                    "source": alert.source or "",
+                    "created_at": alert.created_at.isoformat() if alert.created_at else "",
+                },
+            )
+        except Exception as stream_err:
+            logger.warning("Failed to publish alert to stream", error=str(stream_err))
 
     return (
         jsonify(
@@ -312,9 +329,25 @@ async def request_ai_review(alert_id: int):
     provider = data.get("provider", config.ai.default_provider)
     priority = data.get("priority", 1)
 
-    # TODO: Publish to AI task queue
-    # For now, return a placeholder response
-    job_id = f"ai-{alert_id}-{datetime.utcnow().timestamp()}"
+    import uuid as _uuid
+    job_id = str(_uuid.uuid4())
+    # Publish to AI task queue for processing
+    stream_manager = current_app.config.get("STREAM_MANAGER")
+    if stream_manager:
+        try:
+            await stream_manager.publish_event(
+                "ai:tasks",
+                {
+                    "job_id": job_id,
+                    "alert_id": alert_id,
+                    "provider": provider,
+                    "priority": priority,
+                    "task_type": "alert_review",
+                    "submitted_at": datetime.utcnow().isoformat(),
+                },
+            )
+        except Exception as stream_err:
+            logger.warning("Failed to publish AI review task to stream", error=str(stream_err))
 
     return (
         jsonify(

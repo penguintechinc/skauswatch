@@ -660,10 +660,33 @@ class TAXIIClient:
             raise
 
     async def _setup_oauth2_client(self, feed_id: str, credentials: Dict[str, str]):
-        """Setup OAuth2 client for feed authentication"""
-        # Placeholder for OAuth2 implementation
-        logger.info("OAuth2 authentication setup requested", feed_id=feed_id)
-        pass
+        """Set up OAuth2 client credentials flow for TAXII feed authentication."""
+        required = {"client_id", "client_secret", "token_url"}
+        missing = required - credentials.keys()
+        if missing:
+            raise ValueError(
+                f"OAuth2 credentials missing required fields for feed '{feed_id}': {missing}"
+            )
+
+        client_id = credentials["client_id"]
+        client_secret = credentials["client_secret"]
+        token_url = credentials["token_url"]
+
+        logger.info(
+            "Configuring OAuth2 client credentials flow",
+            feed_id=feed_id,
+            token_url=token_url,
+            client_id=client_id[:4] + "****",
+        )
+
+        # Store credentials for use in request headers
+        self.oauth_clients[feed_id] = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "token_url": token_url,
+            "access_token": None,
+            "expires_at": None,
+        }
 
     async def _discover_taxii_servers(self):
         """Discover TAXII servers and their capabilities"""

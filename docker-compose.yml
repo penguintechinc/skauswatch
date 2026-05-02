@@ -64,7 +64,7 @@ services:
   # Manager Service (Quart API + gRPC)
   manager:
     build:
-      context: ./services/manager-new
+      context: ./services/manager
       dockerfile: Dockerfile
     container_name: skauswatch-manager
     environment:

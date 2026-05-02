@@ -20,7 +20,7 @@ services:
       - QUART_ENV=development
       - QUART_DEBUG=true
     volumes:
-      - ./services/manager-new:/app
+      - ./services/manager:/app
 
   # PKI Server - development mode with hot reload
   pki-server:

@@ -1,19 +1,13 @@
 """
 SkausWatch Manager Service
 
-The central management plane for SkausWatch providing:
-- User authentication and authorization with MFA support
-- Role-based access control (RBAC)
-- Service configuration management
-- Certificate lifecycle management
-- Audit logging and monitoring
-- Administrative dashboard and APIs
+Unified Manager service providing:
+- REST API for external clients
+- gRPC for inter-service communication
+- Alert management with AI review
+- Threat intelligence aggregation
+- EDR agent management
+- Approval workflows
 """
 
-__version__ = "0.1.0"
-__author__ = "SkausWatch Team"
-__email__ = "support@skauswatch.io"
-
-from .main import create_app
-
-__all__ = ["create_app"]
+__version__ = "1.0.0"

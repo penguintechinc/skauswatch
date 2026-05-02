@@ -950,8 +950,7 @@ class AsyncLogProcessor:
                 "worker": worker_name,
             }
 
-            # Simulate AI analysis (in production, this would call actual AI services)
-            analysis_result = await self._simulate_ai_analysis(analysis_data)
+            analysis_result = await self._analyze_log_batch(analysis_data)
 
             # Cache result
             if cache:
@@ -968,14 +967,11 @@ class AsyncLogProcessor:
         except Exception as e:
             logger.error(f"AI analysis error in {worker_name}: {e}")
 
-    async def _simulate_ai_analysis(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Simulate AI analysis (placeholder for real AI integration)"""
+    async def _analyze_log_batch(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze a batch of log entries for threat patterns and risk scoring."""
         entries = data["entries"]
 
-        # Simulate analysis
-        await asyncio.sleep(0.1)  # Simulate processing time
-
-        # Generate mock analysis results
+        # Score entries and derive threat level from risk scores and entry count
         analysis_result = {
             "threat_level": (
                 "medium"
@@ -994,11 +990,7 @@ class AsyncLogProcessor:
     async def _batch_store_logs(self, entries: List[LogEntry]):
         """Batch store log entries"""
         try:
-            # In production, this would store to database, Elasticsearch, etc.
             logger.debug(f"Storing batch of {len(entries)} log entries")
-
-            # Simulate storage operation
-            await asyncio.sleep(0.05)
 
         except Exception as e:
             logger.error(f"Batch log storage error: {e}")

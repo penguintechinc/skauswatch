@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Make manager service importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../services/manager-new"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../services/manager"))
 
 # These tests require manager service dependencies (quart, quart_cors, etc.)
 # Skip the entire module if they aren't installed
