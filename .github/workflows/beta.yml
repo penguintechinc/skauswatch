@@ -1,9 +1,13 @@
-name: Publish Release Images
+name: Build and Push Beta Images
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - 'release/**'
+    paths:
+      - 'services/**'
+      - '.version'
+      - '.github/workflows/beta.yml'
 
 permissions:
   contents: read
@@ -11,7 +15,7 @@ permissions:
 
 jobs:
   build-platform:
-    name: Build & Push ${{ matrix.image_name }} for ${{ matrix.platform }}
+    name: Build & Push ${{ matrix.image_name }} (${{ matrix.platform }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -41,6 +45,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
+      - name: Generate epoch tag
+        id: epoch
+        run: echo "tag=beta-$(date +%s)000" >> $GITHUB_OUTPUT
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a  # v4
 
@@ -60,7 +68,7 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
         run: echo "suffix=${PLATFORM#linux/}" >> $GITHUB_OUTPUT
 
-      - name: Build and push ${{ matrix.image_name }} for ${{ matrix.platform }}
+      - name: Build and push ${{ matrix.image_name }} (${{ matrix.platform }})
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
           context: ./services/${{ matrix.service }}
@@ -70,10 +78,10 @@ jobs:
           cache-to: type=gha,scope=${{ matrix.service }}-${{ steps.arch.outputs.suffix }},mode=max
           build-args: |
             VERSION=${{ github.ref_name }}
-            BUILD_TIME=${{ github.run_id }}
+            BUILD_TIME=${{ steps.epoch.outputs.tag }}
             GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
           tags: |
-            ghcr.io/penguintechinc/skauswatch-${{ matrix.image_name }}:${{ github.ref_name }}-${{ steps.arch.outputs.suffix }}
+            ghcr.io/penguintechinc/skauswatch-${{ matrix.image_name }}:${{ steps.epoch.outputs.tag }}-${{ steps.arch.outputs.suffix }}
 
   merge-manifests:
     name: Merge ${{ matrix.image_name }} Manifests
@@ -109,6 +117,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
+      - name: Generate epoch tag
+        id: epoch
+        run: echo "tag=beta-$(date +%s)000" >> $GITHUB_OUTPUT
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
 
@@ -119,13 +131,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create and push manifest for ${{ matrix.image_name }}
+      - name: Create and push multi-arch manifest for ${{ matrix.image_name }}
         env:
           IMAGE_NAME: ${{ matrix.image_name }}
-          REF_NAME: ${{ github.ref_name }}
+          EPOCH_TAG: ${{ steps.epoch.outputs.tag }}
         run: |
           docker buildx imagetools create \
-            --tag ghcr.io/penguintechinc/skauswatch-${IMAGE_NAME}:${REF_NAME} \
-            --tag ghcr.io/penguintechinc/skauswatch-${IMAGE_NAME}:latest \
-            ghcr.io/penguintechinc/skauswatch-${IMAGE_NAME}:${REF_NAME}-amd64 \
-            ghcr.io/penguintechinc/skauswatch-${IMAGE_NAME}:${REF_NAME}-arm64
+            --tag ghcr.io/penguintechinc/skauswatch-${IMAGE_NAME}:${EPOCH_TAG} \
+            --tag ghcr.io/penguintechinc/skauswatch-${IMAGE_NAME}:beta-latest \
+            ghcr.io/penguintechinc/skauswatch-${IMAGE_NAME}:${EPOCH_TAG}-amd64 \
+            ghcr.io/penguintechinc/skauswatch-${IMAGE_NAME}:${EPOCH_TAG}-arm64

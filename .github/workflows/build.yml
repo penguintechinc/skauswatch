@@ -5,7 +5,7 @@ on:
     branches:
       - main
       - develop
-      - v1.x
+      - 'release/**'
     paths:
       - 'services/**'
       - 'deployment/**'
@@ -16,7 +16,7 @@ on:
     branches:
       - main
       - develop
-      - v1.x
+      - 'release/**'
     paths:
       - 'services/**'
       - 'deployment/**'
