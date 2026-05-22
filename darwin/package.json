@@ -28,7 +28,7 @@
     "version:update": "./scripts/version/update-version.sh"
   },
   "dependencies": {
-    "express": "^4.19.2",
+    "express": "^4.22.2",
     "cors": "^2.8.5",
     "helmet": "^7.1.0",
     "compression": "^1.7.4",
