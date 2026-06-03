@@ -1,4 +1,4 @@
-aiohttp==3.11.0
+aiohttp==3.14.0
 opensearch-py[async]==2.7.1
 aiobotocore==2.15.0
 pyarrow==18.1.0
