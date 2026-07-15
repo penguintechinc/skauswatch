@@ -2,6 +2,8 @@
 //! /api/v1 + health/metrics stack; `healthcheck` is the container-native
 //! health probe (no curl in images, per container standards).
 
+mod auth;
+mod error;
 mod flags;
 mod routes;
 mod state;
