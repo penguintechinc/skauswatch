@@ -27,8 +27,14 @@ spire:
         host: "marchproxy.nest.svc"
         port: 5432
         dbName: spire
-        # TLS to the database; override only for TLS-terminating in-cluster proxies
-        sslMode: "require"
+        # TLS to the database with server-certificate verification.
+        # verify-full requires the server cert to chain to a trusted CA and
+        # match the host. For a private CA, set sslRootCert to a CA bundle
+        # path mounted into the server pod. Downgrade (require/prefer) only
+        # for TLS-terminating in-cluster proxies — never in production.
+        sslMode: "verify-full"
+        # Optional path to a CA bundle inside the pod (e.g. /run/spire/tls/ca.crt)
+        sslRootCert: ""
         secretName: spire-db-credentials
         userKey: username
         passwordKey: password
