@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "services/manager-rs"]
 
 [workspace.package]
 version = "2.0.0"
@@ -11,6 +11,9 @@ repository = "https://github.com/penguintechinc/skauswatch"
 authors = ["Penguin Tech Inc <support@penguintech.io>"]
 
 [workspace.dependencies]
+# Shared libraries (penguin-libs) — pinned git rev until 0.1.0 hits crates.io
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs", rev = "d9b88bfe2959ea04845b12666c7c193b1028507f", package = "penguin-licensing" }
+
 # Internal crates
 skauswatch-common = { path = "crates/skauswatch-common" }
 skauswatch-telemetry = { path = "crates/skauswatch-telemetry" }
@@ -36,9 +39,11 @@ utoipa = { version = "=5.5.0", features = ["axum_extras", "chrono", "uuid"] }
 
 # gRPC
 tonic = "=0.14.6"
+tonic-prost = "=0.14.6"
 prost = "=0.14.4"
 prost-types = "=0.14.4"
-tonic-build = "=0.14.6"
+tonic-prost-build = "=0.14.6"
+protox = "=0.9.1"
 
 # Database
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "chrono", "uuid", "json", "migrate"] }
