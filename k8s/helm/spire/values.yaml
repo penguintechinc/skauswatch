@@ -27,6 +27,8 @@ spire:
         host: "marchproxy.nest.svc"
         port: 5432
         dbName: spire
+        # TLS to the database; override only for TLS-terminating in-cluster proxies
+        sslMode: "require"
         secretName: spire-db-credentials
         userKey: username
         passwordKey: password

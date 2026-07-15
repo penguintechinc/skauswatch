@@ -40,7 +40,7 @@ data:
         plugin_data {
           {{- if eq .Values.spire.server.dataStore.type "postgresql" }}
           database_type = "postgres"
-          connection_string = "dbname={{ .Values.spire.server.dataStore.postgresql.dbName }} host={{ .Values.spire.server.dataStore.postgresql.host }} user=${SPIRE_DB_USER} password=${SPIRE_DB_PASS} port={{ .Values.spire.server.dataStore.postgresql.port }} sslmode=disable"
+          connection_string = "dbname={{ .Values.spire.server.dataStore.postgresql.dbName }} host={{ .Values.spire.server.dataStore.postgresql.host }} user=${SPIRE_DB_USER} password=${SPIRE_DB_PASS} port={{ .Values.spire.server.dataStore.postgresql.port }} sslmode={{ .Values.spire.server.dataStore.postgresql.sslMode | default "require" }}"
           {{- else }}
           database_type = "sqlite3"
           connection_string = "{{ .Values.spire.server.dataStore.sqlite.path }}"
