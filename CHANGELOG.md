@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - Unreleased
+
+Full platform rewrite. Tracked on branch `release/v2.0.x`; `release/v1.0.x` is
+feature-frozen (security fixes only) until v2.0.0 ships.
+
+### Added
+- Rust rewrite of all backend services (core, IceBox, Darwin) — single Cargo
+  workspace; axum REST, tonic gRPC, sqlx (PostgreSQL), Redis/Valkey Streams
+  worker harness replacing Celery
+- `penguin-licensing` Rust crate (penguin-libs): PostHog-compatible feature
+  flags + license entitlement via license.penguintech.io, fail-safe caching,
+  axum feature/tier gating middleware
+- Feature flags (`skauswatch.*`, default OFF) wrapping every feature area,
+  including module gates `skauswatch.icebox` and `skauswatch.darwin`
+- Unified React frontend: IceBox and Darwin UIs merged into `services/webui`
+  as entitlement-gated lazy-loaded modules (`/icebox/*`, `/darwin/*`)
+
+### Changed
+- Migrations: Alembic replaced by `sqlx migrate` with per-module v1 schema
+  baselines (zero schema changes in v2.0.0 — rollback is image-only)
+- Wire contracts preserved: `/api/v1` REST shapes, gRPC proto packages
+  (`skauswatch.manager`/`skauswatch.s3scan`/`skauswatch.pki`), Redis Streams
+  topics — v1 Go EDR agents remain compatible with the v2 manager
+
+### Removed
+- All Python services and the Go EDR agent implementation (ported to Rust)
+- Legacy `services/manager/`, `services/pki-server/`, `services/flask-backend/`,
+  vendored `darwin/shared/`, py4web remnants
+- Standalone IceBox and Darwin webuis; Kustomize/raw K8s manifests (Helm only)
+
 ## [Unreleased]
 
 ### Added
