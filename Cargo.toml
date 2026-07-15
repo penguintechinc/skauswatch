@@ -1,0 +1,100 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "AGPL-3.0-only"
+repository = "https://github.com/penguintechinc/skauswatch"
+authors = ["Penguin Tech Inc <support@penguintech.io>"]
+
+[workspace.dependencies]
+# Internal crates
+skauswatch-common = { path = "crates/skauswatch-common" }
+skauswatch-telemetry = { path = "crates/skauswatch-telemetry" }
+skauswatch-db = { path = "crates/skauswatch-db" }
+skauswatch-auth = { path = "crates/skauswatch-auth" }
+skauswatch-streams = { path = "crates/skauswatch-streams" }
+skauswatch-proto = { path = "crates/skauswatch-proto" }
+skauswatch-ai = { path = "crates/skauswatch-ai" }
+skauswatch-s3 = { path = "crates/skauswatch-s3" }
+
+# Async runtime
+tokio = { version = "=1.52.3", features = ["full"] }
+tokio-stream = "=0.1.18"
+futures = "=0.3.32"
+async-trait = "=0.1.89"
+
+# HTTP / REST
+axum = "=0.8.9"
+tower = "=0.5.3"
+tower-http = { version = "=0.7.0", features = ["trace", "compression-gzip"] }
+http = "=1.4.2"
+utoipa = { version = "=5.5.0", features = ["axum_extras", "chrono", "uuid"] }
+
+# gRPC
+tonic = "=0.14.6"
+prost = "=0.14.4"
+prost-types = "=0.14.4"
+tonic-build = "=0.14.6"
+
+# Database
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "chrono", "uuid", "json", "migrate"] }
+
+# Cache / streams (Valkey/Redis)
+fred = "=10.1.0"
+
+# Object storage
+aws-config = "=1.9.0"
+aws-sdk-s3 = "=1.138.0"
+
+# AuthN/Z
+jsonwebtoken = "=10.4.0"
+openidconnect = "=4.0.1"
+
+# HTTP client
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "gzip"] }
+
+# Serialization
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+
+# Observability
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
+metrics = "=0.24.6"
+metrics-exporter-prometheus = "=0.18.3"
+
+# Utilities
+thiserror = "=2.0.18"
+anyhow = "=1.0.103"
+figment = { version = "=0.10.19", features = ["env"] }
+arc-swap = "=1.9.2"
+url = { version = "=2.5.8", features = ["serde"] }
+uuid = { version = "=1.23.5", features = ["v4", "serde"] }
+chrono = { version = "=0.4.45", features = ["serde"] }
+bytes = "=1.12.1"
+base64 = "=0.22.1"
+clap = { version = "=4.6.1", features = ["derive", "env"] }
+tokio-cron-scheduler = "=0.15.1"
+
+# Test-only
+wiremock = "=0.6.5"
+mockall = "=0.15.0"
+axum-test = "=21.0.0"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
