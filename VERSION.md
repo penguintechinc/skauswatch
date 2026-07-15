@@ -1,5 +1,9 @@
 # Version History
 
+> **⚠️ FEATURE FREEZE (2026-07-14):** `release/v1.0.x` is frozen — security
+> fixes only. All feature work happens on `release/v2.0.x` (full Rust
+> rewrite, unified frontend). See `CHANGELOG.md` on that branch.
+
 ## v1.0.0.1737727200 - 2025-01-24 17:20:00 UTC
 
 ### Initial Release
