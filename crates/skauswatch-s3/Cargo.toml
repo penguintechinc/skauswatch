@@ -1,0 +1,18 @@
+[package]
+name = "skauswatch-s3"
+description = "S3/MinIO client construction shared by scan services and workers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+serde = { workspace = true }
+skauswatch-common = { workspace = true }
+
+[lints]
+workspace = true

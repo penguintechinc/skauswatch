@@ -211,3 +211,7 @@ config.local.yaml
 
 # Worktrees
 .worktrees/
+
+# Claude Code crash-recovery state (never commit)
+.PLAN
+.TODO

@@ -1,0 +1,41 @@
+# cargo-deny policy — supply-chain gates for the skauswatch workspace.
+# Run: cargo deny check
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+    "OpenSSL",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Forbidden: OpenSSL linkage (rustls only) — keeps runtime images slim and FIPS-path clean
+deny = [
+    { crate = "openssl-sys", reason = "rustls only — no OpenSSL FFI in this workspace" },
+    { crate = "native-tls", reason = "rustls only" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# penguin-libs git deps allowed until penguin-licensing publishes to crates.io
+allow-git = ["https://github.com/penguintechinc/penguin-libs"]

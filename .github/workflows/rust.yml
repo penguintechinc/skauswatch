@@ -1,0 +1,87 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'deny.toml'
+      - 'crates/**'
+      - 'services/**/Cargo.toml'
+      - 'services/**/src/**'
+      - 'proto/**'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'deny.toml'
+      - 'crates/**'
+      - 'services/**/Cargo.toml'
+      - 'services/**/src/**'
+      - 'proto/**'
+      - '.github/workflows/rust.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  # Locked resolution only — Cargo.lock is the source of truth
+  CARGO_NET_RETRY: "3"
+
+jobs:
+  lint:
+    name: Format + Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      # rustup honors rust-toolchain.toml; runner ships rustup preinstalled
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  supply-chain:
+    name: Audit + Deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install cargo-audit and cargo-deny (pinned)
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+      - name: cargo audit
+        run: cargo audit
+      - name: cargo deny
+        run: cargo deny check
+
+  coverage:
+    name: Coverage (>=90%)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: Install pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add llvm-tools
+      - name: Install cargo-llvm-cov (pinned)
+        run: cargo install cargo-llvm-cov --version 0.8.7 --locked
+      - name: cargo llvm-cov
+        run: cargo llvm-cov --workspace --locked --fail-under-lines 90
