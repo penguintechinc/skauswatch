@@ -2,8 +2,10 @@
 //! module at a time; each mounts its feature-flag gate when it lands.
 
 mod alerts;
+mod approvals;
 mod auth;
 mod license;
+mod threat_intel;
 mod users;
 
 use axum::Router;
@@ -18,7 +20,9 @@ pub fn router(state: AppState) -> Router {
             license::router()
                 .merge(auth::router())
                 .merge(users::router())
-                .merge(alerts::router()),
+                .merge(alerts::router())
+                .merge(threat_intel::router())
+                .merge(approvals::router()),
         )
         .with_state(state)
 }
