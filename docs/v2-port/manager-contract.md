@@ -197,3 +197,8 @@ EDR_API_SECRET/EDR_*_INTERVAL/EDR_EVENT_BATCH_SIZE/EDR_SEVERITY_THRESHOLD.
 5. SIEM PUT /config is validate-only (not persisted) — replicate as-is.
 6. License checks fail OPEN in v1 — replicate only where parity requires;
    flag for GA hardening.
+7. **PUT /api/v1/alerts/{id}/status had NO role gate in v1** — any
+   authenticated user (incl. read-only viewers) could mutate alert status,
+   while every other alert mutation requires admin/maintainer. DECISION:
+   v2 gates it with role(admin,maintainer). Golden harness will show a
+   200→403 diff for viewer tokens on this route — intentional.

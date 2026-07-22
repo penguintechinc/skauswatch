@@ -539,10 +539,15 @@ struct StatusBody {
 
 async fn update_alert_status(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(alert_id): Path<i32>,
     Json(body): Json<StatusBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Documented deviation from v1 (contract defect #7): v1 let ANY
+    // authenticated role — including read-only viewers — mutate alert
+    // status. That contradicts the role model; gate like the peer
+    // alert mutations.
+    user.require_role(&["admin", "maintainer"])?;
     let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM alerts WHERE id = $1")
         .bind(alert_id)
         .fetch_optional(&state.db)
