@@ -31,7 +31,7 @@ futures = "=0.3.32"
 async-trait = "=0.1.89"
 
 # HTTP / REST
-axum = "=0.8.9"
+axum = { version = "=0.8.9", features = ["multipart"] }
 tower = "=0.5.3"
 tower-http = { version = "=0.7.0", features = ["trace", "compression-gzip"] }
 http = "=1.4.2"
@@ -58,6 +58,7 @@ aws-sdk-s3 = "=1.138.0"
 # AuthN/Z
 bcrypt = "=0.19.2"
 email_address = "=0.2.9"
+hmac = "=0.12.1"
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["rust_crypto"] }
 openidconnect = "=4.0.1"
 
@@ -80,6 +81,7 @@ anyhow = "=1.0.103"
 figment = { version = "=0.10.19", features = ["env"] }
 arc-swap = "=1.9.2"
 sha2 = "=0.10.9"
+md-5 = "=0.11.0"
 url = { version = "=2.5.8", features = ["serde"] }
 uuid = { version = "=1.23.5", features = ["v4", "serde"] }
 chrono = { version = "=0.4.45", features = ["serde"] }

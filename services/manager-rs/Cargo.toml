@@ -15,11 +15,15 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
 bcrypt = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 email_address = { workspace = true }
+hmac = { workspace = true }
 jsonwebtoken = { workspace = true }
+md-5 = { workspace = true }
 sha2 = { workspace = true }
 sqlx = { workspace = true }
 skauswatch-db = { workspace = true }
@@ -40,6 +44,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 axum-test = { workspace = true }
+wiremock = { workspace = true }
 
 [lints]
 workspace = true
