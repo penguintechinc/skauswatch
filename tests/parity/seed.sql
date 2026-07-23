@@ -1,7 +1,7 @@
 -- Golden parity harness seed — applied identically to skauswatch_v1 and
 -- skauswatch_v2 so both managers see byte-identical state.
 --
--- Schema is derived from services/manager/models/db.py (SQLAlchemy section —
+-- Schema is derived from release/v1.0.x:services/manager/models/db.py (SQLAlchemy section —
 -- the contract's authoritative 13-table schema). v1's startup create_all()
 -- is idempotent by table name, so pre-created tables are left untouched.
 --

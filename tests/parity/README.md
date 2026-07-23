@@ -1,7 +1,7 @@
 # Golden parity harness — manager v1 (Quart) vs v2 (Rust)
 
-Runs the v1 Python manager (`services/manager`) and the v2 Rust manager
-(`services/manager-rs`) side by side against identical seeded state,
+Runs the v1 Python manager (extracted from `release/v1.0.x:services/manager`) and the v2 Rust manager
+(`services/manager`) side by side against identical seeded state,
 replays a corpus covering **every REST endpoint of all 11 routers**, and
 structurally diffs status + JSON body. The contract of record is
 `docs/v2-port/manager-contract.md`; diffs that match a documented defect
@@ -30,7 +30,7 @@ both sides must start from the seeded snapshot to stay in lockstep.
 | `parity-pg`  | postgres:17-bookworm, two identically seeded databases (`skauswatch_v1`, `skauswatch_v2`) |
 | `parity-redis` | valkey/valkey:8-bookworm; v1 uses DB index 0, v2 uses DB index 1 |
 | `parity-stub`  | one shared deterministic echo upstream (`stub_upstream.py`) standing in for worker-scanner (ASM), worker-darwin, log-receiver (SIEM), and the S3 endpoint for bucket tests. Both managers proxy to the same stub so forwarded method/path/query/body parity is directly observable |
-| `parity-v1`  | python:3.13-slim-bookworm, pip-installs `services/manager/requirements.txt` (hash-verified), runs `main.py` on :5000 → host :15001. `GRPC_ENABLED=false` |
+| `parity-v1`  | python:3.13-slim-bookworm, pip-installs the v1 snapshot's `requirements.txt` (hash-verified), runs `main.py` on :5000 → host :15001. `GRPC_ENABLED=false` |
 | `parity-v2`  | debug binary built via rust:1.97-slim-bookworm (cargo cache in the session scratchpad), runs on :5000 → host :15002. `GRPC_ENABLED=false` |
 
 Both managers get the same `JWT_SECRET_KEY` and `EDR_API_SECRET`, so JWTs
@@ -56,7 +56,7 @@ Consequently:
 ## Seed data
 
 `seed.sql` creates the contract's 13-table schema (derived from
-`services/manager/models/db.py`, the authoritative source) and seeds 3–4
+`release/v1.0.x:services/manager/models/db.py`, the authoritative source) and seeds 3–4
 deterministic rows per feature: users for each role (admin/maintainer/
 viewer + one deactivated; password `Password123!` for all), IOCs (incl. one
 expired), alerts, approvals (incl. approved + expired), EDR agents/events,
