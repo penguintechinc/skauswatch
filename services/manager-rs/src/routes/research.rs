@@ -23,7 +23,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -140,14 +139,6 @@ fn validation_at(field: &str, msg: &str) -> ApiError {
     ApiError::Validation(vec![json!({
         "loc": [field], "msg": msg, "type": "value_error"
     })])
-}
-
-/// Python `datetime.utcnow().isoformat()` — naive UTC with microseconds.
-fn now_iso() -> String {
-    Utc::now()
-        .naive_utc()
-        .format("%Y-%m-%dT%H:%M:%S%.6f")
-        .to_string()
 }
 
 /// Validates a `query` field: required (`min_length=1`) and `max_length=500`,
@@ -339,7 +330,12 @@ async fn lookup(_user: CurrentUser, Json(body): Json<LookupBody>) -> Result<Resp
     let mut result = serde_json::Map::new();
     result.insert("query".to_owned(), json!(query));
     result.insert("indicator_type".to_owned(), json!(itype));
-    result.insert("timestamp".to_owned(), json!(now_iso()));
+    // Python datetime.utcnow().isoformat() shape via the shared helper
+    // (v2-designed surface — the v1 research routes were runtime-broken).
+    result.insert(
+        "timestamp".to_owned(),
+        json!(skauswatch_streams::py_now_isoformat()),
+    );
 
     let is = |v: &str| itype.as_deref() == Some(v);
 

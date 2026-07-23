@@ -118,6 +118,7 @@ fn can_view_user(current_id: i32, role: &str, target_id: i32) -> bool {
 }
 
 /// List-item shape: `{id,email,full_name,role,is_active,mfa_enabled,created_at}`.
+/// Timestamps render as Python `datetime.isoformat()` (v1 wire parity).
 #[derive(sqlx::FromRow, Serialize)]
 struct UserItem {
     id: i32,
@@ -126,7 +127,8 @@ struct UserItem {
     role: String,
     is_active: bool,
     mfa_enabled: bool,
-    created_at: Option<String>,
+    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
+    created_at: Option<chrono::NaiveDateTime>,
 }
 
 /// Detail shape (GET by id): list-item fields plus `updated_at`.
@@ -138,8 +140,10 @@ struct UserDetail {
     role: String,
     is_active: bool,
     mfa_enabled: bool,
-    created_at: Option<String>,
-    updated_at: Option<String>,
+    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
+    created_at: Option<chrono::NaiveDateTime>,
+    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
+    updated_at: Option<chrono::NaiveDateTime>,
 }
 
 /// Summary shape used inside create/update responses:
@@ -172,7 +176,7 @@ async fn list_users(
 
     let items = sqlx::query_as::<_, UserItem>(
         "SELECT id, email, COALESCE(full_name, '') AS full_name, role, is_active, \
-                COALESCE(mfa_enabled, false) AS mfa_enabled, created_at::text \
+                COALESCE(mfa_enabled, false) AS mfa_enabled, created_at \
          FROM users ORDER BY created_at LIMIT $1 OFFSET $2",
     )
     .bind(per_page)
@@ -206,7 +210,7 @@ async fn get_user(
     let row = sqlx::query_as::<_, UserDetail>(
         "SELECT id, email, COALESCE(full_name, '') AS full_name, role, is_active, \
                 COALESCE(mfa_enabled, false) AS mfa_enabled, \
-                created_at::text, updated_at::text \
+                created_at, updated_at \
          FROM users WHERE id = $1",
     )
     .bind(user_id)

@@ -37,7 +37,7 @@ const MAX_PER_PAGE: i64 = 500;
 const MAX_BULK_INDICATORS: usize = 1000;
 
 const IOC_COLUMNS: &str = "SELECT id, indicator_type, value, threat_level, confidence, source, \
-     tags, metadata, expires_at::text, created_at::text, updated_at::text \
+     tags, metadata, expires_at, created_at, updated_at \
      FROM threat_indicators WHERE TRUE";
 
 /// Router for /api/v1/threat-intel.
@@ -73,7 +73,8 @@ fn field_loc(item: Option<usize>, field: &str) -> serde_json::Value {
 }
 
 /// Full IOC row selected via `IOC_COLUMNS` — jsonb columns come back as
-/// `serde_json::Value`, timestamps as Postgres text.
+/// `serde_json::Value`, timestamps as chrono `NaiveDateTime` (rendered with
+/// `py_isoformat` for v1 wire parity).
 #[derive(sqlx::FromRow)]
 struct IocRow {
     id: i32,
@@ -84,9 +85,9 @@ struct IocRow {
     source: Option<String>,
     tags: Option<serde_json::Value>,
     metadata: Option<serde_json::Value>,
-    expires_at: Option<String>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
+    expires_at: Option<NaiveDateTime>,
+    created_at: Option<NaiveDateTime>,
+    updated_at: Option<NaiveDateTime>,
 }
 
 /// v1 parity: `ioc.tags or []` — SQL NULL / jsonb null become `[]`.
@@ -116,8 +117,8 @@ fn ioc_json(row: &IocRow) -> serde_json::Value {
         "source": row.source,
         "tags": tags_json(&row.tags),
         "metadata": metadata_json(&row.metadata),
-        "expires_at": row.expires_at,
-        "created_at": row.created_at,
+        "expires_at": skauswatch_streams::py_isoformat_opt(row.expires_at),
+        "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
     })
 }
 
@@ -125,7 +126,10 @@ fn ioc_json(row: &IocRow) -> serde_json::Value {
 fn ioc_detail_json(row: &IocRow) -> serde_json::Value {
     let mut v = ioc_json(row);
     if let Some(obj) = v.as_object_mut() {
-        obj.insert("updated_at".to_owned(), serde_json::json!(row.updated_at));
+        obj.insert(
+            "updated_at".to_owned(),
+            serde_json::json!(skauswatch_streams::py_isoformat_opt(row.updated_at)),
+        );
     }
     v
 }
@@ -140,7 +144,7 @@ fn search_json(row: &IocRow) -> serde_json::Value {
         "confidence": row.confidence,
         "source": row.source,
         "tags": tags_json(&row.tags),
-        "created_at": row.created_at,
+        "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
     })
 }
 
@@ -513,7 +517,7 @@ struct CreatedRow {
     indicator_type: String,
     value: String,
     threat_level: Option<String>,
-    created_at: Option<String>,
+    created_at: Option<NaiveDateTime>,
 }
 
 async fn create_ioc(
@@ -542,7 +546,7 @@ async fn create_ioc(
          (indicator_type, value, threat_level, confidence, source, tags, metadata, \
           expires_at, created_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) \
-         RETURNING id, indicator_type, value, threat_level, created_at::text",
+         RETURNING id, indicator_type, value, threat_level, created_at",
     )
     .bind(&v.indicator_type)
     .bind(&v.value)
@@ -564,7 +568,7 @@ async fn create_ioc(
                 "indicator_type": row.indicator_type,
                 "value": row.value,
                 "threat_level": row.threat_level,
-                "created_at": row.created_at,
+                "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
             }
         })),
     ))
@@ -833,7 +837,7 @@ async fn lookup_ioc(
 
     let row: Option<IocRow> = sqlx::query_as(
         "SELECT id, indicator_type, value, threat_level, confidence, source, tags, \
-         metadata, expires_at::text, created_at::text, updated_at::text \
+         metadata, expires_at, created_at, updated_at \
          FROM threat_indicators \
          WHERE indicator_type = $1 AND value = $2 \
            AND (expires_at IS NULL OR expires_at > $3)",

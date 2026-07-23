@@ -29,7 +29,7 @@ const TYPE_MSG: &str = "Input should be 'certificate', 'user', 'service' or 'con
 
 /// List-item projection: the GET /approvals response omits the jsonb columns.
 const LIST_COLUMNS: &str = "SELECT id, request_type, resource_id, resource_type, requester_id, \
-     status, required_approvals, current_approvals, expires_at::text, created_at::text \
+     status, required_approvals, current_approvals, expires_at, created_at \
      FROM approval_requests WHERE TRUE";
 
 /// Router for /api/v1/approvals.
@@ -120,11 +120,6 @@ fn total_pages(total: i64, per_page: i64) -> i64 {
     (total + per_page - 1) / per_page
 }
 
-/// Python `datetime.utcnow().isoformat()` — naive UTC with microseconds.
-fn utc_isoformat(t: NaiveDateTime) -> String {
-    t.format("%Y-%m-%dT%H:%M:%S%.6f").to_string()
-}
-
 /// Parsed GET /approvals query params (Quart request.args semantics).
 struct ListQuery {
     page: i64,
@@ -192,7 +187,8 @@ fn push_list_filters(qb: &mut QueryBuilder<Postgres>, f: &ListFilters) {
     }
 }
 
-/// List-item row (`LIST_COLUMNS`) — timestamps as Postgres text.
+/// List-item row (`LIST_COLUMNS`) — timestamps as chrono `NaiveDateTime`
+/// (rendered with `py_isoformat` for v1 wire parity).
 #[derive(sqlx::FromRow)]
 struct ApprovalListRow {
     id: i32,
@@ -203,8 +199,8 @@ struct ApprovalListRow {
     status: Option<String>,
     required_approvals: Option<i32>,
     current_approvals: Option<i32>,
-    expires_at: Option<String>,
-    created_at: Option<String>,
+    expires_at: Option<NaiveDateTime>,
+    created_at: Option<NaiveDateTime>,
 }
 
 /// v1 list-item response shape (GET /approvals items).
@@ -218,8 +214,8 @@ fn list_item_json(r: &ApprovalListRow) -> serde_json::Value {
         "status": r.status,
         "required_approvals": r.required_approvals,
         "current_approvals": r.current_approvals,
-        "expires_at": r.expires_at,
-        "created_at": r.created_at,
+        "expires_at": skauswatch_streams::py_isoformat_opt(r.expires_at),
+        "created_at": skauswatch_streams::py_isoformat_opt(r.created_at),
     })
 }
 
@@ -277,8 +273,8 @@ struct PendingRow {
     current_approvals: Option<i32>,
     metadata: Option<serde_json::Value>,
     approval_history: Option<serde_json::Value>,
-    expires_at: Option<String>,
-    created_at: Option<String>,
+    expires_at: Option<NaiveDateTime>,
+    created_at: Option<NaiveDateTime>,
 }
 
 /// GET /approvals/pending — admin/maintainer; non-expired pending requests
@@ -294,7 +290,7 @@ async fn list_pending_approvals(
     let rows = sqlx::query_as::<_, PendingRow>(
         "SELECT id, request_type, resource_id, resource_type, requester_id, status, \
                 required_approvals, current_approvals, metadata, approval_history, \
-                expires_at::text, created_at::text \
+                expires_at, created_at \
          FROM approval_requests \
          WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > $1) \
          ORDER BY created_at DESC",
@@ -317,8 +313,8 @@ async fn list_pending_approvals(
                 "required_approvals": r.required_approvals,
                 "current_approvals": r.current_approvals,
                 "metadata": normalize_object(&r.metadata),
-                "expires_at": r.expires_at,
-                "created_at": r.created_at,
+                "expires_at": skauswatch_streams::py_isoformat_opt(r.expires_at),
+                "created_at": skauswatch_streams::py_isoformat_opt(r.created_at),
             })
         })
         .collect();
@@ -330,7 +326,7 @@ async fn list_pending_approvals(
 }
 
 /// Full row for GET /approvals/{id} — all columns, jsonb as `Value`,
-/// timestamps as Postgres text.
+/// timestamps as chrono `NaiveDateTime`.
 #[derive(sqlx::FromRow)]
 struct ApprovalFullRow {
     id: i32,
@@ -344,10 +340,10 @@ struct ApprovalFullRow {
     approvers: Option<serde_json::Value>,
     approval_history: Option<serde_json::Value>,
     metadata: Option<serde_json::Value>,
-    expires_at: Option<String>,
-    completed_at: Option<String>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
+    expires_at: Option<NaiveDateTime>,
+    completed_at: Option<NaiveDateTime>,
+    created_at: Option<NaiveDateTime>,
+    updated_at: Option<NaiveDateTime>,
 }
 
 /// GET /approvals/{approval_id} — any authenticated user; full object.
@@ -359,8 +355,8 @@ async fn get_approval(
     let r = sqlx::query_as::<_, ApprovalFullRow>(
         "SELECT id, request_type, resource_id, resource_type, requester_id, status, \
                 required_approvals, current_approvals, approvers, approval_history, \
-                metadata, expires_at::text, completed_at::text, \
-                created_at::text, updated_at::text \
+                metadata, expires_at, completed_at, \
+                created_at, updated_at \
          FROM approval_requests WHERE id = $1",
     )
     .bind(approval_id)
@@ -380,10 +376,10 @@ async fn get_approval(
         "approvers": normalize_array(&r.approvers),
         "approval_history": normalize_array(&r.approval_history),
         "metadata": normalize_object(&r.metadata),
-        "expires_at": r.expires_at,
-        "completed_at": r.completed_at,
-        "created_at": r.created_at,
-        "updated_at": r.updated_at,
+        "expires_at": skauswatch_streams::py_isoformat_opt(r.expires_at),
+        "completed_at": skauswatch_streams::py_isoformat_opt(r.completed_at),
+        "created_at": skauswatch_streams::py_isoformat_opt(r.created_at),
+        "updated_at": skauswatch_streams::py_isoformat_opt(r.updated_at),
     })))
 }
 
@@ -447,8 +443,8 @@ struct CreatedRow {
     request_type: String,
     resource_id: String,
     status: String,
-    expires_at: Option<String>,
-    created_at: Option<String>,
+    expires_at: Option<NaiveDateTime>,
+    created_at: Option<NaiveDateTime>,
 }
 
 /// POST /approvals — any authenticated user; requester_id = current user,
@@ -468,7 +464,7 @@ async fn create_approval(
               required_approvals, current_approvals, approvers, approval_history, \
               metadata, expires_at, created_at) \
          VALUES ($1, $2, $3, $4, 'pending', $5, 0, '[]'::jsonb, '[]'::jsonb, $6, $7, $8) \
-         RETURNING id, request_type, resource_id, status, expires_at::text, created_at::text",
+         RETURNING id, request_type, resource_id, status, expires_at, created_at",
     )
     .bind(&v.request_type)
     .bind(&v.resource_id)
@@ -490,8 +486,8 @@ async fn create_approval(
                 "request_type": row.request_type,
                 "resource_id": row.resource_id,
                 "status": row.status,
-                "expires_at": row.expires_at,
-                "created_at": row.created_at,
+                "expires_at": skauswatch_streams::py_isoformat_opt(row.expires_at),
+                "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
             }
         })),
     ))
@@ -631,7 +627,7 @@ struct DecidedRow {
     status: Option<String>,
     current_approvals: Option<i32>,
     required_approvals: Option<i32>,
-    completed_at: Option<String>,
+    completed_at: Option<NaiveDateTime>,
 }
 
 /// POST /approvals/{approval_id}/decide — admin/maintainer; records an
@@ -707,7 +703,7 @@ async fn decide_approval(
         DecisionGuard::Proceed => {}
     }
 
-    let timestamp = utc_isoformat(now);
+    let timestamp = skauswatch_streams::py_isoformat(now);
     let upd = apply_decision(
         row.current_approvals,
         row.required_approvals,
@@ -743,7 +739,7 @@ async fn decide_approval(
     tx.commit().await?;
 
     let out = sqlx::query_as::<_, DecidedRow>(
-        "SELECT id, status, current_approvals, required_approvals, completed_at::text \
+        "SELECT id, status, current_approvals, required_approvals, completed_at \
          FROM approval_requests WHERE id = $1",
     )
     .bind(approval_id)
@@ -758,7 +754,7 @@ async fn decide_approval(
             "status": out.status,
             "current_approvals": out.current_approvals,
             "required_approvals": out.required_approvals,
-            "completed_at": out.completed_at,
+            "completed_at": skauswatch_streams::py_isoformat_opt(out.completed_at),
         }
     })))
 }
@@ -905,7 +901,7 @@ mod tests {
             user_email: "reviewer@example.com",
             approved,
             reason: Some("looks fine"),
-            timestamp: "2026-07-15T10:00:00.000000",
+            timestamp: "2026-07-15T10:00:00.000042",
         }
     }
 
@@ -1125,7 +1121,7 @@ mod tests {
         assert_eq!(entry["user_email"], "reviewer@example.com");
         assert_eq!(entry["approved"], true);
         assert_eq!(entry["reason"], "looks fine");
-        assert_eq!(entry["timestamp"], "2026-07-15T10:00:00.000000");
+        assert_eq!(entry["timestamp"], "2026-07-15T10:00:00.000042");
     }
 
     #[test]
@@ -1235,9 +1231,11 @@ mod tests {
     }
 
     #[test]
-    fn utc_isoformat_matches_python_shape() {
+    fn history_timestamp_uses_python_isoformat_shape() {
+        // The decide path stamps history entries with the shared helper —
+        // Python isoformat omits the fraction at microsecond == 0.
         let t = dt("2026-07-15T10:00:00");
-        assert_eq!(utc_isoformat(t), "2026-07-15T10:00:00.000000");
+        assert_eq!(skauswatch_streams::py_isoformat(t), "2026-07-15T10:00:00");
     }
 
     #[test]

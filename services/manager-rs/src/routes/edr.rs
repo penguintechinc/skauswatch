@@ -43,7 +43,7 @@ const MAX_EVENTS_PER_REQUEST: usize = 100;
 const DEFAULT_COLLECTORS: [&str; 3] = ["process", "network", "file"];
 
 const AGENT_COLUMNS: &str = "SELECT id, agent_id, hostname, ip_address, os_type, os_version, \
-     agent_version, status, last_heartbeat::text, metadata, created_at::text, updated_at::text \
+     agent_version, status, last_heartbeat, metadata, created_at, updated_at \
      FROM edr_agents WHERE TRUE";
 
 /// Router for /api/v1/edr.
@@ -234,14 +234,6 @@ fn parse_page_params(
     (page, per_page)
 }
 
-/// Python `datetime.utcnow().isoformat()` — naive UTC with microseconds.
-fn utcnow_isoformat() -> String {
-    Utc::now()
-        .naive_utc()
-        .format("%Y-%m-%dT%H:%M:%S%.6f")
-        .to_string()
-}
-
 /// EDRAgentRegisterRequest — fields optional here so missing ones map to the
 /// validation envelope instead of an axum extractor rejection.
 #[derive(Deserialize)]
@@ -410,7 +402,7 @@ async fn heartbeat(
     Ok(Json(serde_json::json!({
         "status": "ok",
         "agent_id": v.agent_id,
-        "timestamp": utcnow_isoformat(),
+        "timestamp": skauswatch_streams::py_now_isoformat(),
     })))
 }
 
@@ -683,7 +675,8 @@ async fn agent_config(
 }
 
 /// Full agent row (list/get endpoints) — jsonb metadata as
-/// `serde_json::Value`, timestamps as Postgres text.
+/// `serde_json::Value`, timestamps as chrono `NaiveDateTime` (rendered with
+/// `py_isoformat` for v1 wire parity).
 #[derive(sqlx::FromRow)]
 struct AgentRow {
     id: i32,
@@ -694,10 +687,10 @@ struct AgentRow {
     os_version: Option<String>,
     agent_version: Option<String>,
     status: Option<String>,
-    last_heartbeat: Option<String>,
+    last_heartbeat: Option<chrono::NaiveDateTime>,
     metadata: Option<serde_json::Value>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
+    created_at: Option<chrono::NaiveDateTime>,
+    updated_at: Option<chrono::NaiveDateTime>,
 }
 
 /// v1 list-item shape (GET /edr/agents) — no metadata / updated_at.
@@ -711,8 +704,8 @@ fn agent_list_json(r: &AgentRow) -> serde_json::Value {
         "os_version": r.os_version,
         "agent_version": r.agent_version,
         "status": r.status,
-        "last_heartbeat": r.last_heartbeat,
-        "created_at": r.created_at,
+        "last_heartbeat": skauswatch_streams::py_isoformat_opt(r.last_heartbeat),
+        "created_at": skauswatch_streams::py_isoformat_opt(r.created_at),
     })
 }
 
@@ -799,10 +792,10 @@ async fn get_agent(
         "os_version": row.os_version,
         "agent_version": row.agent_version,
         "status": row.status,
-        "last_heartbeat": row.last_heartbeat,
+        "last_heartbeat": skauswatch_streams::py_isoformat_opt(row.last_heartbeat),
         "metadata": metadata,
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
+        "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
+        "updated_at": skauswatch_streams::py_isoformat_opt(row.updated_at),
     })))
 }
 
@@ -815,7 +808,7 @@ struct EventRow {
     process_name: Option<String>,
     process_path: Option<String>,
     command_line: Option<String>,
-    created_at: Option<String>,
+    created_at: Option<chrono::NaiveDateTime>,
 }
 
 /// GET /edr/agents/{agent_id}/events — JWT (any role). Paginated events for
@@ -837,7 +830,7 @@ async fn get_agent_events(
     let (page, per_page) = parse_page_params(&params, 50, 200);
     let rows = sqlx::query_as::<_, EventRow>(
         "SELECT id, event_type, severity, process_name, process_path, command_line, \
-         created_at::text FROM edr_events WHERE agent_id = $1 \
+         created_at FROM edr_events WHERE agent_id = $1 \
          ORDER BY created_at DESC LIMIT $2 OFFSET $3",
     )
     .bind(&agent_id)
@@ -860,7 +853,7 @@ async fn get_agent_events(
                 "process_name": e.process_name,
                 "process_path": e.process_path,
                 "command_line": e.command_line,
-                "created_at": e.created_at,
+                "created_at": skauswatch_streams::py_isoformat_opt(e.created_at),
             })
         })
         .collect();
