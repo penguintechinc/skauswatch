@@ -1,7 +1,7 @@
 # Manager Service — v1 Contract Spec (Rust port source of truth)
 
 Derived from `services/manager` (Quart) on `release/v2.0.x`, 2026-07-15.
-The Rust port (`services/manager-rs`) MUST match this contract; deviations
+The Rust port (`services/manager`, formerly `services/manager-rs`; v1 Python source frozen on `release/v1.0.x`) MUST match this contract; deviations
 require a documented decision in this file.
 
 ## Bootstrap facts
@@ -143,7 +143,7 @@ audit_logs, edr_agents, edr_events, s3_bucket_configs, s3_scan_jobs,
 s3_scan_results, adhoc_scan_results, s3_scan_schedules. Full column lists in
 services/manager/models/db.py (treat as authoritative over handler code —
 see drift below). v2: baseline into migrations/core via sqlx migrate
-(Phase 10); manager-rs uses sqlx runtime queries, no create_all.
+(Phase 10); the Rust manager uses sqlx runtime queries, no create_all.
 
 ## Redis Streams (prefix `skauswatch`, maxlen ~10000)
 

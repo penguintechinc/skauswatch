@@ -106,13 +106,20 @@ up() {
   build_v2
 
   echo "== v1 manager (Quart) =="
+  # services/manager on this branch is the v2 Rust service; the v1 Python
+  # source lives frozen on release/v1.0.x. Extract a pristine snapshot from
+  # git history for the container mount.
+  V1_SRC="$SCRATCH/v1-manager-src"
+  rm -rf "$V1_SRC"
+  mkdir -p "$V1_SRC"
+  git -C "$REPO" archive release/v1.0.x services/manager | tar -x -C "$V1_SRC"
   # Dependencies install once into a persistent PYTHONUSERBASE volume so the
   # runner's poisoned-connection recovery (docker restart) reboots in
   # seconds instead of re-running pip (see README: v1 defect — a SQL error
   # aborts the shared PyDAL connection permanently).
   mkdir -p "$SCRATCH/pip-user"
   docker run -d --name "$V1" --network "$NET" -p "$V1_PORT":5000 \
-    -v "$REPO/services/manager":/app:ro \
+    -v "$V1_SRC/services/manager":/app:ro \
     -v "$REPO/.version":/.version:ro \
     -v "$SCRATCH/pip-cache":/tmp/pip-cache \
     -v "$SCRATCH/pip-user":/pipuser \
