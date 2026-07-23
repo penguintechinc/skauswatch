@@ -848,6 +848,54 @@ async fn run_head_bucket(b: &BucketRow) -> (StatusCode, Json<serde_json::Value>)
 // Scan job endpoints
 // ============================================
 
+/// One `s3scan:tasks` dispatch — v1 ScanJobManager task shape.
+struct ScanTaskMsg<'a> {
+    /// Scan-job UUID (v1 `job_id = str(uuid4())`), or the ad-hoc scan UUID.
+    job_id: &'a str,
+    /// Bucket config id; `None` for ad-hoc uploads (v1 None → "").
+    bucket_config_id: Option<i32>,
+    /// S3 object key; empty for a job-level dispatch (worker enumerates).
+    object_key: &'a str,
+    /// Object size in bytes (0 when unknown at dispatch time).
+    object_size: i64,
+    /// Object ETag; empty when unknown at dispatch time.
+    object_etag: &'a str,
+    /// v1 `config.get("scan_enabled", True)`.
+    scan_enabled: bool,
+    /// v1 `config.get("yara_enabled", False)`.
+    yara_enabled: bool,
+    /// Python `datetime.utcnow().isoformat()` publish stamp.
+    submitted_at: &'a str,
+}
+
+/// v1 `s3scan:tasks` message — field names, order, and redis-py xadd
+/// stringification (`{job_id,bucket_config_id,object_key,object_size,
+/// object_etag,scan_enabled,yara_enabled,submitted_at}`; Python renders
+/// bools as "True"/"False" and None as "").
+fn scan_task_fields(msg: &ScanTaskMsg<'_>) -> skauswatch_streams::EntryFields {
+    vec![
+        ("job_id".to_owned(), msg.job_id.to_owned()),
+        (
+            "bucket_config_id".to_owned(),
+            msg.bucket_config_id
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+        ),
+        ("object_key".to_owned(), msg.object_key.to_owned()),
+        ("object_size".to_owned(), msg.object_size.to_string()),
+        ("object_etag".to_owned(), msg.object_etag.to_owned()),
+        (
+            "scan_enabled".to_owned(),
+            skauswatch_streams::py_bool(msg.scan_enabled).to_owned(),
+        ),
+        (
+            "yara_enabled".to_owned(),
+            skauswatch_streams::py_bool(msg.yara_enabled).to_owned(),
+        ),
+        ("submitted_at".to_owned(), msg.submitted_at.to_owned()),
+    ]
+}
+
 /// TriggerScanRequest — v1 tolerates a missing body entirely.
 #[derive(Default, Deserialize)]
 struct TriggerBody {
@@ -886,12 +934,12 @@ async fn trigger_scan(
     }
     let force_rescan = parsed.force_rescan.unwrap_or(false);
 
-    let bucket: Option<(Option<bool>,)> =
-        sqlx::query_as("SELECT scan_enabled FROM s3_bucket_configs WHERE id = $1")
+    let bucket: Option<(Option<bool>, Option<bool>)> =
+        sqlx::query_as("SELECT scan_enabled, yara_enabled FROM s3_bucket_configs WHERE id = $1")
             .bind(bucket_id)
             .fetch_optional(&state.db)
             .await?;
-    let Some((scan_enabled,)) = bucket else {
+    let Some((scan_enabled, yara_enabled)) = bucket else {
         return Err(ApiError::NotFound(
             "Bucket configuration not found".to_owned(),
         ));
@@ -919,7 +967,28 @@ async fn trigger_scan(
     .fetch_one(&state.db)
     .await?;
 
-    // TODO(streams): publish s3scan:tasks — wired with skauswatch-streams integration
+    // v2 dispatch decision: v1's HTTP trigger only inserted a pending row —
+    // no runtime component ever picked it up (the ScanJobManager publisher
+    // was reachable only via the never-registered gRPC S3ScanService), so
+    // jobs stayed pending forever. v2 publishes one job-level s3scan:tasks
+    // message using the v1 task field shape; empty object_key means "worker
+    // enumerates the bucket". Failures are swallowed with a warning, matching
+    // every v1 HTTP publish site.
+    state
+        .publish_stream(
+            skauswatch_streams::STREAM_S3_SCAN_TASKS,
+            scan_task_fields(&ScanTaskMsg {
+                job_id: &job_uuid,
+                bucket_config_id: Some(bucket_id),
+                object_key: "",
+                object_size: 0,
+                object_etag: "",
+                scan_enabled: true,
+                yara_enabled: yara_enabled.unwrap_or(false),
+                submitted_at: &skauswatch_streams::py_now_isoformat(),
+            }),
+        )
+        .await;
 
     Ok((
         StatusCode::CREATED,
@@ -1772,8 +1841,31 @@ async fn upload_file(
     .fetch_one(&state.db)
     .await?;
 
-    // TODO(streams): publish s3scan:tasks (ad-hoc scan dispatch) — wired with
-    // skauswatch-streams integration
+    // v2 dispatch decision: v1's HTTP upload route was runtime-broken
+    // (defect #1, `db.adhoc_scans`) and its service-layer sibling scanned
+    // inline — nothing ever hit the stream. v2 dispatches the ad-hoc scan as
+    // an s3scan:tasks message in the v1 task field shape: empty
+    // bucket_config_id (no bucket config — the worker resolves the ad-hoc
+    // bucket), object_key uses the v1 AdhocScanManager `{scan_id}/{filename}`
+    // convention, and yara is on (ad-hoc results expose yara_matches).
+    // Failures are swallowed with a warning, matching every v1 HTTP publish
+    // site.
+    let object_key = format!("{scan_uuid}/{filename}");
+    state
+        .publish_stream(
+            skauswatch_streams::STREAM_S3_SCAN_TASKS,
+            scan_task_fields(&ScanTaskMsg {
+                job_id: &scan_uuid,
+                bucket_config_id: None,
+                object_key: &object_key,
+                object_size: i64::from(size_i32),
+                object_etag: "",
+                scan_enabled: true,
+                yara_enabled: true,
+                submitted_at: &skauswatch_streams::py_now_isoformat(),
+            }),
+        )
+        .await;
 
     Ok((
         StatusCode::CREATED,
@@ -2229,6 +2321,63 @@ mod tests {
         kv.iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn scan_task_fields_match_v1_names_order_and_encoding() {
+        // Job-level dispatch (bucket scan trigger).
+        let fields = scan_task_fields(&ScanTaskMsg {
+            job_id: "6f9b7a1c-0000-0000-0000-000000000000",
+            bucket_config_id: Some(3),
+            object_key: "",
+            object_size: 0,
+            object_etag: "",
+            scan_enabled: true,
+            yara_enabled: false,
+            submitted_at: "2026-07-22T09:30:00.000042",
+        });
+        assert_eq!(
+            fields,
+            pairs(&[
+                ("job_id", "6f9b7a1c-0000-0000-0000-000000000000"),
+                ("bucket_config_id", "3"),
+                ("object_key", ""),
+                ("object_size", "0"),
+                ("object_etag", ""),
+                // Python str(bool) capitalization, per redis-py xadd parity.
+                ("scan_enabled", "True"),
+                ("yara_enabled", "False"),
+                ("submitted_at", "2026-07-22T09:30:00.000042"),
+            ])
+        );
+    }
+
+    #[test]
+    fn scan_task_fields_adhoc_dispatch_encodes_none_as_empty() {
+        let fields = scan_task_fields(&ScanTaskMsg {
+            job_id: "adhoc-uuid",
+            bucket_config_id: None,
+            object_key: "adhoc-uuid/evil.exe",
+            object_size: 1024,
+            object_etag: "",
+            scan_enabled: true,
+            yara_enabled: true,
+            submitted_at: "2026-07-22T09:30:00.000042",
+        });
+        assert_eq!(
+            fields,
+            pairs(&[
+                ("job_id", "adhoc-uuid"),
+                // v1 encoder: None → "".
+                ("bucket_config_id", ""),
+                ("object_key", "adhoc-uuid/evil.exe"),
+                ("object_size", "1024"),
+                ("object_etag", ""),
+                ("scan_enabled", "True"),
+                ("yara_enabled", "True"),
+                ("submitted_at", "2026-07-22T09:30:00.000042"),
+            ])
+        );
     }
 
     #[tokio::test]

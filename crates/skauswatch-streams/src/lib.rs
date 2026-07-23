@@ -6,7 +6,8 @@
 //! Topic name constants are added per-service during Phase 3, copied
 //! verbatim from the v1 producers so the wire contract is preserved.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
+use fred::interfaces::{ClientLike, StreamsInterface};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -16,6 +17,148 @@ pub const TOPIC_PREFIX: &str = "skauswatch";
 /// Builds a fully-qualified stream key: `skauswatch:{service}:{queue}`.
 pub fn topic(service: &str, queue: &str) -> String {
     format!("{TOPIC_PREFIX}:{service}:{queue}")
+}
+
+// v1 stream names (RedisStreamManager constants) — unprefixed; the producer
+// prepends the configured key prefix (`REDIS_KEY_PREFIX`, default
+// `skauswatch`) exactly like v1's `_key()`.
+
+/// EDR event pipeline stream (v1 `STREAM_EDR_EVENTS`).
+pub const STREAM_EDR_EVENTS: &str = "edr:events";
+/// Pending-alert processing stream (v1 `STREAM_ALERTS_PENDING`).
+pub const STREAM_ALERTS_PENDING: &str = "alerts:pending";
+/// AI task queue stream (v1 `STREAM_AI_TASKS`).
+pub const STREAM_AI_TASKS: &str = "ai:tasks";
+/// Threat-intel update stream (v1 `STREAM_THREAT_UPDATES`).
+pub const STREAM_THREAT_UPDATES: &str = "threatintel:updates";
+/// Approval workflow stream (v1 `STREAM_APPROVALS`).
+pub const STREAM_APPROVALS: &str = "approvals:pending";
+/// Audit log stream (v1 `STREAM_AUDIT_LOG`).
+pub const STREAM_AUDIT_LOG: &str = "audit:log";
+/// S3 scan task stream (v1 `STREAM_S3_SCAN_TASKS`).
+pub const STREAM_S3_SCAN_TASKS: &str = "s3scan:tasks";
+/// S3 scan result stream (v1 `STREAM_S3_SCAN_RESULTS`).
+pub const STREAM_S3_SCAN_RESULTS: &str = "s3scan:results";
+
+/// Approximate stream cap applied on publish — v1 `publish_event` default
+/// (`maxlen=10000, approximate=True`).
+pub const DEFAULT_MAXLEN: i64 = 10_000;
+
+// v1 wire-encoding helpers. redis-py xadd stringifies every field value:
+// dict/list → json.dumps, datetime → isoformat, bool → str(bool), None → "".
+// Field maps built for publishing must reproduce those bytes exactly.
+
+/// Python `str(bool)` — `"True"` / `"False"` (capitalized, unlike Rust).
+pub fn py_bool(b: bool) -> &'static str {
+    if b { "True" } else { "False" }
+}
+
+/// Python `datetime.isoformat()` for a naive UTC timestamp. Always renders
+/// six fractional digits — the manager-rs port convention (Python omits the
+/// fraction only in the one-in-a-million `microsecond == 0` case).
+pub fn py_isoformat(t: NaiveDateTime) -> String {
+    t.format("%Y-%m-%dT%H:%M:%S%.6f").to_string()
+}
+
+/// Python `datetime.utcnow().isoformat()` — the stamp v1 producers attach as
+/// `submitted_at` / `timestamp` fields.
+pub fn py_now_isoformat() -> String {
+    py_isoformat(Utc::now().naive_utc())
+}
+
+/// Reproduces v1 `RedisConfig.full_url`: injects `default:{password}@` after
+/// the scheme when a password is configured and the URL has no userinfo.
+pub fn redis_url_with_password(url: &str, password: Option<&str>) -> String {
+    match password {
+        Some(pass) if !url.contains('@') => match url.split_once("://") {
+            Some((scheme, rest)) => format!("{scheme}://default:{pass}@{rest}"),
+            None => url.to_owned(),
+        },
+        _ => url.to_owned(),
+    }
+}
+
+/// Fully-prefixed stream key (v1 `RedisStreamManager._key`):
+/// `{prefix}:{stream}`, e.g. `skauswatch:alerts:pending`.
+pub fn prefixed_key(prefix: &str, stream: &str) -> String {
+    format!("{prefix}:{stream}")
+}
+
+/// Ordered field list for one stream entry. Order is preserved on XADD,
+/// matching redis-py's dict insertion order — required for wire parity.
+pub type EntryFields = Vec<(String, String)>;
+
+/// Publisher for `skauswatch:*` streams — the v1 `RedisStreamManager`
+/// producer side. Wraps a fred client with auto-reconnect; every publish is
+/// an `XADD` with the v1 approximate MAXLEN cap.
+#[derive(Clone)]
+pub struct StreamProducer {
+    client: fred::clients::Client,
+    prefix: String,
+}
+
+impl std::fmt::Debug for StreamProducer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamProducer")
+            .field("prefix", &self.prefix)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StreamProducer {
+    /// Connects to Valkey/Redis and verifies the connection (v1
+    /// `RedisStreamManager.connect` pings on connect; startup fails if the
+    /// broker is unreachable). `prefix` namespaces every stream key.
+    pub async fn connect(
+        url: &str,
+        password: Option<&str>,
+        prefix: &str,
+    ) -> Result<Self, StreamError> {
+        let effective = redis_url_with_password(url, password);
+        let config = fred::types::config::Config::from_url(&effective)?;
+        let mut builder = fred::types::Builder::from_config(config);
+        // Retry forever with capped exponential backoff — parity with
+        // redis-py's per-command reconnect behavior.
+        builder.set_policy(fred::types::config::ReconnectPolicy::new_exponential(
+            0, 100, 30_000, 2,
+        ));
+        let client = builder.build()?;
+        // init() connects and waits for the first successful handshake; the
+        // returned join handle is detached (the reconnect task runs for the
+        // client's lifetime).
+        let _connect_task = client.init().await?;
+        Ok(Self {
+            client,
+            prefix: prefix.to_owned(),
+        })
+    }
+
+    /// Fully-prefixed stream key for an unprefixed stream name (v1 `_key`).
+    pub fn key(&self, stream: &str) -> String {
+        prefixed_key(&self.prefix, stream)
+    }
+
+    /// XADDs the ordered fields to `{prefix}:{stream}` with the v1 cap
+    /// (`MAXLEN ~ 10000`). Returns the generated entry id.
+    pub async fn publish(&self, stream: &str, fields: EntryFields) -> Result<String, StreamError> {
+        let id: String = self
+            .client
+            .xadd(
+                self.key(stream),
+                false,
+                ("MAXLEN", "~", DEFAULT_MAXLEN),
+                "*",
+                fields,
+            )
+            .await?;
+        Ok(id)
+    }
+
+    /// PINGs the broker — the v1 `/healthz` Redis probe.
+    pub async fn ping(&self) -> Result<(), StreamError> {
+        let _: String = self.client.ping(None).await?;
+        Ok(())
+    }
 }
 
 /// Envelope for one queued job. Serialized as JSON into a single stream
@@ -65,6 +208,12 @@ pub enum StreamError {
     Transport(String),
 }
 
+impl From<fred::error::Error> for StreamError {
+    fn from(e: fred::error::Error) -> Self {
+        StreamError::Transport(e.to_string())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::panic)] // tests fail loudly by design
 mod tests {
@@ -73,6 +222,71 @@ mod tests {
     #[test]
     fn topic_uses_shared_prefix() {
         assert_eq!(topic("s3scan", "jobs"), "skauswatch:s3scan:jobs");
+    }
+
+    #[test]
+    fn stream_names_match_v1_manager_constants() {
+        assert_eq!(STREAM_EDR_EVENTS, "edr:events");
+        assert_eq!(STREAM_ALERTS_PENDING, "alerts:pending");
+        assert_eq!(STREAM_AI_TASKS, "ai:tasks");
+        assert_eq!(STREAM_THREAT_UPDATES, "threatintel:updates");
+        assert_eq!(STREAM_APPROVALS, "approvals:pending");
+        assert_eq!(STREAM_AUDIT_LOG, "audit:log");
+        assert_eq!(STREAM_S3_SCAN_TASKS, "s3scan:tasks");
+        assert_eq!(STREAM_S3_SCAN_RESULTS, "s3scan:results");
+    }
+
+    #[test]
+    fn py_bool_matches_python_str_bool() {
+        assert_eq!(py_bool(true), "True");
+        assert_eq!(py_bool(false), "False");
+    }
+
+    #[test]
+    fn py_isoformat_renders_naive_utc_with_microseconds() {
+        let dt = chrono::NaiveDate::from_ymd_opt(2026, 7, 22)
+            .and_then(|d| d.and_hms_micro_opt(10, 3, 7, 123456));
+        let dt = match dt {
+            Some(v) => v,
+            None => panic!("valid test datetime"),
+        };
+        assert_eq!(py_isoformat(dt), "2026-07-22T10:03:07.123456");
+        // Port convention: six digits even at microsecond == 0.
+        let zero = match chrono::NaiveDate::from_ymd_opt(2026, 7, 22)
+            .and_then(|d| d.and_hms_micro_opt(10, 3, 7, 0))
+        {
+            Some(v) => v,
+            None => panic!("valid test datetime"),
+        };
+        assert_eq!(py_isoformat(zero), "2026-07-22T10:03:07.000000");
+    }
+
+    #[test]
+    fn prefixed_key_matches_v1_key_builder() {
+        assert_eq!(
+            prefixed_key("skauswatch", STREAM_ALERTS_PENDING),
+            "skauswatch:alerts:pending"
+        );
+        assert_eq!(prefixed_key("custom", STREAM_AI_TASKS), "custom:ai:tasks");
+    }
+
+    #[test]
+    fn redis_url_password_injection_matches_v1_full_url() {
+        // Password set, no userinfo → inject `default:{pass}@`.
+        assert_eq!(
+            redis_url_with_password("redis://redis:6379/0", Some("s3cr3t")),
+            "redis://default:s3cr3t@redis:6379/0"
+        );
+        // URL already carries userinfo → untouched.
+        assert_eq!(
+            redis_url_with_password("redis://user:pw@redis:6379/0", Some("s3cr3t")),
+            "redis://user:pw@redis:6379/0"
+        );
+        // No password → untouched.
+        assert_eq!(
+            redis_url_with_password("redis://redis:6379/0", None),
+            "redis://redis:6379/0"
+        );
     }
 
     #[test]

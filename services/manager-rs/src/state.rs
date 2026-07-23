@@ -1,10 +1,11 @@
-//! Shared application state: Postgres pool, auth settings, and the
-//! license/flag client. Valkey/streams and gRPC clients join as their
+//! Shared application state: Postgres pool, auth settings, the license/flag
+//! client, and the Valkey/Redis Streams producer. gRPC clients join as their
 //! routers are ported.
 
 use std::sync::Arc;
 
 use penguin_licensing::{LicenseClient, LicenseConfig};
+use skauswatch_streams::StreamProducer;
 use sqlx::PgPool;
 
 /// Auth settings mirroring the v1 `AuthConfig` defaults.
@@ -50,6 +51,10 @@ pub struct AppStateInner {
     pub db: PgPool,
     /// Auth settings.
     pub auth: AuthSettings,
+    /// Redis Streams producer. `None` only when streams are not initialized
+    /// (tests) — v1 guards every publish with `if stream_manager:` and its
+    /// healthz reports `not initialized` in the same situation.
+    pub streams: Option<StreamProducer>,
 }
 
 /// Cheap-to-clone handle used as axum state.
@@ -72,11 +77,36 @@ impl AppStateInner {
             .await
             .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
 
+        // v1 env semantics: REDIS_URL (default redis://redis:6379/0),
+        // optional REDIS_PASSWORD, REDIS_KEY_PREFIX (default skauswatch).
+        // v1 raises out of startup when the broker is unreachable — match.
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://redis:6379/0".to_owned());
+        let redis_password = std::env::var("REDIS_PASSWORD").ok();
+        let prefix = std::env::var("REDIS_KEY_PREFIX").unwrap_or_else(|_| "skauswatch".to_owned());
+        let streams = StreamProducer::connect(&redis_url, redis_password.as_deref(), &prefix)
+            .await
+            .map_err(|e| anyhow::anyhow!("redis connect: {e}"))?;
+
         Ok(Arc::new(Self {
             license,
             db,
             auth: AuthSettings::from_env(),
+            streams: Some(streams),
         }))
+    }
+
+    /// Publishes ordered fields to a `skauswatch:*` stream, swallowing every
+    /// failure with a warning — v1 wraps each HTTP-request publish site in
+    /// try/except so publishing never fails the request; the `None` producer
+    /// mirrors v1's `if stream_manager:` silent skip.
+    pub async fn publish_stream(&self, stream: &str, fields: skauswatch_streams::EntryFields) {
+        let Some(producer) = &self.streams else {
+            return;
+        };
+        if let Err(e) = producer.publish(stream, fields).await {
+            tracing::warn!(stream, error = %e, "failed to publish to stream");
+        }
     }
 
     /// Test constructor: caller-supplied license client, lazy (unconnected)
@@ -97,6 +127,7 @@ impl AppStateInner {
                 max_login_attempts: 5,
                 lockout_minutes: 15,
             },
+            streams: None,
         })
     }
 }
