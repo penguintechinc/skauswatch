@@ -27,7 +27,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ApiJson};
 use crate::state::AppState;
 
 /// v1 `ResearchIndicatorType` enum values, in declaration order.
@@ -300,7 +300,10 @@ struct LookupBody {
 /// when omitted, then walks v1's control flow — including the shodan/maltego
 /// "not enabled" 503 short-circuits — emitting empty per-source envelopes since
 /// no external source is queried in this port.
-async fn lookup(_user: CurrentUser, Json(body): Json<LookupBody>) -> Result<Response, ApiError> {
+async fn lookup(
+    _user: CurrentUser,
+    ApiJson(body): ApiJson<LookupBody>,
+) -> Result<Response, ApiError> {
     let query = validate_query(body.query.as_deref())?;
     let indicator_type = validate_indicator_type(body.indicator_type.as_deref(), false)?;
     if let Some(t) = body.timeout {
@@ -383,7 +386,7 @@ struct QueryTypeBody {
 /// returns the empty WHOIS envelope since no external lookup is performed.
 async fn whois_lookup(
     _user: CurrentUser,
-    Json(body): Json<QueryTypeBody>,
+    ApiJson(body): ApiJson<QueryTypeBody>,
 ) -> Result<Json<Value>, ApiError> {
     validate_query(body.query.as_deref())?;
     validate_indicator_type(body.indicator_type.as_deref(), true)?;
@@ -402,7 +405,7 @@ struct DnsBody {
 /// since no resolver is queried in this port.
 async fn dns_lookup(
     _user: CurrentUser,
-    Json(body): Json<DnsBody>,
+    ApiJson(body): ApiJson<DnsBody>,
 ) -> Result<Json<Value>, ApiError> {
     validate_query(body.query.as_deref())?;
     validate_indicator_type(body.indicator_type.as_deref(), false)?;
@@ -413,7 +416,7 @@ async fn dns_lookup(
 /// returns v1's no-data body since Team Cymru is not queried in this port.
 async fn asn_lookup(
     _user: CurrentUser,
-    Json(body): Json<QueryTypeBody>,
+    ApiJson(body): ApiJson<QueryTypeBody>,
 ) -> Result<Json<Value>, ApiError> {
     validate_query(body.query.as_deref())?;
     validate_indicator_type(body.indicator_type.as_deref(), true)?;
@@ -685,8 +688,7 @@ mod tests {
         for res in responses {
             res.assert_status(StatusCode::UNAUTHORIZED);
             let body: Value = res.json();
-            assert_eq!(body["error"], "Unauthorized");
-            assert_eq!(body["detail"], "Missing authorization header");
+            assert_eq!(body["error"], "Missing or invalid authorization header");
         }
     }
 
@@ -699,7 +701,6 @@ mod tests {
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
         let body: Value = res.json();
-        assert_eq!(body["error"], "Unauthorized");
-        assert_eq!(body["detail"], "Invalid token");
+        assert_eq!(body["error"], "Invalid token");
     }
 }

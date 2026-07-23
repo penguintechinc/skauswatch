@@ -62,8 +62,11 @@ async fn serve() -> anyhow::Result<()> {
     let _license_bg = state.license.spawn_refresh();
 
     // v1-shape /healthz (DB + Redis probes) replaces the generic telemetry
-    // health router; /readyz keeps the readiness gate.
-    let app = routes::router(state.clone()).merge(health::router(state.clone(), readiness.clone()));
+    // health router; /readyz keeps the readiness gate. The fallback serves
+    // the v1 Quart framework-404 envelope for unknown routes.
+    let app = routes::router(state.clone())
+        .merge(health::router(state.clone(), readiness.clone()))
+        .fallback(error::fallback_not_found);
 
     let addr: SocketAddr = ([0, 0, 0, 0], http_port()).into();
     let listener = tokio::net::TcpListener::bind(addr).await?;

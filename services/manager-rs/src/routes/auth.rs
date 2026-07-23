@@ -12,7 +12,7 @@ use serde::Deserialize;
 use crate::auth::{
     self, CurrentUser, create_access_token, create_refresh_token, decode_refresh, token_hash,
 };
-use crate::error::ApiError;
+use crate::error::{ApiError, ApiJson};
 use crate::state::AppState;
 
 /// Router for /api/v1/auth.
@@ -46,7 +46,8 @@ struct LoginRow {
     id: i32,
     email: String,
     password_hash: String,
-    full_name: Option<String>,
+    /// v1 renders `user.full_name or ""` — SELECT COALESCEs to "".
+    full_name: String,
     role: String,
     is_active: bool,
     failed_login_attempts: i32,
@@ -55,7 +56,7 @@ struct LoginRow {
 
 async fn login(
     State(state): State<AppState>,
-    Json(body): Json<LoginRequest>,
+    ApiJson(body): ApiJson<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     if !valid_email(&body.email) {
         return Err(validation("email", "value is not a valid email address"));
@@ -67,13 +68,14 @@ async fn login(
         ));
     }
 
+    // v1 lowercases the login email before lookup.
     let row = sqlx::query_as::<_, LoginRow>(
-        "SELECT id, email, password_hash, full_name, role, is_active, \
+        "SELECT id, email, password_hash, COALESCE(full_name, '') AS full_name, role, is_active, \
                 failed_login_attempts, \
                 (account_locked_until IS NOT NULL AND account_locked_until > now()) AS locked \
          FROM users WHERE email = $1",
     )
-    .bind(&body.email)
+    .bind(body.email.to_lowercase())
     .fetch_optional(&state.db)
     .await?;
 
@@ -83,18 +85,23 @@ async fn login(
         ));
     };
     if user.locked {
-        return Err(ApiError::Unauthorized("Account locked".to_owned()));
-    }
-    if !user.is_active {
-        return Err(ApiError::Unauthorized("Account deactivated".to_owned()));
+        return Err(ApiError::Unauthorized(
+            "Account is locked. Please try again later.".to_owned(),
+        ));
     }
 
+    // v1 order: password check (and attempt bookkeeping) runs BEFORE the
+    // is_active check — a deactivated user with a wrong password sees
+    // "Invalid email or password", not the deactivation message.
+    // pyDAL parity: every users UPDATE below also bumps updated_at
+    // (Field(update=utcnow) fires on all v1 updates, including these).
     if !auth::verify_password(&body.password, &user.password_hash) {
         let attempts = user.failed_login_attempts + 1;
         if attempts >= state.auth.max_login_attempts {
             sqlx::query(
                 "UPDATE users SET failed_login_attempts = $1, \
-                 account_locked_until = now() + make_interval(mins => $2) WHERE id = $3",
+                 account_locked_until = now() + make_interval(mins => $2), \
+                 updated_at = now() WHERE id = $3",
             )
             .bind(attempts)
             .bind(state.auth.lockout_minutes as i32)
@@ -102,19 +109,26 @@ async fn login(
             .execute(&state.db)
             .await?;
         } else {
-            sqlx::query("UPDATE users SET failed_login_attempts = $1 WHERE id = $2")
-                .bind(attempts)
-                .bind(user.id)
-                .execute(&state.db)
-                .await?;
+            sqlx::query(
+                "UPDATE users SET failed_login_attempts = $1, updated_at = now() WHERE id = $2",
+            )
+            .bind(attempts)
+            .bind(user.id)
+            .execute(&state.db)
+            .await?;
         }
         return Err(ApiError::Unauthorized(
             "Invalid email or password".to_owned(),
         ));
     }
 
+    if !user.is_active {
+        return Err(ApiError::Unauthorized("Account is deactivated".to_owned()));
+    }
+
     sqlx::query(
-        "UPDATE users SET failed_login_attempts = 0, account_locked_until = NULL WHERE id = $1",
+        "UPDATE users SET failed_login_attempts = 0, account_locked_until = NULL, \
+         updated_at = now() WHERE id = $1",
     )
     .bind(user.id)
     .execute(&state.db)
@@ -179,7 +193,7 @@ struct RefreshRow {
 
 async fn refresh(
     State(state): State<AppState>,
-    Json(body): Json<RefreshRequest>,
+    ApiJson(body): ApiJson<RefreshRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let claims = decode_refresh(&body.refresh_token, &state.auth.jwt_secret)?;
     let hash = token_hash(&body.refresh_token);
@@ -191,14 +205,14 @@ async fn refresh(
     .bind(&hash)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| ApiError::Unauthorized("Invalid token".to_owned()))?;
+    .ok_or_else(|| ApiError::Unauthorized("Refresh token has been revoked".to_owned()))?;
 
     let claimed_user: i32 = claims
         .sub
         .parse()
-        .map_err(|_| ApiError::Unauthorized("Invalid token".to_owned()))?;
+        .map_err(|_| ApiError::Unauthorized("Invalid refresh token".to_owned()))?;
     if claimed_user != row.user_id {
-        return Err(ApiError::Unauthorized("Invalid token".to_owned()));
+        return Err(ApiError::Unauthorized("Invalid refresh token".to_owned()));
     }
 
     #[derive(sqlx::FromRow)]
@@ -210,9 +224,11 @@ async fn refresh(
         .bind(row.user_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| ApiError::Unauthorized("Invalid token".to_owned()))?;
+        .ok_or_else(|| ApiError::Unauthorized("User not found or deactivated".to_owned()))?;
     if !user.is_active {
-        return Err(ApiError::Unauthorized("Account deactivated".to_owned()));
+        return Err(ApiError::Unauthorized(
+            "User not found or deactivated".to_owned(),
+        ));
     }
 
     // Rotation: revoke the presented token before issuing a new pair.
@@ -234,14 +250,14 @@ async fn logout(
     State(state): State<AppState>,
     user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let result = sqlx::query(
-        "UPDATE refresh_tokens SET revoked = true WHERE user_id = $1 AND revoked = false",
-    )
-    .bind(user.id)
-    .execute(&state.db)
-    .await?;
+    // v1 counts the pyDAL update over ALL of the user's rows (already-
+    // revoked ones included) — no `revoked = false` filter.
+    let result = sqlx::query("UPDATE refresh_tokens SET revoked = true WHERE user_id = $1")
+        .bind(user.id)
+        .execute(&state.db)
+        .await?;
     Ok(Json(serde_json::json!({
-        "message": "Logged out successfully",
+        "message": "Successfully logged out",
         "tokens_revoked": result.rows_affected(),
     })))
 }
@@ -281,7 +297,7 @@ struct RegisterRequest {
 
 async fn register(
     State(state): State<AppState>,
-    Json(body): Json<RegisterRequest>,
+    ApiJson(body): ApiJson<RegisterRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {
     if !valid_email(&body.email) {
         return Err(validation("email", "value is not a valid email address"));
@@ -299,22 +315,24 @@ async fn register(
         ));
     }
 
+    // v1 lowercases the email for both the existence check and the insert.
+    let email = body.email.to_lowercase();
     let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM users WHERE email = $1")
-        .bind(&body.email)
+        .bind(&email)
         .fetch_optional(&state.db)
         .await?;
     if exists.is_some() {
         return Err(ApiError::Conflict(serde_json::json!({
-            "error": "User with this email already exists"
+            "error": "Email already registered"
         })));
     }
 
     let password_hash = auth::hash_password(&body.password)?;
     let (id,): (i32,) = sqlx::query_as(
-        "INSERT INTO users (email, password_hash, full_name, role, is_active) \
-         VALUES ($1, $2, $3, 'viewer', true) RETURNING id",
+        "INSERT INTO users (email, password_hash, full_name, role, is_active, updated_at) \
+         VALUES ($1, $2, $3, 'viewer', true, now()) RETURNING id",
     )
-    .bind(&body.email)
+    .bind(&email)
     .bind(&password_hash)
     .bind(&body.full_name)
     .fetch_one(&state.db)
@@ -323,10 +341,10 @@ async fn register(
     Ok((
         axum::http::StatusCode::CREATED,
         Json(serde_json::json!({
-            "message": "User registered successfully",
+            "message": "Registration successful",
             "user": {
                 "id": id,
-                "email": body.email,
+                "email": email,
                 "full_name": body.full_name,
                 "role": "viewer",
             }

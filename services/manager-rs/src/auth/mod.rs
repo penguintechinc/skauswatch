@@ -89,11 +89,20 @@ pub fn create_refresh_token(
     .map_err(|e| ApiError::internal("jwt encode", e))
 }
 
-fn decode<T: serde::de::DeserializeOwned>(token: &str, secret: &str) -> Result<T, ApiError> {
+/// Decodes signature/exp into raw claims. Error strings are caller-supplied
+/// because v1 words them per flow ("Token expired" vs "Refresh token
+/// expired", ...); the type check happens after, exactly like v1's
+/// jwt.decode-then-`payload.get("type")` ordering.
+fn decode_claims(
+    token: &str,
+    secret: &str,
+    expired_msg: &str,
+    invalid_msg: &str,
+) -> Result<serde_json::Value, ApiError> {
     let mut validation = Validation::default(); // HS256
     validation.validate_exp = true;
     validation.required_spec_claims.clear();
-    jsonwebtoken::decode::<T>(
+    jsonwebtoken::decode::<serde_json::Value>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
         &validation,
@@ -101,28 +110,34 @@ fn decode<T: serde::de::DeserializeOwned>(token: &str, secret: &str) -> Result<T
     .map(|data| data.claims)
     .map_err(|e| match e.kind() {
         jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
-            ApiError::Unauthorized("Token expired".to_owned())
+            ApiError::Unauthorized(expired_msg.to_owned())
         }
-        _ => ApiError::Unauthorized("Invalid token".to_owned()),
+        _ => ApiError::Unauthorized(invalid_msg.to_owned()),
     })
 }
 
-/// Decodes and type-checks an access token.
+/// Decodes and type-checks an access token (v1 `auth_required` strings).
 pub fn decode_access(token: &str, secret: &str) -> Result<AccessClaims, ApiError> {
-    let claims: AccessClaims = decode(token, secret)?;
-    if claims.token_type != "access" {
-        return Err(ApiError::Unauthorized("Invalid token".to_owned()));
+    let claims = decode_claims(token, secret, "Token expired", "Invalid token")?;
+    if claims.get("type").and_then(|t| t.as_str()) != Some("access") {
+        return Err(ApiError::Unauthorized("Invalid token type".to_owned()));
     }
-    Ok(claims)
+    serde_json::from_value(claims).map_err(|_| ApiError::Unauthorized("Invalid token".to_owned()))
 }
 
-/// Decodes and type-checks a refresh token.
+/// Decodes and type-checks a refresh token (v1 `/auth/refresh` strings).
 pub fn decode_refresh(token: &str, secret: &str) -> Result<RefreshClaims, ApiError> {
-    let claims: RefreshClaims = decode(token, secret)?;
-    if claims.token_type != "refresh" {
-        return Err(ApiError::Unauthorized("Invalid token".to_owned()));
+    let claims = decode_claims(
+        token,
+        secret,
+        "Refresh token expired",
+        "Invalid refresh token",
+    )?;
+    if claims.get("type").and_then(|t| t.as_str()) != Some("refresh") {
+        return Err(ApiError::Unauthorized("Invalid token type".to_owned()));
     }
-    Ok(claims)
+    serde_json::from_value(claims)
+        .map_err(|_| ApiError::Unauthorized("Invalid refresh token".to_owned()))
 }
 
 /// bcrypt hash (v1 parity: bcrypt.hashpw with default cost).
@@ -177,14 +192,16 @@ impl FromRequestParts<AppState> for CurrentUser {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        // v1 uses one message for both missing and non-Bearer headers.
+        const HEADER_MSG: &str = "Missing or invalid authorization header";
         let header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| ApiError::Unauthorized("Missing authorization header".to_owned()))?;
+            .ok_or_else(|| ApiError::Unauthorized(HEADER_MSG.to_owned()))?;
         let token = header
             .strip_prefix("Bearer ")
-            .ok_or_else(|| ApiError::Unauthorized("Invalid authorization header".to_owned()))?;
+            .ok_or_else(|| ApiError::Unauthorized(HEADER_MSG.to_owned()))?;
         let claims = decode_access(token, &state.auth.jwt_secret)?;
         let user_id: i32 = claims
             .sub
@@ -198,10 +215,12 @@ impl FromRequestParts<AppState> for CurrentUser {
         .bind(user_id)
         .fetch_optional(&state.db)
         .await?
-        .ok_or_else(|| ApiError::Unauthorized("User not found".to_owned()))?;
+        .ok_or_else(|| ApiError::Unauthorized("User not found or inactive".to_owned()))?;
 
         if !row.is_active {
-            return Err(ApiError::Unauthorized("Account deactivated".to_owned()));
+            return Err(ApiError::Unauthorized(
+                "User not found or inactive".to_owned(),
+            ));
         }
         Ok(row.into())
     }

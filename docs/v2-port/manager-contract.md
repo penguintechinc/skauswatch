@@ -202,3 +202,59 @@ EDR_API_SECRET/EDR_*_INTERVAL/EDR_EVENT_BATCH_SIZE/EDR_SEVERITY_THRESHOLD.
    while every other alert mutation requires admin/maintainer. DECISION:
    v2 gates it with role(admin,maintainer). Golden harness will show a
    200→403 diff for viewer tokens on this route — intentional.
+8. **Filtered list queries runtime-broken** (found by the golden parity
+   harness, tests/parity): list/search handlers seed PyDAL queries with the
+   bare table (`query = db.alerts`) and AND conditions onto it — the SQL
+   renders `WHERE alerts AND (...)` → `DatatypeMismatch` → 500 for EVERY
+   filtered list: alerts `severity[]/status[]/source`, alerts search with
+   any criterion, threat-intel iocs list (always — the default
+   non-expired filter counts) and search, approvals `status/type/
+   requester_id`, edr agents `status[]/os_type`, s3 jobs/results filters.
+   Unfiltered lists work (and `include_expired=true` un-breaks ti list).
+   DECISION: v2 implements the documented filter semantics (200).
+9. **One shared PyDAL connection, never rolled back** — all requests use a
+   single thread-local connection; no error path rolls back, so the first
+   SQL error leaves the transaction aborted and every later DB request
+   500s until process restart. Reachable from normal traffic: minting two
+   refresh tokens for one user within the same second produces an
+   identical JWT (second-granularity iat/exp) → `refresh_tokens.token_hash`
+   UNIQUE violation. DECISION: not replicated — v2 uses pooled per-query
+   sqlx connections (the same-second refresh collision still 500s the one
+   request on both sides, but v2 recovers). The parity harness restarts v1
+   after any 500 to keep observing per-endpoint behavior.
+10. **Custom-validator errors crash the 400 path**: pydantic v1-style
+   validators that `raise ValueError` leave the ValueError object inside
+   `e.errors()[i]["ctx"]` — `jsonify` cannot serialize it → 500 instead of
+   the intended 400 (ti iocs create/bulk value validation, s3 bucket
+   `endpoint_url`, `cron_expression`, `hash_value`). DECISION: v2 returns
+   the proper 400 validation envelope.
+11. **S3 bucket create omits NOT NULL `created_by`** → IntegrityError →
+   500 on every create (and the harness's follow-on update/get/delete of
+   the new bucket 404 on v1). DECISION: v2 binds created_by = current
+   user.
+12. **S3 bucket test imports boto3, which is not in requirements.txt** →
+   ModuleNotFoundError, and the `except ClientError` clause itself raises
+   UnboundLocalError → 500 always. DECISION: v2 implements the probe with
+   aws-sdk-s3.
+
+## Error body shapes (harness-verified)
+
+Handler-raised errors in v1 are BARE `{"error": "<msg>"}` bodies; the
+`{error:"<Title>",detail}` envelope in §Bootstrap applies only to Quart's
+registered errorhandlers (unknown-route 404, uncaught-exception 500). v2
+matches: ApiError renders bare bodies, the router fallback serves the v1
+404 envelope verbatim, 500 is `{"error":"Internal Server Error"}`.
+
+Validation errors: both sides answer 400
+`{error:"Validation error", details:[...]}`, but v1's `details` are raw
+pydantic-v2 `e.errors()` dicts (incl. `input`, `url`, `ctx` — pydantic
+internals; sometimes unserializable, see defect 10). DECISION: v2 emits
+simplified `{loc, msg, type:"value_error"}` entries — same envelope and
+status, details payload intentionally not byte-identical (webui renders
+`msg`/`loc` only). Same applies to the per-item `errors[].error` strings
+in EDR batch responses (v1: `str(ValidationError)` multi-line dump).
+
+Runtime timestamps: PyDAL writes second-precision datetimes (no
+microseconds) and ALSO sets `update=`-fields (updated_at) on INSERT. v2
+mirrors the updated_at-on-insert/update behavior but keeps microsecond
+precision — both render valid Python `datetime.isoformat()` strings.

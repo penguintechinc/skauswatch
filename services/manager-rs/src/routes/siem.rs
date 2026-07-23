@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ApiJson};
 use crate::state::AppState;
 
 /// Free-tier user cap (v1 `SIEMConfig.free_tier_user_cap` — default 5, never
@@ -121,7 +121,7 @@ async fn siem_health() -> Json<serde_json::Value> {
 /// through verbatim; transport/parse failures are 500 (v1 uncaught httpx).
 async fn proxy_ingest(
     _user: CurrentUser,
-    Json(body): Json<serde_json::Value>,
+    ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let settings = SiemSettings::from_env();
     let resp = reqwest::Client::new()
@@ -348,7 +348,7 @@ fn check_retention(body: &serde_json::Map<String, serde_json::Value>) -> Retenti
 /// Invalid values return the bare v1 400 body, not the shared envelope.
 async fn update_siem_config(
     user: CurrentUser,
-    Json(body): Json<serde_json::Value>,
+    ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<Response, ApiError> {
     user.require_role(&["admin"])?;
 
@@ -463,8 +463,7 @@ mod tests {
         for res in responses {
             res.assert_status(StatusCode::UNAUTHORIZED);
             let body: serde_json::Value = res.json();
-            assert_eq!(body["error"], "Unauthorized");
-            assert_eq!(body["detail"], "Missing authorization header");
+            assert_eq!(body["error"], "Missing or invalid authorization header");
         }
     }
 
@@ -477,8 +476,7 @@ mod tests {
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
         let body: serde_json::Value = res.json();
-        assert_eq!(body["error"], "Unauthorized");
-        assert_eq!(body["detail"], "Invalid token");
+        assert_eq!(body["error"], "Invalid token");
     }
 
     #[test]

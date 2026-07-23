@@ -16,7 +16,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{self, CurrentUser};
-use crate::error::ApiError;
+use crate::error::{ApiError, ApiJson};
 use crate::state::AppState;
 
 /// Free-tier user cap (v1 `SIEMConfig.free_tier_user_cap`).
@@ -247,7 +247,7 @@ struct CreateRequest {
 async fn create_user(
     State(state): State<AppState>,
     user: CurrentUser,
-    Json(body): Json<CreateRequest>,
+    ApiJson(body): ApiJson<CreateRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     user.require_role(&["admin"])?;
 
@@ -289,8 +289,8 @@ async fn create_user(
 
     let password_hash = auth::hash_password(&body.password)?;
     let created = sqlx::query_as::<_, UserSummary>(
-        "INSERT INTO users (email, password_hash, full_name, role, is_active) \
-         VALUES ($1, $2, $3, $4, $5) \
+        "INSERT INTO users (email, password_hash, full_name, role, is_active, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, now()) \
          RETURNING id, email, COALESCE(full_name, '') AS full_name, role, is_active",
     )
     .bind(&email)
@@ -364,7 +364,7 @@ async fn update_user(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(user_id): Path<i32>,
-    Json(body): Json<UpdateRequest>,
+    ApiJson(body): ApiJson<UpdateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let is_self = user.id == user_id;
     let is_admin = user.role == "admin";
