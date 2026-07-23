@@ -1,0 +1,39 @@
+# buf configuration for the LIVE skauswatch proto tree (this directory).
+#
+# The `baseline/` subdirectory is a frozen snapshot of what fielded v1 EDR
+# agents compiled against. It declares the SAME package names as the live
+# protos (packages are intentionally unversioned for v1 wire compat), so it
+# MUST be excluded from this module to avoid duplicate-symbol errors. It is
+# its own standalone buf module (see baseline/buf.yaml) and is used only as
+# the `--against` input for `buf breaking`.
+version: v2
+modules:
+  - path: .
+    excludes:
+      - baseline
+breaking:
+  use:
+    # FILE is buf's strictest breaking-change category: it includes all
+    # WIRE and WIRE_JSON rules plus generated-source compatibility, and
+    # matches types per-file (so file moves/deletes are also breaking).
+    # Fielded Go EDR agents cannot be recompiled in lockstep with the
+    # manager, so we gate on the full FILE category — wire, JSON, and
+    # source compat all must hold against the committed baseline.
+    - FILE
+lint:
+  use:
+    # Deliberately NOT the STANDARD category. The v1 packages are
+    # intentionally unversioned (skauswatch.manager, not
+    # skauswatch.manager.v1) because the package name is part of the gRPC
+    # method path that fielded agents depend on — so PACKAGE_VERSION_SUFFIX
+    # and PACKAGE_DIRECTORY_MATCH can never pass. This gate exists for
+    # breaking-change detection, not style; lint is limited to the rules
+    # the current protos already satisfy (verified against buf 1.72.0:
+    # BASIC passes except the single rule below).
+    - BASIC
+  except:
+    # Packages are unversioned (skauswatch.manager) but files live under
+    # versioned dirs (manager/v1/) — the layout fielded agents were
+    # generated from. Moving files to satisfy this rule would itself be a
+    # FILE-level breaking change against the baseline.
+    - PACKAGE_DIRECTORY_MATCH

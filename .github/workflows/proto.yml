@@ -1,0 +1,69 @@
+name: Proto Wire-Compat
+
+# Gate: any change to proto/ must remain wire/JSON/source compatible with
+# the committed baseline snapshot (proto/baseline/ == what fielded v1 Go EDR
+# agents compiled against). See proto/baseline/README.md.
+#
+# No third-party actions (same philosophy as rust.yml) — buf runs via the
+# official bufbuild/buf docker image, pinned to exact version + SHA256 digest.
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+    paths:
+      - 'proto/**'
+      - '.github/workflows/proto.yml'
+  pull_request:
+    paths:
+      - 'proto/**'
+      - '.github/workflows/proto.yml'
+
+env:
+  # Pin BOTH exact version tag AND digest — never 'latest'.
+  BUF_IMAGE: bufbuild/buf:1.72.0@sha256:65bd496a89c762ad7151ca9e7d885a45dacb3671a8e8ec39738b9f844d3405ea
+
+jobs:
+  breaking:
+    name: buf breaking (baseline gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: buf breaking against committed baseline
+        # FILE rule category (configured in proto/buf.yaml): buf's strictest
+        # breaking set — wire, JSON, and generated-source compat, matched
+        # per-file. Fails on any change that would break fielded v1 agents.
+        run: |
+          docker run --rm \
+            --volume "${PWD}:/workspace:ro" \
+            --workdir /workspace \
+            "${BUF_IMAGE}" \
+            breaking proto --against proto/baseline
+      - name: baseline must be byte-identical or reviewed
+        # Belt-and-braces: `buf breaking` cannot detect a baseline that was
+        # quietly rewritten to match a breaking live change. Flag any diff
+        # touching proto/baseline so reviewers see it explicitly.
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}"
+            if ! git diff --quiet "origin/${GITHUB_BASE_REF}" -- proto/baseline/; then
+              echo "::warning::proto/baseline/ modified in this PR — requires explicit wire-compat review (see proto/baseline/README.md)"
+            fi
+          fi
+
+  lint:
+    name: buf lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: buf lint
+        # Lint config in proto/buf.yaml is intentionally minimal (BASIC minus
+        # PACKAGE_DIRECTORY_MATCH) — the gate's purpose is breaking-change
+        # detection, not style churn on frozen v1 contracts.
+        run: |
+          docker run --rm \
+            --volume "${PWD}:/workspace:ro" \
+            --workdir /workspace \
+            "${BUF_IMAGE}" \
+            lint proto
