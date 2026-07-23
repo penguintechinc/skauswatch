@@ -4085,6 +4085,7 @@ dependencies = [
  "skauswatch-common",
  "skauswatch-db",
  "skauswatch-proto",
+ "skauswatch-streams",
  "skauswatch-telemetry",
  "sqlx",
  "thiserror",

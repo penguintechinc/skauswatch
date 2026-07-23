@@ -5,6 +5,7 @@
 mod auth;
 mod error;
 mod flags;
+mod health;
 mod routes;
 mod state;
 
@@ -58,8 +59,9 @@ async fn serve() -> anyhow::Result<()> {
     // on the license server.
     let _license_bg = state.license.spawn_refresh();
 
-    let app =
-        routes::router(state.clone()).merge(skauswatch_telemetry::health_router(readiness.clone()));
+    // v1-shape /healthz (DB + Redis probes) replaces the generic telemetry
+    // health router; /readyz keeps the readiness gate.
+    let app = routes::router(state.clone()).merge(health::router(state.clone(), readiness.clone()));
 
     let addr: SocketAddr = ([0, 0, 0, 0], http_port()).into();
     let listener = tokio::net::TcpListener::bind(addr).await?;

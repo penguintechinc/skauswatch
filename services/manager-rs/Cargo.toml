@@ -34,6 +34,7 @@ serde_json = { workspace = true }
 skauswatch-auth = { workspace = true }
 skauswatch-common = { workspace = true }
 skauswatch-proto = { workspace = true }
+skauswatch-streams = { workspace = true }
 skauswatch-telemetry = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

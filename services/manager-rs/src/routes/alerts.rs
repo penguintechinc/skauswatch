@@ -378,6 +378,31 @@ struct CreatedRow {
     severity: String,
     status: String,
     created_at: Option<String>,
+    created_at_dt: Option<NaiveDateTime>,
+}
+
+/// v1 `alerts:pending` message — field names, order, and redis-py xadd
+/// stringification (`{alert_id,title,severity,source,created_at}`;
+/// `source or ""`, `created_at.isoformat() if created_at else ""`).
+fn alert_pending_fields(
+    alert_id: i32,
+    title: &str,
+    severity: &str,
+    source: &str,
+    created_at: Option<NaiveDateTime>,
+) -> skauswatch_streams::EntryFields {
+    vec![
+        ("alert_id".to_owned(), alert_id.to_string()),
+        ("title".to_owned(), title.to_owned()),
+        ("severity".to_owned(), severity.to_owned()),
+        ("source".to_owned(), source.to_owned()),
+        (
+            "created_at".to_owned(),
+            created_at
+                .map(skauswatch_streams::py_isoformat)
+                .unwrap_or_default(),
+        ),
+    ]
 }
 
 async fn create_alert(
@@ -391,7 +416,7 @@ async fn create_alert(
     let row = sqlx::query_as::<_, CreatedRow>(
         "INSERT INTO alerts (title, description, severity, status, source, indicators, created_at) \
          VALUES ($1, $2, $3, 'pending', $4, $5, now()) \
-         RETURNING id, title, severity, status, created_at::text",
+         RETURNING id, title, severity, status, created_at::text, created_at AS created_at_dt",
     )
     .bind(&v.title)
     .bind(&v.description)
@@ -401,7 +426,20 @@ async fn create_alert(
     .fetch_one(&state.db)
     .await?;
 
-    // TODO(streams): publish alerts:pending — wired with skauswatch-streams integration
+    // v1 publishes alerts:pending after insert, swallowing failures
+    // (try/except + warning) — publish errors never fail the request.
+    state
+        .publish_stream(
+            skauswatch_streams::STREAM_ALERTS_PENDING,
+            alert_pending_fields(
+                row.id,
+                &row.title,
+                &row.severity,
+                &v.source,
+                row.created_at_dt,
+            ),
+        )
+        .await;
 
     Ok((
         StatusCode::CREATED,
@@ -585,6 +623,26 @@ struct AiReviewBody {
     priority: Option<i64>,
 }
 
+/// v1 `ai:tasks` message — field names, order, and redis-py xadd
+/// stringification (`{job_id,alert_id,provider,priority,task_type,
+/// submitted_at}`; task_type fixed to "alert_review").
+fn ai_task_fields(
+    job_id: &str,
+    alert_id: i32,
+    provider: &str,
+    priority: i64,
+    submitted_at: String,
+) -> skauswatch_streams::EntryFields {
+    vec![
+        ("job_id".to_owned(), job_id.to_owned()),
+        ("alert_id".to_owned(), alert_id.to_string()),
+        ("provider".to_owned(), provider.to_owned()),
+        ("priority".to_owned(), priority.to_string()),
+        ("task_type".to_owned(), "alert_review".to_owned()),
+        ("submitted_at".to_owned(), submitted_at),
+    ]
+}
+
 /// v1 parity: `AI_ENABLED` env var, default true; any value other than
 /// "true" (case-insensitive) disables AI integration.
 fn ai_enabled() -> bool {
@@ -636,7 +694,22 @@ async fn request_ai_review(
         .format("%Y-%m-%dT%H:%M:%S%.6f")
         .to_string();
 
-    // TODO(streams): publish ai:tasks — wired with skauswatch-streams integration
+    // v1 publishes ai:tasks before building the 202 response, swallowing
+    // failures (try/except + warning) — the job_id is returned regardless.
+    // v1 stamps a fresh utcnow() inside the publish dict, distinct from the
+    // response's submitted_at.
+    state
+        .publish_stream(
+            skauswatch_streams::STREAM_AI_TASKS,
+            ai_task_fields(
+                &job_id,
+                alert_id,
+                &provider,
+                priority,
+                skauswatch_streams::py_now_isoformat(),
+            ),
+        )
+        .await;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -847,6 +920,57 @@ mod tests {
         assert_eq!(q.per_page, 20);
         assert!(q.severity.is_empty());
         assert_eq!(q.source, None);
+    }
+
+    #[test]
+    fn alert_pending_fields_match_v1_names_order_and_encoding() {
+        let created = chrono::NaiveDate::from_ymd_opt(2026, 7, 22)
+            .and_then(|d| d.and_hms_micro_opt(9, 30, 0, 42));
+        let fields = alert_pending_fields(7, "Suspicious login", "high", "edr", created);
+        assert_eq!(
+            fields,
+            vec![
+                ("alert_id".to_owned(), "7".to_owned()),
+                ("title".to_owned(), "Suspicious login".to_owned()),
+                ("severity".to_owned(), "high".to_owned()),
+                ("source".to_owned(), "edr".to_owned()),
+                (
+                    "created_at".to_owned(),
+                    "2026-07-22T09:30:00.000042".to_owned()
+                ),
+            ]
+        );
+        // v1: `created_at.isoformat() if created_at else ""`.
+        let fields = alert_pending_fields(7, "t", "low", "", None);
+        assert_eq!(fields[4], ("created_at".to_owned(), String::new()));
+    }
+
+    #[test]
+    fn ai_task_fields_match_v1_names_order_and_encoding() {
+        let fields = ai_task_fields(
+            "6f9b7a1c-0000-0000-0000-000000000000",
+            42,
+            "ollama",
+            2,
+            "2026-07-22T09:30:00.000042".to_owned(),
+        );
+        assert_eq!(
+            fields,
+            vec![
+                (
+                    "job_id".to_owned(),
+                    "6f9b7a1c-0000-0000-0000-000000000000".to_owned()
+                ),
+                ("alert_id".to_owned(), "42".to_owned()),
+                ("provider".to_owned(), "ollama".to_owned()),
+                ("priority".to_owned(), "2".to_owned()),
+                ("task_type".to_owned(), "alert_review".to_owned()),
+                (
+                    "submitted_at".to_owned(),
+                    "2026-07-22T09:30:00.000042".to_owned()
+                ),
+            ]
+        );
     }
 
     #[test]

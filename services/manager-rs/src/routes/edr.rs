@@ -545,12 +545,33 @@ async fn store_event(db: &sqlx::PgPool, ev: &EventInsert) -> Result<bool, sqlx::
     Ok(true)
 }
 
+/// v1 `edr:events` batch summary — field names, order, and redis-py xadd
+/// stringification (`{agent_id,events_count,severity,submitted_at}`).
+///
+/// v1 BUG replicated on purpose: the max-severity expression
+/// `max((e.severity for e in events if hasattr(e, "severity") and e.severity),
+/// default="low")` iterates the RAW request dicts, which never have a
+/// `.severity` attribute — the generator is always empty, so v1 always
+/// publishes `"low"` regardless of the batch's real severities.
+fn edr_summary_fields(
+    agent_id: &str,
+    events_count: i64,
+    submitted_at: String,
+) -> skauswatch_streams::EntryFields {
+    vec![
+        ("agent_id".to_owned(), agent_id.to_owned()),
+        ("events_count".to_owned(), events_count.to_string()),
+        ("severity".to_owned(), "low".to_owned()),
+        ("submitted_at".to_owned(), submitted_at),
+    ]
+}
+
 /// POST /edr/events — HMAC agent auth. Accepts a single event object or a
 /// batch (≤100); always 202 with per-item errors capped at 10 — v1 swallows
 /// per-event DB failures into the errors list too.
 async fn report_events(
     State(state): State<AppState>,
-    _agent: EdrAgent,
+    agent: EdrAgent,
     body: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let data: serde_json::Value = serde_json::from_slice(&body)
@@ -582,11 +603,20 @@ async fn report_events(
         }
     }
 
-    // TODO(streams): publish edr:events batch summary — wired with
-    // skauswatch-streams integration. Fields per contract:
-    // {agent_id, events_count, severity, submitted_at}. NB v1's max-severity
-    // expression iterates raw dicts (no .severity attr) so it always
-    // publishes "low" — replicate when wiring.
+    // v1 publishes an edr:events batch summary only when created_count > 0,
+    // swallowing failures (try/except + warning) — never fails the 202.
+    if stored > 0 {
+        state
+            .publish_stream(
+                skauswatch_streams::STREAM_EDR_EVENTS,
+                edr_summary_fields(
+                    &agent.agent_id,
+                    stored,
+                    skauswatch_streams::py_now_isoformat(),
+                ),
+            )
+            .await;
+    }
 
     Ok((
         StatusCode::ACCEPTED,
@@ -980,6 +1010,24 @@ mod tests {
         assert_eq!(
             valid_key("agent-001"),
             "2e3bdc4edea1fa9037414810457dcbf75fa025b654ceffcbc0cf2a98fcbb9e40"
+        );
+    }
+
+    #[test]
+    fn edr_summary_fields_match_v1_including_severity_bug() {
+        let fields = edr_summary_fields("agent-001", 5, "2026-07-22T09:30:00.000042".to_owned());
+        assert_eq!(
+            fields,
+            vec![
+                ("agent_id".to_owned(), "agent-001".to_owned()),
+                ("events_count".to_owned(), "5".to_owned()),
+                // v1 bug parity: always "low", even for critical batches.
+                ("severity".to_owned(), "low".to_owned()),
+                (
+                    "submitted_at".to_owned(),
+                    "2026-07-22T09:30:00.000042".to_owned()
+                ),
+            ]
         );
     }
 
