@@ -18,7 +18,7 @@ use serde::Deserialize;
 use sqlx::{Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ApiJson};
 use crate::state::AppState;
 
 /// v1 `ApprovalStatus` enum values (statistics buckets).
@@ -452,7 +452,7 @@ struct CreatedRow {
 async fn create_approval(
     State(state): State<AppState>,
     user: CurrentUser,
-    Json(body): Json<CreateBody>,
+    ApiJson(body): ApiJson<CreateBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let v = validate_create(&body)?;
     let now = Utc::now().naive_utc();
@@ -462,8 +462,8 @@ async fn create_approval(
         "INSERT INTO approval_requests \
              (request_type, resource_id, resource_type, requester_id, status, \
               required_approvals, current_approvals, approvers, approval_history, \
-              metadata, expires_at, created_at) \
-         VALUES ($1, $2, $3, $4, 'pending', $5, 0, '[]'::jsonb, '[]'::jsonb, $6, $7, $8) \
+              metadata, expires_at, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, 'pending', $5, 0, '[]'::jsonb, '[]'::jsonb, $6, $7, $8, $8) \
          RETURNING id, request_type, resource_id, status, expires_at, created_at",
     )
     .bind(&v.request_type)
@@ -637,7 +637,7 @@ async fn decide_approval(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(approval_id): Path<i32>,
-    Json(body): Json<DecideBody>,
+    ApiJson(body): ApiJson<DecideBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     user.require_role(&["admin", "maintainer"])?;
     let Some(approved) = body.approved else {

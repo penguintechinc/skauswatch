@@ -16,12 +16,27 @@ use crate::state::AppState;
 pub fn router(state: AppState, readiness: Readiness) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/version", get(version_info))
         .with_state(state)
         .merge(
             Router::new()
                 .route("/readyz", get(readyz))
                 .with_state(readiness),
         )
+}
+
+/// GET /version — v1 `{name, version, environment}`; environment mirrors
+/// v1's `QUART_ENV` default "production" (ENVIRONMENT honored first for
+/// the Rust deployment).
+async fn version_info() -> Json<serde_json::Value> {
+    let environment = std::env::var("ENVIRONMENT")
+        .or_else(|_| std::env::var("QUART_ENV"))
+        .unwrap_or_else(|_| "production".to_owned());
+    Json(serde_json::json!({
+        "name": "SkausWatch Manager Service",
+        "version": get_version(),
+        "environment": environment,
+    }))
 }
 
 /// v1 `get_version()`: read the repo-root `.version` file, else "0.0.0-dev".

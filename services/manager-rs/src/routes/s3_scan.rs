@@ -44,7 +44,7 @@ use serde::Deserialize;
 use sqlx::{Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ApiJson};
 use crate::state::AppState;
 
 /// v1 `S3ScanStatus` enum values (results/statistics filter surface).
@@ -494,7 +494,7 @@ struct CreatedBucketRow {
 async fn create_bucket(
     State(state): State<AppState>,
     user: CurrentUser,
-    Json(body): Json<BucketCreateBody>,
+    ApiJson(body): ApiJson<BucketCreateBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     user.require_role(&["admin", "maintainer"])?;
     let v = validate_bucket_create(&body)?;
@@ -516,8 +516,8 @@ async fn create_bucket(
     let row = sqlx::query_as::<_, CreatedBucketRow>(
         "INSERT INTO s3_bucket_configs (name, endpoint_url, bucket_name, access_key_id, \
          secret_access_key, region, use_ssl, path_style, prefix_filter, file_types_filter, \
-         max_file_size_mb, scan_enabled, yara_enabled, created_by, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now()) \
+         max_file_size_mb, scan_enabled, yara_enabled, created_by, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now()) \
          RETURNING id, name, bucket_name, access_key_id, created_at",
     )
     .bind(&v.name)
@@ -679,7 +679,7 @@ async fn update_bucket(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(bucket_id): Path<i32>,
-    Json(body): Json<BucketUpdateBody>,
+    ApiJson(body): ApiJson<BucketUpdateBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     user.require_role(&["admin", "maintainer"])?;
     let v = validate_bucket_update(&body)?;
@@ -1679,7 +1679,7 @@ async fn set_schedule(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(bucket_id): Path<i32>,
-    Json(body): Json<ScheduleBody>,
+    ApiJson(body): ApiJson<ScheduleBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     user.require_role(&["admin", "maintainer"])?;
     let (cron, timezone, enabled) = validate_schedule(&body)?;
@@ -1692,7 +1692,7 @@ async fn set_schedule(
 
     let row = sqlx::query_as::<_, UpsertedScheduleRow>(
         "INSERT INTO s3_scan_schedules (bucket_config_id, cron_expression, timezone, enabled, \
-         created_at) VALUES ($1, $2, $3, $4, now()) \
+         created_at, updated_at) VALUES ($1, $2, $3, $4, now(), now()) \
          ON CONFLICT (bucket_config_id) DO UPDATE SET \
          cron_expression = EXCLUDED.cron_expression, timezone = EXCLUDED.timezone, \
          enabled = EXCLUDED.enabled, updated_at = now() \
@@ -1809,7 +1809,13 @@ async fn upload_file(
                 }
             }
             Ok(None) => break,
-            Err(e) => return Err(ApiError::internal("multipart parse", e)),
+            // Quart tolerates malformed multipart (request.files just ends
+            // up empty), so v1 answers the same 400 as a missing file part.
+            Err(_) => {
+                return Err(ApiError::BadRequest(
+                    "No file provided in request".to_owned(),
+                ));
+            }
         }
     }
     let Some((filename, data)) = file else {
@@ -2262,7 +2268,7 @@ fn validate_hash_value(b: &HashLookupBody) -> Result<String, ApiError> {
 async fn hash_lookup(
     State(state): State<AppState>,
     _user: CurrentUser,
-    Json(body): Json<HashLookupBody>,
+    ApiJson(body): ApiJson<HashLookupBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let hash = validate_hash_value(&body)?;
     let Some(ioc) = fetch_hash_indicator(&state.db, &hash).await? else {
@@ -2423,8 +2429,7 @@ mod tests {
         for res in responses {
             res.assert_status(StatusCode::UNAUTHORIZED);
             let body: serde_json::Value = res.json();
-            assert_eq!(body["error"], "Unauthorized");
-            assert_eq!(body["detail"], "Missing authorization header");
+            assert_eq!(body["error"], "Missing or invalid authorization header");
         }
     }
 
@@ -2437,8 +2442,7 @@ mod tests {
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
         let body: serde_json::Value = res.json();
-        assert_eq!(body["error"], "Unauthorized");
-        assert_eq!(body["detail"], "Invalid token");
+        assert_eq!(body["error"], "Invalid token");
     }
 
     #[test]

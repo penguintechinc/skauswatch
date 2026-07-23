@@ -19,7 +19,7 @@ use serde::Deserialize;
 use sqlx::{Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ApiJson};
 use crate::state::AppState;
 
 /// v1 `IndicatorType` enum values.
@@ -523,7 +523,7 @@ struct CreatedRow {
 async fn create_ioc(
     State(state): State<AppState>,
     user: CurrentUser,
-    Json(body): Json<IocBody>,
+    ApiJson(body): ApiJson<IocBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     user.require_role(&["admin", "maintainer"])?;
     let v = validate_ioc(&body, None)?;
@@ -544,8 +544,8 @@ async fn create_ioc(
     let row = sqlx::query_as::<_, CreatedRow>(
         "INSERT INTO threat_indicators \
          (indicator_type, value, threat_level, confidence, source, tags, metadata, \
-          expires_at, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) \
+          expires_at, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now()) \
          RETURNING id, indicator_type, value, threat_level, created_at",
     )
     .bind(&v.indicator_type)
@@ -614,8 +614,8 @@ async fn upsert_ioc(db: &sqlx::PgPool, v: &ValidIoc) -> Result<bool, sqlx::Error
             sqlx::query(
                 "INSERT INTO threat_indicators \
                  (indicator_type, value, threat_level, confidence, source, tags, \
-                  metadata, expires_at, created_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())",
+                  metadata, expires_at, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())",
             )
             .bind(&v.indicator_type)
             .bind(&v.value)
@@ -638,7 +638,7 @@ async fn upsert_ioc(db: &sqlx::PgPool, v: &ValidIoc) -> Result<bool, sqlx::Error
 async fn bulk_create_iocs(
     State(state): State<AppState>,
     user: CurrentUser,
-    Json(body): Json<BulkBody>,
+    ApiJson(body): ApiJson<BulkBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     user.require_role(&["admin", "maintainer"])?;
 
@@ -799,7 +799,7 @@ fn validate_search(b: &SearchBody) -> Result<(IocFilters, i64, i64), ApiError> {
 async fn search_iocs(
     State(state): State<AppState>,
     _user: CurrentUser,
-    Json(body): Json<SearchBody>,
+    ApiJson(body): ApiJson<SearchBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (filters, page, per_page) = validate_search(&body)?;
     let (rows, total) = fetch_ioc_page(&state.db, &filters, page, per_page).await?;
@@ -825,7 +825,7 @@ struct LookupBody {
 async fn lookup_ioc(
     State(state): State<AppState>,
     _user: CurrentUser,
-    Json(body): Json<LookupBody>,
+    ApiJson(body): ApiJson<LookupBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let indicator_type = body.indicator_type.as_deref().filter(|s| !s.is_empty());
     let value = body.value.as_deref().filter(|s| !s.is_empty());

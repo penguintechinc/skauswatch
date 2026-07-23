@@ -540,8 +540,7 @@ mod tests {
         for res in responses {
             res.assert_status(StatusCode::UNAUTHORIZED);
             let body: serde_json::Value = res.json();
-            assert_eq!(body["error"], "Unauthorized");
-            assert_eq!(body["detail"], "Missing authorization header");
+            assert_eq!(body["error"], "Missing or invalid authorization header");
         }
     }
 
@@ -554,8 +553,7 @@ mod tests {
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
         let body: serde_json::Value = res.json();
-        assert_eq!(body["error"], "Unauthorized");
-        assert_eq!(body["detail"], "Invalid token");
+        assert_eq!(body["error"], "Invalid token");
     }
 
     #[tokio::test]

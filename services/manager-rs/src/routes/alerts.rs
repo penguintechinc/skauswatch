@@ -12,7 +12,7 @@ use serde::Deserialize;
 use sqlx::{Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ApiJson};
 use crate::state::AppState;
 
 const SEVERITIES: [&str; 5] = ["critical", "high", "medium", "low", "info"];
@@ -408,14 +408,15 @@ fn alert_pending_fields(
 async fn create_alert(
     State(state): State<AppState>,
     user: CurrentUser,
-    Json(body): Json<CreateBody>,
+    ApiJson(body): ApiJson<CreateBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     user.require_role(&["admin", "maintainer"])?;
     let v = validate_create(&body)?;
 
     let row = sqlx::query_as::<_, CreatedRow>(
-        "INSERT INTO alerts (title, description, severity, status, source, indicators, created_at) \
-         VALUES ($1, $2, $3, 'pending', $4, $5, now()) \
+        "INSERT INTO alerts (title, description, severity, status, source, indicators, created_at, \
+          updated_at) \
+         VALUES ($1, $2, $3, 'pending', $4, $5, now(), now()) \
          RETURNING id, title, severity, status, created_at",
     )
     .bind(&v.title)
@@ -497,7 +498,7 @@ async fn update_alert(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(alert_id): Path<i32>,
-    Json(body): Json<UpdateBody>,
+    ApiJson(body): ApiJson<UpdateBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     user.require_role(&["admin", "maintainer"])?;
     validate_update(&body)?;
@@ -573,7 +574,7 @@ async fn update_alert_status(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(alert_id): Path<i32>,
-    Json(body): Json<StatusBody>,
+    ApiJson(body): ApiJson<StatusBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Documented deviation from v1 (contract defect #7): v1 let ANY
     // authenticated role — including read-only viewers — mutate alert
@@ -794,7 +795,7 @@ fn validate_search(b: &SearchBody) -> Result<(AlertFilters, i64, i64), ApiError>
 async fn search_alerts(
     State(state): State<AppState>,
     _user: CurrentUser,
-    Json(body): Json<SearchBody>,
+    ApiJson(body): ApiJson<SearchBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (filters, page, per_page) = validate_search(&body)?;
     let (rows, total) = fetch_alert_page(&state.db, &filters, page, per_page).await?;

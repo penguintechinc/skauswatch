@@ -411,8 +411,10 @@ mod tests {
             };
             assert_eq!(res.status_code(), StatusCode::UNAUTHORIZED, "{m} {p}");
             let body: serde_json::Value = res.json();
-            assert_eq!(body["error"], "Unauthorized", "{m} {p}");
-            assert_eq!(body["detail"], "Missing authorization header", "{m} {p}");
+            assert_eq!(
+                body["error"], "Missing or invalid authorization header",
+                "{m} {p}"
+            );
         }
     }
 
@@ -428,8 +430,7 @@ mod tests {
             .await;
         assert_eq!(res.status_code(), StatusCode::UNAUTHORIZED);
         let body: serde_json::Value = res.json();
-        assert_eq!(body["error"], "Unauthorized");
-        assert_eq!(body["detail"], "Invalid token");
+        assert_eq!(body["error"], "Invalid token");
     }
 
     #[tokio::test]
@@ -444,7 +445,7 @@ mod tests {
             .await;
         assert_eq!(res.status_code(), StatusCode::UNAUTHORIZED);
         let body: serde_json::Value = res.json();
-        assert_eq!(body["detail"], "Invalid authorization header");
+        assert_eq!(body["error"], "Missing or invalid authorization header");
     }
 
     #[tokio::test]

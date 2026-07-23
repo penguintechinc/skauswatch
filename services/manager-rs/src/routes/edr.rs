@@ -24,7 +24,7 @@ use sha2::Sha256;
 use sqlx::{Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ApiJson};
 use crate::state::AppState;
 
 /// v1 `EDRAgentStatus` enum values (order matters for statistics buckets).
@@ -279,7 +279,7 @@ fn validate_register(b: &RegisterBody) -> Result<ValidRegister, ApiError> {
 async fn register_agent(
     State(state): State<AppState>,
     _agent: EdrAgent,
-    Json(body): Json<RegisterBody>,
+    ApiJson(body): ApiJson<RegisterBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let v = validate_register(&body)?;
 
@@ -318,8 +318,8 @@ async fn register_agent(
 
     sqlx::query(
         "INSERT INTO edr_agents (agent_id, hostname, ip_address, os_type, os_version, \
-         agent_version, status, last_heartbeat, metadata, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'active', now(), $7, now())",
+         agent_version, status, last_heartbeat, metadata, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'active', now(), $7, now(), now())",
     )
     .bind(&v.agent_id)
     .bind(&v.hostname)
@@ -376,7 +376,7 @@ fn validate_heartbeat(b: &HeartbeatBody) -> Result<ValidHeartbeat, ApiError> {
 async fn heartbeat(
     State(state): State<AppState>,
     _agent: EdrAgent,
-    Json(body): Json<HeartbeatBody>,
+    ApiJson(body): ApiJson<HeartbeatBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let v = validate_heartbeat(&body)?;
 
@@ -1041,8 +1041,7 @@ mod tests {
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
         let body: serde_json::Value = res.json();
-        assert_eq!(body["error"], "Unauthorized");
-        assert_eq!(body["detail"], "Missing API key or Agent ID");
+        assert_eq!(body["error"], "Missing API key or Agent ID");
 
         // One header present, the other missing — still the same rejection.
         let res = server
@@ -1052,7 +1051,7 @@ mod tests {
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
         let body: serde_json::Value = res.json();
-        assert_eq!(body["detail"], "Missing API key or Agent ID");
+        assert_eq!(body["error"], "Missing API key or Agent ID");
     }
 
     #[tokio::test]
@@ -1066,8 +1065,7 @@ mod tests {
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
         let body: serde_json::Value = res.json();
-        assert_eq!(body["error"], "Unauthorized");
-        assert_eq!(body["detail"], "Invalid API key");
+        assert_eq!(body["error"], "Invalid API key");
     }
 
     #[tokio::test]
@@ -1101,8 +1099,7 @@ mod tests {
             .await;
         res.assert_status(StatusCode::BAD_REQUEST);
         let body: serde_json::Value = res.json();
-        assert_eq!(body["error"], "Bad Request");
-        assert_eq!(body["detail"], "Maximum 100 events per request");
+        assert_eq!(body["error"], "Maximum 100 events per request");
     }
 
     #[tokio::test]
@@ -1137,8 +1134,7 @@ mod tests {
             let res = server.get(path).await;
             res.assert_status(StatusCode::UNAUTHORIZED);
             let body: serde_json::Value = res.json();
-            assert_eq!(body["error"], "Unauthorized");
-            assert_eq!(body["detail"], "Missing authorization header");
+            assert_eq!(body["error"], "Missing or invalid authorization header");
         }
         let res = server.post("/api/v1/edr/agents/agent-001/deactivate").await;
         res.assert_status(StatusCode::UNAUTHORIZED);
