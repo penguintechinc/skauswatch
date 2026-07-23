@@ -1,10 +1,12 @@
 //! SkausWatch manager service entry point. `serve` (default) runs the REST
-//! /api/v1 + health/metrics stack; `healthcheck` is the container-native
-//! health probe (no curl in images, per container standards).
+//! /api/v1 + health/metrics stack and the v1-parity gRPC control plane;
+//! `healthcheck` is the container-native health probe (no curl in images,
+//! per container standards).
 
 mod auth;
 mod error;
 mod flags;
+mod grpc;
 mod health;
 mod routes;
 mod state;
@@ -68,10 +70,36 @@ async fn serve() -> anyhow::Result<()> {
     tracing::info!(%addr, "manager REST listening");
     readiness.set_ready();
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // One signal fans out to both servers so REST and gRPC shut down
+    // together (v1 cancelled its gRPC task alongside hypercorn).
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    });
+
+    let http = async {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
+            .await
+            .map_err(anyhow::Error::from)
+    };
+
+    if grpc::enabled() {
+        let grpc_fut = grpc::serve(state.clone(), wait_for_shutdown(shutdown_rx.clone()));
+        tokio::try_join!(http, grpc_fut)?;
+    } else {
+        // v1 `GRPC_ENABLED=false` path: REST only.
+        tracing::info!("gRPC server disabled");
+        http.await?;
+    }
     Ok(())
+}
+
+/// Resolves once the shutdown broadcast fires (or its sender is dropped),
+/// gating graceful shutdown for both the REST and gRPC servers.
+async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
+    let _ = rx.wait_for(|stop| *stop).await;
 }
 
 async fn shutdown_signal() {
