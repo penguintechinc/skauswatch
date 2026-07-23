@@ -53,11 +53,35 @@ pub fn py_bool(b: bool) -> &'static str {
     if b { "True" } else { "False" }
 }
 
-/// Python `datetime.isoformat()` for a naive UTC timestamp. Always renders
-/// six fractional digits — the manager-rs port convention (Python omits the
-/// fraction only in the one-in-a-million `microsecond == 0` case).
+/// Python `datetime.isoformat()` for a naive UTC timestamp, byte-for-byte:
+/// `YYYY-MM-DDTHH:MM:SS` when `microsecond == 0`, otherwise
+/// `YYYY-MM-DDTHH:MM:SS.ffffff` (exactly six zero-padded digits).
 pub fn py_isoformat(t: NaiveDateTime) -> String {
-    t.format("%Y-%m-%dT%H:%M:%S%.6f").to_string()
+    use chrono::Timelike as _;
+    if t.nanosecond() == 0 {
+        t.format("%Y-%m-%dT%H:%M:%S").to_string()
+    } else {
+        t.format("%Y-%m-%dT%H:%M:%S%.6f").to_string()
+    }
+}
+
+/// `py_isoformat` lifted over `Option` — `None` stays `None` so JSON
+/// rendering emits `null` exactly where v1's `x.isoformat() if x else None`
+/// did.
+pub fn py_isoformat_opt(t: Option<NaiveDateTime>) -> Option<String> {
+    t.map(py_isoformat)
+}
+
+/// Serde `serialize_with` adapter for `Option<NaiveDateTime>` struct fields:
+/// renders Python isoformat, or JSON null for `None`.
+pub fn serde_py_isoformat_opt<S: serde::Serializer>(
+    t: &Option<NaiveDateTime>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match t {
+        Some(v) => serializer.serialize_str(&py_isoformat(*v)),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// Python `datetime.utcnow().isoformat()` — the stamp v1 producers attach as
@@ -242,23 +266,58 @@ mod tests {
         assert_eq!(py_bool(false), "False");
     }
 
-    #[test]
-    fn py_isoformat_renders_naive_utc_with_microseconds() {
-        let dt = chrono::NaiveDate::from_ymd_opt(2026, 7, 22)
-            .and_then(|d| d.and_hms_micro_opt(10, 3, 7, 123456));
-        let dt = match dt {
-            Some(v) => v,
-            None => panic!("valid test datetime"),
-        };
-        assert_eq!(py_isoformat(dt), "2026-07-22T10:03:07.123456");
-        // Port convention: six digits even at microsecond == 0.
-        let zero = match chrono::NaiveDate::from_ymd_opt(2026, 7, 22)
-            .and_then(|d| d.and_hms_micro_opt(10, 3, 7, 0))
+    fn micro_dt(micro: u32) -> NaiveDateTime {
+        match chrono::NaiveDate::from_ymd_opt(2026, 7, 22)
+            .and_then(|d| d.and_hms_micro_opt(10, 3, 7, micro))
         {
             Some(v) => v,
             None => panic!("valid test datetime"),
-        };
-        assert_eq!(py_isoformat(zero), "2026-07-22T10:03:07.000000");
+        }
+    }
+
+    #[test]
+    fn py_isoformat_renders_six_zero_padded_fraction_digits() {
+        assert_eq!(py_isoformat(micro_dt(123456)), "2026-07-22T10:03:07.123456");
+        // Zero-padding: small microsecond values keep exactly six digits.
+        assert_eq!(py_isoformat(micro_dt(42)), "2026-07-22T10:03:07.000042");
+        assert_eq!(py_isoformat(micro_dt(120000)), "2026-07-22T10:03:07.120000");
+    }
+
+    #[test]
+    fn py_isoformat_omits_fraction_at_zero_microseconds() {
+        // Python datetime.isoformat() drops the fraction entirely when
+        // microsecond == 0 — v1 wire parity depends on this.
+        assert_eq!(py_isoformat(micro_dt(0)), "2026-07-22T10:03:07");
+    }
+
+    #[test]
+    fn py_isoformat_opt_passes_null_through() {
+        assert_eq!(py_isoformat_opt(None), None);
+        assert_eq!(
+            py_isoformat_opt(Some(micro_dt(1))),
+            Some("2026-07-22T10:03:07.000001".to_owned())
+        );
+    }
+
+    #[test]
+    fn serde_adapter_matches_python_isoformat_and_null() {
+        #[derive(Serialize)]
+        struct Row {
+            #[serde(serialize_with = "crate::serde_py_isoformat_opt")]
+            at: Option<NaiveDateTime>,
+        }
+        let some = serde_json::to_value(Row {
+            at: Some(micro_dt(0)),
+        });
+        match some {
+            Ok(v) => assert_eq!(v, serde_json::json!({"at": "2026-07-22T10:03:07"})),
+            Err(e) => panic!("serialize: {e}"),
+        }
+        let none = serde_json::to_value(Row { at: None });
+        match none {
+            Ok(v) => assert_eq!(v, serde_json::json!({"at": null})),
+            Err(e) => panic!("serialize: {e}"),
+        }
     }
 
     #[test]

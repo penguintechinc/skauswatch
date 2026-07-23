@@ -246,6 +246,19 @@ async fn logout(
     })))
 }
 
+/// Re-renders `CurrentUser.created_at` (Postgres `timestamp::text`, loaded
+/// by the auth extractor: `YYYY-MM-DD HH:MM:SS[.f…]`, trailing fraction zeros
+/// trimmed) as Python `datetime.isoformat()` for v1 wire parity. The
+/// Postgres text form is lossless, so parse-and-reformat is exact; an
+/// unparseable value falls through unchanged rather than being dropped.
+fn created_at_isoformat(raw: Option<&str>) -> Option<String> {
+    let s = raw?;
+    match chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+        Ok(t) => Some(skauswatch_streams::py_isoformat(t)),
+        Err(_) => Some(s.to_owned()),
+    }
+}
+
 async fn me(user: CurrentUser) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "id": user.id,
@@ -254,7 +267,7 @@ async fn me(user: CurrentUser) -> Json<serde_json::Value> {
         "role": user.role,
         "is_active": user.is_active,
         "mfa_enabled": user.mfa_enabled,
-        "created_at": user.created_at,
+        "created_at": created_at_isoformat(user.created_at.as_deref()),
     }))
 }
 
@@ -319,4 +332,29 @@ async fn register(
             }
         })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn me_created_at_reformats_postgres_text_as_python_isoformat() {
+        // Postgres trims trailing fraction zeros; Python pads to six digits.
+        assert_eq!(
+            created_at_isoformat(Some("2026-07-22 10:03:07.1")),
+            Some("2026-07-22T10:03:07.100000".to_owned())
+        );
+        assert_eq!(
+            created_at_isoformat(Some("2026-07-22 10:03:07.123456")),
+            Some("2026-07-22T10:03:07.123456".to_owned())
+        );
+        // microsecond == 0 → Python omits the fraction entirely.
+        assert_eq!(
+            created_at_isoformat(Some("2026-07-22 10:03:07")),
+            Some("2026-07-22T10:03:07".to_owned())
+        );
+        // NULL column → JSON null.
+        assert_eq!(created_at_isoformat(None), None);
+    }
 }

@@ -29,7 +29,8 @@
 //! House conventions shared with routes/alerts.rs & routes/threat_intel.rs:
 //! bare v1 `{"error": ...}` bodies map onto the ApiError envelope;
 //! page/per_page floored at 1 where v1 would divide by zero; timestamps are
-//! selected as Postgres `::text`.
+//! selected as chrono `NaiveDateTime` and rendered with
+//! `skauswatch_streams::py_isoformat` (Python `datetime.isoformat()` parity).
 
 use axum::body::Bytes;
 use axum::extract::multipart::MultipartRejection;
@@ -65,22 +66,22 @@ const UPLOAD_BODY_LIMIT: usize = (MAX_UPLOAD_MB + 2) * 1024 * 1024;
 
 const BUCKET_COLUMNS: &str = "SELECT id, name, endpoint_url, bucket_name, access_key_id, \
      secret_access_key, region, use_ssl, path_style, prefix_filter, file_types_filter, \
-     max_file_size_mb, scan_enabled, yara_enabled, created_at::text, updated_at::text \
+     max_file_size_mb, scan_enabled, yara_enabled, created_at, updated_at \
      FROM s3_bucket_configs WHERE TRUE";
 
 const JOB_COLUMNS: &str = "SELECT id, bucket_config_id, job_type, status, scanned_objects, \
-     infected_objects, pup_objects, error_count, skipped_objects, started_at::text, \
-     completed_at::text, error_message, metadata, created_at::text \
+     infected_objects, pup_objects, error_count, skipped_objects, started_at, \
+     completed_at, error_message, metadata, created_at \
      FROM s3_scan_jobs WHERE TRUE";
 
 const RESULT_COLUMNS: &str = "SELECT id, job_id, bucket_config_id, object_key, object_size, \
      detected_file_type, scan_status, is_malware, is_pup, is_threat, threat_names, \
-     yara_matches, sandbox_status, sandbox_result, scanned_at::text \
+     yara_matches, sandbox_status, sandbox_result, scanned_at \
      FROM s3_scan_results WHERE TRUE";
 
 const ADHOC_COLUMNS: &str = "SELECT id, uploaded_by, original_filename, file_size, scan_status, \
      is_malware, is_pup, is_threat, threat_names, yara_matches, sandbox_result, file_md5, \
-     file_sha256, scanned_at::text, uploaded_at::text FROM adhoc_scan_results WHERE TRUE";
+     file_sha256, scanned_at, uploaded_at FROM adhoc_scan_results WHERE TRUE";
 
 /// Router for /api/v1/s3-scan — all 22 contract routes (23 method+path
 /// pairs; the contract counts GET+DELETE /upload/{id} as one route).
@@ -260,7 +261,8 @@ fn parse_page_params(pairs: &[(String, String)]) -> (i64, i64) {
 // Bucket configuration endpoints
 // ============================================
 
-/// Full bucket-config row — timestamps as Postgres text, filter list as jsonb.
+/// Full bucket-config row — timestamps as chrono `NaiveDateTime`, filter
+/// list as jsonb.
 #[derive(sqlx::FromRow)]
 struct BucketRow {
     id: i32,
@@ -277,8 +279,8 @@ struct BucketRow {
     max_file_size_mb: Option<i32>,
     scan_enabled: Option<bool>,
     yara_enabled: Option<bool>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
+    created_at: Option<NaiveDateTime>,
+    updated_at: Option<NaiveDateTime>,
 }
 
 /// v1 full bucket shape (list items + GET detail) with masked credentials.
@@ -298,8 +300,8 @@ fn bucket_json(b: &BucketRow) -> serde_json::Value {
         "max_file_size_mb": b.max_file_size_mb,
         "scan_enabled": b.scan_enabled,
         "yara_enabled": b.yara_enabled,
-        "created_at": b.created_at,
-        "updated_at": b.updated_at,
+        "created_at": skauswatch_streams::py_isoformat_opt(b.created_at),
+        "updated_at": skauswatch_streams::py_isoformat_opt(b.updated_at),
     })
 }
 
@@ -484,7 +486,7 @@ struct CreatedBucketRow {
     name: String,
     bucket_name: String,
     access_key_id: String,
-    created_at: Option<String>,
+    created_at: Option<NaiveDateTime>,
 }
 
 /// POST /buckets — admin/maintainer. 409 on duplicate endpoint+bucket pair.
@@ -516,7 +518,7 @@ async fn create_bucket(
          secret_access_key, region, use_ssl, path_style, prefix_filter, file_types_filter, \
          max_file_size_mb, scan_enabled, yara_enabled, created_by, created_at) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now()) \
-         RETURNING id, name, bucket_name, access_key_id, created_at::text",
+         RETURNING id, name, bucket_name, access_key_id, created_at",
     )
     .bind(&v.name)
     .bind(&v.endpoint_url)
@@ -544,7 +546,7 @@ async fn create_bucket(
                 "name": row.name,
                 "bucket_name": row.bucket_name,
                 "access_key_id": mask_access_key(&row.access_key_id),
-                "created_at": row.created_at,
+                "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
             }
         })),
     ))
@@ -668,7 +670,7 @@ struct UpdatedBucketRow {
     id: i32,
     name: String,
     access_key_id: String,
-    updated_at: Option<String>,
+    updated_at: Option<NaiveDateTime>,
 }
 
 /// PUT /buckets/{id} — admin/maintainer partial update; pyDAL parity sets
@@ -736,7 +738,7 @@ async fn update_bucket(
     }
 
     let row = sqlx::query_as::<_, UpdatedBucketRow>(
-        "SELECT id, name, access_key_id, updated_at::text FROM s3_bucket_configs WHERE id = $1",
+        "SELECT id, name, access_key_id, updated_at FROM s3_bucket_configs WHERE id = $1",
     )
     .bind(bucket_id)
     .fetch_optional(&state.db)
@@ -749,7 +751,7 @@ async fn update_bucket(
             "id": row.id,
             "name": row.name,
             "access_key_id": mask_access_key(&row.access_key_id),
-            "updated_at": row.updated_at,
+            "updated_at": skauswatch_streams::py_isoformat_opt(row.updated_at),
         }
     })))
 }
@@ -909,7 +911,7 @@ struct CreatedJobRow {
     bucket_config_id: i32,
     job_type: String,
     status: Option<String>,
-    created_at: Option<String>,
+    created_at: Option<NaiveDateTime>,
 }
 
 /// POST /buckets/{id}/scan — admin/maintainer. Defect #4: writes job_type
@@ -958,7 +960,7 @@ async fn trigger_scan(
     let row = sqlx::query_as::<_, CreatedJobRow>(
         "INSERT INTO s3_scan_jobs (job_id, bucket_config_id, job_type, status, triggered_by, \
          metadata, created_at) VALUES ($1, $2, 'full_scan', 'pending', $3, $4, now()) \
-         RETURNING id, bucket_config_id, job_type, status, created_at::text",
+         RETURNING id, bucket_config_id, job_type, status, created_at",
     )
     .bind(&job_uuid)
     .bind(bucket_id)
@@ -999,7 +1001,7 @@ async fn trigger_scan(
                 "bucket_config_id": row.bucket_config_id,
                 "job_type": row.job_type,
                 "status": row.status,
-                "created_at": row.created_at,
+                "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
             }
         })),
     ))
@@ -1018,11 +1020,11 @@ struct JobRow {
     pup_objects: Option<i32>,
     error_count: Option<i32>,
     skipped_objects: Option<i32>,
-    started_at: Option<String>,
-    completed_at: Option<String>,
+    started_at: Option<NaiveDateTime>,
+    completed_at: Option<NaiveDateTime>,
     error_message: Option<String>,
     metadata: Option<serde_json::Value>,
-    created_at: Option<String>,
+    created_at: Option<NaiveDateTime>,
 }
 
 /// prefix_filter for the wire — read back out of the job's metadata jsonb.
@@ -1055,10 +1057,10 @@ fn job_json(j: &JobRow) -> serde_json::Value {
         "files_skipped": j.skipped_objects.unwrap_or(0),
         "prefix_filter": meta_prefix_filter(&j.metadata),
         "force_rescan": meta_force_rescan(&j.metadata),
-        "started_at": j.started_at,
-        "completed_at": j.completed_at,
+        "started_at": skauswatch_streams::py_isoformat_opt(j.started_at),
+        "completed_at": skauswatch_streams::py_isoformat_opt(j.completed_at),
         "error_message": j.error_message,
-        "created_at": j.created_at,
+        "created_at": skauswatch_streams::py_isoformat_opt(j.created_at),
     })
 }
 
@@ -1230,7 +1232,7 @@ struct ResultRow {
     yara_matches: Option<serde_json::Value>,
     sandbox_status: Option<String>,
     sandbox_result: Option<serde_json::Value>,
-    scanned_at: Option<String>,
+    scanned_at: Option<NaiveDateTime>,
 }
 
 /// v1 result list-item shape. scan_engine/confidence_score have no backing
@@ -1251,7 +1253,7 @@ fn result_json(r: &ResultRow) -> serde_json::Value {
         "yara_matches": jsonb_list(&r.yara_matches),
         "scan_engine": serde_json::Value::Null,
         "confidence_score": serde_json::Value::Null,
-        "scanned_at": r.scanned_at,
+        "scanned_at": skauswatch_streams::py_isoformat_opt(r.scanned_at),
     })
 }
 
@@ -1550,9 +1552,10 @@ async fn get_statistics(
     }
 
     let mut lq =
-        QueryBuilder::new("SELECT max(scanned_at)::text FROM s3_scan_results WHERE scanned_at >= ");
+        QueryBuilder::new("SELECT max(scanned_at) FROM s3_scan_results WHERE scanned_at >= ");
     push_scope(&mut lq);
-    let last_scan_at: Option<String> = lq.build_query_scalar().fetch_one(&state.db).await?;
+    let last_scan_at: Option<NaiveDateTime> = lq.build_query_scalar().fetch_one(&state.db).await?;
+    let last_scan_at = skauswatch_streams::py_isoformat_opt(last_scan_at);
 
     Ok(Json(serde_json::json!({
         "total_scanned": total_scanned,
@@ -1581,10 +1584,10 @@ struct ScheduleRow {
     cron_expression: String,
     timezone: Option<String>,
     enabled: Option<bool>,
-    last_run_at: Option<String>,
-    next_run_at: Option<String>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
+    last_run_at: Option<NaiveDateTime>,
+    next_run_at: Option<NaiveDateTime>,
+    created_at: Option<NaiveDateTime>,
+    updated_at: Option<NaiveDateTime>,
 }
 
 /// GET /buckets/{id}/schedule — 404s for missing bucket, then missing
@@ -1600,8 +1603,8 @@ async fn get_schedule(
         ));
     }
     let row = sqlx::query_as::<_, ScheduleRow>(
-        "SELECT id, bucket_config_id, cron_expression, timezone, enabled, last_run_at::text, \
-         next_run_at::text, created_at::text, updated_at::text \
+        "SELECT id, bucket_config_id, cron_expression, timezone, enabled, last_run_at, \
+         next_run_at, created_at, updated_at \
          FROM s3_scan_schedules WHERE bucket_config_id = $1",
     )
     .bind(bucket_id)
@@ -1615,12 +1618,12 @@ async fn get_schedule(
         "cron_expression": row.cron_expression,
         "timezone": row.timezone,
         "enabled": row.enabled,
-        "last_triggered_at": row.last_run_at,
-        "next_trigger_at": row.next_run_at,
+        "last_triggered_at": skauswatch_streams::py_isoformat_opt(row.last_run_at),
+        "next_trigger_at": skauswatch_streams::py_isoformat_opt(row.next_run_at),
         "error_count": 0,
         "last_error_message": serde_json::Value::Null,
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
+        "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
+        "updated_at": skauswatch_streams::py_isoformat_opt(row.updated_at),
     })))
 }
 
@@ -1666,8 +1669,8 @@ struct UpsertedScheduleRow {
     cron_expression: String,
     timezone: Option<String>,
     enabled: Option<bool>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
+    created_at: Option<NaiveDateTime>,
+    updated_at: Option<NaiveDateTime>,
 }
 
 /// PUT /buckets/{id}/schedule — admin/maintainer upsert keyed on the unique
@@ -1694,7 +1697,7 @@ async fn set_schedule(
          cron_expression = EXCLUDED.cron_expression, timezone = EXCLUDED.timezone, \
          enabled = EXCLUDED.enabled, updated_at = now() \
          RETURNING id, bucket_config_id, cron_expression, timezone, enabled, \
-         created_at::text, updated_at::text",
+         created_at, updated_at",
     )
     .bind(bucket_id)
     .bind(&cron)
@@ -1711,8 +1714,8 @@ async fn set_schedule(
             "cron_expression": row.cron_expression,
             "timezone": row.timezone,
             "enabled": row.enabled,
-            "created_at": row.created_at,
-            "updated_at": row.updated_at,
+            "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
+            "updated_at": skauswatch_streams::py_isoformat_opt(row.updated_at),
         }
     })))
 }
@@ -1770,7 +1773,7 @@ struct CreatedAdhocRow {
     file_size: Option<i32>,
     scan_status: Option<String>,
     file_sha256: Option<String>,
-    scanned_at: Option<String>,
+    scanned_at: Option<NaiveDateTime>,
 }
 
 /// POST /upload — multipart `file` field, <=100MB, md5+sha256 recorded.
@@ -1830,7 +1833,7 @@ async fn upload_file(
         "INSERT INTO adhoc_scan_results (scan_id, uploaded_by, original_filename, file_size, \
          file_md5, file_sha256, scan_status, is_malware, is_pup, is_threat, uploaded_at) \
          VALUES ($1, $2, $3, $4, $5, $6, 'pending', FALSE, FALSE, FALSE, now()) \
-         RETURNING id, original_filename, file_size, scan_status, file_sha256, scanned_at::text",
+         RETURNING id, original_filename, file_size, scan_status, file_sha256, scanned_at",
     )
     .bind(&scan_uuid)
     .bind(user.id)
@@ -1877,7 +1880,7 @@ async fn upload_file(
                 "file_size": row.file_size,
                 "scan_status": row.scan_status,
                 "file_hash_sha256": row.file_sha256,
-                "scanned_at": row.scanned_at,
+                "scanned_at": skauswatch_streams::py_isoformat_opt(row.scanned_at),
             }
         })),
     ))
@@ -1900,8 +1903,8 @@ struct AdhocRow {
     sandbox_result: Option<serde_json::Value>,
     file_md5: Option<String>,
     file_sha256: Option<String>,
-    scanned_at: Option<String>,
-    uploaded_at: Option<String>,
+    scanned_at: Option<NaiveDateTime>,
+    uploaded_at: Option<NaiveDateTime>,
 }
 
 /// v1 owner gate: uploader or admin only (403 "Access denied").
@@ -1949,8 +1952,8 @@ async fn get_upload_result(
         "file_hash_sha256": row.file_sha256,
         "error_message": serde_json::Value::Null,
         "metadata": serde_json::Value::Object(serde_json::Map::new()),
-        "scanned_at": row.scanned_at,
-        "created_at": row.uploaded_at,
+        "scanned_at": skauswatch_streams::py_isoformat_opt(row.scanned_at),
+        "created_at": skauswatch_streams::py_isoformat_opt(row.uploaded_at),
     })))
 }
 
@@ -1993,7 +1996,7 @@ async fn list_upload_history(
                 "is_pup": r.is_pup,
                 "is_threat": r.is_threat,
                 "file_hash_sha256": r.file_sha256,
-                "scanned_at": r.scanned_at,
+                "scanned_at": skauswatch_streams::py_isoformat_opt(r.scanned_at),
             })
         })
         .collect();
@@ -2076,7 +2079,7 @@ struct IndicatorRow {
     source: Option<String>,
     tags: Option<serde_json::Value>,
     metadata: Option<serde_json::Value>,
-    created_at: Option<String>,
+    created_at: Option<NaiveDateTime>,
 }
 
 /// Fetches a live (non-expired) `hash` indicator for a value — defect #3
@@ -2087,7 +2090,7 @@ async fn fetch_hash_indicator(
 ) -> Result<Option<IndicatorRow>, ApiError> {
     Ok(sqlx::query_as::<_, IndicatorRow>(
         "SELECT id, indicator_type, threat_level, confidence, source, tags, metadata, \
-         created_at::text FROM threat_indicators \
+         created_at FROM threat_indicators \
          WHERE indicator_type = $1 AND value = $2 \
          AND (expires_at IS NULL OR expires_at > $3) LIMIT 1",
     )
@@ -2154,12 +2157,12 @@ async fn create_ti_indicator(
         indicator_type: String,
         value: String,
         threat_level: Option<String>,
-        created_at: Option<String>,
+        created_at: Option<NaiveDateTime>,
     }
     let row = sqlx::query_as::<_, CreatedIocRow>(
         "INSERT INTO threat_indicators (indicator_type, value, threat_level, confidence, \
          source, tags, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
-         RETURNING id, indicator_type, value, threat_level, created_at::text",
+         RETURNING id, indicator_type, value, threat_level, created_at",
     )
     .bind(HASH_IOC_TYPE)
     .bind(hash)
@@ -2180,7 +2183,7 @@ async fn create_ti_indicator(
                 "indicator_type": row.indicator_type,
                 "value": row.value,
                 "threat_level": row.threat_level,
-                "created_at": row.created_at,
+                "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
             }
         })),
     )
@@ -2275,7 +2278,7 @@ async fn hash_lookup(
             "source": ioc.source,
             "tags": jsonb_list(&ioc.tags),
             "metadata": jsonb_object(&ioc.metadata),
-            "created_at": ioc.created_at,
+            "created_at": skauswatch_streams::py_isoformat_opt(ioc.created_at),
         }
     })))
 }
@@ -2321,6 +2324,13 @@ mod tests {
         kv.iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    fn dt(s: &str) -> NaiveDateTime {
+        match NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
+            Ok(t) => t,
+            Err(e) => panic!("bad test datetime {s}: {e}"),
+        }
     }
 
     #[test]
@@ -2816,14 +2826,14 @@ mod tests {
             pup_objects: Some(5),
             error_count: Some(5),
             skipped_objects: Some(5),
-            started_at: Some("2026-07-15 10:00:00".to_owned()),
+            started_at: Some(dt("2026-07-15T10:00:00")),
             completed_at: None,
             error_message: None,
             metadata: Some(serde_json::json!({
                 "prefix_filter": "incoming/",
                 "force_rescan": true,
             })),
-            created_at: Some("2026-07-15 09:59:00".to_owned()),
+            created_at: Some(dt("2026-07-15T09:59:00.000042")),
         }
     }
 
@@ -2838,6 +2848,10 @@ mod tests {
         assert_eq!(v["prefix_filter"], "incoming/");
         assert_eq!(v["force_rescan"], true);
         assert_eq!(v.get("metadata"), None); // list shape has no metadata
+        // Python isoformat: fraction omitted at micros==0, six digits else.
+        assert_eq!(v["started_at"], "2026-07-15T10:00:00");
+        assert_eq!(v["completed_at"], serde_json::Value::Null);
+        assert_eq!(v["created_at"], "2026-07-15T09:59:00.000042");
 
         let mut bare = job_row();
         bare.metadata = None;
@@ -2881,9 +2895,10 @@ mod tests {
             yara_matches: None,
             sandbox_status: None,
             sandbox_result: None,
-            scanned_at: Some("2026-07-15 10:00:00".to_owned()),
+            scanned_at: Some(dt("2026-07-15T10:00:00")),
         };
         let v = result_detail_json(&row);
+        assert_eq!(v["scanned_at"], "2026-07-15T10:00:00"); // isoformat, no fraction
         assert_eq!(v["scan_job_id"], 2);
         assert_eq!(v["file_key"], "a/b.exe");
         assert_eq!(v["file_size"], 1024);

@@ -30,8 +30,8 @@ const STATUS_MSG: &str =
 const DEFAULT_AI_PROVIDER: &str = "ollama";
 
 const ALERT_COLUMNS: &str = "SELECT id, title, description, severity, status, source, \
-     indicators, ai_review, assigned_to, resolved_at::text, resolution_notes, \
-     created_at::text, updated_at::text FROM alerts WHERE TRUE";
+     indicators, ai_review, assigned_to, resolved_at, resolution_notes, \
+     created_at, updated_at FROM alerts WHERE TRUE";
 
 /// Router for /api/v1/alerts.
 pub fn router() -> Router<AppState> {
@@ -51,7 +51,8 @@ fn validation(field: &str, msg: &str) -> ApiError {
 }
 
 /// Full alert row selected via `ALERT_COLUMNS` — jsonb columns come back as
-/// `serde_json::Value`, timestamps as Postgres text.
+/// `serde_json::Value`, timestamps as chrono `NaiveDateTime` (rendered with
+/// `py_isoformat` for v1 wire parity).
 #[derive(sqlx::FromRow)]
 struct AlertRow {
     id: i32,
@@ -63,10 +64,10 @@ struct AlertRow {
     indicators: Option<serde_json::Value>,
     ai_review: Option<serde_json::Value>,
     assigned_to: Option<i32>,
-    resolved_at: Option<String>,
+    resolved_at: Option<NaiveDateTime>,
     resolution_notes: Option<String>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
+    created_at: Option<NaiveDateTime>,
+    updated_at: Option<NaiveDateTime>,
 }
 
 /// v1 full-alert response shape (list + get endpoints).
@@ -81,10 +82,10 @@ fn alert_json(row: &AlertRow) -> serde_json::Value {
         "indicators": normalize_indicators(&row.indicators),
         "ai_review": row.ai_review,
         "assigned_to": row.assigned_to,
-        "resolved_at": row.resolved_at,
+        "resolved_at": skauswatch_streams::py_isoformat_opt(row.resolved_at),
         "resolution_notes": row.resolution_notes,
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
+        "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
+        "updated_at": skauswatch_streams::py_isoformat_opt(row.updated_at),
     })
 }
 
@@ -97,7 +98,7 @@ fn search_json(row: &AlertRow) -> serde_json::Value {
         "severity": row.severity,
         "status": row.status,
         "source": row.source,
-        "created_at": row.created_at,
+        "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
     })
 }
 
@@ -377,8 +378,7 @@ struct CreatedRow {
     title: String,
     severity: String,
     status: String,
-    created_at: Option<String>,
-    created_at_dt: Option<NaiveDateTime>,
+    created_at: Option<NaiveDateTime>,
 }
 
 /// v1 `alerts:pending` message — field names, order, and redis-py xadd
@@ -416,7 +416,7 @@ async fn create_alert(
     let row = sqlx::query_as::<_, CreatedRow>(
         "INSERT INTO alerts (title, description, severity, status, source, indicators, created_at) \
          VALUES ($1, $2, $3, 'pending', $4, $5, now()) \
-         RETURNING id, title, severity, status, created_at::text, created_at AS created_at_dt",
+         RETURNING id, title, severity, status, created_at",
     )
     .bind(&v.title)
     .bind(&v.description)
@@ -431,13 +431,7 @@ async fn create_alert(
     state
         .publish_stream(
             skauswatch_streams::STREAM_ALERTS_PENDING,
-            alert_pending_fields(
-                row.id,
-                &row.title,
-                &row.severity,
-                &v.source,
-                row.created_at_dt,
-            ),
+            alert_pending_fields(row.id, &row.title, &row.severity, &v.source, row.created_at),
         )
         .await;
 
@@ -450,7 +444,7 @@ async fn create_alert(
                 "title": row.title,
                 "severity": row.severity,
                 "status": row.status,
-                "created_at": row.created_at,
+                "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
             }
         })),
     ))
@@ -496,7 +490,7 @@ struct UpdatedRow {
     title: String,
     severity: String,
     status: String,
-    updated_at: Option<String>,
+    updated_at: Option<NaiveDateTime>,
 }
 
 async fn update_alert(
@@ -551,7 +545,7 @@ async fn update_alert(
     }
 
     let row = sqlx::query_as::<_, UpdatedRow>(
-        "SELECT id, title, severity, status, updated_at::text FROM alerts WHERE id = $1",
+        "SELECT id, title, severity, status, updated_at FROM alerts WHERE id = $1",
     )
     .bind(alert_id)
     .fetch_optional(&state.db)
@@ -565,7 +559,7 @@ async fn update_alert(
             "title": row.title,
             "severity": row.severity,
             "status": row.status,
-            "updated_at": row.updated_at,
+            "updated_at": skauswatch_streams::py_isoformat_opt(row.updated_at),
         }
     })))
 }
@@ -688,11 +682,8 @@ async fn request_ai_review(
         .unwrap_or_else(|| DEFAULT_AI_PROVIDER.to_owned());
     let priority = parsed.priority.unwrap_or(1);
     let job_id = uuid::Uuid::new_v4().to_string();
-    // Python datetime.utcnow().isoformat() — naive UTC with microseconds.
-    let submitted_at = Utc::now()
-        .naive_utc()
-        .format("%Y-%m-%dT%H:%M:%S%.6f")
-        .to_string();
+    // Python datetime.utcnow().isoformat() — v1 shape via the shared helper.
+    let submitted_at = skauswatch_streams::py_now_isoformat();
 
     // v1 publishes ai:tasks before building the 202 response, swallowing
     // failures (try/except + warning) — the job_id is returned regardless.
