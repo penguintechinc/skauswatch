@@ -11,6 +11,9 @@ use fred::interfaces::{ClientLike, StreamsInterface};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+mod consumer;
+pub use consumer::{ConsumerConfig, HandlerError, StreamConsumer, StreamEntry, StreamHandler};
+
 /// Stream key prefix shared with the v1 stack — do not change.
 pub const TOPIC_PREFIX: &str = "skauswatch";
 
