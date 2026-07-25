@@ -1,0 +1,5 @@
+{
+  "r4": "{'endpoint': '/api/v1/users', 'method': 'GET', 'time': 1705312200}",
+  "nested": "{'a': 1, 'b': [1, 2, {'c': True}], 'd': None, 'e': \"x'y\"}",
+  "floaty": "{'n': 1705312200.0, 'm': 0.1}"
+}
