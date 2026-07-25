@@ -7,7 +7,6 @@ import type {
   ConnectionTestResult,
   IndicatorCreateResponse,
   PaginatedResponse,
-  S3ScanStatus,
   ScanJob,
   ScanResult,
   ScanResultsQuery,

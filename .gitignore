@@ -212,6 +212,14 @@ config.local.yaml
 # Worktrees
 .worktrees/
 
+# Node.js / Frontend
+node_modules/
+services/*/node_modules/
+*/node_modules/
+dist/
+services/*/dist/
+*.tsbuildinfo
+
 # Claude Code crash-recovery state (never commit)
 .PLAN
 .TODO
