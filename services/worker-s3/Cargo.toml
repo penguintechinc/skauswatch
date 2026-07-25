@@ -1,0 +1,44 @@
+[package]
+name = "skauswatch-worker-s3"
+description = "SkausWatch S3 scan worker — Redis Streams consumer (Rust port of the v1 worker-s3)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "skauswatch-worker-s3"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+infer = { workspace = true }
+md-5 = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+skauswatch-common = { workspace = true }
+skauswatch-db = { workspace = true }
+skauswatch-streams = { workspace = true }
+skauswatch-telemetry = { workspace = true }
+
+[dev-dependencies]
+fred = { workspace = true }
+
+[lints]
+workspace = true

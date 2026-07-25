@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/manager"]
+members = ["crates/*", "services/manager", "services/worker-s3"]
 
 [workspace.package]
 version = "2.0.0"
@@ -54,6 +54,10 @@ fred = "=10.1.0"
 # Object storage
 aws-config = "=1.9.0"
 aws-sdk-s3 = "=1.138.0"
+
+# Content scanning (worker-s3): magic-byte file typing + SHA1 (md-5/sha2 above)
+infer = "=0.22.0"
+sha1 = "=0.10.7"
 
 # AuthN/Z
 bcrypt = "=0.19.2"
