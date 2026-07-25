@@ -4115,6 +4115,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "skauswatch-log-receiver"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-test",
+ "chrono",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "skauswatch-streams",
+ "skauswatch-telemetry",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "skauswatch-manager"
 version = "2.0.0"
 dependencies = [
