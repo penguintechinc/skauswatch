@@ -1,6 +1,7 @@
-import { useEffect } from 'react';
+import { useEffect, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useAuth } from './hooks/useAuth';
+import { useEntitlements } from './context/EntitlementsContext';
 import Layout from './components/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
 import RoleGuard from './components/RoleGuard';
@@ -15,8 +16,29 @@ import S3Scan from './pages/S3Scan';
 import Darwin from './pages/Darwin';
 import Spire from './pages/Spire';
 
+// Lazy-loaded module pages
+const IceBoxDashboard = lazy(() => import('./modules/icebox/Dashboard'));
+const IceBoxSecrets = lazy(() => import('./modules/icebox/Secrets'));
+const IceBoxJitAccess = lazy(() => import('./modules/icebox/JitAccess'));
+const IceBoxOneTime = lazy(() => import('./modules/icebox/OneTimePage'));
+const IceBoxCloudSync = lazy(() => import('./modules/icebox/CloudSync'));
+const IceBoxPki = lazy(() => import('./modules/icebox/PkiPage'));
+const IceBoxSsh = lazy(() => import('./modules/icebox/SshPage'));
+const IceBoxAudit = lazy(() => import('./modules/icebox/AuditPage'));
+const IceBoxSettings = lazy(() => import('./modules/icebox/SettingsPage'));
+
+// Loading fallback component
+function LoadingFallback() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-slate-900">
+      <div className="text-amber-400 text-xl">Loading...</div>
+    </div>
+  );
+}
+
 function App() {
   const { isAuthenticated, isLoading, checkAuth } = useAuth();
+  const { getFlag } = useEntitlements();
 
   useEffect(() => {
     console.log('[App] Starting auth check, isLoading:', isLoading);
@@ -68,6 +90,25 @@ function App() {
 
         {/* Darwin AI Code Review - all authenticated users */}
         <Route path="/darwin" element={<Darwin />} />
+
+        {/* IceBox Vault Module - gated by license flag */}
+        {getFlag('skauswatch.icebox') && (
+          <Route path="/icebox/*" element={
+            <Suspense fallback={<LoadingFallback />}>
+              <Routes>
+                <Route index element={<IceBoxDashboard />} />
+                <Route path="secrets" element={<IceBoxSecrets />} />
+                <Route path="jit" element={<IceBoxJitAccess />} />
+                <Route path="one-time" element={<IceBoxOneTime />} />
+                <Route path="sync" element={<IceBoxCloudSync />} />
+                <Route path="pki" element={<IceBoxPki />} />
+                <Route path="ssh" element={<IceBoxSsh />} />
+                <Route path="audit" element={<IceBoxAudit />} />
+                <Route path="settings" element={<IceBoxSettings />} />
+              </Routes>
+            </Suspense>
+          } />
+        )}
 
         {/* SPIRE Identity Management - Maintainer and Admin */}
         <Route

@@ -31,7 +31,7 @@ export default function Users() {
 
   const handleCreateUser = async (data: Record<string, unknown>) => {
     try {
-      await usersApi.create(data);
+      await usersApi.create(data as { email: string; password: string; full_name: string; role: 'admin' | 'maintainer' | 'viewer' });
       setShowCreateModal(false);
       fetchUsers();
       setError(null);
@@ -150,9 +150,6 @@ export default function Users() {
             type: 'password',
             required: true,
             placeholder: 'Minimum 8 characters',
-            validation: {
-              minLength: 8,
-            },
           },
           {
             name: 'role',
@@ -168,7 +165,6 @@ export default function Users() {
           },
         ]}
         onSubmit={handleCreateUser}
-        submitText="Create User"
       />
     </div>
   );
