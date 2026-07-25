@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/manager", "services/worker-s3"]
+members = ["crates/*", "services/manager", "services/worker-s3", "services/ssh-ca"]
 
 [workspace.package]
 version = "2.0.0"
@@ -88,6 +88,10 @@ sha2 = "=0.10.9"
 md-5 = "=0.11.0"
 url = { version = "=2.5.8", features = ["serde"] }
 uuid = { version = "=1.23.5", features = ["v4", "serde"] }
+
+# SSH certificate authority (ssh-ca): OpenSSH cert signing/parsing. 0.7 is a
+# release candidate (pre-release, forbidden) — pin the current stable 0.6.7.
+ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed25519", "rsa", "p256", "p384", "getrandom"] }
 chrono = { version = "=0.4.45", features = ["serde"] }
 bytes = "=1.12.1"
 base64 = "=0.22.1"

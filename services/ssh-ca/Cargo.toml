@@ -1,0 +1,36 @@
+[package]
+name = "skauswatch-ssh-ca"
+description = "SkausWatch SSH certificate authority — OpenSSH user/host cert signing (Rust port of the v1 ssh-ca)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "skauswatch-ssh-ca"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ssh-key = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+skauswatch-common = { workspace = true }
+skauswatch-streams = { workspace = true }
+skauswatch-telemetry = { workspace = true }
+
+[dev-dependencies]
+axum-test = { workspace = true }
+
+[lints]
+workspace = true
