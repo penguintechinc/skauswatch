@@ -1,0 +1,43 @@
+[package]
+name = "skauswatch-worker-scanner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+clap.workspace = true
+fred.workspace = true
+metrics.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["postgres"] }
+tokio.workspace = true
+tower.workspace = true
+tower-http = { workspace = true, features = ["trace"] }
+tracing.workspace = true
+yara-x.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+glob = "=0.3.4"
+futures = "=0.3.32"
+
+skauswatch-common.workspace = true
+skauswatch-db.workspace = true
+skauswatch-streams.workspace = true
+skauswatch-telemetry.workspace = true
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lints]
+workspace = true

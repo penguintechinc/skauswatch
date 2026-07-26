@@ -45,6 +45,11 @@ pub const STREAM_S3_SCAN_RESULTS: &str = "s3scan:results";
 /// Darwin code review task stream.
 pub const STREAM_DARWIN_TASKS: &str = "darwin:tasks";
 
+/// ASM (YARA/ClamAV/Nuclei/ZAP/OpenVAS) scan task stream.
+pub const STREAM_SCANNER_TASKS: &str = "scanner:tasks";
+/// ASM scan result stream.
+pub const STREAM_SCANNER_RESULTS: &str = "scanner:results";
+
 /// Approximate stream cap applied on publish — v1 `publish_event` default
 /// (`maxlen=10000, approximate=True`).
 pub const DEFAULT_MAXLEN: i64 = 10_000;
