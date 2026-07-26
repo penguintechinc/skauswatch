@@ -27,6 +27,21 @@ const IceBoxSsh = lazy(() => import('./modules/icebox/SshPage'));
 const IceBoxAudit = lazy(() => import('./modules/icebox/AuditPage'));
 const IceBoxSettings = lazy(() => import('./modules/icebox/SettingsPage'));
 
+// Darwin module pages
+const DarwinDashboard = lazy(() => import('./modules/darwin/Dashboard'));
+const DarwinAnalytics = lazy(() => import('./modules/darwin/Analytics'));
+const DarwinIssues = lazy(() => import('./modules/darwin/Issues'));
+const DarwinReviews = lazy(() => import('./modules/darwin/Reviews'));
+const DarwinRepositories = lazy(() => import('./modules/darwin/Repositories'));
+const DarwinSettings = lazy(() => import('./modules/darwin/Settings'));
+const DarwinUsers = lazy(() => import('./modules/darwin/Users'));
+const DarwinRoles = lazy(() => import('./modules/darwin/Roles'));
+const DarwinTeams = lazy(() => import('./modules/darwin/Teams'));
+const DarwinTenants = lazy(() => import('./modules/darwin/Tenants'));
+const DarwinReviewDetail = lazy(() => import('./modules/darwin/ReviewDetail'));
+const DarwinUserDetail = lazy(() => import('./modules/darwin/UserDetail'));
+const DarwinRepositorySettings = lazy(() => import('./modules/darwin/RepositorySettings'));
+
 // Loading fallback component
 function LoadingFallback() {
   return (
@@ -88,8 +103,30 @@ function App() {
         {/* S3 Malware Scanning - all authenticated users */}
         <Route path="/s3-scan" element={<S3Scan />} />
 
-        {/* Darwin AI Code Review - all authenticated users */}
-        <Route path="/darwin" element={<Darwin />} />
+        {/* Darwin AI Code Review - gated by license flag */}
+        {getFlag('skauswatch.darwin') ? (
+          <Route path="/darwin/*" element={
+            <Suspense fallback={<LoadingFallback />}>
+              <Routes>
+                <Route index element={<DarwinDashboard />} />
+                <Route path="analytics" element={<DarwinAnalytics />} />
+                <Route path="issues" element={<DarwinIssues />} />
+                <Route path="reviews" element={<DarwinReviews />} />
+                <Route path="reviews/:id" element={<DarwinReviewDetail />} />
+                <Route path="repositories" element={<DarwinRepositories />} />
+                <Route path="repositories/:id/settings" element={<DarwinRepositorySettings />} />
+                <Route path="settings" element={<DarwinSettings />} />
+                <Route path="users" element={<DarwinUsers />} />
+                <Route path="users/:id" element={<DarwinUserDetail />} />
+                <Route path="roles" element={<DarwinRoles />} />
+                <Route path="teams" element={<DarwinTeams />} />
+                <Route path="tenants" element={<DarwinTenants />} />
+              </Routes>
+            </Suspense>
+          } />
+        ) : (
+          <Route path="/darwin" element={<Darwin />} />
+        )}
 
         {/* IceBox Vault Module - gated by license flag */}
         {getFlag('skauswatch.icebox') && (
