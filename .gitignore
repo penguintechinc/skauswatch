@@ -211,3 +211,7 @@ config.local.yaml
 
 # Worktrees
 .worktrees/
+# Non-standard worktree location found in this repo. The convention is
+# .worktrees/ at the repo root; this covers the stray path so it stops
+# showing up as untracked and blocking branch switches.
+.claude/worktrees/
