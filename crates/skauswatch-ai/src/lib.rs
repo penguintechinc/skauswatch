@@ -1,9 +1,13 @@
 //! Multi-provider AI abstraction ported from
 //! `services/manager-new/services/ai/` — one `CompletionProvider` trait with
-//! Anthropic, OpenAI, and Ollama implementations (Phase 2/7 fill in the HTTP
-//! clients). Provider API keys come from env/secrets, never config files.
+//! Anthropic, OpenAI, and Ollama implementations. Provider API keys come from
+//! env/secrets, never config files.
 
 use serde::{Deserialize, Serialize};
+
+pub mod anthropic;
+pub mod ollama;
+pub mod openai;
 
 /// Which upstream AI provider to use, from `AI_PROVIDER` env.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

@@ -4185,6 +4185,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 name = "skauswatch-ai"
 version = "2.0.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "reqwest",
  "serde",
@@ -4389,6 +4390,32 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "skauswatch-worker-darwin"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "chrono",
+ "clap",
+ "fred",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "skauswatch-ai",
+ "skauswatch-common",
+ "skauswatch-db",
+ "skauswatch-streams",
+ "skauswatch-telemetry",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "wiremock",
 ]
 
 [[package]]
