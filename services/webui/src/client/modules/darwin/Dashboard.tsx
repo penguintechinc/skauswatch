@@ -5,7 +5,7 @@ import Card from '../../components/Card';
 import type { DashboardStats, Finding, Platform, FindingSeverity, DashboardFilters } from './types';
 
 export default function Dashboard() {
-  const { user } = useAuth();
+  const { user: _user } = useAuth();
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [isLoadingStats, setIsLoadingStats] = useState(true);

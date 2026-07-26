@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { reviewsApi } from './api';
-import type { Review, ReviewComment } from './types';
+import type { Review } from './types';
 import Card from '../../components/Card';
 import Button from '../../components/Button';
 

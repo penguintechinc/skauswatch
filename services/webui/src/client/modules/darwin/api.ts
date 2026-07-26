@@ -1,8 +1,24 @@
-// Darwin module API client - stub for batch 2
-// Routes through Express proxy to darwin backend (DARWIN_BACKEND_URL)
+// Darwin module API client - routes through Express proxy to darwin backend
 
 import axios from 'axios';
-import type { Review, Issue, PaginatedResponse, DashboardStats, FindingsResponse, DashboardFilters, ReviewMetrics, User } from './types';
+import type {
+  Review,
+  ReviewComment,
+  Issue,
+  PaginatedResponse,
+  DashboardStats,
+  FindingsResponse,
+  DashboardFilters,
+  ReviewMetrics,
+  User,
+  RepositoryConfig,
+  CreateRepositoryData,
+  UpdateRepositoryData,
+  RepositoryListResponse,
+  OrganizationsResponse,
+  CreateUserData,
+  UpdateUserData,
+} from './types';
 
 const DARWIN_API_URL = process.env.VITE_DARWIN_API_URL || '/api/darwin';
 
@@ -11,8 +27,8 @@ const darwinApiClient = axios.create({
 });
 
 export const reviewsApi = {
-  list: async (page = 1, perPage = 20, filters?: any): Promise<PaginatedResponse<Review>> => {
-    const params: any = { page, per_page: perPage };
+  list: async (page = 1, perPage = 20, filters?: Record<string, any>): Promise<PaginatedResponse<Review>> => {
+    const params: Record<string, any> = { page, per_page: perPage };
     if (filters?.status) params.status = filters.status;
     if (filters?.repo) params.repository = filters.repo;
     const response = await darwinApiClient.get('/reviews', { params });
@@ -24,19 +40,24 @@ export const reviewsApi = {
     return response.data;
   },
 
-  create: async (data: any) => {
+  create: async (data: Partial<Review>): Promise<Review> => {
     const response = await darwinApiClient.post('/reviews', data);
     return response.data;
   },
 
-  delete: async (id: number) => {
+  addComment: async (reviewId: number, data: Partial<ReviewComment>): Promise<ReviewComment> => {
+    const response = await darwinApiClient.post(`/reviews/${reviewId}/comments`, data);
+    return response.data;
+  },
+
+  delete: async (id: number): Promise<void> => {
     await darwinApiClient.delete(`/reviews/${id}`);
   },
 };
 
 export const issuesApi = {
-  list: async (page = 1, perPage = 20, filters?: any): Promise<PaginatedResponse<Issue>> => {
-    const params: any = { page, per_page: perPage };
+  list: async (page = 1, perPage = 20, filters?: Record<string, any>): Promise<PaginatedResponse<Issue>> => {
+    const params: Record<string, any> = { page, per_page: perPage };
     if (filters?.severity) params.severity = filters.severity;
     if (filters?.status) params.status = filters.status;
     const response = await darwinApiClient.get('/issues', { params });
@@ -48,12 +69,12 @@ export const issuesApi = {
     return response.data;
   },
 
-  create: async (data: any) => {
+  create: async (data: Partial<Issue>): Promise<Issue> => {
     const response = await darwinApiClient.post('/issues', data);
     return response.data;
   },
 
-  delete: async (id: number) => {
+  delete: async (id: number): Promise<void> => {
     await darwinApiClient.delete(`/issues/${id}`);
   },
 };
@@ -64,7 +85,9 @@ export const dashboardApi = {
     return response.data;
   },
 
-  getFindings: async (filters?: DashboardFilters & { page?: number; per_page?: number }): Promise<FindingsResponse> => {
+  getFindings: async (
+    filters?: DashboardFilters & { page?: number; per_page?: number }
+  ): Promise<FindingsResponse> => {
     const response = await darwinApiClient.get('/dashboard/findings', { params: filters });
     return response.data;
   },
@@ -82,71 +105,108 @@ export const analyticsApi = {
   },
 };
 
-// Stub APIs for other darwin resources
 export const tenantsApi = {
-  list: async (page = 1, perPage = 20) => {
+  list: async (page = 1, perPage = 20): Promise<PaginatedResponse<Record<string, any>>> => {
     const response = await darwinApiClient.get('/tenants', { params: { page, per_page: perPage } });
     return response.data;
   },
 
-  get: async (id: number) => {
+  get: async (id: number): Promise<Record<string, any>> => {
     const response = await darwinApiClient.get(`/tenants/${id}`);
     return response.data;
   },
 
-  create: async (data: any) => {
+  create: async (data: Record<string, any>): Promise<Record<string, any>> => {
     const response = await darwinApiClient.post('/tenants', data);
     return response.data;
   },
 
-  delete: async (id: number) => {
+  delete: async (id: number): Promise<void> => {
     await darwinApiClient.delete(`/tenants/${id}`);
+  },
+
+  getMembers: async (id: number): Promise<User[]> => {
+    const response = await darwinApiClient.get(`/tenants/${id}/members`);
+    return response.data;
+  },
+
+  addMember: async (tenantId: number, memberData: number | Record<string, any>): Promise<void> => {
+    const data = typeof memberData === 'number' ? { user_id: memberData } : memberData;
+    await darwinApiClient.post(`/tenants/${tenantId}/members`, data);
+  },
+
+  removeMember: async (tenantId: number, userId: number): Promise<void> => {
+    await darwinApiClient.delete(`/tenants/${tenantId}/members/${userId}`);
   },
 };
 
 export const rolesApi = {
-  list: async (page = 1, perPage = 20) => {
+  list: async (page = 1, perPage = 20): Promise<PaginatedResponse<Record<string, any>>> => {
     const response = await darwinApiClient.get('/roles', { params: { page, per_page: perPage } });
     return response.data;
   },
 
-  get: async (id: number) => {
+  get: async (id: number): Promise<Record<string, any>> => {
     const response = await darwinApiClient.get(`/roles/${id}`);
     return response.data;
   },
 
-  create: async (data: any) => {
+  create: async (data: Record<string, any>): Promise<Record<string, any>> => {
     const response = await darwinApiClient.post('/roles', data);
     return response.data;
   },
 
-  delete: async (id: number) => {
+  update: async (id: number, data: Record<string, any>): Promise<Record<string, any>> => {
+    const response = await darwinApiClient.put(`/roles/${id}`, data);
+    return response.data;
+  },
+
+  delete: async (id: number): Promise<void> => {
     await darwinApiClient.delete(`/roles/${id}`);
+  },
+
+  listRoles: async (page = 1, perPage = 20): Promise<PaginatedResponse<Record<string, any>>> => {
+    const response = await darwinApiClient.get('/roles', { params: { page, per_page: perPage } });
+    return response.data;
+  },
+
+  listScopes: async (): Promise<Record<string, any>[]> => {
+    const response = await darwinApiClient.get('/scopes');
+    return response.data;
   },
 };
 
 export const teamsApi = {
-  list: async (page = 1, perPage = 20) => {
+  list: async (page = 1, perPage = 20): Promise<PaginatedResponse<Record<string, any>>> => {
     const response = await darwinApiClient.get('/teams', { params: { page, per_page: perPage } });
     return response.data;
   },
 
-  get: async (id: number) => {
+  get: async (id: number): Promise<Record<string, any>> => {
     const response = await darwinApiClient.get(`/teams/${id}`);
     return response.data;
   },
 
-  create: async (data: any) => {
+  create: async (data: Record<string, any>): Promise<Record<string, any>> => {
     const response = await darwinApiClient.post('/teams', data);
     return response.data;
   },
 
-  getMembers: async (id: number) => {
+  delete: async (id: number): Promise<void> => {
+    await darwinApiClient.delete(`/teams/${id}`);
+  },
+
+  getMembers: async (id: number): Promise<User[]> => {
     const response = await darwinApiClient.get(`/teams/${id}/members`);
     return response.data;
   },
 
-  removeMember: async (teamId: number, userId: number) => {
+  addMember: async (teamId: number, memberData: number | Record<string, any>): Promise<void> => {
+    const data = typeof memberData === 'number' ? { user_id: memberData } : memberData;
+    await darwinApiClient.post(`/teams/${teamId}/members`, data);
+  },
+
+  removeMember: async (teamId: number, userId: number): Promise<void> => {
     await darwinApiClient.delete(`/teams/${teamId}/members/${userId}`);
   },
 };
@@ -157,66 +217,85 @@ export const usersApi = {
     return response.data;
   },
 
-  get: async (id: number) => {
+  get: async (id: number): Promise<User> => {
     const response = await darwinApiClient.get(`/users/${id}`);
     return response.data;
   },
 
-  create: async (data: any) => {
+  create: async (data: CreateUserData): Promise<User> => {
     const response = await darwinApiClient.post('/users', data);
     return response.data;
   },
 
-  delete: async (id: number) => {
+  update: async (id: number, data: UpdateUserData): Promise<User> => {
+    const response = await darwinApiClient.put(`/users/${id}`, data);
+    return response.data;
+  },
+
+  delete: async (id: number): Promise<void> => {
     await darwinApiClient.delete(`/users/${id}`);
   },
 };
 
 export const repositoriesApi = {
-  list: async (page = 1, perPage = 20) => {
+  list: async (page = 1, perPage = 20): Promise<RepositoryListResponse> => {
     const response = await darwinApiClient.get('/repositories', { params: { page, per_page: perPage } });
     return response.data;
   },
 
-  get: async (id: number) => {
+  get: async (id: number): Promise<RepositoryConfig> => {
     const response = await darwinApiClient.get(`/repositories/${id}`);
     return response.data;
   },
 
-  create: async (data: any) => {
+  create: async (data: CreateRepositoryData): Promise<RepositoryConfig> => {
     const response = await darwinApiClient.post('/repositories', data);
     return response.data;
   },
 
-  delete: async (id: number) => {
+  update: async (id: number, data: UpdateRepositoryData): Promise<RepositoryConfig> => {
+    const response = await darwinApiClient.put(`/repositories/${id}`, data);
+    return response.data;
+  },
+
+  delete: async (id: number): Promise<void> => {
     await darwinApiClient.delete(`/repositories/${id}`);
+  },
+
+  listOrganizations: async (): Promise<OrganizationsResponse> => {
+    const response = await darwinApiClient.get('/repositories/organizations');
+    return response.data;
+  },
+
+  testConnection: async (id: number): Promise<{ success: boolean; message: string }> => {
+    const response = await darwinApiClient.post(`/repositories/${id}/test`, {});
+    return response.data;
   },
 };
 
 export const configApi = {
-  get: async () => {
+  get: async (): Promise<Record<string, any>> => {
     const response = await darwinApiClient.get('/config');
     return response.data;
   },
 
-  update: async (config: any) => {
-    const response = await darwinApiClient.put('/config', config);
-    return response.data;
+  update: async (config: Record<string, any>): Promise<void> => {
+    await darwinApiClient.put('/config', config);
   },
 };
 
 export const elderApi = {
-  push: async (filters?: any) => {
+  push: async (filters?: Record<string, any>): Promise<Record<string, any>> => {
     const response = await darwinApiClient.post('/integrations/elder', filters || {});
     return response.data;
   },
 
-  test: async () => {
+  test: async (): Promise<Record<string, any>> => {
     const response = await darwinApiClient.post('/integrations/elder/test');
     return response.data;
   },
 
-  getStats: async () => {
+  getStats: async (): Promise<Record<string, any>> => {
     const response = await darwinApiClient.get('/integrations/elder/stats');
     return response.data;
   },
