@@ -42,6 +42,8 @@ pub const STREAM_AUDIT_LOG: &str = "audit:log";
 pub const STREAM_S3_SCAN_TASKS: &str = "s3scan:tasks";
 /// S3 scan result stream (v1 `STREAM_S3_SCAN_RESULTS`).
 pub const STREAM_S3_SCAN_RESULTS: &str = "s3scan:results";
+/// Darwin code review task stream.
+pub const STREAM_DARWIN_TASKS: &str = "darwin:tasks";
 
 /// Approximate stream cap applied on publish — v1 `publish_event` default
 /// (`maxlen=10000, approximate=True`).
