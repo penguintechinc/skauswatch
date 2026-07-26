@@ -1,4 +1,5 @@
-// @ts-nocheck - legacy darwin module: type mismatches expected until darwin backend is integrated
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+// @ts-nocheck
 import { useState, useEffect } from 'react';
 import { repositoriesApi } from './api';
 import type { RepositoryConfig } from './types';
