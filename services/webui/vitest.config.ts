@@ -11,6 +11,12 @@ export default defineConfig({
     setupFiles: ['./src/client/tests/setup.ts'],
     include: ['src/client/tests/**/*.{test,spec}.{ts,tsx}'],
     exclude: ['src/client/tests/e2e/**', 'node_modules/**'],
+    // Deterministic isolation: forked process + fresh module registry per
+    // file prevents the cross-file vi.mock leakage that made the module-smoke
+    // test flaky. (No mockReset/restoreMocks — those wipe the in-file vi.mock
+    // factory implementations the tests rely on.)
+    pool: 'forks',
+    isolate: true,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
