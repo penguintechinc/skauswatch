@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/manager", "services/worker-s3", "services/ssh-ca", "services/log-receiver", "services/pki-server", "services/worker-darwin", "services/worker-scanner", "services/icebox", "services/worker-icebox-sync", "services/edr-agent", "services/aaa-monitor"]
+members = ["crates/*", "services/manager", "services/worker-s3", "services/ssh-ca", "services/log-receiver", "services/pki-server", "services/worker-darwin", "services/worker-scanner", "services/icebox", "services/worker-icebox-sync", "services/edr-agent", "services/aaa-monitor", "services/darwin-backend"]
 
 [workspace.package]
 version = "2.0.0"
@@ -94,6 +94,8 @@ yara-x = "=1.19.0"
 # + AWS Secrets Manager cloud-sync (other providers NotImplemented in v2.0).
 skauswatch-icebox = { path = "crates/skauswatch-icebox" }
 aes-gcm = "=0.10.3"
+# CSPRNG (darwin-backend AEAD nonces for git-credential tokens at rest)
+rand = "=0.8.5"
 # aws-sdk-secretsmanager's default feature set includes `"rustls"`, which (unlike
 # aws-config's same-named feature above) maps directly to the legacy
 # `aws-smithy-runtime/tls-rustls` -> legacy-rustls-ring -> rustls 0.21 ->
