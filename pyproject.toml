@@ -86,9 +86,9 @@ test = [
 [project.scripts]
 skauswatch = "skauswatch.cli:main"
 skauswatch-manager = "skauswatch.services.manager.cli:main"
-skauswatch-pki = "skauswatch.services.pki_server.cli:main"
-skauswatch-ssh-ca = "skauswatch.services.ssh_ca.cli:main"
-skauswatch-aaa = "skauswatch.services.aaa_monitor.cli:main"
+skauswatch-pki = "skauswatch.services.pki.cli:main"
+skauswatch-sshca = "skauswatch.services.sshca.cli:main"
+skauswatch-aaa = "skauswatch.services.monitor.cli:main"
 
 [project.urls]
 Homepage = "https://skauswatch.io"

@@ -32,8 +32,8 @@ V1_PORT=15001
 V2_PORT=15002
 
 JWT_SECRET=parity-jwt-secret
-EDR_API_SECRET=parity-edr-secret
-export EDR_API_SECRET
+ENDPOINT_API_SECRET=parity-endpoint-secret
+export ENDPOINT_API_SECRET
 
 # Cargo caches live in the session scratchpad (fall back to /tmp for
 # standalone runs).
@@ -92,13 +92,13 @@ up() {
   done
   docker exec "$PG" psql -q -U "$PG_USER" -d postgres \
     -c "CREATE DATABASE skauswatch_v1;" -c "CREATE DATABASE skauswatch_v2;"
-  docker exec -i "$PG" psql -q -v ON_ERROR_STOP=1 -U "$PG_USER" -d skauswatch_v1 <"$HERE/seed.sql"
-  docker exec -i "$PG" psql -q -v ON_ERROR_STOP=1 -U "$PG_USER" -d skauswatch_v2 <"$HERE/seed.sql"
+  docker exec -i "$PG" psql -q -v ON_ERROR_STOP=1 -U "$PG_USER" -d skauswatch_v1 <"$HERE/seed_v1.sql"
+  docker exec -i "$PG" psql -q -v ON_ERROR_STOP=1 -U "$PG_USER" -d skauswatch_v2 <"$HERE/seed_v2.sql"
 
   echo "== valkey (db 0 = v1, db 1 = v2) =="
   docker run -d --name "$REDIS" --network "$NET" "$REDIS_IMG" >/dev/null
 
-  echo "== stub upstream (worker-scanner / worker-darwin / log-receiver / S3) =="
+  echo "== stub upstream (scanner / worker-codescan / logs / S3) =="
   docker run -d --name "$STUB" --network "$NET" \
     -v "$HERE/stub_upstream.py":/stub.py:ro \
     "$PY_IMG" python3 /stub.py >/dev/null
@@ -130,7 +130,7 @@ up() {
     -e DB_USER="$PG_USER" -e DB_PASS="$PG_PASS" \
     -e REDIS_URL="redis://$REDIS:6379/0" \
     -e JWT_SECRET_KEY="$JWT_SECRET" -e SECRET_KEY=parity-secret \
-    -e EDR_API_SECRET="$EDR_API_SECRET" \
+    -e EDR_API_SECRET="$ENDPOINT_API_SECRET" \
     -e GRPC_ENABLED=false -e QUART_ENV=production \
     -e WORKER_SCANNER_URL="http://$STUB:9999" \
     -e WORKER_DARWIN_URL="http://$STUB:9999" \
@@ -149,12 +149,12 @@ up() {
     -e DB_USER="$PG_USER" -e DB_PASS="$PG_PASS" \
     -e REDIS_URL="redis://$REDIS:6379/1" \
     -e JWT_SECRET_KEY="$JWT_SECRET" \
-    -e EDR_API_SECRET="$EDR_API_SECRET" \
+    -e ENDPOINT_API_SECRET="$ENDPOINT_API_SECRET" \
     -e GRPC_ENABLED=false \
     -e LICENSE_SERVER_URL="http://$STUB:9999" \
-    -e WORKER_SCANNER_URL="http://$STUB:9999" \
-    -e WORKER_DARWIN_URL="http://$STUB:9999" \
-    -e LOG_RECEIVER_URL="http://$STUB:9999" \
+    -e SCANNER_URL="http://$STUB:9999" \
+    -e WORKER_CODESCAN_URL="http://$STUB:9999" \
+    -e LOGS_URL="http://$STUB:9999" \
     "$PY_IMG" skauswatch-manager serve \
     >/dev/null
 
@@ -167,7 +167,7 @@ up() {
 replay() {
   PARITY_V1_URL="http://127.0.0.1:$V1_PORT" \
   PARITY_V2_URL="http://127.0.0.1:$V2_PORT" \
-  EDR_API_SECRET="$EDR_API_SECRET" \
+  ENDPOINT_API_SECRET="$ENDPOINT_API_SECRET" \
   python3 "$HERE/runner.py"
 }
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/manager", "services/worker-s3", "services/ssh-ca", "services/log-receiver", "services/pki-server", "services/worker-darwin", "services/worker-scanner", "services/icebox", "services/worker-icebox-sync", "services/edr-agent", "services/aaa-monitor", "services/darwin-backend"]
+members = ["crates/*", "services/manager", "services/s3scan", "services/sshca", "services/logs", "services/pki", "services/worker-codescan", "services/scanner", "services/vault", "services/worker-vault-sync", "services/endpoint-agent", "services/monitor", "services/codescan-backend"]
 
 [workspace.package]
 version = "2.0.0"
@@ -79,36 +79,36 @@ aws-sdk-s3 = { version = "=1.138.0", default-features = false, features = [
     "rt-tokio",
 ] }
 
-# PKI / X.509 (pki-server): rcgen builds/signs certs + CRLs, x509-parser reads
+# PKI / X.509 (pki): rcgen builds/signs certs + CRLs, x509-parser reads
 # CA cert/CSR public keys for RFC 5280 method-1 (SHA1) key identifiers. aws_lc_rs
 # backend (default in the tree via rustls) enables RSA key generation; ring off.
 rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "pem", "aws_lc_rs", "x509-parser"] }
 x509-parser = "=0.18.1"
 time = { version = "=0.3.53", default-features = false, features = ["std"] }
 
-# YARA malware pattern matching (worker-scanner): pure-Rust engine, no C deps
+# YARA malware pattern matching (scanner): pure-Rust engine, no C deps
 yara-x = "=1.19.0"
 
-# IceBox vault: shared crypto crate + AES-256-GCM envelope (cross-decrypt parity
-# with v1 Python cryptography AESGCM — see docs/v2-port/icebox-crypto-gate.md)
+# Vault: shared crypto crate + AES-256-GCM envelope (cross-decrypt parity
+# with v1 Python cryptography AESGCM — see docs/v2-port/vault-crypto-gate.md)
 # + AWS Secrets Manager cloud-sync (other providers NotImplemented in v2.0).
-skauswatch-icebox = { path = "crates/skauswatch-icebox" }
+skauswatch-vault = { path = "crates/skauswatch-vault" }
 aes-gcm = "=0.10.3"
-# CSPRNG (darwin-backend AEAD nonces for git-credential tokens at rest)
+# CSPRNG (codescan-backend AEAD nonces for git-credential tokens at rest)
 rand = "=0.8.5"
 # aws-sdk-secretsmanager's default feature set includes `"rustls"`, which (unlike
 # aws-config's same-named feature above) maps directly to the legacy
 # `aws-smithy-runtime/tls-rustls` -> legacy-rustls-ring -> rustls 0.21 ->
-# rustls-webpki 0.101.7 stack (RUSTSEC-2026-0098/0099/0104). worker-icebox-sync
+# rustls-webpki 0.101.7 stack (RUSTSEC-2026-0098/0099/0104). worker-vault-sync
 # builds the client directly via `Config::builder()` with static credentials
-# (see services/worker-icebox-sync/src/providers/aws.rs) — no SSO/STS/profile
+# (see services/worker-vault-sync/src/providers/aws.rs) — no SSO/STS/profile
 # resolution needed — so only the modern HTTP client + tokio runtime are kept.
 aws-sdk-secretsmanager = { version = "=1.90.0", default-features = false, features = [
     "default-https-client",
     "rt-tokio",
 ] }
 
-# EDR agent (client, endpoint-side): viper-shaped YAML config, cross-platform
+# Endpoint agent (client-side): viper-shaped YAML config, cross-platform
 # process/network enumeration, directory walking for file integrity checks
 serde_yaml = "=0.9.34"
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system", "user"] }
@@ -116,7 +116,7 @@ netstat2 = "=0.11.2"
 walkdir = "=2.5.0"
 
 
-# Content scanning (worker-s3): magic-byte file typing + SHA1 (md-5/sha2 above)
+# Content scanning (s3scan): magic-byte file typing + SHA1 (md-5/sha2 above)
 infer = "=0.22.0"
 sha1 = "=0.10.7"
 
@@ -150,7 +150,7 @@ md-5 = "=0.11.0"
 url = { version = "=2.5.8", features = ["serde"] }
 uuid = { version = "=1.23.5", features = ["v4", "serde"] }
 
-# SSH certificate authority (ssh-ca): OpenSSH cert signing/parsing. 0.7 is a
+# SSH certificate authority (sshca): OpenSSH cert signing/parsing. 0.7 is a
 # release candidate (pre-release, forbidden) — pin the current stable 0.6.7.
 ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed25519", "rsa", "p256", "p384", "getrandom"] }
 chrono = { version = "=0.4.45", features = ["serde"] }

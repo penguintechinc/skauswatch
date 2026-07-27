@@ -23,7 +23,7 @@ const navigation: NavCategory[] = [
       { label: 'SPIRE Identity', path: '/security/spire', icon: '🔐', roles: ['admin', 'maintainer'] },
       { label: 'Threat Intel', path: '/threat-intel', icon: '🛡️' },
       { label: 'S3 Scanning', path: '/s3-scan', icon: '🔍' },
-      { label: 'Darwin AI Review', path: '/darwin', icon: '🤖' },
+      { label: 'CodeScan AI Review', path: '/codescan', icon: '🤖' },
     ],
   },
   {

@@ -39,7 +39,7 @@ def manager_app():
             siem=SIEMConfig(
                 enabled=True,
                 opensearch_url="http://localhost:9200",
-                log_receiver_url="http://localhost:5010",
+                logs_url="http://localhost:5010",
                 retention_days=90,
             ),
         )

@@ -25,21 +25,21 @@ resources:
 - manifests/redis-secrets.yaml
 - manifests/manager/deployment.yaml
 - manifests/manager/service.yaml
-- manifests/pki-server/deployment.yaml
-- manifests/pki-server/service.yaml
-- manifests/ssh-ca/deployment.yaml
-- manifests/ssh-ca/service.yaml
-- manifests/aaa-monitor/deployment.yaml
-- manifests/aaa-monitor/service.yaml
-- manifests/worker-s3/deployment.yaml
-- manifests/worker-scanner/deployment.yaml
-- manifests/worker-scanner/service.yaml
-- manifests/worker-darwin/deployment.yaml
-- manifests/worker-darwin/service.yaml
-- manifests/worker-darwin-celery/deployment.yaml
+- manifests/pki/deployment.yaml
+- manifests/pki/service.yaml
+- manifests/sshca/deployment.yaml
+- manifests/sshca/service.yaml
+- manifests/monitor/deployment.yaml
+- manifests/monitor/service.yaml
+- manifests/s3scan/deployment.yaml
+- manifests/scanner/deployment.yaml
+- manifests/scanner/service.yaml
+- manifests/worker-codescan/deployment.yaml
+- manifests/worker-codescan/service.yaml
+- manifests/worker-codescan-celery/deployment.yaml
 - manifests/webui/deployment.yaml
 - manifests/webui/service.yaml
-- manifests/edr-agent/daemonset.yaml
+- manifests/endpoint-agent/daemonset.yaml
 
 configMapGenerator:
 - name: skauswatch-config
@@ -60,7 +60,7 @@ configMapGenerator:
   - SHODAN_ENABLED=false
   - MALTEGO_ENABLED=false
   - MANAGER_URL=http://manager.skauswatch.svc.cluster.local:8080
-  - CONSUMER_NAME=worker-s3
+  - CONSUMER_NAME=s3scan
 
 secretGenerator:
 - name: skauswatch-secrets
@@ -71,10 +71,10 @@ secretGenerator:
   - SECURITY_PASSWORD_SALT=changeme
   - LICENSE_KEY=PENG-TEST-TEST-TEST-TEST-ABCDE
   - REDIS_PASSWORD=changeme
-- name: skauswatch-darwin-secrets
+- name: skauswatch-codescan-secrets
   literals:
-  - DARWIN_DB_USER=darwin
-  - DARWIN_DB_PASS=changeme
-  - DARWIN_CELERY_BROKER_URL=redis://:changeme@redis:6379/2
+  - CODESCAN_DB_USER=codescan
+  - CODESCAN_DB_PASS=changeme
+  - CODESCAN_CELERY_BROKER_URL=redis://:changeme@redis:6379/2
   - ANTHROPIC_API_KEY=
   - OPENAI_API_KEY=

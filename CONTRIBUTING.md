@@ -85,8 +85,8 @@ Use descriptive branch names with prefixes:
 - `test/` - Test improvements
 
 Examples:
-- `feature/ssh-ca-certificate-validation`
-- `bugfix/pki-server-memory-leak`
+- `feature/sshca-certificate-validation`
+- `bugfix/pki-memory-leak`
 - `docs/api-documentation-update`
 
 ### Commit Message Format
@@ -114,9 +114,9 @@ Types:
 
 Examples:
 ```
-feat(ssh-ca): add certificate validation endpoint
+feat(sshca): add certificate validation endpoint
 
-fix(pki-server): resolve memory leak in certificate cleanup
+fix(pki): resolve memory leak in certificate cleanup
 
 docs: update API documentation for manager service
 ```

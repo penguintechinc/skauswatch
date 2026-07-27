@@ -754,7 +754,7 @@ mod tests {
     async fn log_audit_event_unknown_api_version_is_unimplemented() {
         let err = match svc()
             .log_audit_event(authed(AuditEvent {
-                event_type: "edr".to_owned(),
+                event_type: "endpoint".to_owned(),
                 action: "test".to_owned(),
                 api_version: "v9".to_owned(),
                 ..Default::default()

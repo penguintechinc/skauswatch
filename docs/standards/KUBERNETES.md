@@ -391,7 +391,7 @@ Production deployments use registered `.app` domains as the canonical URL, with 
 | Repo | `.app` Domain (Canonical) | `.penguincloud.io` (Redirects) |
 |------|--------------------------|-------------------------------|
 | articdbm | `articdbm.app` | `articdbm.penguincloud.io` |
-| darwin | `darwincode.app` | `darwin.penguincloud.io` |
+| codescan | `codescancode.app` | `codescan.penguincloud.io` |
 | elder | `elderrms.app` | `elder.penguincloud.io` |
 | icecharts | `icecharts.app` | `icecharts.penguincloud.io` |
 | killkrill | `killkrill.app` | `killkrill.penguincloud.io` |

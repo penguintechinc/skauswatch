@@ -1,11 +1,11 @@
 # YARA-X Compatibility Spike — Verdict
 
-**Decision:** Can pure-Rust `yara-x` replace libyara (v1: `yara-python==4.5.4`) for skauswatch's actual YARA rule corpus in the v2 `worker-scanner`, or must we fall back to the `yara` FFI crate?
+**Decision:** Can pure-Rust `yara-x` replace libyara (v1: `yara-python==4.5.4`) for skauswatch's actual YARA rule corpus in the v2 `scanner`, or must we fall back to the `yara` FFI crate?
 
 **Verdict: GO — adopt `yara-x`, pinned `=1.19.0`.** 100% compile pass, 100% match parity (rule-level *and* matched-string-level) on a 19-file fixture set, ~13x scan throughput vs libyara, zero C dependencies.
 
 - Spike date: 2026-07-22 · Branch: `release/v2.0.x`
-- Engines compared: `yara-x 1.19.0` (crates.io, released 2026-06-24, current stable) vs `yara-python 4.5.4` (v1's exact pin from `services/worker-s3/requirements.txt`, bundled libyara)
+- Engines compared: `yara-x 1.19.0` (crates.io, released 2026-06-24, current stable) vs `yara-python 4.5.4` (v1's exact pin from `services/s3scan/requirements.txt`, bundled libyara)
 - Spike artifacts (code, fixtures, raw results): session scratchpad `yarax-spike/` — reproduction commands in the appendix. Nothing was added to the workspace besides this document.
 
 ---
@@ -15,8 +15,8 @@
 The **entire runtime rule corpus is one file: `config/yara_rules/corporate_threats.yar` — 5 rules.** Verified by:
 
 - Repo-wide search for `*.yar` / `*.yara` on `release/v2.0.x` **and** `release/v1.0.x` (`git ls-tree -r release/v1.0.x | grep -iE '\.yara?$'`) — one file, both branches; git history shows it is the only rule file ever committed.
-- v1 loader: `services/worker-s3/scanner/yara_scanner.py` — `yara.compile(rules_path)`, rules path from `YARA_RULES_PATH` (default `/yara_rules`), YARA off by default (`YARA_ENABLED=false`).
-- Rule delivery: docker-compose mounts `./config/yara_rules:/yara_rules:ro`; Helm (`k8s/helm/worker-s3/values.yaml`) mounts ConfigMap `yara-rules-config` at `/etc/yara/rules`. **Operators can therefore inject arbitrary rules** — the corpus is small but user-extensible, which is why §3 probes features beyond the corpus.
+- v1 loader: `services/s3scan/scanner/yara_scanner.py` — `yara.compile(rules_path)`, rules path from `YARA_RULES_PATH` (default `/yara_rules`), YARA off by default (`YARA_ENABLED=false`).
+- Rule delivery: docker-compose mounts `./config/yara_rules:/yara_rules:ro`; Helm (`k8s/helm/s3scan/values.yaml`) mounts ConfigMap `yara-rules-config` at `/etc/yara/rules`. **Operators can therefore inject arbitrary rules** — the corpus is small but user-extensible, which is why §3 probes features beyond the corpus.
 - No YARA rule feeds exist: `ti/enricher.py` only parses rule *names* out of scan results; threat-intel feeds (VT/OTX) never deliver rule text.
 
 ### Per-rule feature usage
@@ -33,7 +33,7 @@ The **entire runtime rule corpus is one file: `config/yara_rules/corporate_threa
 
 ### v1 defect found during inventory (Phase 3 input)
 
-`YaraScanner` requires a single rules **file** (`yara.compile(filepath)`), but the config default (`/yara_rules`), Helm mount (`/etc/yara/rules`), and docs all point at a **directory**. `yara.compile(<dir>)` raises, `worker.py:478-489` swallows the exception (`logger.warning` → `yara_scanner = None`), so **v1 YARA scanning silently no-ops under the default/Helm deployment layout** unless `YARA_RULES_PATH` names one `.yar` file. v2 `worker-scanner` must glob `*.yar`/`*.yara` under the rules dir (each file = one `Compiler::add_source`), and must treat rule-load failure as a hard, visible error (metric + log), not a silent disable. This is a behavioral *improvement*, to be recorded alongside the other documented v1 defects in `docs/v2-port/manager-contract.md`.
+`YaraScanner` requires a single rules **file** (`yara.compile(filepath)`), but the config default (`/yara_rules`), Helm mount (`/etc/yara/rules`), and docs all point at a **directory**. `yara.compile(<dir>)` raises, `worker.py:478-489` swallows the exception (`logger.warning` → `yara_scanner = None`), so **v1 YARA scanning silently no-ops under the default/Helm deployment layout** unless `YARA_RULES_PATH` names one `.yar` file. v2 `scanner` must glob `*.yar`/`*.yara` under the rules dir (each file = one `Compiler::add_source`), and must treat rule-load failure as a hard, visible error (metric + log), not a silent disable. This is a behavioral *improvement*, to be recorded alongside the other documented v1 defects in `docs/v2-port/manager-contract.md`.
 
 ---
 
@@ -98,7 +98,7 @@ Comparison: yara-x `Scanner::scan` vs yara-python `rules.match(filepath)` (v1's 
 
 ## 6. Recommendation
 
-**GO: `yara-x = "=1.19.0"`** for Phase 3 `worker-scanner`.
+**GO: `yara-x = "=1.19.0"`** for Phase 3 `scanner`.
 
 Rationale:
 1. 100% compile + 100% match parity on the real corpus and adversarial fixtures.
@@ -107,12 +107,12 @@ Rationale:
 4. Actively maintained (monthly releases through June 2026).
 
 Phase 3 implementation notes:
-- Pin `yara-x = "=1.19.0"` in `services/worker-scanner`'s crate; `cargo audit`/`deny` as usual. Note it pulls wasmtime/cranelift (rule JIT) — expect a heavier build and binary; build time was fine (~90 s warm cache) and is release-gated anyway.
+- Pin `yara-x = "=1.19.0"` in `services/scanner`'s crate; `cargo audit`/`deny` as usual. Note it pulls wasmtime/cranelift (rule JIT) — expect a heavier build and binary; build time was fine (~90 s warm cache) and is release-gated anyway.
 - Rules loading: glob `*.yar`/`*.yara` in `YARA_RULES_PATH` (dir or single file), one `add_source` per file; **fail loudly** on compile error (fixes the v1 silent no-op defect, §1).
 - Match result mapping: `MatchingRule::identifier()` → v1 `rule_name`, `namespace()` → `namespace`, `tags()` → `tags`, `patterns()/matches()` → `matched_strings` — everything the v1 `yara_matches` JSON shape needs is available.
 - Operator-facing doc: custom rules using the legacy `entrypoint` keyword must be rewritten to `pe.entry_point`/`elf.entry_point`; external variables require the worker to define them (none are defined today, so any such rule was already broken in v1).
 
-**Fallback plan (not triggered):** if a future operator corpus surfaces a hard yara-x gap (realistically only legacy `entrypoint` or exotic libyara-only module fields), wrap the engine behind a small `trait YaraEngine { compile; scan }` in worker-scanner and add a non-default Cargo feature `libyara-ffi` backed by the `yara` FFI crate (libyara 4.5.x). Do **not** pre-build this abstraction beyond the trait seam — the spike found no need for the second implementation.
+**Fallback plan (not triggered):** if a future operator corpus surfaces a hard yara-x gap (realistically only legacy `entrypoint` or exotic libyara-only module fields), wrap the engine behind a small `trait YaraEngine { compile; scan }` in scanner and add a non-default Cargo feature `libyara-ffi` backed by the `yara` FFI crate (libyara 4.5.x). Do **not** pre-build this abstraction beyond the trait seam — the spike found no need for the second implementation.
 
 ---
 

@@ -24,39 +24,39 @@ class TestServiceHealth:
         response = await async_http_client.get(f"{url}{health_endpoint}")
         assert response.status_code == 200
 
-    async def test_pki_server_health(
+    async def test_pki_health(
         self, service_urls, pki_service_ready, async_http_client
     ):
         """Test PKI Server health endpoint."""
         if not pki_service_ready:
             pytest.skip("PKI Server not reachable")
 
-        url = service_urls.get("pki_server")
-        health_endpoint = service_urls.get("pki_server_health", "/health")
+        url = service_urls.get("pki")
+        health_endpoint = service_urls.get("pki_health", "/health")
         response = await async_http_client.get(f"{url}{health_endpoint}")
         assert response.status_code == 200
 
-    async def test_ssh_ca_health(
-        self, service_urls, ssh_ca_service_ready, async_http_client
+    async def test_sshca_health(
+        self, service_urls, sshca_service_ready, async_http_client
     ):
         """Test SSH CA health endpoint."""
-        if not ssh_ca_service_ready:
+        if not sshca_service_ready:
             pytest.skip("SSH CA not reachable")
 
-        url = service_urls.get("ssh_ca")
-        health_endpoint = service_urls.get("ssh_ca_health", "/health")
+        url = service_urls.get("sshca")
+        health_endpoint = service_urls.get("sshca_health", "/health")
         response = await async_http_client.get(f"{url}{health_endpoint}")
         assert response.status_code == 200
 
-    async def test_aaa_monitor_health(
-        self, service_urls, aaa_monitor_service_ready, async_http_client
+    async def test_monitor_health(
+        self, service_urls, monitor_service_ready, async_http_client
     ):
-        """Test AAA Monitor health endpoint."""
-        if not aaa_monitor_service_ready:
-            pytest.skip("AAA Monitor not reachable")
+        """Test Monitor health endpoint."""
+        if not monitor_service_ready:
+            pytest.skip("Monitor not reachable")
 
-        url = service_urls.get("aaa_monitor")
-        health_endpoint = service_urls.get("aaa_monitor_health", "/health")
+        url = service_urls.get("monitor")
+        health_endpoint = service_urls.get("monitor_health", "/health")
         response = await async_http_client.get(f"{url}{health_endpoint}")
         assert response.status_code == 200
 

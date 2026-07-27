@@ -19,19 +19,19 @@ resources:
 replicas:
 - name: manager
   count: 2
-- name: pki-server
+- name: pki
   count: 2
-- name: ssh-ca
+- name: sshca
   count: 2
-- name: aaa-monitor
+- name: monitor
   count: 2
-- name: worker-s3
+- name: s3scan
   count: 2
-- name: worker-scanner
+- name: scanner
   count: 2
-- name: worker-darwin
+- name: worker-codescan
   count: 1
-- name: worker-darwin-celery
+- name: worker-codescan-celery
   count: 1
 - name: webui
   count: 2
@@ -42,9 +42,9 @@ configMapGenerator:
   literals:
   - LOG_LEVEL=INFO
   - RELEASE_MODE=false
-  # IceBox shim env vars — pki-server and ssh-ca now proxy to IceBox services
-  - ICEBOX_PKI_URL=http://icebox-pki-server.icebox.svc.cluster.local:8081
-  - ICEBOX_SSH_CA_URL=http://icebox-ssh-ca.icebox.svc.cluster.local:8082
+  # Vault shim env vars — pki and sshca now proxy to Vault services
+  - VAULT_PKI_URL=http://vault-pki.vault.svc.cluster.local:8081
+  - VAULT_SSHCA_URL=http://vault-sshca.vault.svc.cluster.local:8082
 
 secretGenerator:
 - name: skauswatch-secrets
@@ -56,11 +56,11 @@ secretGenerator:
   - SECURITY_PASSWORD_SALT=betasalt
   - LICENSE_KEY=PENG-BETA-XXXX-XXXX-XXXX-ABCD
   - REDIS_PASSWORD=betaredis
-- name: skauswatch-darwin-secrets
+- name: skauswatch-codescan-secrets
   behavior: merge
   literals:
-  - DARWIN_DB_USER=darwin
-  - DARWIN_DB_PASS=betadarwinpass
-  - DARWIN_CELERY_BROKER_URL=redis://:betaredis@redis:6379/2
+  - CODESCAN_DB_USER=codescan
+  - CODESCAN_DB_PASS=betacodescanpass
+  - CODESCAN_CELERY_BROKER_URL=redis://:betaredis@redis:6379/2
   - ANTHROPIC_API_KEY=
   - OPENAI_API_KEY=

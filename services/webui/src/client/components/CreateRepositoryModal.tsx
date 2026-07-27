@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { CreateRepositoryData } from '../modules/darwin/types';
+import type { CreateRepositoryData } from '../modules/codescan/types';
 
 interface CreateRepositoryModalProps {
   isOpen: boolean;

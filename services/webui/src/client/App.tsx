@@ -13,34 +13,34 @@ import Profile from './pages/Profile';
 import Settings from './pages/Settings';
 import ThreatIntel from './pages/ThreatIntel';
 import S3Scan from './pages/S3Scan';
-import Darwin from './pages/Darwin';
+import CodeScan from './pages/CodeScan';
 import Spire from './pages/Spire';
 
 // Lazy-loaded module pages
-const IceBoxDashboard = lazy(() => import('./modules/icebox/Dashboard'));
-const IceBoxSecrets = lazy(() => import('./modules/icebox/Secrets'));
-const IceBoxJitAccess = lazy(() => import('./modules/icebox/JitAccess'));
-const IceBoxOneTime = lazy(() => import('./modules/icebox/OneTimePage'));
-const IceBoxCloudSync = lazy(() => import('./modules/icebox/CloudSync'));
-const IceBoxPki = lazy(() => import('./modules/icebox/PkiPage'));
-const IceBoxSsh = lazy(() => import('./modules/icebox/SshPage'));
-const IceBoxAudit = lazy(() => import('./modules/icebox/AuditPage'));
-const IceBoxSettings = lazy(() => import('./modules/icebox/SettingsPage'));
+const VaultDashboard = lazy(() => import('./modules/vault/Dashboard'));
+const VaultSecrets = lazy(() => import('./modules/vault/Secrets'));
+const VaultJitAccess = lazy(() => import('./modules/vault/JitAccess'));
+const VaultOneTime = lazy(() => import('./modules/vault/OneTimePage'));
+const VaultCloudSync = lazy(() => import('./modules/vault/CloudSync'));
+const VaultPki = lazy(() => import('./modules/vault/PkiPage'));
+const VaultSsh = lazy(() => import('./modules/vault/SshPage'));
+const VaultAudit = lazy(() => import('./modules/vault/AuditPage'));
+const VaultSettings = lazy(() => import('./modules/vault/SettingsPage'));
 
-// Darwin module pages
-const DarwinDashboard = lazy(() => import('./modules/darwin/Dashboard'));
-const DarwinAnalytics = lazy(() => import('./modules/darwin/Analytics'));
-const DarwinIssues = lazy(() => import('./modules/darwin/Issues'));
-const DarwinReviews = lazy(() => import('./modules/darwin/Reviews'));
-const DarwinRepositories = lazy(() => import('./modules/darwin/Repositories'));
-const DarwinSettings = lazy(() => import('./modules/darwin/Settings'));
-const DarwinUsers = lazy(() => import('./modules/darwin/Users'));
-const DarwinRoles = lazy(() => import('./modules/darwin/Roles'));
-const DarwinTeams = lazy(() => import('./modules/darwin/Teams'));
-const DarwinTenants = lazy(() => import('./modules/darwin/Tenants'));
-const DarwinReviewDetail = lazy(() => import('./modules/darwin/ReviewDetail'));
-const DarwinUserDetail = lazy(() => import('./modules/darwin/UserDetail'));
-const DarwinRepositorySettings = lazy(() => import('./modules/darwin/RepositorySettings'));
+// CodeScan module pages
+const CodeScanDashboard = lazy(() => import('./modules/codescan/Dashboard'));
+const CodeScanAnalytics = lazy(() => import('./modules/codescan/Analytics'));
+const CodeScanIssues = lazy(() => import('./modules/codescan/Issues'));
+const CodeScanReviews = lazy(() => import('./modules/codescan/Reviews'));
+const CodeScanRepositories = lazy(() => import('./modules/codescan/Repositories'));
+const CodeScanSettings = lazy(() => import('./modules/codescan/Settings'));
+const CodeScanUsers = lazy(() => import('./modules/codescan/Users'));
+const CodeScanRoles = lazy(() => import('./modules/codescan/Roles'));
+const CodeScanTeams = lazy(() => import('./modules/codescan/Teams'));
+const CodeScanTenants = lazy(() => import('./modules/codescan/Tenants'));
+const CodeScanReviewDetail = lazy(() => import('./modules/codescan/ReviewDetail'));
+const CodeScanUserDetail = lazy(() => import('./modules/codescan/UserDetail'));
+const CodeScanRepositorySettings = lazy(() => import('./modules/codescan/RepositorySettings'));
 
 // Loading fallback component
 function LoadingFallback() {
@@ -103,45 +103,45 @@ function App() {
         {/* S3 Malware Scanning - all authenticated users */}
         <Route path="/s3-scan" element={<S3Scan />} />
 
-        {/* Darwin AI Code Review - gated by license flag */}
-        {getFlag('skauswatch.darwin') ? (
-          <Route path="/darwin/*" element={
+        {/* CodeScan AI Code Review - gated by license flag */}
+        {getFlag('skauswatch.codescan') ? (
+          <Route path="/codescan/*" element={
             <Suspense fallback={<LoadingFallback />}>
               <Routes>
-                <Route index element={<DarwinDashboard />} />
-                <Route path="analytics" element={<DarwinAnalytics />} />
-                <Route path="issues" element={<DarwinIssues />} />
-                <Route path="reviews" element={<DarwinReviews />} />
-                <Route path="reviews/:id" element={<DarwinReviewDetail />} />
-                <Route path="repositories" element={<DarwinRepositories />} />
-                <Route path="repositories/:id/settings" element={<DarwinRepositorySettings />} />
-                <Route path="settings" element={<DarwinSettings />} />
-                <Route path="users" element={<DarwinUsers />} />
-                <Route path="users/:id" element={<DarwinUserDetail />} />
-                <Route path="roles" element={<DarwinRoles />} />
-                <Route path="teams" element={<DarwinTeams />} />
-                <Route path="tenants" element={<DarwinTenants />} />
+                <Route index element={<CodeScanDashboard />} />
+                <Route path="analytics" element={<CodeScanAnalytics />} />
+                <Route path="issues" element={<CodeScanIssues />} />
+                <Route path="reviews" element={<CodeScanReviews />} />
+                <Route path="reviews/:id" element={<CodeScanReviewDetail />} />
+                <Route path="repositories" element={<CodeScanRepositories />} />
+                <Route path="repositories/:id/settings" element={<CodeScanRepositorySettings />} />
+                <Route path="settings" element={<CodeScanSettings />} />
+                <Route path="users" element={<CodeScanUsers />} />
+                <Route path="users/:id" element={<CodeScanUserDetail />} />
+                <Route path="roles" element={<CodeScanRoles />} />
+                <Route path="teams" element={<CodeScanTeams />} />
+                <Route path="tenants" element={<CodeScanTenants />} />
               </Routes>
             </Suspense>
           } />
         ) : (
-          <Route path="/darwin" element={<Darwin />} />
+          <Route path="/codescan" element={<CodeScan />} />
         )}
 
-        {/* IceBox Vault Module - gated by license flag */}
-        {getFlag('skauswatch.icebox') && (
-          <Route path="/icebox/*" element={
+        {/* Vault Vault Module - gated by license flag */}
+        {getFlag('skauswatch.vault') && (
+          <Route path="/vault/*" element={
             <Suspense fallback={<LoadingFallback />}>
               <Routes>
-                <Route index element={<IceBoxDashboard />} />
-                <Route path="secrets" element={<IceBoxSecrets />} />
-                <Route path="jit" element={<IceBoxJitAccess />} />
-                <Route path="one-time" element={<IceBoxOneTime />} />
-                <Route path="sync" element={<IceBoxCloudSync />} />
-                <Route path="pki" element={<IceBoxPki />} />
-                <Route path="ssh" element={<IceBoxSsh />} />
-                <Route path="audit" element={<IceBoxAudit />} />
-                <Route path="settings" element={<IceBoxSettings />} />
+                <Route index element={<VaultDashboard />} />
+                <Route path="secrets" element={<VaultSecrets />} />
+                <Route path="jit" element={<VaultJitAccess />} />
+                <Route path="one-time" element={<VaultOneTime />} />
+                <Route path="sync" element={<VaultCloudSync />} />
+                <Route path="pki" element={<VaultPki />} />
+                <Route path="ssh" element={<VaultSsh />} />
+                <Route path="audit" element={<VaultAudit />} />
+                <Route path="settings" element={<VaultSettings />} />
               </Routes>
             </Suspense>
           } />

@@ -19,14 +19,14 @@ graph TB
 
     subgraph service_layer["Service Layer"]
         pki["🔐 PKI Server<br/>Port 5001<br/>Shim Proxy"]
-        ssh_ca["🔑 SSH CA<br/>Port 5002<br/>Shim Proxy"]
-        aaa["📊 AAA Monitor<br/>Port 5003<br/>FastAPI"]
+        sshca["🔑 SSH CA<br/>Port 5002<br/>Shim Proxy"]
+        aaa["📊 Monitor<br/>Port 5003<br/>FastAPI"]
     end
 
     subgraph worker_layer["Async Worker Layer"]
-        worker_s3["🔍 Worker-S3<br/>ClamAV + YARA<br/>+ TI"]
-        worker_scan["🛡️ Worker-Scanner<br/>Nuclei + ZAP<br/>+ OpenVAS"]
-        edr["🚨 EDR Agent<br/>Go 1.24<br/>DaemonSet"]
+        s3scan["🔍 S3scan<br/>ClamAV + YARA<br/>+ TI"]
+        worker_scan["🛡️ Scanner<br/>Nuclei + ZAP<br/>+ OpenVAS"]
+        endpoint["🚨 ENDPOINT Agent<br/>Go 1.24<br/>DaemonSet"]
     end
 
     subgraph data_layer["Data & Infrastructure Layer"]
@@ -39,26 +39,26 @@ graph TB
     webui -->|REST| manager
     external -->|REST/gRPC| manager
     manager -->|REST| pki
-    manager -->|REST| ssh_ca
+    manager -->|REST| sshca
     manager -->|REST| aaa
-    manager -->|gRPC| worker_s3
+    manager -->|gRPC| s3scan
     manager -->|gRPC| worker_scan
-    manager -->|K8s API| edr
+    manager -->|K8s API| endpoint
 
-    worker_s3 -->|Job Queue| redis
+    s3scan -->|Job Queue| redis
     worker_scan -->|Job Queue| redis
     manager -->|Job Dispatch| redis
     aaa -->|Event Stream| redis
 
     manager --> postgres
     pki --> postgres
-    ssh_ca --> postgres
+    sshca --> postgres
     aaa --> postgres
-    worker_s3 --> postgres
+    s3scan --> postgres
     worker_scan --> postgres
 
-    worker_s3 --> minio
-    worker_s3 --> clamav
+    s3scan --> minio
+    s3scan --> clamav
     worker_scan -->|Network Scans| external
 
     classDef client fill:#06b6d4
@@ -76,7 +76,7 @@ sequenceDiagram
     participant WebUI as WebUI<br/>Port 3000
     participant Manager as Manager<br/>Port 5000
     participant Redis as Redis<br/>Job Queue
-    participant Worker as Worker-S3
+    participant Worker as S3scan
     participant DB as PostgreSQL
     participant ClamAV as ClamAV
     participant MinIO as MinIO
@@ -109,7 +109,7 @@ sequenceDiagram
     User->>WebUI: View findings
 ```
 
-## 🔐 Certificate & SSH Lifecycle (with IceBox)
+## 🔐 Certificate & SSH Lifecycle (with Vault)
 
 ```mermaid
 sequenceDiagram
@@ -117,18 +117,18 @@ sequenceDiagram
     participant WebUI as WebUI
     participant Manager as Manager<br/>Port 5000
     participant PKIShim as PKI Server<br/>Port 5001<br/>Shim
-    participant IceBox as IceBox PKI<br/>Port 5101
+    participant Vault as Vault PKI<br/>Port 5101
     participant DB as PostgreSQL
-    participant Audit as AAA Monitor<br/>Port 5003
+    participant Audit as Monitor<br/>Port 5003
 
     User->>WebUI: Request certificate
     WebUI->>Manager: POST /api/v1/certificates
     Manager->>PKIShim: Forward request
-    PKIShim->>IceBox: 1. Check IceBox available
-    IceBox->>IceBox: Generate X.509 cert
-    IceBox->>DB: Store cert + CA chain
-    IceBox->>Audit: Log certificate issuance
-    IceBox-->>PKIShim: Return cert + key
+    PKIShim->>Vault: 1. Check Vault available
+    Vault->>Vault: Generate X.509 cert
+    Vault->>DB: Store cert + CA chain
+    Vault->>Audit: Log certificate issuance
+    Vault-->>PKIShim: Return cert + key
     PKIShim-->>Manager: Forward response
     Manager-->>WebUI: Return certificate
     WebUI-->>User: Display PEM
@@ -145,15 +145,15 @@ skauswatch:scan-jobs (stream)
 └─ job-3: {scan_id, bucket, profile, credentials}
 
 Consumer Groups:
-├─ worker-s3-group (pending delivery)
-└─ worker-s3-group (acknowledged delivery)
+├─ s3scan-group (pending delivery)
+└─ s3scan-group (acknowledged delivery)
 ```
 
 **Job lifecycle:**
 1. **Manager** publishes job: `XADD skauswatch:scan-jobs * ...`
-2. **Worker-S3** consumes: `XREADGROUP GROUP worker-s3-group $ STREAMS skauswatch:scan-jobs`
+2. **S3scan** consumes: `XREADGROUP GROUP s3scan-group $ STREAMS skauswatch:scan-jobs`
 3. Worker processes job
-4. Worker acknowledges: `XACK skauswatch:scan-jobs worker-s3-group job-id`
+4. Worker acknowledges: `XACK skauswatch:scan-jobs s3scan-group job-id`
 5. Manager polls status updates via gRPC
 
 **Why Redis Streams (not Celery/RQ):**
@@ -173,19 +173,19 @@ Flow:
 1. User provides AWS credentials via WebUI
 2. Manager encrypts using S3_CRED_ENCRYPTION_KEY
 3. Stores encrypted blob in PostgreSQL
-4. Worker-S3 decrypts on job consumption
+4. S3scan decrypts on job consumption
 5. Credentials used to authenticate S3 requests
 6. Decrypted credentials never logged
 ```
 
 ### Inter-Service Authentication
 
-**When IceBox installed:**
-- All services use X.509 certificates issued by IceBox PKI
+**When Vault installed:**
+- All services use X.509 certificates issued by Vault PKI
 - mTLS enforcement on service-to-service communication
 - Certificate validation enforced at TLS layer
 
-**When IceBox unavailable (v1.x fallback):**
+**When Vault unavailable (v1.x fallback):**
 - Services communicate over HTTP with no encryption
 - API endpoints protected by JWT tokens only
 - Recommended only for development
@@ -249,7 +249,7 @@ certificate_pem TEXT
 private_key_pem TEXT (encrypted)
 ```
 
-**audit_logs** (AAA Monitor)
+**audit_logs** (Monitor)
 ```sql
 id UUID PRIMARY KEY
 user_id UUID
@@ -282,12 +282,12 @@ valid_before TIMESTAMP
 - No session affinity required
 - Shares PostgreSQL and Redis backend
 
-**Worker-S3 & Worker-Scanner (job consumers):**
+**S3scan & Scanner (job consumers):**
 - Run N parallel instances
 - Each consumes from same Redis Stream group
 - Load automatically balanced by consumer group
 
-**EDR Agent (K8s DaemonSet):**
+**ENDPOINT Agent (K8s DaemonSet):**
 - Runs on every node
 - No scaling — one per node by design
 - Reports aggregated metrics to Manager
@@ -310,7 +310,7 @@ valid_before TIMESTAMP
 
 ## 🔗 Integration Points
 
-### IceBox Sub-Module
+### Vault Sub-Module
 
 PKI Server and SSH CA act as thin shim proxies:
 ```
@@ -318,11 +318,11 @@ Client Request
     ↓
 [PKI Server Shim - Port 5001]
     ↓
-Check: $ICEBOX_PKI_URL set?
-    ├─ Yes: Forward → IceBox Port 5101
+Check: $VAULT_PKI_URL set?
+    ├─ Yes: Forward → Vault Port 5101
     └─ No: Return 503 "Service Unavailable"
     ↓
-IceBox PKI Backend
+Vault PKI Backend
     ↓
 Response (with Deprecation headers)
 ```
@@ -333,19 +333,19 @@ Response (with Deprecation headers)
 - Proxy all request/response bodies unchanged
 - Log all requests for audit trail
 
-**Future (v2.0):** Shims removed, clients use IceBox directly
+**Future (v2.0):** Shims removed, clients use Vault directly
 
-### Darwin Sub-Module
+### CodeScan Sub-Module
 
-Darwin worker integrates via webhook:
+CodeScan worker integrates via webhook:
 ```
 GitHub/GitLab
     ↓ webhook
 Manager (webhook receiver)
     ↓
-[Darwin Worker Job]
+[CodeScan Worker Job]
     ↓
-Worker-Darwin (subprocess)
+Worker-CodeScan (subprocess)
     ↓
 AI Provider (Claude/OpenAI/Ollama)
     ↓
@@ -376,7 +376,7 @@ PyDAL abstracts SQL generation, allowing:
 - Built-in input sanitization (SQL injection prevention)
 - Simple syntax: `db(db.users.id == 5).select()`
 
-### Why Go for EDR Agent?
+### Why Go for ENDPOINT Agent?
 
 Go provides:
 - Minimal runtime footprint (single binary)
@@ -392,13 +392,13 @@ Go provides:
 | Get scan status | <5ms | 1000 req/sec | Direct DB query |
 | S3 scan (1GB) | 30-60s | 1 scan at a time | ClamAV + YARA sequential |
 | Vulnerability scan | 5-120s | Depends on target | Nuclei (fast), ZAP (medium), OpenVAS (slow) |
-| Certificate issue | <50ms | 100 cert/sec | IceBox PKI backend |
+| Certificate issue | <50ms | 100 cert/sec | Vault PKI backend |
 | Audit log write | <10ms | 1000 log/sec | Async Redis + DB |
 
 ## 🔮 Future Architecture (v2.0)
 
 Planned changes:
-- Remove PKI/SSH CA shim proxies (clients use IceBox directly)
+- Remove PKI/SSH CA shim proxies (clients use Vault directly)
 - Replace Quart with native async Flask alternative (if available)
 - Add horizontal scaling for PostgreSQL (read replicas + sharding)
 - Introduce service mesh (Istio) for mTLS and observability

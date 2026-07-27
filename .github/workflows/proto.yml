@@ -1,7 +1,7 @@
 name: Proto Wire-Compat
 
 # Gate: any change to proto/ must remain wire/JSON/source compatible with
-# the committed baseline snapshot (proto/baseline/ == what fielded v1 Go EDR
+# the committed baseline snapshot (proto/baseline/ == what fielded v1 Go ENDPOINT
 # agents compiled against). See proto/baseline/README.md.
 #
 # No third-party actions (same philosophy as rust.yml) — buf runs via the

@@ -23,44 +23,44 @@ services:
       - ./services/manager:/app
 
   # PKI Server - development mode with hot reload
-  pki-server:
+  pki:
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=true
     volumes:
-      - ./services/pki-server-new:/app
+      - ./services/pki:/app
 
   # SSH CA - development mode with hot reload
-  ssh-ca:
+  sshca:
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=true
     volumes:
-      - ./services/ssh-ca:/app
+      - ./services/sshca:/app
 
-  # AAA Monitor - development mode with hot reload
-  aaa-monitor:
+  # Monitor - development mode with hot reload
+  monitor:
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=true
     volumes:
-      - ./services/aaa-monitor:/app
+      - ./services/monitor:/app
 
   # Worker S3 - development mode with hot reload
-  worker-s3:
+  s3scan:
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=true
     volumes:
-      - ./services/worker-s3:/app
+      - ./services/s3scan:/app
 
   # Worker Scanner - development mode with hot reload
-  worker-scanner:
+  scanner:
     environment:
       - FLASK_DEBUG=1
       - CELERY_ALWAYS_EAGER=true
     volumes:
-      - ./services/worker-scanner:/app
+      - ./services/scanner:/app
 
   # WebUI - development mode with hot reload
   webui:
@@ -73,9 +73,9 @@ services:
       - ./services/webui:/app
       - ./services/webui/node_modules:/app/node_modules
 
-  # EDR Agent - development mode with debug logging
-  edr-agent:
+  # ENDPOINT Agent - development mode with debug logging
+  endpoint-agent:
     environment:
       - LOG_LEVEL=debug
     volumes:
-      - ./services/edr-agent:/app
+      - ./services/endpoint-agent:/app

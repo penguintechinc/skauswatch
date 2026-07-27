@@ -39,27 +39,27 @@ impl AuthSettings {
     }
 }
 
-/// v1 `config.edr.api_secret` default — kept only as a value to reject, not
-/// as a fallback (see `validate_edr_secret_for_production`).
-const EDR_DEFAULT_SECRET: &str = "change-me-edr-secret";
+/// v1 `config.endpoint.api_secret` default — kept only as a value to reject, not
+/// as a fallback (see `validate_endpoint_secret_for_production`).
+const ENDPOINT_DEFAULT_SECRET: &str = "change-me-endpoint-secret";
 
 /// Pure fail-fast predicate: is `secret` acceptable for production use?
 /// Rejects blank values and the well-known v1 default.
-fn edr_secret_is_valid_for_production(secret: &str) -> bool {
+fn endpoint_secret_is_valid_for_production(secret: &str) -> bool {
     let trimmed = secret.trim();
-    !trimmed.is_empty() && trimmed != EDR_DEFAULT_SECRET
+    !trimmed.is_empty() && trimmed != ENDPOINT_DEFAULT_SECRET
 }
 
-/// FAILS STARTUP in production when `EDR_API_SECRET` is unset, empty, or
-/// still the well-known `change-me-edr-secret` default — running with any of
-/// those lets anyone forge the EDR agent HMAC. Non-production is
-/// unrestricted (routes/edr.rs reads the secret fresh per request and fails
+/// FAILS STARTUP in production when `ENDPOINT_API_SECRET` is unset, empty, or
+/// still the well-known `change-me-endpoint-secret` default — running with any of
+/// those lets anyone forge the ENDPOINT agent HMAC. Non-production is
+/// unrestricted (routes/endpoint.rs reads the secret fresh per request and fails
 /// closed against an empty value rather than falling back to the default).
-fn validate_edr_secret_for_production(secret: &str) -> anyhow::Result<()> {
-    if skauswatch_auth::is_production() && !edr_secret_is_valid_for_production(secret) {
+fn validate_endpoint_secret_for_production(secret: &str) -> anyhow::Result<()> {
+    if skauswatch_auth::is_production() && !endpoint_secret_is_valid_for_production(secret) {
         anyhow::bail!(
-            "EDR_API_SECRET must be set to a real secret (not empty, not the default \
-             \"{EDR_DEFAULT_SECRET}\") in production (RELEASE_MODE != \"false\")"
+            "ENDPOINT_API_SECRET must be set to a real secret (not empty, not the default \
+             \"{ENDPOINT_DEFAULT_SECRET}\") in production (RELEASE_MODE != \"false\")"
         );
     }
     Ok(())
@@ -85,12 +85,14 @@ pub type AppState = Arc<AppStateInner>;
 impl AppStateInner {
     /// Builds state from environment configuration. DB connects with
     /// retry/backoff; license client degrades to cached/community. Fails
-    /// fast (before any network I/O) if `JWT_SECRET_KEY`/`EDR_API_SECRET`
+    /// fast (before any network I/O) if `JWT_SECRET_KEY`/`ENDPOINT_API_SECRET`
     /// are missing/default in production — see `AuthSettings::from_env` and
-    /// `validate_edr_secret_for_production`.
+    /// `validate_endpoint_secret_for_production`.
     pub async fn from_env() -> anyhow::Result<AppState> {
         let auth = AuthSettings::from_env()?;
-        validate_edr_secret_for_production(&std::env::var("EDR_API_SECRET").unwrap_or_default())?;
+        validate_endpoint_secret_for_production(
+            &std::env::var("ENDPOINT_API_SECRET").unwrap_or_default(),
+        )?;
 
         let cfg = LicenseConfig::from_env("skauswatch")
             .map_err(|e| anyhow::anyhow!("license config: {e}"))?
@@ -165,27 +167,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn edr_secret_rejects_blank_and_default() {
-        assert!(!edr_secret_is_valid_for_production(""));
-        assert!(!edr_secret_is_valid_for_production("   "));
-        assert!(!edr_secret_is_valid_for_production(EDR_DEFAULT_SECRET));
-        assert!(!edr_secret_is_valid_for_production(&format!(
-            "  {EDR_DEFAULT_SECRET}  "
+    fn endpoint_secret_rejects_blank_and_default() {
+        assert!(!endpoint_secret_is_valid_for_production(""));
+        assert!(!endpoint_secret_is_valid_for_production("   "));
+        assert!(!endpoint_secret_is_valid_for_production(
+            ENDPOINT_DEFAULT_SECRET
+        ));
+        assert!(!endpoint_secret_is_valid_for_production(&format!(
+            "  {ENDPOINT_DEFAULT_SECRET}  "
         )));
     }
 
     #[test]
-    fn edr_secret_accepts_a_real_value() {
-        assert!(edr_secret_is_valid_for_production("a-real-random-secret"));
+    fn endpoint_secret_accepts_a_real_value() {
+        assert!(endpoint_secret_is_valid_for_production(
+            "a-real-random-secret"
+        ));
     }
 
     #[test]
-    fn validate_edr_secret_only_enforced_when_production() {
+    fn validate_endpoint_secret_only_enforced_when_production() {
         // This test process's ambient RELEASE_MODE is out of our control
         // (see the skauswatch-auth `resolve_required_secret`/
         // `release_mode_is_production` unit tests for the pure logic, which
         // doesn't require mutating global env state); this test only
         // exercises that a valid secret is *always* accepted regardless.
-        assert!(validate_edr_secret_for_production("a-real-random-secret").is_ok());
+        assert!(validate_endpoint_secret_for_production("a-real-random-secret").is_ok());
     }
 }

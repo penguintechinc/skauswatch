@@ -121,7 +121,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        service: [manager, pki-server-new, ssh-ca, aaa-monitor, worker-s3, worker-scanner, webui, edr-agent]
+        service: [manager, pki, sshca, monitor, s3scan, scanner, webui, endpoint-agent]
         platform: [linux/amd64, linux/arm64]
 
     steps:

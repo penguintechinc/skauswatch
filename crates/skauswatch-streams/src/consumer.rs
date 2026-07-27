@@ -1,6 +1,6 @@
 //! Consumer-group worker harness — the reusable half of the Celery
-//! replacement, landing with the first worker port (worker-s3) and reused by
-//! worker-scanner / worker-darwin. Wraps a fred client with the full
+//! replacement, landing with the first worker port (s3scan) and reused by
+//! scanner / worker-codescan. Wraps a fred client with the full
 //! at-least-once delivery lifecycle a v1 Celery worker had: consumer-group
 //! reads (`XREADGROUP`), per-message ack (`XACK`), stale-message recovery
 //! (`XAUTOCLAIM`), bounded retries, a dead-letter queue after N failed

@@ -156,39 +156,39 @@ spire:
     # Known SkausWatch + PenguinCloud services registered on post-install.
     # Best-effort — entries skipped silently if namespace/SA absent.
     services:
-      - name: aaa-monitor
+      - name: monitor
         namespace: skauswatch
-        serviceAccount: aaa-monitor
-      - name: edr-agent
+        serviceAccount: monitor
+      - name: endpoint-agent
         namespace: skauswatch
-        serviceAccount: edr-agent
+        serviceAccount: endpoint-agent
       - name: manager
         namespace: skauswatch
         serviceAccount: manager
-      - name: pki-server
+      - name: pki
         namespace: skauswatch
-        serviceAccount: pki-server
-      - name: ssh-ca
+        serviceAccount: pki
+      - name: sshca
         namespace: skauswatch
-        serviceAccount: ssh-ca
+        serviceAccount: sshca
       - name: webui
         namespace: skauswatch
         serviceAccount: webui
-      - name: worker-darwin
+      - name: worker-codescan
         namespace: skauswatch
-        serviceAccount: worker-darwin
-      - name: worker-s3
+        serviceAccount: worker-codescan
+      - name: s3scan
         namespace: skauswatch
-        serviceAccount: worker-s3
-      - name: worker-scanner
+        serviceAccount: s3scan
+      - name: scanner
         namespace: skauswatch
-        serviceAccount: worker-scanner
+        serviceAccount: scanner
       - name: flask-backend
         namespace: skauswatch
         serviceAccount: flask-backend
-      - name: log-receiver
+      - name: logs
         namespace: skauswatch
-        serviceAccount: log-receiver
+        serviceAccount: logs
     # Cross-suite PenguinCloud services — enrolled only if namespace exists
     suiteServices:
       - name: nest-api

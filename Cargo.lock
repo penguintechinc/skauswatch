@@ -5147,34 +5147,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
-name = "skauswatch-aaa-monitor"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "axum-test",
- "chrono",
- "clap",
- "futures",
- "jsonwebtoken",
- "penguin-licensing",
- "reqwest",
- "serde",
- "serde_json",
- "skauswatch-auth",
- "skauswatch-common",
- "skauswatch-telemetry",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tower-http 0.7.0",
- "tracing",
- "uuid",
- "wiremock",
-]
-
-[[package]]
 name = "skauswatch-ai"
 version = "2.0.0"
 dependencies = [
@@ -5201,17 +5173,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "skauswatch-common"
-version = "2.0.0"
-dependencies = [
- "figment",
- "serde",
- "thiserror 2.0.18",
- "url",
-]
-
-[[package]]
-name = "skauswatch-darwin-backend"
+name = "skauswatch-codescan-backend"
 version = "2.0.0"
 dependencies = [
  "aes-gcm",
@@ -5237,6 +5199,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "skauswatch-common"
+version = "2.0.0"
+dependencies = [
+ "figment",
+ "serde",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
 name = "skauswatch-db"
 version = "2.0.0"
 dependencies = [
@@ -5249,7 +5221,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "skauswatch-edr-agent"
+name = "skauswatch-endpoint-agent"
 version = "2.0.0"
 dependencies = [
  "chrono",
@@ -5273,44 +5245,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "skauswatch-icebox"
-version = "2.0.0"
-dependencies = [
- "aes-gcm",
- "base64",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "skauswatch-icebox-service"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "axum",
- "axum-test",
- "base64",
- "chrono",
- "clap",
- "jsonwebtoken",
- "penguin-licensing",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "skauswatch-db",
- "skauswatch-icebox",
- "skauswatch-streams",
- "skauswatch-telemetry",
- "sqlx",
- "tokio",
- "tower",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "skauswatch-log-receiver"
+name = "skauswatch-logs"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -5369,7 +5304,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "skauswatch-pki-server"
+name = "skauswatch-monitor"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "axum-test",
+ "chrono",
+ "clap",
+ "futures",
+ "jsonwebtoken",
+ "penguin-licensing",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "skauswatch-auth",
+ "skauswatch-common",
+ "skauswatch-telemetry",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tower-http 0.7.0",
+ "tracing",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "skauswatch-pki"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -5425,7 +5388,69 @@ dependencies = [
 ]
 
 [[package]]
-name = "skauswatch-ssh-ca"
+name = "skauswatch-s3scan"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "axum",
+ "chrono",
+ "clap",
+ "fred",
+ "infer",
+ "md-5 0.11.0",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "skauswatch-common",
+ "skauswatch-db",
+ "skauswatch-streams",
+ "skauswatch-telemetry",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "skauswatch-scanner"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "bytes",
+ "chrono",
+ "clap",
+ "fred",
+ "futures",
+ "glob",
+ "metrics",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "skauswatch-common",
+ "skauswatch-db",
+ "skauswatch-streams",
+ "skauswatch-telemetry",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tower-http 0.7.0",
+ "tracing",
+ "uuid",
+ "yara-x",
+]
+
+[[package]]
+name = "skauswatch-sshca"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -5478,7 +5503,44 @@ dependencies = [
 ]
 
 [[package]]
-name = "skauswatch-worker-darwin"
+name = "skauswatch-vault"
+version = "2.0.0"
+dependencies = [
+ "aes-gcm",
+ "base64",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "skauswatch-vault-service"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-test",
+ "base64",
+ "chrono",
+ "clap",
+ "jsonwebtoken",
+ "penguin-licensing",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "skauswatch-db",
+ "skauswatch-streams",
+ "skauswatch-telemetry",
+ "skauswatch-vault",
+ "sqlx",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "skauswatch-worker-codescan"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -5504,7 +5566,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "skauswatch-worker-icebox-sync"
+name = "skauswatch-worker-vault-sync"
 version = "2.0.0"
 dependencies = [
  "anyhow",
@@ -5517,75 +5579,13 @@ dependencies = [
  "reqwest",
  "serde_json",
  "skauswatch-db",
- "skauswatch-icebox",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-vault",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "skauswatch-worker-s3"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "aws-config",
- "aws-sdk-s3",
- "axum",
- "chrono",
- "clap",
- "fred",
- "infer",
- "md-5 0.11.0",
- "reqwest",
- "serde",
- "serde_json",
- "sha1 0.10.7",
- "sha2 0.10.9",
- "skauswatch-common",
- "skauswatch-db",
- "skauswatch-streams",
- "skauswatch-telemetry",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "skauswatch-worker-scanner"
-version = "2.0.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "bytes",
- "chrono",
- "clap",
- "fred",
- "futures",
- "glob",
- "metrics",
- "reqwest",
- "serde",
- "serde_json",
- "skauswatch-common",
- "skauswatch-db",
- "skauswatch-streams",
- "skauswatch-telemetry",
- "sqlx",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tower",
- "tower-http 0.7.0",
- "tracing",
- "uuid",
- "yara-x",
 ]
 
 [[package]]

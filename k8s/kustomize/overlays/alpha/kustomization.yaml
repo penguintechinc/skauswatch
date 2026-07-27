@@ -32,48 +32,48 @@ images:
 - name: registry-dal2.penguintech.io/skauswatch/manager
   newName: localhost:32000/skauswatch-manager
   newTag: latest
-- name: registry-dal2.penguintech.io/skauswatch/pki-server
-  newName: localhost:32000/skauswatch-pki-server
+- name: registry-dal2.penguintech.io/skauswatch/pki
+  newName: localhost:32000/skauswatch-pki
   newTag: latest
-- name: registry-dal2.penguintech.io/skauswatch/ssh-ca
-  newName: localhost:32000/skauswatch-ssh-ca
+- name: registry-dal2.penguintech.io/skauswatch/sshca
+  newName: localhost:32000/skauswatch-sshca
   newTag: latest
-- name: registry-dal2.penguintech.io/skauswatch/aaa-monitor
-  newName: localhost:32000/skauswatch-aaa-monitor
+- name: registry-dal2.penguintech.io/skauswatch/monitor
+  newName: localhost:32000/skauswatch-monitor
   newTag: latest
-- name: registry-dal2.penguintech.io/skauswatch/worker-s3
-  newName: localhost:32000/skauswatch-worker-s3
+- name: registry-dal2.penguintech.io/skauswatch/s3scan
+  newName: localhost:32000/skauswatch-s3scan
   newTag: latest
-- name: ghcr.io/penguintechinc/skauswatch-worker-scanner
-  newName: localhost:32000/skauswatch-worker-scanner
+- name: ghcr.io/penguintechinc/skauswatch-scanner
+  newName: localhost:32000/skauswatch-scanner
   newTag: latest
-- name: ghcr.io/penguintechinc/skauswatch-worker-darwin
-  newName: localhost:32000/skauswatch-worker-darwin
+- name: ghcr.io/penguintechinc/skauswatch-worker-codescan
+  newName: localhost:32000/skauswatch-worker-codescan
   newTag: latest
 - name: ghcr.io/penguintechinc/skauswatch-webui
   newName: localhost:32000/skauswatch-webui
   newTag: latest
-- name: ghcr.io/penguintechinc/skauswatch-edr-agent
-  newName: localhost:32000/skauswatch-edr-agent
+- name: ghcr.io/penguintechinc/skauswatch-endpoint-agent
+  newName: localhost:32000/skauswatch-endpoint-agent
   newTag: latest
 
 
 replicas:
 - name: manager
   count: 1
-- name: pki-server
+- name: pki
   count: 1
-- name: ssh-ca
+- name: sshca
   count: 1
-- name: aaa-monitor
+- name: monitor
   count: 1
-- name: worker-s3
+- name: s3scan
   count: 1
-- name: worker-scanner
+- name: scanner
   count: 1
-- name: worker-darwin
+- name: worker-codescan
   count: 1
-- name: worker-darwin-celery
+- name: worker-codescan-celery
   count: 1
 - name: webui
   count: 1
@@ -89,9 +89,9 @@ configMapGenerator:
   - DB_HOST=alpha-postgres.skauswatch.svc.cluster.local
   - REDIS_HOST=alpha-redis.skauswatch.svc.cluster.local
   - MANAGER_URL=http://alpha-manager.skauswatch.svc.cluster.local:5000
-  # IceBox shim env vars — pki-server and ssh-ca now proxy to IceBox services
-  - ICEBOX_PKI_URL=http://icebox-pki-server.icebox.svc.cluster.local:8081
-  - ICEBOX_SSH_CA_URL=http://icebox-ssh-ca.icebox.svc.cluster.local:8082
+  # Vault shim env vars — pki and sshca now proxy to Vault services
+  - VAULT_PKI_URL=http://vault-pki.vault.svc.cluster.local:8081
+  - VAULT_SSHCA_URL=http://vault-sshca.vault.svc.cluster.local:8082
 
 secretGenerator:
 - name: skauswatch-secrets
@@ -103,15 +103,15 @@ secretGenerator:
   - SECURITY_PASSWORD_SALT=alphasalt
   - LICENSE_KEY=PENG-ALPHA-XXXX-XXXX-XXXX-ABCD
   - REDIS_PASSWORD=alpharedis
-  - EDR_API_KEY=alpha-edr-dev-key-2024
+  - ENDPOINT_API_KEY=alpha-endpoint-dev-key-2024
   - DATABASE_URL=postgresql://alphauser:alphapass@alpha-postgres.skauswatch.svc.cluster.local:5432/skauswatch
   - REDIS_URL=redis://default:alpharedis@alpha-redis.skauswatch.svc.cluster.local:6379/0
   - CELERY_BROKER_URL=redis://default:alpharedis@alpha-redis.skauswatch.svc.cluster.local:6379/1
-- name: skauswatch-darwin-secrets
+- name: skauswatch-codescan-secrets
   behavior: merge
   literals:
-  - DARWIN_DB_USER=darwin
-  - DARWIN_DB_PASS=alphadarwinpass
-  - DARWIN_CELERY_BROKER_URL=redis://:alpharedis@redis:6379/2
+  - CODESCAN_DB_USER=codescan
+  - CODESCAN_DB_PASS=alphacodescanpass
+  - CODESCAN_CELERY_BROKER_URL=redis://:alpharedis@redis:6379/2
   - ANTHROPIC_API_KEY=
   - OPENAI_API_KEY=

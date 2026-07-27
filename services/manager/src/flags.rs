@@ -4,7 +4,7 @@
 //! docs/feature-flags.md.
 
 /// Module gates — licensed sub-products.
-pub const MODULE_FLAGS: &[&str] = &["skauswatch.icebox", "skauswatch.darwin"];
+pub const MODULE_FLAGS: &[&str] = &["skauswatch.vault", "skauswatch.codescan"];
 
 /// Core feature-area flags, one per /api/v1 router / worker job family.
 pub const CORE_FLAGS: &[&str] = &[
@@ -14,10 +14,10 @@ pub const CORE_FLAGS: &[&str] = &[
     "skauswatch.alerts",
     "skauswatch.approvals",
     "skauswatch.asm",
-    "skauswatch.edr",
+    "skauswatch.endpoint",
     "skauswatch.research",
     "skauswatch.ai-review",
-    "skauswatch.aaa-monitor",
+    "skauswatch.monitor",
     "skauswatch.log-ingest",
     "skauswatch.pki",
 ];

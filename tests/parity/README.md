@@ -29,25 +29,27 @@ both sides must start from the seeded snapshot to stay in lockstep.
 |--------------|------|
 | `parity-pg`  | postgres:17-bookworm, two identically seeded databases (`skauswatch_v1`, `skauswatch_v2`) |
 | `parity-redis` | valkey/valkey:8-bookworm; v1 uses DB index 0, v2 uses DB index 1 |
-| `parity-stub`  | one shared deterministic echo upstream (`stub_upstream.py`) standing in for worker-scanner (ASM), worker-darwin, log-receiver (SIEM), and the S3 endpoint for bucket tests. Both managers proxy to the same stub so forwarded method/path/query/body parity is directly observable |
+| `parity-stub`  | one shared deterministic echo upstream (`stub_upstream.py`) standing in for scanner (ASM), worker-codescan, logs (SIEM), and the S3 endpoint for bucket tests. Both managers proxy to the same stub so forwarded method/path/query/body parity is directly observable |
 | `parity-v1`  | python:3.13-slim-bookworm, pip-installs the v1 snapshot's `requirements.txt` (hash-verified), runs `main.py` on :5000 → host :15001. `GRPC_ENABLED=false` |
 | `parity-v2`  | debug binary built via rust:1.97-slim-bookworm (cargo cache in the session scratchpad), runs on :5000 → host :15002. `GRPC_ENABLED=false` |
 
-Both managers get the same `JWT_SECRET_KEY` and `EDR_API_SECRET`, so JWTs
-and EDR HMAC keys are cross-valid; each gets its **own identical database**
-and its own Redis DB index. OpenSearch is intentionally absent (both sides
-must fail identically on SIEM search/stats).
+Both managers get the same `JWT_SECRET_KEY` and the same HMAC secret value —
+v1 as `EDR_API_SECRET` (its pre-rename name), v2 as `ENDPOINT_API_SECRET`
+(see docs/MIGRATION.md) — so JWTs and endpoint-agent HMAC keys are
+cross-valid; each gets its **own identical database** and its own Redis DB
+index. OpenSearch is intentionally absent (both sides must fail identically
+on SIEM search/stats).
 
 ## Licensing posture (important)
 
 `RELEASE_MODE` is unset for v2 → penguin-licensing dev mode → every
-feature/flag gate evaluates **enabled** (darwin gate open). v1's
+feature/flag gate evaluates **enabled** (codescan gate open). v1's
 penguin-licensing 0.1.0 has **no `has_feature` method** — every v1 license
-check takes its exception path: darwin fails **open** (allowed, matching
+check takes its exception path: codescan fails **open** (allowed, matching
 v2), the users free-tier cap fails **closed** (`has_premium = False`).
 Consequently:
 
-- The darwin router is comparable (both sides open).
+- The codescan router is comparable (both sides open).
 - The free-tier user-cap path (5+ users) is **not comparable** under this
   posture (v1 would cap, v2's dev bypass would not); the corpus therefore
   keeps the user count under 5 whenever `POST /api/v1/users` runs. The cap
@@ -55,15 +57,19 @@ Consequently:
 
 ## Seed data
 
-`seed.sql` creates the contract's 13-table schema (derived from
-`release/v1.0.x:services/manager/models/db.py`, the authoritative source) and seeds 3–4
-deterministic rows per feature: users for each role (admin/maintainer/
-viewer + one deactivated; password `Password123!` for all), IOCs (incl. one
-expired), alerts, approvals (incl. approved + expired), EDR agents/events,
-S3 buckets/jobs/results/adhoc results/schedule. All IDs are explicit with
-sequences reset (`setval`) so rows created during replay get identical IDs
-on both sides. All seeded timestamps are fixed literals so deterministic
-fields byte-compare.
+`seed_v1.sql`/`seed_v2.sql` create the contract's 13-table schema (derived
+from `release/v1.0.x:services/manager/models/db.py`, the authoritative
+source) and seed 3–4 deterministic rows per feature: users for each role
+(admin/maintainer/viewer + one deactivated; password `Password123!` for
+all), IOCs (incl. one expired), alerts, approvals (incl. approved +
+expired), endpoint agents/events, S3 buckets/jobs/results/adhoc
+results/schedule. The two files are row-for-row identical except the
+endpoint-agent tables: `seed_v1.sql` keeps the pre-rename
+`edr_agents`/`edr_events` names the frozen v1 queries expect, `seed_v2.sql`
+uses the renamed `endpoint_agents`/`endpoint_events` (see
+docs/MIGRATION.md). All IDs are explicit with sequences reset (`setval`) so
+rows created during replay get identical IDs on both sides. All seeded
+timestamps are fixed literals so deterministic fields byte-compare.
 
 v1's startup `create_all()` is idempotent by table name and leaves the
 pre-created schema untouched.
@@ -138,14 +144,14 @@ run. Rationale per family:
   leak pydantic internals); v2 emits the same envelope
   `{error: "Validation error", details: [...]}` with simplified
   `{loc,msg,type}` entries. The allowlist excuses only the `details`
-  payload (and EDR batch `errors[].error` strings) — the 400/202 status
+  payload (and ENDPOINT batch `errors[].error` strings) — the 400/202 status
   and envelope keys must still match.
 
 ## Coverage notes / honest gaps
 
 - corpus: 282 cases across the 11 routers + root health endpoints
   (happy path, auth failure, validation failure, role gates, filters,
-  pagination, EDR HMAC positive/negative, proxy forwarding).
+  pagination, ENDPOINT HMAC positive/negative, proxy forwarding).
 - gRPC surface is out of scope here (covered by `grpc` module tests).
 - The free-tier user cap and SSO-402 paths are not comparable under the
   dev licensing posture (see above).

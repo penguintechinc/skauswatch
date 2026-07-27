@@ -1,5 +1,5 @@
-//! /api/v1/asm — pure authenticated proxy to the worker-scanner ASM API
-//! (`WORKER_SCANNER_URL`, default `http://worker-scanner:5001`). Contract:
+//! /api/v1/asm — pure authenticated proxy to the scanner ASM API
+//! (`SCANNER_URL`, default `http://scanner:5001`). Contract:
 //! docs/v2-port/manager-contract.md §asm; Python source of truth:
 //! services/manager/api/v1/asm.py.
 
@@ -16,9 +16,9 @@ use crate::auth::CurrentUser;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// v1 upstream default when `WORKER_SCANNER_URL` is unset.
-const DEFAULT_SCANNER_URL: &str = "http://worker-scanner:5001";
-/// v1 httpx client timeout for worker-scanner calls (`timeout=120.0`).
+/// v1 upstream default when `SCANNER_URL` is unset.
+const DEFAULT_SCANNER_URL: &str = "http://scanner:5001";
+/// v1 httpx client timeout for scanner calls (`timeout=120.0`).
 const SCANNER_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Router for /api/v1/asm.
@@ -40,10 +40,10 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-/// Resolves `{WORKER_SCANNER_URL}/api/v1/asm` — same env var and default as
+/// Resolves `{SCANNER_URL}/api/v1/asm` — same env var and default as
 /// the v1 module-level constant, read per request (house pattern: siem.rs).
 fn scanner_base() -> String {
-    scanner_base_from(std::env::var("WORKER_SCANNER_URL").ok().as_deref())
+    scanner_base_from(std::env::var("SCANNER_URL").ok().as_deref())
 }
 
 /// Pure form of [`scanner_base`] for tests.
@@ -77,7 +77,7 @@ fn upstream_error(e: &reqwest::Error) -> (StatusCode, serde_json::Value) {
     } else if e.is_connect() {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            serde_json::json!({"error": "Cannot connect to worker-scanner"}),
+            serde_json::json!({"error": "Cannot connect to scanner"}),
         )
     } else {
         (
@@ -87,7 +87,7 @@ fn upstream_error(e: &reqwest::Error) -> (StatusCode, serde_json::Value) {
     }
 }
 
-/// Forwards one request to the worker-scanner ASM API, mapping the outcome
+/// Forwards one request to the scanner ASM API, mapping the outcome
 /// to the v1 wire shapes: upstream JSON (non-JSON bodies become
 /// `{"raw": text}`) with the upstream status code, or the
 /// [`upstream_error`] envelopes on transport failure.
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             body,
-            serde_json::json!({"error": "Cannot connect to worker-scanner"})
+            serde_json::json!({"error": "Cannot connect to scanner"})
         );
     }
 
@@ -697,10 +697,7 @@ mod tests {
 
     #[test]
     fn scanner_base_uses_env_or_v1_default() {
-        assert_eq!(
-            scanner_base_from(None),
-            "http://worker-scanner:5001/api/v1/asm"
-        );
+        assert_eq!(scanner_base_from(None), "http://scanner:5001/api/v1/asm");
         assert_eq!(
             scanner_base_from(Some("http://localhost:9999")),
             "http://localhost:9999/api/v1/asm"

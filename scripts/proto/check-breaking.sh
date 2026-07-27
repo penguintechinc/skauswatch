@@ -2,7 +2,7 @@
 # check-breaking.sh — local mirror of .github/workflows/proto.yml.
 #
 # Runs `buf breaking` of the live proto/ tree against the committed
-# wire-compat baseline (proto/baseline/, what fielded v1 EDR agents compiled
+# wire-compat baseline (proto/baseline/, what fielded v1 ENDPOINT agents compiled
 # against), then `buf lint`. Uses the exact same pinned bufbuild/buf docker
 # image as CI. Bash 3.2 compatible (macOS default shell).
 #

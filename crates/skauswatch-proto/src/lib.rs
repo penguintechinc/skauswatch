@@ -3,7 +3,7 @@
 //!
 //! WIRE-COMPAT POLICY: proto **package names stay unchanged**
 //! (`skauswatch.manager`, `skauswatch.s3scan`, `skauswatch.pki`) — the
-//! package is part of the gRPC method path and fielded v1 EDR agents must
+//! package is part of the gRPC method path and fielded v1 ENDPOINT agents must
 //! keep working against the v2 manager. A `buf breaking` CI gate guards
 //! these contracts.
 //!

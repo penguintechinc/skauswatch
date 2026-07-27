@@ -14,7 +14,7 @@ DOCKER_ORG := penguintechinc
 PYTHON_VERSION := 3.13
 
 # Service directories
-SERVICES := services/manager-new services/pki-server-new services/ssh-ca services/aaa-monitor services/worker-s3 services/worker-scanner services/webui services/edr-agent
+SERVICES := services/manager-new services/pki services/sshca services/monitor services/s3scan services/scanner services/webui services/endpoint-agent
 
 # Colors for output
 RED := \033[31m
@@ -149,45 +149,45 @@ build: ## Build - Validate all Python services compile cleanly
 build-python: ## Build - Syntax-check all Python services
 	@echo "$(BLUE)Checking Python services...$(RESET)"
 	@python3 -m compileall services/manager-new || true
-	@python3 -m compileall services/pki-server-new || true
-	@python3 -m compileall services/ssh-ca || true
-	@python3 -m compileall services/aaa-monitor || true
-	@python3 -m compileall services/worker-s3 || true
-	@python3 -m compileall services/worker-scanner || true
+	@python3 -m compileall services/pki || true
+	@python3 -m compileall services/sshca || true
+	@python3 -m compileall services/monitor || true
+	@python3 -m compileall services/s3scan || true
+	@python3 -m compileall services/scanner || true
 	@python3 -m compileall services/webui || true
-	@python3 -m compileall services/edr-agent || true
+	@python3 -m compileall services/endpoint-agent || true
 
 # Docker Commands
 docker-build: ## Docker - Build all SkausWatch service images
 	@echo "$(BLUE)Building Docker images...$(RESET)"
 	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-manager:$(VERSION) \
 		-f services/manager-new/Dockerfile services/manager-new/
-	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-pki-server:$(VERSION) \
-		-f services/pki-server-new/Dockerfile services/pki-server-new/
-	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-ssh-ca:$(VERSION) \
-		-f services/ssh-ca/Dockerfile services/ssh-ca/
-	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-aaa-monitor:$(VERSION) \
-		-f services/aaa-monitor/Dockerfile services/aaa-monitor/
-	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-worker-s3:$(VERSION) \
-		-f services/worker-s3/Dockerfile services/worker-s3/
-	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-worker-scanner:$(VERSION) \
-		-f services/worker-scanner/Dockerfile services/worker-scanner/
+	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-pki:$(VERSION) \
+		-f services/pki/Dockerfile services/pki/
+	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-sshca:$(VERSION) \
+		-f services/sshca/Dockerfile services/sshca/
+	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-monitor:$(VERSION) \
+		-f services/monitor/Dockerfile services/monitor/
+	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-s3scan:$(VERSION) \
+		-f services/s3scan/Dockerfile services/s3scan/
+	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-scanner:$(VERSION) \
+		-f services/scanner/Dockerfile services/scanner/
 	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-webui:$(VERSION) \
 		-f services/webui/Dockerfile services/webui/
-	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-edr-agent:$(VERSION) \
-		-f services/edr-agent/Dockerfile services/edr-agent/
+	@docker build -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-endpoint-agent:$(VERSION) \
+		-f services/endpoint-agent/Dockerfile services/endpoint-agent/
 	@echo "$(GREEN)All images built!$(RESET)"
 
 docker-push: ## Docker - Push all service images to registry
 	@echo "$(BLUE)Pushing Docker images...$(RESET)"
 	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-manager:$(VERSION)
-	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-pki-server:$(VERSION)
-	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-ssh-ca:$(VERSION)
-	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-aaa-monitor:$(VERSION)
-	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-worker-s3:$(VERSION)
-	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-worker-scanner:$(VERSION)
+	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-pki:$(VERSION)
+	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-sshca:$(VERSION)
+	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-monitor:$(VERSION)
+	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-s3scan:$(VERSION)
+	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-scanner:$(VERSION)
 	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-webui:$(VERSION)
-	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-edr-agent:$(VERSION)
+	@docker push $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(PROJECT_NAME)-endpoint-agent:$(VERSION)
 
 docker-run: ## Docker - Run application with Docker Compose
 	@docker-compose up --build
@@ -284,10 +284,10 @@ deploy-prod: ## Deploy - Deploy to production environment
 health: ## Health - Check all service health endpoints
 	@echo "$(BLUE)Checking service health...$(RESET)"
 	@curl -sf http://localhost:5000/health && echo "$(GREEN)manager: OK$(RESET)" || echo "$(RED)manager (5000): FAILED$(RESET)"
-	@curl -sf http://localhost:5001/health && echo "$(GREEN)pki-server: OK$(RESET)" || echo "$(RED)pki-server (5001): FAILED$(RESET)"
-	@curl -sf http://localhost:5002/health && echo "$(GREEN)ssh-ca: OK$(RESET)" || echo "$(RED)ssh-ca (5002): FAILED$(RESET)"
-	@curl -sf http://localhost:5003/health && echo "$(GREEN)aaa-monitor: OK$(RESET)" || echo "$(RED)aaa-monitor (5003): FAILED$(RESET)"
-	@curl -sf http://localhost:5004/health && echo "$(GREEN)worker-scanner: OK$(RESET)" || echo "$(RED)worker-scanner (5004): FAILED$(RESET)"
+	@curl -sf http://localhost:5001/health && echo "$(GREEN)pki: OK$(RESET)" || echo "$(RED)pki (5001): FAILED$(RESET)"
+	@curl -sf http://localhost:5002/health && echo "$(GREEN)sshca: OK$(RESET)" || echo "$(RED)sshca (5002): FAILED$(RESET)"
+	@curl -sf http://localhost:5003/health && echo "$(GREEN)monitor: OK$(RESET)" || echo "$(RED)monitor (5003): FAILED$(RESET)"
+	@curl -sf http://localhost:5004/health && echo "$(GREEN)scanner: OK$(RESET)" || echo "$(RED)scanner (5004): FAILED$(RESET)"
 	@curl -sf http://localhost:3000/health && echo "$(GREEN)webui: OK$(RESET)" || echo "$(RED)webui (3000): FAILED$(RESET)"
 
 logs: ## Logs - Show all service logs
@@ -297,25 +297,25 @@ logs-manager: ## Logs - Show manager service logs
 	@docker-compose logs -f manager
 
 logs-pki: ## Logs - Show PKI server logs
-	@docker-compose logs -f pki-server
+	@docker-compose logs -f pki
 
-logs-ssh-ca: ## Logs - Show SSH CA logs
-	@docker-compose logs -f ssh-ca
+logs-sshca: ## Logs - Show SSH CA logs
+	@docker-compose logs -f sshca
 
-logs-aaa: ## Logs - Show AAA monitor logs
-	@docker-compose logs -f aaa-monitor
+logs-aaa: ## Logs - Show monitor logs
+	@docker-compose logs -f monitor
 
 logs-worker: ## Logs - Show S3 worker logs
-	@docker-compose logs -f worker-s3
+	@docker-compose logs -f s3scan
 
 logs-scanner: ## Logs - Show scanner worker logs
-	@docker-compose logs -f worker-scanner
+	@docker-compose logs -f scanner
 
 logs-webui: ## Logs - Show WebUI logs
 	@docker-compose logs -f webui
 
-logs-edr: ## Logs - Show EDR agent logs
-	@docker-compose logs -f edr-agent
+logs-endpoint: ## Logs - Show ENDPOINT agent logs
+	@docker-compose logs -f endpoint-agent
 
 logs-db: ## Logs - Show database logs
 	@docker-compose logs -f postgres redis
@@ -380,7 +380,7 @@ info: ## Info - Show project information and service URLs
 	@echo "  Manager:        http://localhost:5000"
 	@echo "  PKI Server:     http://localhost:5001"
 	@echo "  SSH CA:         http://localhost:5002"
-	@echo "  AAA Monitor:    http://localhost:5003"
+	@echo "  Monitor:    http://localhost:5003"
 	@echo "  Worker Scanner: http://localhost:5004"
 	@echo "  WebUI:          http://localhost:3000"
 	@echo "  Prometheus:     http://localhost:9090"

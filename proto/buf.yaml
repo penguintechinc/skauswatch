@@ -1,6 +1,6 @@
 # buf configuration for the LIVE skauswatch proto tree (this directory).
 #
-# The `baseline/` subdirectory is a frozen snapshot of what fielded v1 EDR
+# The `baseline/` subdirectory is a frozen snapshot of what fielded v1 ENDPOINT
 # agents compiled against. It declares the SAME package names as the live
 # protos (packages are intentionally unversioned for v1 wire compat), so it
 # MUST be excluded from this module to avoid duplicate-symbol errors. It is
@@ -16,7 +16,7 @@ breaking:
     # FILE is buf's strictest breaking-change category: it includes all
     # WIRE and WIRE_JSON rules plus generated-source compatibility, and
     # matches types per-file (so file moves/deletes are also breaking).
-    # Fielded Go EDR agents cannot be recompiled in lockstep with the
+    # Fielded Go ENDPOINT agents cannot be recompiled in lockstep with the
     # manager, so we gate on the full FILE category — wire, JSON, and
     # source compat all must hold against the committed baseline.
     - FILE

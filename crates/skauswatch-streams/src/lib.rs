@@ -26,8 +26,8 @@ pub fn topic(service: &str, queue: &str) -> String {
 // prepends the configured key prefix (`REDIS_KEY_PREFIX`, default
 // `skauswatch`) exactly like v1's `_key()`.
 
-/// EDR event pipeline stream (v1 `STREAM_EDR_EVENTS`).
-pub const STREAM_EDR_EVENTS: &str = "edr:events";
+/// ENDPOINT event pipeline stream (v1 `STREAM_ENDPOINT_EVENTS`).
+pub const STREAM_ENDPOINT_EVENTS: &str = "endpoint:events";
 /// Pending-alert processing stream (v1 `STREAM_ALERTS_PENDING`).
 pub const STREAM_ALERTS_PENDING: &str = "alerts:pending";
 /// AI task queue stream (v1 `STREAM_AI_TASKS`).
@@ -42,8 +42,8 @@ pub const STREAM_AUDIT_LOG: &str = "audit:log";
 pub const STREAM_S3_SCAN_TASKS: &str = "s3scan:tasks";
 /// S3 scan result stream (v1 `STREAM_S3_SCAN_RESULTS`).
 pub const STREAM_S3_SCAN_RESULTS: &str = "s3scan:results";
-/// Darwin code review task stream.
-pub const STREAM_DARWIN_TASKS: &str = "darwin:tasks";
+/// CodeScan code review task stream.
+pub const STREAM_CODESCAN_TASKS: &str = "codescan:tasks";
 
 /// ASM (YARA/ClamAV/Nuclei/ZAP/OpenVAS) scan task stream.
 pub const STREAM_SCANNER_TASKS: &str = "scanner:tasks";
@@ -260,7 +260,7 @@ mod tests {
 
     #[test]
     fn stream_names_match_v1_manager_constants() {
-        assert_eq!(STREAM_EDR_EVENTS, "edr:events");
+        assert_eq!(STREAM_ENDPOINT_EVENTS, "endpoint:events");
         assert_eq!(STREAM_ALERTS_PENDING, "alerts:pending");
         assert_eq!(STREAM_AI_TASKS, "ai:tasks");
         assert_eq!(STREAM_THREAT_UPDATES, "threatintel:updates");

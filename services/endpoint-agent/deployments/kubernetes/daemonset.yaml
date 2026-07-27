@@ -1,0 +1,160 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: skauswatch-endpoint-agent
+  namespace: skauswatch
+  labels:
+    app: endpoint-agent
+    component: security
+spec:
+  selector:
+    matchLabels:
+      app: endpoint-agent
+  template:
+    metadata:
+      labels:
+        app: endpoint-agent
+        component: security
+    spec:
+      serviceAccountName: endpoint-agent
+      hostPID: true
+      hostNetwork: true
+      containers:
+      - name: endpoint-agent
+        image: penguintech/skauswatch-endpoint-agent:latest
+        imagePullPolicy: Always
+        securityContext:
+          privileged: true
+          capabilities:
+            add:
+              - SYS_PTRACE
+              - NET_ADMIN
+              - SYS_ADMIN
+        env:
+        - name: ENDPOINT_MANAGER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: endpoint-agent-config
+              key: manager_url
+        - name: ENDPOINT_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: endpoint-agent-secrets
+              key: api-key
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+        volumeMounts:
+        - name: host-proc
+          mountPath: /host/proc
+          readOnly: true
+        - name: host-sys
+          mountPath: /host/sys
+          readOnly: true
+        - name: host-etc
+          mountPath: /host/etc
+          readOnly: true
+        - name: config
+          mountPath: /etc/skauswatch
+        livenessProbe:
+          exec:
+            command:
+            - /app/endpoint-agent
+            - --health
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+            - /app/endpoint-agent
+            - --health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      volumes:
+      - name: host-proc
+        hostPath:
+          path: /proc
+      - name: host-sys
+        hostPath:
+          path: /sys
+      - name: host-etc
+        hostPath:
+          path: /etc
+      - name: config
+        configMap:
+          name: endpoint-agent-config
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      - operator: Exists
+        effect: NoExecute
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: endpoint-agent-config
+  namespace: skauswatch
+data:
+  manager_url: "https://manager.skauswatch.svc.cluster.local:5000"
+  endpoint-agent.yaml: |
+    manager_url: "https://manager.skauswatch.svc.cluster.local:5000"
+    heartbeat_interval: 60
+    event_buffer_size: 1000
+    collectors:
+      process:
+        enabled: true
+      file:
+        enabled: true
+        watch_paths:
+          - "/host/etc"
+      network:
+        enabled: true
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: endpoint-agent-secrets
+  namespace: skauswatch
+type: Opaque
+stringData:
+  api-key: "CHANGE_ME_IN_PRODUCTION"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: endpoint-agent
+  namespace: skauswatch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: endpoint-agent
+rules:
+- apiGroups: [""]
+  resources: ["pods", "nodes"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: endpoint-agent
+subjects:
+- kind: ServiceAccount
+  name: endpoint-agent
+  namespace: skauswatch
+roleRef:
+  kind: ClusterRole
+  name: endpoint-agent
+  apiGroup: rbac.authorization.k8s.io

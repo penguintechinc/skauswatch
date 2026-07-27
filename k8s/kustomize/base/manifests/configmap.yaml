@@ -24,6 +24,6 @@ data:
   ASN_TIMEOUT: "5"
   SHODAN_ENABLED: "false"
   MALTEGO_ENABLED: "false"
-  ICEBOX_PKI_URL: ""
-  ICEBOX_SSH_CA_URL: ""
+  VAULT_PKI_URL: ""
+  VAULT_SSHCA_URL: ""
   MANAGER_URL: "http://manager.skauswatch.svc.cluster.local:5000"

@@ -1,0 +1,17 @@
+apiVersion: v2
+name: skauswatch-worker-codescan
+description: SkausWatch CodeScan AI Code Review Worker Service
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skauswatch
+  - worker
+  - codescan
+  - ai
+  - code-review
+  - flask
+  - python
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io
