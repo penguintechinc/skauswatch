@@ -19,7 +19,9 @@ use skauswatch_proto::manager::{
     IocListResponse, IocQuery, IocRequest, IocResponse, ThreatLevel,
 };
 
-use super::{check_api_version, db_err, method_not_implemented, now_ts, ts_from_naive};
+use super::{
+    check_api_version, db_err, method_not_implemented, now_ts, require_jwt, ts_from_naive,
+};
 use crate::state::AppState;
 
 /// v1 `HealthResponse.version` — the Python servicer hardcoded "1.0.0"
@@ -247,6 +249,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<AlertRequest>,
     ) -> Result<Response<AlertResponse>, Status> {
+        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -287,6 +290,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<AlertQuery>,
     ) -> Result<Response<AlertResponse>, Status> {
+        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
         Ok(Response::new(self.fetch_alert(req.alert_id).await?))
@@ -299,6 +303,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<AlertStatusUpdate>,
     ) -> Result<Response<AlertResponse>, Status> {
+        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
         let Ok(pk) = i32::try_from(req.alert_id) else {
@@ -358,6 +363,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<IocRequest>,
     ) -> Result<Response<IocResponse>, Status> {
+        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -405,6 +411,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<IndicatorLookup>,
     ) -> Result<Response<IndicatorMatch>, Status> {
+        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -477,6 +484,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<AuditEvent>,
     ) -> Result<Response<AuditResponse>, Status> {
+        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -544,6 +552,73 @@ mod tests {
         ManagerGrpc::new(test_state())
     }
 
+    /// Wraps `msg` in a `Request` carrying a valid `test-secret`-signed
+    /// bearer token, matching `test_state()`'s `AuthSettings::jwt_secret`.
+    fn authed<T>(msg: T) -> Request<T> {
+        let token = match skauswatch_auth::issue_service_token(
+            "test-caller",
+            "admin",
+            "test-secret",
+            300,
+        ) {
+            Ok(t) => t,
+            Err(e) => panic!("issue test token: {e}"),
+        };
+        let mut req = Request::new(msg);
+        let value = match format!("Bearer {token}").parse() {
+            Ok(v) => v,
+            Err(e) => panic!("metadata value: {e}"),
+        };
+        req.metadata_mut().insert("authorization", value);
+        req
+    }
+
+    #[tokio::test]
+    async fn create_alert_without_jwt_is_unauthenticated() {
+        let err = match svc()
+            .create_alert(Request::new(AlertRequest {
+                title: "t".to_owned(),
+                ..Default::default()
+            }))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("missing bearer token must be rejected"),
+        };
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn get_alert_with_wrong_secret_is_unauthenticated() {
+        let bad_token =
+            match skauswatch_auth::issue_service_token("x", "admin", "wrong-secret", 300) {
+                Ok(t) => t,
+                Err(e) => panic!("issue token: {e}"),
+            };
+        let mut req = Request::new(AlertQuery {
+            alert_id: 1,
+            api_version: "v1".to_owned(),
+        });
+        let value = match format!("Bearer {bad_token}").parse() {
+            Ok(v) => v,
+            Err(e) => panic!("metadata value: {e}"),
+        };
+        req.metadata_mut().insert("authorization", value);
+        let err = match svc().get_alert(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("wrong-secret token must be rejected"),
+        };
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn health_check_requires_no_jwt() {
+        // HealthCheck is intentionally left open (liveness/readiness probe,
+        // not in the audit's gated-method list) — must succeed with no
+        // authorization metadata at all.
+        assert!(svc().health_check(Request::new(())).await.is_ok());
+    }
+
     #[tokio::test]
     async fn health_check_reports_v1_hardcoded_fields_and_db_error() {
         let resp = match svc().health_check(Request::new(())).await {
@@ -568,7 +643,7 @@ mod tests {
         // Fielded v1 agents send no api_version (proto3 → ""): must route
         // past the gate and hit the handler (which fails on the test DB).
         let err = match svc()
-            .get_alert(Request::new(AlertQuery {
+            .get_alert(authed(AlertQuery {
                 alert_id: 1,
                 api_version: String::new(),
             }))
@@ -583,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn get_alert_explicit_v1_routes_to_handler() {
         let err = match svc()
-            .get_alert(Request::new(AlertQuery {
+            .get_alert(authed(AlertQuery {
                 alert_id: 1,
                 api_version: "v1".to_owned(),
             }))
@@ -598,7 +673,7 @@ mod tests {
     #[tokio::test]
     async fn get_alert_unknown_api_version_is_unimplemented() {
         let err = match svc()
-            .get_alert(Request::new(AlertQuery {
+            .get_alert(authed(AlertQuery {
                 alert_id: 1,
                 api_version: "v9".to_owned(),
             }))
@@ -614,7 +689,7 @@ mod tests {
     #[tokio::test]
     async fn create_alert_unknown_api_version_is_unimplemented() {
         let err = match svc()
-            .create_alert(Request::new(AlertRequest {
+            .create_alert(authed(AlertRequest {
                 title: "t".to_owned(),
                 api_version: "v9".to_owned(),
                 ..Default::default()
@@ -631,7 +706,7 @@ mod tests {
     #[tokio::test]
     async fn update_alert_status_unknown_api_version_is_unimplemented() {
         let err = match svc()
-            .update_alert_status(Request::new(AlertStatusUpdate {
+            .update_alert_status(authed(AlertStatusUpdate {
                 alert_id: 1,
                 new_status: AlertStatus::StatusResolved as i32,
                 resolution_notes: String::new(),
@@ -649,7 +724,7 @@ mod tests {
     #[tokio::test]
     async fn create_ioc_and_lookup_gate_api_version() {
         let e1 = match svc()
-            .create_ioc(Request::new(IocRequest {
+            .create_ioc(authed(IocRequest {
                 value: "1.2.3.4".to_owned(),
                 api_version: "v9".to_owned(),
                 ..Default::default()
@@ -662,7 +737,7 @@ mod tests {
         assert_eq!(e1.code(), Code::Unimplemented);
 
         let e2 = match svc()
-            .lookup_indicator(Request::new(IndicatorLookup {
+            .lookup_indicator(authed(IndicatorLookup {
                 r#type: IndicatorType::IndicatorIp as i32,
                 value: "1.2.3.4".to_owned(),
                 api_version: "v9".to_owned(),
@@ -678,7 +753,7 @@ mod tests {
     #[tokio::test]
     async fn log_audit_event_unknown_api_version_is_unimplemented() {
         let err = match svc()
-            .log_audit_event(Request::new(AuditEvent {
+            .log_audit_event(authed(AuditEvent {
                 event_type: "edr".to_owned(),
                 action: "test".to_owned(),
                 api_version: "v9".to_owned(),

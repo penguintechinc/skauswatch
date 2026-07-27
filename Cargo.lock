@@ -5263,6 +5263,9 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tonic",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5425,6 +5428,7 @@ dependencies = [
  "serde_json",
  "sha1 0.10.7",
  "sha2 0.10.9",
+ "skauswatch-auth",
  "skauswatch-common",
  "skauswatch-db",
  "skauswatch-proto",
@@ -5474,6 +5478,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "skauswatch-auth",
  "skauswatch-common",
  "skauswatch-streams",
  "skauswatch-telemetry",

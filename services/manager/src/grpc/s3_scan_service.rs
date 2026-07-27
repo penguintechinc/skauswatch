@@ -14,7 +14,7 @@ use skauswatch_proto::s3scan::{
     ScanStatusResponse, ScanTask, StreamAck, TaskAck,
 };
 
-use super::check_api_version;
+use super::{check_api_version, require_jwt};
 use crate::state::AppState;
 
 /// S3ScanService servicer backed by the shared AppState (DB + streams).
@@ -212,6 +212,7 @@ impl S3ScanService for S3ScanGrpc {
         &self,
         request: Request<ScanTask>,
     ) -> Result<Response<TaskAck>, Status> {
+        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -259,6 +260,7 @@ impl S3ScanService for S3ScanGrpc {
         &self,
         request: Request<ScanResult>,
     ) -> Result<Response<ResultAck>, Status> {
+        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
         let res = request.into_inner();
         check_api_version(&res.api_version)?;
         let accepted = handle_scan_result(&self.state, &res).await;
@@ -272,6 +274,7 @@ impl S3ScanService for S3ScanGrpc {
         &self,
         request: Request<AdhocScanRequest>,
     ) -> Result<Response<AdhocScanResponse>, Status> {
+        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -339,6 +342,7 @@ impl S3ScanService for S3ScanGrpc {
         &self,
         request: Request<Streaming<ScanResult>>,
     ) -> Result<Response<StreamAck>, Status> {
+        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
         let mut stream = request.into_inner();
         let mut results_received: i32 = 0;
         while let Some(res) = stream.message().await? {
@@ -364,6 +368,7 @@ impl S3ScanService for S3ScanGrpc {
         &self,
         request: Request<ScanStatusRequest>,
     ) -> Result<Response<ScanStatusResponse>, Status> {
+        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -404,6 +409,23 @@ mod tests {
         S3ScanGrpc::new(test_state())
     }
 
+    /// Wraps `msg` in a `Request` carrying a valid `test-secret`-signed
+    /// bearer token, matching `test_state()`'s `AuthSettings::jwt_secret`.
+    fn authed<T>(msg: T) -> Request<T> {
+        let token =
+            match skauswatch_auth::issue_service_token("worker", "worker", "test-secret", 300) {
+                Ok(t) => t,
+                Err(e) => panic!("issue test token: {e}"),
+            };
+        let mut req = Request::new(msg);
+        let value = match format!("Bearer {token}").parse() {
+            Ok(v) => v,
+            Err(e) => panic!("metadata value: {e}"),
+        };
+        req.metadata_mut().insert("authorization", value);
+        req
+    }
+
     fn full_task(api_version: &str) -> ScanTask {
         ScanTask {
             task_id: "task-1".to_owned(),
@@ -424,6 +446,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_scan_task_without_jwt_is_unauthenticated() {
+        let err = match svc().submit_scan_task(Request::new(full_task(""))).await {
+            Err(e) => e,
+            Ok(_) => panic!("missing bearer token must be rejected"),
+        };
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
     async fn submit_scan_task_reports_missing_fields_in_ack() {
         for (field, mutate) in [("task_id", 0_usize), ("job_id", 1), ("object_key", 2)] {
             let mut task = full_task("");
@@ -432,7 +463,7 @@ mod tests {
                 1 => task.job_id = String::new(),
                 _ => task.object_key = String::new(),
             }
-            let ack = match svc().submit_scan_task(Request::new(task)).await {
+            let ack = match svc().submit_scan_task(authed(task)).await {
                 Ok(r) => r.into_inner(),
                 Err(e) => panic!("validation failures must ack, not error: {e}"),
             };
@@ -445,7 +476,7 @@ mod tests {
     async fn submit_scan_task_without_streams_acks_error() {
         // Empty api_version (old-agent path) routes to the handler; the
         // test state has no producer → v1-style "Error: ..." ack.
-        let ack = match svc().submit_scan_task(Request::new(full_task(""))).await {
+        let ack = match svc().submit_scan_task(authed(full_task(""))).await {
             Ok(r) => r.into_inner(),
             Err(e) => panic!("publish failures must ack, not error: {e}"),
         };
@@ -455,7 +486,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_scan_task_unknown_api_version_is_unimplemented() {
-        let err = match svc().submit_scan_task(Request::new(full_task("v9"))).await {
+        let err = match svc().submit_scan_task(authed(full_task("v9"))).await {
             Err(e) => e,
             Ok(_) => panic!("v9 must be rejected"),
         };
@@ -513,7 +544,7 @@ mod tests {
             job_id: "job-1".to_owned(),
             ..Default::default()
         };
-        let ack = match svc().report_scan_result(Request::new(no_task)).await {
+        let ack = match svc().report_scan_result(authed(no_task)).await {
             Ok(r) => r.into_inner(),
             Err(e) => panic!("validation failures must ack, not error: {e}"),
         };
@@ -523,7 +554,7 @@ mod tests {
             task_id: "task-1".to_owned(),
             ..Default::default()
         };
-        let ack = match svc().report_scan_result(Request::new(no_job)).await {
+        let ack = match svc().report_scan_result(authed(no_job)).await {
             Ok(r) => r.into_inner(),
             Err(e) => panic!("validation failures must ack, not error: {e}"),
         };
@@ -538,7 +569,7 @@ mod tests {
             api_version: "v9".to_owned(),
             ..Default::default()
         };
-        let err = match svc().report_scan_result(Request::new(res)).await {
+        let err = match svc().report_scan_result(authed(res)).await {
             Err(e) => e,
             Ok(_) => panic!("v9 must be rejected"),
         };
@@ -548,7 +579,7 @@ mod tests {
     #[tokio::test]
     async fn scan_adhoc_file_validates_content_and_filename() {
         let err = match svc()
-            .scan_adhoc_file(Request::new(AdhocScanRequest {
+            .scan_adhoc_file(authed(AdhocScanRequest {
                 filename: "a.bin".to_owned(),
                 ..Default::default()
             }))
@@ -561,7 +592,7 @@ mod tests {
         assert_eq!(err.message(), "Missing file content");
 
         let err = match svc()
-            .scan_adhoc_file(Request::new(AdhocScanRequest {
+            .scan_adhoc_file(authed(AdhocScanRequest {
                 file_content: vec![1, 2, 3],
                 ..Default::default()
             }))
@@ -579,7 +610,7 @@ mod tests {
         // Valid request against the unreachable test DB → v1 catch-all
         // INTERNAL "Error: ..." surface.
         let err = match svc()
-            .scan_adhoc_file(Request::new(AdhocScanRequest {
+            .scan_adhoc_file(authed(AdhocScanRequest {
                 scan_id: "scan-1".to_owned(),
                 file_content: vec![1, 2, 3],
                 filename: "a.bin".to_owned(),
@@ -602,7 +633,7 @@ mod tests {
     #[tokio::test]
     async fn get_scan_status_requires_job_id() {
         let err = match svc()
-            .get_scan_status(Request::new(ScanStatusRequest::default()))
+            .get_scan_status(authed(ScanStatusRequest::default()))
             .await
         {
             Err(e) => e,
@@ -615,7 +646,7 @@ mod tests {
     #[tokio::test]
     async fn get_scan_status_unknown_api_version_is_unimplemented() {
         let err = match svc()
-            .get_scan_status(Request::new(ScanStatusRequest {
+            .get_scan_status(authed(ScanStatusRequest {
                 job_id: "job-1".to_owned(),
                 api_version: "v9".to_owned(),
             }))

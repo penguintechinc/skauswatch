@@ -4,10 +4,17 @@
 //! docs/v2-port/manager-contract.md §gRPC; Python source of truth:
 //! services/manager/grpc/{server,s3_scan_server}.py.
 //!
-//! AUTH PARITY: v1 bound both services to an insecure port with NO
-//! authentication — no metadata checks and no HMAC (the EDR
-//! `X-API-Key`/`X-Agent-ID` HMAC gate is REST-only). Replicated exactly:
-//! internal cluster port, no interceptor. Flagged for GA hardening.
+//! AUTH (hardened, finding #3): every implemented business RPC now requires
+//! `authorization: Bearer <jwt>` metadata — an HS256 access token signed
+//! with the shared `JWT_SECRET_KEY` (`skauswatch_auth::verify_grpc_bearer`).
+//! `HealthCheck` stays open (liveness/readiness probes, no sensitive data,
+//! not in the audit's gated-method list). Dead/UNIMPLEMENTED stub RPCs are
+//! unauthenticated too — they do no work regardless of the caller. No
+//! in-repo caller exists for either service today (confirmed by repo-wide
+//! grep: EDR agents authenticate via the REST HMAC gate only, and workers
+//! consume `s3scan:tasks`/publish results over Redis Streams, never gRPC) —
+//! gating introduces no breakage; any future caller must present a machine
+//! JWT minted with `skauswatch_auth::issue_service_token`.
 //!
 //! API VERSIONING: every request message (except HealthCheck's
 //! `google.protobuf.Empty`) carries `api_version`. Fielded v1 Go agents
@@ -63,6 +70,15 @@ pub async fn serve(
         )))
         .serve_with_shutdown(addr, shutdown)
         .await?;
+    Ok(())
+}
+
+/// Requires a valid `authorization: Bearer <jwt>` gRPC metadata entry,
+/// signed with the shared `JWT_SECRET_KEY` (finding #3). Maps verification
+/// failure onto `UNAUTHENTICATED` via `skauswatch_auth::ServiceTokenError`'s
+/// `From<_> for tonic::Status` impl.
+fn require_jwt(metadata: &tonic::metadata::MetadataMap, secret: &str) -> Result<(), Status> {
+    skauswatch_auth::verify_grpc_bearer(metadata, secret)?;
     Ok(())
 }
 

@@ -3,6 +3,8 @@
 //! strings are provisional until the golden parity harness verifies them
 //! against live v1 responses.
 
+use std::sync::LazyLock;
+
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -14,6 +16,17 @@ use crate::auth::{
 };
 use crate::error::{ApiError, ApiJson};
 use crate::state::AppState;
+
+/// Bcrypt hash of an arbitrary fixed string — never a real credential, used
+/// solely to burn the same bcrypt cost-factor CPU time that a real password
+/// check would (finding #8). Computed once per process; falls back to a
+/// well-formed public bcrypt test vector in the practically-unreachable case
+/// `hash_password` itself fails, so the dummy verify never short-circuits.
+static DUMMY_PASSWORD_HASH: LazyLock<String> = LazyLock::new(|| {
+    auth::hash_password("skauswatch-login-timing-equalizer-not-a-real-credential").unwrap_or_else(
+        |_| "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy".to_owned(),
+    )
+});
 
 /// Router for /api/v1/auth.
 pub fn router() -> Router<AppState> {
@@ -80,6 +93,11 @@ async fn login(
     .await?;
 
     let Some(user) = row else {
+        // Finding #8: without this, an unknown email returns instantly while
+        // a known email always pays the ~ms bcrypt cost below — a timing
+        // oracle an attacker can use to enumerate valid accounts. Running a
+        // dummy verify here equalizes the two paths' wall-clock cost.
+        let _ = auth::verify_password(&body.password, &DUMMY_PASSWORD_HASH);
         return Err(ApiError::Unauthorized(
             "Invalid email or password".to_owned(),
         ));
@@ -355,6 +373,36 @@ async fn register(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for finding #8 (login timing oracle): the unknown-email
+    /// dummy verify must actually pay bcrypt's real cost-factor work, not
+    /// fail-fast, or it doesn't equalize anything. Compares against a
+    /// deliberately malformed hash (which fails parsing near-instantly) with
+    /// a generous 10x margin to avoid CI timing flakiness while still
+    /// proving the dummy path isn't a cheap short-circuit.
+    #[test]
+    fn dummy_password_hash_costs_real_bcrypt_work_not_a_fast_fail() {
+        assert!(DUMMY_PASSWORD_HASH.starts_with("$2"));
+        assert!(!auth::verify_password(
+            "definitely-not-it",
+            &DUMMY_PASSWORD_HASH
+        ));
+
+        let malformed = "not-a-bcrypt-hash";
+        let start = std::time::Instant::now();
+        let _ = auth::verify_password("x", malformed);
+        let malformed_elapsed = start.elapsed();
+
+        let start = std::time::Instant::now();
+        let _ = auth::verify_password("x", &DUMMY_PASSWORD_HASH);
+        let dummy_elapsed = start.elapsed();
+
+        assert!(
+            dummy_elapsed > malformed_elapsed * 10,
+            "dummy verify ({dummy_elapsed:?}) should cost real bcrypt work, \
+             far more than a fail-fast malformed-hash parse ({malformed_elapsed:?})"
+        );
+    }
 
     #[test]
     fn me_created_at_reformats_postgres_text_as_python_isoformat() {

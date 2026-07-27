@@ -34,8 +34,6 @@ const THREAT_LEVELS: [&str; 5] = ["critical", "high", "medium", "low", "info"];
 const AGENT_STATUS_MSG: &str = "Input should be 'active', 'inactive' or 'disconnected'";
 const SEVERITY_MSG: &str = "Input should be 'critical', 'high', 'medium', 'low' or 'info'";
 
-/// v1 `EDRConfig.api_secret` default (env `EDR_API_SECRET` unset).
-const DEFAULT_EDR_SECRET: &str = "change-me-edr-secret";
 /// v1 hard cap on POST /events batch size.
 const MAX_EVENTS_PER_REQUEST: usize = 100;
 /// v1 default collectors — `EDRConfig.enabled_collectors` has no env
@@ -62,9 +60,15 @@ pub fn router() -> Router<AppState> {
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// v1 `config.edr.api_secret`: env `EDR_API_SECRET` with the change-me default.
+/// v1 `config.edr.api_secret`: env `EDR_API_SECRET`. No hardcoded fallback —
+/// `AppStateInner::from_env`'s `validate_edr_secret_for_production` FAILS
+/// STARTUP in production if this is unset/empty/the old "change-me-edr-secret"
+/// default, so by the time any request reaches this handler in production the
+/// secret is guaranteed real. In dev, an unset value resolves to an empty
+/// key: the computed HMAC then fails closed (matches no real caller) instead
+/// of silently accepting the well-known default.
 fn edr_api_secret() -> String {
-    std::env::var("EDR_API_SECRET").unwrap_or_else(|_| DEFAULT_EDR_SECRET.to_owned())
+    std::env::var("EDR_API_SECRET").unwrap_or_default()
 }
 
 /// Lowercase hex encoding — matches Python's `hexdigest()`.
@@ -990,8 +994,12 @@ mod tests {
         axum_test::TestServer::new(app)
     }
 
+    /// Computes the HMAC a real caller would send, using the *live*
+    /// `edr_api_secret()` lookup (not a hardcoded literal) so these tests
+    /// stay correct regardless of the ambient `EDR_API_SECRET` — there is no
+    /// production-fallback default to hardcode against anymore (finding #4).
     fn valid_key(agent_id: &str) -> String {
-        match expected_api_key(DEFAULT_EDR_SECRET, agent_id) {
+        match expected_api_key(&edr_api_secret(), agent_id) {
             Ok(k) => k,
             Err(e) => panic!("hmac: {e:?}"),
         }
@@ -1000,10 +1008,27 @@ mod tests {
     #[test]
     fn hmac_matches_python_hexdigest_vector() {
         // hmac.new(b"change-me-edr-secret", b"agent-001", sha256).hexdigest()
+        // — a pure vector check of expected_api_key itself; the old v1
+        // default is used here only as a literal, never as a runtime
+        // fallback (removed per finding #4).
+        let key = match expected_api_key("change-me-edr-secret", "agent-001") {
+            Ok(k) => k,
+            Err(e) => panic!("hmac: {e:?}"),
+        };
         assert_eq!(
-            valid_key("agent-001"),
+            key,
             "2e3bdc4edea1fa9037414810457dcbf75fa025b654ceffcbc0cf2a98fcbb9e40"
         );
+    }
+
+    #[test]
+    fn edr_api_secret_has_no_hardcoded_fallback() {
+        // Regression for finding #4: with EDR_API_SECRET unset in this
+        // process, the per-request lookup must NOT silently resolve to the
+        // old guessable "change-me-edr-secret" default.
+        if std::env::var("EDR_API_SECRET").is_err() {
+            assert_ne!(edr_api_secret(), "change-me-edr-secret");
+        }
     }
 
     #[test]

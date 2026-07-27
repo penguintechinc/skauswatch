@@ -3,6 +3,14 @@
 //! `{error, detail}` shape only comes from Quart's framework error handlers
 //! (unknown-route 404 / uncaught 500). Validation failures answer
 //! `400 {"error": "Validation error", "details": [...]}`.
+//!
+//! Finding #6: `Internal` no longer echoes its message to the client — raw
+//! `sqlx`/CA-engine error text (schema/column names, query fragments,
+//! filesystem paths from CA key I/O) is exactly what an attacker wants from
+//! a 500. The real detail is always logged server-side at the point the
+//! error is constructed (`ApiError::internal`, and the `From<X509Error>` /
+//! `From<SshError>` impls below); the response body is a fixed generic
+//! string.
 
 use axum::Json;
 use axum::extract::FromRequest;
@@ -55,9 +63,11 @@ impl IntoResponse for ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 serde_json::json!({ "error": msg }),
             ),
-            ApiError::Internal(msg) => (
+            // Finding #6: never echo `msg` (raw sqlx/CA-engine error text) to
+            // the caller — it's already logged at construction time below.
+            ApiError::Internal(_msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({ "error": msg }),
+                serde_json::json!({ "error": "Internal Server Error" }),
             ),
         };
         (status, Json(body)).into_response()
@@ -74,7 +84,10 @@ impl From<crate::ca::x509::X509Error> for ApiError {
     fn from(e: crate::ca::x509::X509Error) -> Self {
         match e {
             crate::ca::x509::X509Error::BadRequest(m) => ApiError::BadRequest(m),
-            crate::ca::x509::X509Error::Internal(m) => ApiError::Internal(m),
+            crate::ca::x509::X509Error::Internal(m) => {
+                tracing::error!(error = %m, "pki internal error (x509)");
+                ApiError::Internal(m)
+            }
         }
     }
 }
@@ -83,7 +96,10 @@ impl From<crate::ca::ssh::SshError> for ApiError {
     fn from(e: crate::ca::ssh::SshError) -> Self {
         match e {
             crate::ca::ssh::SshError::BadRequest(m) => ApiError::BadRequest(m),
-            crate::ca::ssh::SshError::Internal(m) => ApiError::Internal(m),
+            crate::ca::ssh::SshError::Internal(m) => {
+                tracing::error!(error = %m, "pki internal error (ssh)");
+                ApiError::Internal(m)
+            }
         }
     }
 }
@@ -124,4 +140,53 @@ pub async fn fallback_not_found() -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)] // tests fail loudly by design
+mod tests {
+    use super::*;
+
+    /// Regression for finding #6: a 500 body must never contain the real
+    /// internal error text, only the fixed generic message.
+    #[tokio::test]
+    async fn internal_error_body_never_leaks_the_cause() {
+        let resp = ApiError::Internal(
+            "duplicate key value violates unique constraint \"ca_keys_pkey\"".to_owned(),
+        )
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = match axum::body::to_bytes(resp.into_body(), usize::MAX).await {
+            Ok(b) => b,
+            Err(e) => panic!("read body: {e}"),
+        };
+        let text = String::from_utf8_lossy(&body);
+        assert!(!text.contains("duplicate key"));
+        assert!(!text.contains("ca_keys_pkey"));
+
+        let json: serde_json::Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => panic!("body not JSON: {e}"),
+        };
+        assert_eq!(json["error"], "Internal Server Error");
+    }
+
+    #[test]
+    fn x509_internal_error_converts_without_altering_the_logged_message() {
+        let err: ApiError = crate::ca::x509::X509Error::Internal("boom".to_owned()).into();
+        match err {
+            ApiError::Internal(m) => assert_eq!(m, "boom"),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ssh_internal_error_converts_without_altering_the_logged_message() {
+        let err: ApiError = crate::ca::ssh::SshError::Internal("boom".to_owned()).into();
+        match err {
+            ApiError::Internal(m) => assert_eq!(m, "boom"),
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
 }

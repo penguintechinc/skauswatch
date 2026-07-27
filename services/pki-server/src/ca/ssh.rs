@@ -106,6 +106,31 @@ impl SshCa {
         })
     }
 
+    /// Test-only in-memory CA: no `ssh-keygen` subprocess, no filesystem I/O.
+    /// `ssh-keygen` isn't installed in the plain `rust:*-bookworm` CI/build
+    /// image this workspace verifies against, so any test that only needs
+    /// *a* constructible `SshCa` (e.g. building `AppStateInner` to exercise
+    /// the auth gate, not actual cert signing) must not call
+    /// `load_or_generate`, which unconditionally shells out.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        Self {
+            config: SshCaConfig {
+                ca_key_path: String::new(),
+                ca_public_key_path: String::new(),
+                ca_key_password: None,
+                default_validity_seconds: 86_400,
+                max_validity_seconds: 604_800,
+                default_key_type: "ed25519".to_owned(),
+                krl_path: String::new(),
+            },
+            ca_public_key: "ssh-ed25519 AAAAtest test-ca".to_owned(),
+            ca_fingerprint: "SHA256:testtesttesttesttesttesttesttesttesttest".to_owned(),
+            serial_counter: AtomicU64::new(1),
+            krl_version: AtomicU64::new(0),
+        }
+    }
+
     /// CA public key line (v1 `get_ca_public_key`).
     pub fn ca_public_key(&self) -> &str {
         &self.ca_public_key

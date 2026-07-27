@@ -52,6 +52,11 @@ async fn serve() -> anyhow::Result<()> {
     skauswatch_telemetry::install_metrics_exporter()
         .map_err(|e| anyhow::anyhow!("metrics exporter: {e}"))?;
 
+    // Fails fast (before any CA key material is touched) if JWT_SECRET_KEY
+    // is missing in production — see skauswatch_auth::load_jwt_secret and
+    // finding #2 (this service previously had no authentication at all).
+    let jwt_secret: Arc<str> = skauswatch_auth::load_jwt_secret()?.into();
+
     let cfg = SshCaConfig::from_env();
     tracing::info!(
         port = cfg.http_port,
@@ -64,7 +69,11 @@ async fn serve() -> anyhow::Result<()> {
     let ca = Arc::new(SshCa::load_or_generate(&cfg.ca_key_path)?);
     tracing::info!(ca_fingerprint = %ca.fingerprint(), "CA ready");
     let store = Arc::new(CertStore::new());
-    let state = AppState { ca, store };
+    let state = AppState {
+        ca,
+        store,
+        jwt_secret,
+    };
 
     let readiness = skauswatch_telemetry::Readiness::new();
     let app = routes::router(state)
