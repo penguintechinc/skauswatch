@@ -1,1 +1,0 @@
-"""IceBox database models."""
