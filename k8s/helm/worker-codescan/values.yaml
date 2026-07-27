@@ -1,0 +1,186 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch-worker-codescan
+  pullPolicy: IfNotPresent
+  tag: latest
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+
+service:
+  enabled: true
+  type: ClusterIP
+  port: 5005
+  targetPort: 5005
+
+# No ingress - internal service only
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: "500m"
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+celery:
+  replicaCount: 1
+  resources:
+    limits:
+      cpu: "1"
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+env:
+  - name: CODESCAN_PORT
+    value: "5005"
+  - name: FLASK_ENV
+    value: "production"
+  - name: DB_HOST
+    value: "postgres"
+  - name: DB_PORT
+    value: "5432"
+  - name: DB_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: db-name
+  - name: CODESCAN_DB_USER
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-codescan-secret
+        key: codescan-db-user
+  - name: CODESCAN_DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-codescan-secret
+        key: codescan-db-pass
+  - name: CODESCAN_CELERY_BROKER_URL
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-codescan-secret
+        key: celery-broker-url
+  - name: ANTHROPIC_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-codescan-secret
+        key: anthropic-api-key
+        optional: true
+  - name: OPENAI_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-codescan-secret
+        key: openai-api-key
+        optional: true
+  - name: CODESCAN_AI_PROVIDER
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: codescan-ai-provider
+  - name: CODESCAN_AI_MODEL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: codescan-ai-model
+  - name: CODESCAN_FREE_TIER_USER_CAP
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: codescan-free-tier-user-cap
+  - name: CODESCAN_MAX_REPOS_FREE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: codescan-max-repos-free
+  - name: CODESCAN_MAX_REVIEWS_PER_DAY
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: codescan-max-reviews-per-day
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-codescan-secret
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: release-mode
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 5005
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: 5005
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+configMapData:
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"
+  db-name: "skauswatch"
+  codescan-ai-provider: "anthropic"
+  codescan-ai-model: "claude-opus-4-5"
+  codescan-free-tier-user-cap: "3"
+  codescan-max-repos-free: "3"
+  codescan-max-reviews-per-day: "10"
+
+secretData:
+  codescan-db-user: "codescan"
+  codescan-db-pass: "changeme-in-production"
+  celery-broker-url: "redis://:changeme@redis:6379/2"
+  anthropic-api-key: ""
+  openai-api-key: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

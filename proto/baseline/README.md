@@ -3,7 +3,7 @@
 ## What this is
 
 Byte-for-byte snapshots of the canonical skauswatch `.proto` contracts
-**as compiled into fielded v1 Go EDR agents**:
+**as compiled into fielded v1 Go ENDPOINT agents**:
 
 | Baseline file | Live file |
 |---|---|

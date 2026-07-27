@@ -92,14 +92,14 @@ services:
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
       # SIEM Integration
       - OPENSEARCH_URL=http://opensearch:9200
-      - LOG_RECEIVER_URL=http://log-receiver:5010
+      - LOGS_URL=http://logs:5010
       - SIEM_ENABLED=${SIEM_ENABLED:-true}
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-90}
       # TI Integration
       - VIRUSTOTAL_API_KEY=${VIRUSTOTAL_API_KEY:-}
       - OTX_API_KEY=${OTX_API_KEY:-}
-      # Darwin AI Review
-      - WORKER_DARWIN_URL=http://worker-darwin:5005
+      # CodeScan AI Review
+      - WORKER_CODESCAN_URL=http://worker-codescan:5005
     ports:
       - "${MANAGER_PORT:-5004}:5000"
       - "${MANAGER_GRPC_PORT:-50054}:50051"
@@ -142,11 +142,11 @@ services:
       - app-network
 
   # Log Receiver Service (SIEM ingest: HTTP + syslog UDP + Redis stream)
-  log-receiver:
+  logs:
     build:
-      context: ./services/log-receiver
+      context: ./services/logs
       dockerfile: Dockerfile
-    container_name: skauswatch-log-receiver
+    container_name: skauswatch-logs
     environment:
       - OPENSEARCH_URL=http://opensearch:9200
       - S3_ENDPOINT_URL=http://minio:9000
@@ -159,7 +159,7 @@ services:
       - HTTP_PORT=5010
       - SYSLOG_UDP_PORT=514
     ports:
-      - "${LOG_RECEIVER_PORT:-5010}:5010"
+      - "${LOGS_PORT:-5010}:5010"
       - "514:514/udp"
     depends_on:
       opensearch:
@@ -189,10 +189,10 @@ services:
     networks:
       - app-network
 
-  # Worker-S3 Service (Malware Scanning Workers)
-  worker-s3:
+  # S3Scan Service (Malware Scanning Workers)
+  s3scan:
     build:
-      context: ./services/worker-s3
+      context: ./services/s3scan
       dockerfile: Dockerfile
     # Note: No container_name when using replicas
     deploy:
@@ -250,11 +250,11 @@ services:
       - app-network
 
   # PKI Server
-  pki-server:
+  pki:
     build:
-      context: ./services/pki-server-new
+      context: ./services/pki
       dockerfile: Dockerfile
-    container_name: skauswatch-pki-server
+    container_name: skauswatch-pki
     environment:
       - FLASK_ENV=${FLASK_ENV:-production}
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
@@ -267,7 +267,7 @@ services:
       - DB_PASS=${POSTGRES_PASSWORD:-password}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/0
     ports:
-      - "${PKI_SERVER_PORT:-5001}:5000"
+      - "${PKI_PORT:-5001}:5000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -283,11 +283,11 @@ services:
       - app-network
 
   # SSH CA Service
-  ssh-ca:
+  sshca:
     build:
-      context: ./services/ssh-ca
+      context: ./services/sshca
       dockerfile: Dockerfile
-    container_name: skauswatch-ssh-ca
+    container_name: skauswatch-sshca
     environment:
       - FLASK_ENV=${FLASK_ENV:-production}
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
@@ -300,7 +300,7 @@ services:
       - DB_PASS=${POSTGRES_PASSWORD:-password}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/0
     ports:
-      - "${SSH_CA_PORT:-5002}:5000"
+      - "${SSHCA_PORT:-5002}:5000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -315,12 +315,12 @@ services:
     networks:
       - app-network
 
-  # AAA Monitor Service
-  aaa-monitor:
+  # Monitor Service
+  monitor:
     build:
-      context: ./services/aaa-monitor
+      context: ./services/monitor
       dockerfile: Dockerfile
-    container_name: skauswatch-aaa-monitor
+    container_name: skauswatch-monitor
     environment:
       - FLASK_ENV=${FLASK_ENV:-production}
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
@@ -333,7 +333,7 @@ services:
       - DB_PASS=${POSTGRES_PASSWORD:-password}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/0
     ports:
-      - "${AAA_MONITOR_PORT:-5003}:5000"
+      - "${MONITOR_PORT:-5003}:5000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -390,16 +390,16 @@ services:
       - app-network
     restart: unless-stopped
 
-  # Worker-Scanner Service (Vulnerability Scanner)
-  worker-scanner:
+  # Scanner Service (Vulnerability Scanner)
+  scanner:
     build:
-      context: ./services/worker-scanner
+      context: ./services/scanner
       dockerfile: Dockerfile
-    container_name: skauswatch-worker-scanner
+    container_name: skauswatch-scanner
     cap_add:
       - NET_RAW
     environment:
-      - WORKER_SCANNER_PORT=5004
+      - SCANNER_PORT=5004
       - DATABASE_URL=postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-password}@postgres:5432/${POSTGRES_DB:-app_db}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/0
       - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/1
@@ -413,7 +413,7 @@ services:
       - ASM_SCREENSHOT_TIMEOUT=${ASM_SCREENSHOT_TIMEOUT:-10}
       - ASM_EXTRA_PORTS=${ASM_EXTRA_PORTS:-}
     ports:
-      - "${WORKER_SCANNER_PORT:-5004}:5004"
+      - "${SCANNER_PORT:-5004}:5004"
     depends_on:
       postgres:
         condition: service_healthy
@@ -425,34 +425,34 @@ services:
     networks:
       - app-network
 
-  # Worker-Darwin Service (Darwin AI Code Review API)
-  worker-darwin:
+  # Worker-CodeScan Service (CodeScan AI Code Review API)
+  worker-codescan:
     build:
-      context: ./services/worker-darwin
+      context: ./services/worker-codescan
       dockerfile: Dockerfile
-    container_name: skauswatch-worker-darwin
+    container_name: skauswatch-worker-codescan
     environment:
-      - DARWIN_PORT=5005
+      - CODESCAN_PORT=5005
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_NAME=${POSTGRES_DB:-app_db}
-      - DARWIN_DB_USER=${DARWIN_DB_USER:-darwin}
-      - DARWIN_DB_PASS=${DARWIN_DB_PASS:-change-me-darwin-pass}
+      - CODESCAN_DB_USER=${CODESCAN_DB_USER:-codescan}
+      - CODESCAN_DB_PASS=${CODESCAN_DB_PASS:-change-me-codescan-pass}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-password}
-      - DARWIN_CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/2
+      - CODESCAN_CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/2
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
-      - DARWIN_AI_PROVIDER=${DARWIN_AI_PROVIDER:-anthropic}
-      - DARWIN_AI_MODEL=${DARWIN_AI_MODEL:-claude-opus-4-5}
-      - DARWIN_FREE_TIER_USER_CAP=${DARWIN_FREE_TIER_USER_CAP:-3}
-      - DARWIN_MAX_REPOS_FREE=${DARWIN_MAX_REPOS_FREE:-3}
-      - DARWIN_MAX_REVIEWS_PER_DAY=${DARWIN_MAX_REVIEWS_PER_DAY:-10}
+      - CODESCAN_AI_PROVIDER=${CODESCAN_AI_PROVIDER:-anthropic}
+      - CODESCAN_AI_MODEL=${CODESCAN_AI_MODEL:-claude-opus-4-5}
+      - CODESCAN_FREE_TIER_USER_CAP=${CODESCAN_FREE_TIER_USER_CAP:-3}
+      - CODESCAN_MAX_REPOS_FREE=${CODESCAN_MAX_REPOS_FREE:-3}
+      - CODESCAN_MAX_REVIEWS_PER_DAY=${CODESCAN_MAX_REVIEWS_PER_DAY:-10}
       - LICENSE_KEY=${LICENSE_KEY:-}
     ports:
-      - "${WORKER_DARWIN_PORT:-5005}:5005"
+      - "${WORKER_CODESCAN_PORT:-5005}:5005"
     depends_on:
       postgres:
         condition: service_healthy
@@ -467,34 +467,34 @@ services:
     networks:
       - app-network
 
-  # Worker-Darwin Celery (Darwin AI Code Review background tasks)
-  worker-darwin-celery:
+  # Worker-CodeScan Celery (CodeScan AI Code Review background tasks)
+  worker-codescan-celery:
     build:
-      context: ./services/worker-darwin
+      context: ./services/worker-codescan
       dockerfile: Dockerfile
-    container_name: skauswatch-worker-darwin-celery
+    container_name: skauswatch-worker-codescan-celery
     command: >
       celery -A workers.celery_app.celery_app worker
       --loglevel=info
-      -Q darwin_reviews,darwin_plans,darwin_polling
+      -Q codescan_reviews,codescan_plans,codescan_polling
     environment:
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_NAME=${POSTGRES_DB:-app_db}
-      - DARWIN_DB_USER=${DARWIN_DB_USER:-darwin}
-      - DARWIN_DB_PASS=${DARWIN_DB_PASS:-change-me-darwin-pass}
+      - CODESCAN_DB_USER=${CODESCAN_DB_USER:-codescan}
+      - CODESCAN_DB_PASS=${CODESCAN_DB_PASS:-change-me-codescan-pass}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-password}
-      - DARWIN_CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/2
+      - CODESCAN_CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-password}@redis:6379/2
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434}
-      - DARWIN_AI_PROVIDER=${DARWIN_AI_PROVIDER:-anthropic}
-      - DARWIN_AI_MODEL=${DARWIN_AI_MODEL:-claude-opus-4-5}
+      - CODESCAN_AI_PROVIDER=${CODESCAN_AI_PROVIDER:-anthropic}
+      - CODESCAN_AI_MODEL=${CODESCAN_AI_MODEL:-claude-opus-4-5}
       - LICENSE_KEY=${LICENSE_KEY:-}
     depends_on:
-      worker-darwin:
+      worker-codescan:
         condition: service_healthy
     restart: unless-stopped
     networks:
@@ -518,12 +518,12 @@ services:
     networks:
       - app-network
 
-  # EDR Agent Service (Go EDR Agent)
-  edr-agent:
+  # ENDPOINT Agent Service (Go ENDPOINT Agent)
+  endpoint-agent:
     build:
-      context: ./services/edr-agent
+      context: ./services/endpoint-agent
       dockerfile: Dockerfile
-    container_name: skauswatch-edr-agent
+    container_name: skauswatch-endpoint-agent
     environment:
       - MANAGER_URL=http://manager:5000
     depends_on:

@@ -11,16 +11,16 @@ Full platform rewrite. Tracked on branch `release/v2.0.x`; `release/v1.0.x` is
 feature-frozen (security fixes only) until v2.0.0 ships.
 
 ### Added
-- Rust rewrite of all backend services (core, IceBox, Darwin) — single Cargo
+- Rust rewrite of all backend services (core, Vault, CodeScan) — single Cargo
   workspace; axum REST, tonic gRPC, sqlx (PostgreSQL), Redis/Valkey Streams
   worker harness replacing Celery
 - `penguin-licensing` Rust crate (penguin-libs): PostHog-compatible feature
   flags + license entitlement via license.penguintech.io, fail-safe caching,
   axum feature/tier gating middleware
 - Feature flags (`skauswatch.*`, default OFF) wrapping every feature area,
-  including module gates `skauswatch.icebox` and `skauswatch.darwin`
-- Unified React frontend: IceBox and Darwin UIs merged into `services/webui`
-  as entitlement-gated lazy-loaded modules (`/icebox/*`, `/darwin/*`)
+  including module gates `skauswatch.vault` and `skauswatch.codescan`
+- Unified React frontend: Vault and CodeScan UIs merged into `services/webui`
+  as entitlement-gated lazy-loaded modules (`/vault/*`, `/codescan/*`)
 
 ### Changed
 - Migrations: Alembic replaced by `sqlx migrate`
@@ -32,15 +32,15 @@ feature-frozen (security fixes only) until v2.0.0 ships.
   no data migration, no fielded-agent compatibility constraint.)
 
 ### Deprecated
-- Old REST paths (`/api/v1/{edr,icebox,darwin,aaa}/*`) — mounted as aliases with
+- Old REST paths (`/api/v1/{endpoint,vault,codescan,aaa}/*`) — mounted as aliases with
   `Deprecation`/`Sunset` headers; removed in a later release. Old feature-flag
   keys read as fallbacks during transition. See `docs/MIGRATION.md`.
 
 ### Removed
-- All Python services and the Go EDR agent implementation (ported to Rust)
-- Legacy `services/manager/`, `services/pki-server/`, `services/flask-backend/`,
+- All Python services and the Go ENDPOINT agent implementation (ported to Rust)
+- Legacy `services/manager/`, `services/pki/`, `services/flask-backend/`,
   vendored `darwin/shared/`, py4web remnants
-- Standalone IceBox and Darwin webuis; Kustomize/raw K8s manifests (Helm only)
+- Standalone Vault and CodeScan webuis; Kustomize/raw K8s manifests (Helm only)
 
 ## [Unreleased]
 
@@ -75,9 +75,9 @@ feature-frozen (security fixes only) until v2.0.0 ships.
   - `requirements-dev.txt` for development dependencies
 - Service directories:
   - Manager Service (`services/manager/`)
-  - PKI Server Service (`services/pki-server/`)
-  - SSH CA Service (`services/ssh-ca/`)
-  - AAA Monitor Service (`services/aaa-monitor/`)
+  - PKI Server Service (`services/pki/`)
+  - SSH CA Service (`services/sshca/`)
+  - Monitor Service (`services/monitor/`)
 - Shared components:
   - Models (`shared/models/`)
   - Utils (`shared/utils/`)

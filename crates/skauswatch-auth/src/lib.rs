@@ -9,7 +9,7 @@
 //! This crate also carries the house fail-fast secret policy
 //! ([`load_jwt_secret`]) and a service-to-service JWT verifier
 //! ([`verify_service_token`], [`AuthenticatedCaller`], [`verify_grpc_bearer`])
-//! shared by services (pki-server, ssh-ca) that have no local user database
+//! shared by services (pki, sshca) that have no local user database
 //! and therefore can't run the manager's full `CurrentUser` extractor, but
 //! still must require a valid HS256 access token signed with the same
 //! `JWT_SECRET_KEY` on every request.
@@ -104,7 +104,7 @@ impl Claims {
 /// login endpoint (`services/manager/src/auth::AccessClaims`): `sub`,
 /// `role`, `type: "access"`, `exp`, `iat`. Any service that verifies with the
 /// same `JWT_SECRET_KEY` can consume it — this is the "machine JWT" shape
-/// used to gate pki-server, ssh-ca, and the manager's own gRPC surface.
+/// used to gate pki, sshca, and the manager's own gRPC surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceClaims {
     /// String-encoded caller id (user id, or a machine/service identifier).
@@ -160,7 +160,7 @@ impl From<ServiceTokenError> for tonic::Status {
 
 /// Verifies an HS256 token signed with `secret`: valid signature, unexpired,
 /// and `type == "access"`. This is the sole authz input for services with no
-/// local user database (pki-server, ssh-ca) — there is no role/scope check
+/// local user database (pki, sshca) — there is no role/scope check
 /// here beyond "this is a genuine, current access token".
 pub fn verify_service_token(token: &str, secret: &str) -> Result<ServiceClaims, ServiceTokenError> {
     let mut validation = Validation::new(Algorithm::HS256);
@@ -215,7 +215,7 @@ fn bearer_token(raw: &str) -> Option<&str> {
 
 /// Verifies the `authorization: Bearer <jwt>` gRPC metadata entry against
 /// `secret` — the tonic-side counterpart to [`AuthenticatedCaller`], for
-/// gating tonic services (pki-server's `PKIService`, the manager's
+/// gating tonic services (pki's `PKIService`, the manager's
 /// `ManagerService`/`S3ScanService`).
 pub fn verify_grpc_bearer(
     metadata: &tonic::metadata::MetadataMap,
@@ -247,7 +247,7 @@ impl<T: JwtSecretSource + ?Sized> JwtSecretSource for std::sync::Arc<T> {
 /// Axum extractor requiring a valid Bearer access token signed with the
 /// state's JWT secret. Unlike the manager's `CurrentUser`, this performs no
 /// database lookup — signature + expiry + token type only — because
-/// pki-server and ssh-ca have no local user table.
+/// pki and sshca have no local user table.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedCaller(pub ServiceClaims);
 

@@ -38,8 +38,8 @@ export function EntitlementsProvider({ children }: { children: ReactNode }) {
           valid: false,
           tier: 'free',
           flags: {
-            'skauswatch.icebox': false,
-            'skauswatch.darwin': false,
+            'skauswatch.vault': false,
+            'skauswatch.codescan': false,
           },
           features: {},
         });

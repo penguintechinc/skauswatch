@@ -20,15 +20,15 @@ APP_HOST="skauswatch.penguintech.cloud"
 
 # Services configuration — one entry per Helm chart + Dockerfile
 SERVICES=(
-  "aaa-monitor:services/aaa-monitor"
-  "edr-agent:services/edr-agent"
+  "monitor:services/monitor"
+  "endpoint-agent:services/endpoint-agent"
   "manager:services/manager"
-  "pki-server:services/pki-server-new"
-  "ssh-ca:services/ssh-ca"
+  "pki:services/pki"
+  "sshca:services/sshca"
   "webui:services/webui"
-  "worker-darwin:services/worker-darwin"
-  "worker-s3:services/worker-s3"
-  "worker-scanner:services/worker-scanner"
+  "worker-codescan:services/worker-codescan"
+  "s3scan:services/s3scan"
+  "scanner:services/scanner"
 )
 
 # Image defaults
@@ -458,7 +458,7 @@ main() {
     echo "View deployment logs:"
     echo "  kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l app=skauswatch-manager"
     echo "  kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l app=skauswatch-webui"
-    echo "  kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l app=skauswatch-aaa-monitor"
+    echo "  kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l app=skauswatch-monitor"
     echo ""
     echo "View Helm releases:"
     echo "  helm list -n ${NAMESPACE}"

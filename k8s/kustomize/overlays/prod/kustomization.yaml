@@ -20,15 +20,15 @@ resources:
 replicas:
 - name: manager
   count: 3
-- name: pki-server
+- name: pki
   count: 3
-- name: ssh-ca
+- name: sshca
   count: 2
-- name: aaa-monitor
+- name: monitor
   count: 2
-- name: worker-s3
+- name: s3scan
   count: 3
-- name: worker-scanner
+- name: scanner
   count: 3
 - name: webui
   count: 2

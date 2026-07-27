@@ -1,0 +1,16 @@
+apiVersion: v2
+name: skauswatch-scanner
+description: SkausWatch Vulnerability Scanner Worker Service
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skauswatch
+  - worker
+  - scanner
+  - vulnerability
+  - flask
+  - python
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io

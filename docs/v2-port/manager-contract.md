@@ -7,14 +7,14 @@ require a documented decision in this file.
 ## Bootstrap facts
 
 - REST port **5000** (env `API_PORT`), gRPC **50051** (env `GRPC_PORT`,
-  `GRPC_ENABLED=true`). PKI gRPC client target `PKI_GRPC_ADDR=pki-server:50052`.
+  `GRPC_ENABLED=true`). PKI gRPC client target `PKI_GRPC_ADDR=pki:50052`.
 - CORS enabled by default: origins `*`; methods GET,POST,PUT,DELETE,OPTIONS;
   headers `Content-Type, Authorization, X-API-Key, X-Agent-ID`.
 - Blueprints → prefixes: auth `/api/v1/auth`, users `/api/v1/users`, alerts
   `/api/v1/alerts`, threat_intel `/api/v1/threat-intel`, research
-  `/api/v1/research`, approvals `/api/v1/approvals`, edr `/api/v1/edr`,
-  s3_scan `/api/v1/s3-scan`, siem `/api/v1/siem`, asm `/api/v1/asm`, darwin
-  `/api/v1/darwin`.
+  `/api/v1/research`, approvals `/api/v1/approvals`, endpoint `/api/v1/endpoint`,
+  s3_scan `/api/v1/s3-scan`, siem `/api/v1/siem`, asm `/api/v1/asm`, codescan
+  `/api/v1/codescan`.
 - Non-prefixed: `GET /healthz` → `{status,version,database,redis,timestamp}`
   (200 healthy / 503; checks DB SELECT 1 + Redis ping), `GET /readyz` →
   `{status:"ready"}`, `GET /version` → `{name,version,environment}`.
@@ -38,13 +38,13 @@ require a documented decision in this file.
 - Login lockout: 5 failed attempts → `account_locked_until = now+15min`.
 - Login response: `{access_token, refresh_token, token_type:"Bearer",
   expires_in, user:{id,email,full_name,role}}`.
-- EDR agent auth (separate): headers `X-API-Key` + `X-Agent-ID`;
-  `expected = hmac_sha256(EDR_API_SECRET, agent_id).hexdigest()`,
+- ENDPOINT agent auth (separate): headers `X-API-Key` + `X-Agent-ID`;
+  `expected = hmac_sha256(ENDPOINT_API_SECRET, agent_id).hexdigest()`,
   constant-time compare.
 - License gating: users create → `has_feature("premium")` else free-tier cap
   (`SIEM free_tier_user_cap`=5, exempt domains
-  `skauswatch.penguintech.cloud`,`skauswatch.app`); darwin routes →
-  `has_feature("darwin")` else 403; `_require_sso_license` → 402 (reserved).
+  `skauswatch.penguintech.cloud`,`skauswatch.app`); codescan routes →
+  `has_feature("codescan")` else 403; `_require_sso_license` → 402 (reserved).
   v1 fails OPEN on license-client exceptions. v2: use penguin-licensing
   crate (bypass domains give the same effect; fail-safe default OFF differs
   — v2 keeps v1 fail-open ONLY where parity requires, revisit at GA).
@@ -52,9 +52,9 @@ require a documented decision in this file.
 ## Routers (full table)
 
 See the detailed endpoint tables in the port tracker below. Summary counts:
-auth 5, users 5, alerts 8, threat-intel 9, approvals 7, edr 9, s3-scan 22,
-siem 6, asm 10 (pure proxy → worker-scanner:5001), darwin 12 (pure proxy →
-worker-darwin:5005 behind `has_feature("darwin")`), research 7.
+auth 5, users 5, alerts 8, threat-intel 9, approvals 7, endpoint 9, s3-scan 22,
+siem 6, asm 10 (pure proxy → scanner:5001), codescan 12 (pure proxy →
+worker-codescan:5005 behind `has_feature("codescan")`), research 7.
 
 ### auth `/api/v1/auth`
 | M | Path | Auth | Notes |
@@ -98,10 +98,10 @@ metadata,required_approvals 1-10,expires_hours 1-168}), decide
 cancel (requester or admin; sets rejected), statistics.
 Types: certificate/user/service/configuration.
 
-### edr `/api/v1/edr`
+### endpoint `/api/v1/endpoint`
 Agent (HMAC): register (201/200), heartbeat (404 unregistered), events
 (single or ≤100 batch → 202 {events_received,events_stored,errors[:10]};
-publishes `edr:events` summary), config (GET, X-Agent-ID header).
+publishes `endpoint:events` summary), config (GET, X-Agent-ID header).
 Operator (JWT): agents list (admin/maint), agent get, agent events
 (per_page≤200), deactivate (admin), statistics (stale = active & no
 heartbeat 5min).
@@ -115,18 +115,18 @@ hash-lookup (MD5-32/SHA256-64 hex). Credential masking: access `xxxx****`,
 secret `xxxx...last4`.
 
 ### siem `/api/v1/siem`
-health (no auth; probes log-receiver /healthz), ingest (proxy →
-LOG_RECEIVER_URL /ingest), search (OpenSearch `skauswatch-logs-*`), stats
+health (no auth; probes logs /healthz), ingest (proxy →
+LOGS_URL /ingest), search (OpenSearch `skauswatch-logs-*`), stats
 (aggs class_name.keyword/severity_id), config GET, config PUT (admin;
 retention_days 1-400; v1 does NOT persist — validate-only no-op).
 
-### asm — pure proxy to `WORKER_SCANNER_URL` (`worker-scanner:5001`)
+### asm — pure proxy to `SCANNER_URL` (`scanner:5001`)
 /api/v1/asm/*: scans POST/GET/get + hosts/screenshots/certs/diff/report,
 settings/ports GET/PUT (PUT admin). httpx timeout 120s, forwards
 Authorization. Errors: 504 timeout, 503 connect, 500 other.
 
-### darwin — pure proxy to `WORKER_DARWIN_URL` (`worker-darwin:5005`)
-Every route gated by has_feature("darwin") → 403. status, repos CRUD
+### codescan — pure proxy to `WORKER_CODESCAN_URL` (`worker-codescan:5005`)
+Every route gated by has_feature("codescan") → 403. status, repos CRUD
 (POST/PUT/DELETE admin), reviews (POST maintainer), plans.
 
 ### research `/api/v1/research`
@@ -139,7 +139,7 @@ validators/research_models.py.
 ## DB schema (owned by manager; SQLAlchemy create_all at startup in v1)
 
 Tables: users, refresh_tokens, threat_indicators, alerts, approval_requests,
-audit_logs, edr_agents, edr_events, s3_bucket_configs, s3_scan_jobs,
+audit_logs, endpoint_agents, endpoint_events, s3_bucket_configs, s3_scan_jobs,
 s3_scan_results, adhoc_scan_results, s3_scan_schedules. Full column lists in
 services/manager/models/db.py (treat as authoritative over handler code —
 see drift below). v2: baseline into migrations/core via sqlx migrate
@@ -147,13 +147,13 @@ see drift below). v2: baseline into migrations/core via sqlx migrate
 
 ## Redis Streams (prefix `skauswatch`, maxlen ~10000)
 
-Streams: edr:events, alerts:pending, ai:tasks, threatintel:updates,
+Streams: endpoint:events, alerts:pending, ai:tasks, threatintel:updates,
 approvals:pending, audit:log, s3scan:tasks, s3scan:results.
-Groups (manager): manager-edr, manager-alerts, manager-ai, manager-s3scan,
+Groups (manager): manager-endpoint, manager-alerts, manager-ai, manager-s3scan,
 manager-s3scan-results. Encoding: each field flattened — dict/list →
 json.dumps, datetime → isoformat, else str (None→""). Consume:
 xreadgroup(count=10, block=5000) + per-message xack.
-Manager consumes edr:events (log/warn) and alerts:pending (high/critical →
+Manager consumes endpoint:events (log/warn) and alerts:pending (high/critical →
 republish ai:tasks). Producers/fields table in git history of this file's
 source exploration; key ones:
 - s3scan:tasks: {job_id,bucket_config_id,object_key,object_size,object_etag,
@@ -177,9 +177,9 @@ Key ones: API_PORT(5000), GRPC_PORT(50051), DB_* (DB_PASS or DB_PASSWORD),
 REDIS_URL/REDIS_PASSWORD/REDIS_KEY_PREFIX(skauswatch), SECRET_KEY,
 JWT_SECRET_KEY, AI_ENABLED/OLLAMA_URL/ANTHROPIC_API_KEY/OPENAI_API_KEY,
 OTX_API_KEY/VIRUSTOTAL_API_KEY, RESEARCH_*/SHODAN_*/MALTEGO_*,
-OPENSEARCH_URL/LOG_RECEIVER_URL/LOG_RETENTION_DAYS, S3_SCAN_* (incl
-S3_CRED_ENCRYPTION_KEY), WORKER_SCANNER_URL, WORKER_DARWIN_URL + DARWIN_*,
-EDR_API_SECRET/EDR_*_INTERVAL/EDR_EVENT_BATCH_SIZE/EDR_SEVERITY_THRESHOLD.
+OPENSEARCH_URL/LOGS_URL/LOG_RETENTION_DAYS, S3_SCAN_* (incl
+S3_CRED_ENCRYPTION_KEY), SCANNER_URL, WORKER_CODESCAN_URL + CODESCAN_*,
+ENDPOINT_API_SECRET/ENDPOINT_*_INTERVAL/ENDPOINT_EVENT_BATCH_SIZE/ENDPOINT_SEVERITY_THRESHOLD.
 
 ## v1 defects found (port decisions — do NOT blindly replicate)
 
@@ -209,7 +209,7 @@ EDR_API_SECRET/EDR_*_INTERVAL/EDR_EVENT_BATCH_SIZE/EDR_SEVERITY_THRESHOLD.
    filtered list: alerts `severity[]/status[]/source`, alerts search with
    any criterion, threat-intel iocs list (always — the default
    non-expired filter counts) and search, approvals `status/type/
-   requester_id`, edr agents `status[]/os_type`, s3 jobs/results filters.
+   requester_id`, endpoint agents `status[]/os_type`, s3 jobs/results filters.
    Unfiltered lists work (and `include_expired=true` un-breaks ti list).
    DECISION: v2 implements the documented filter semantics (200).
 9. **One shared PyDAL connection, never rolled back** — all requests use a
@@ -252,7 +252,7 @@ internals; sometimes unserializable, see defect 10). DECISION: v2 emits
 simplified `{loc, msg, type:"value_error"}` entries — same envelope and
 status, details payload intentionally not byte-identical (webui renders
 `msg`/`loc` only). Same applies to the per-item `errors[].error` strings
-in EDR batch responses (v1: `str(ValidationError)` multi-line dump).
+in ENDPOINT batch responses (v1: `str(ValidationError)` multi-line dump).
 
 Runtime timestamps: PyDAL writes second-precision datetimes (no
 microseconds) and ALSO sets `update=`-fields (updated_at) on INSERT. v2

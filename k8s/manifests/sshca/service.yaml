@@ -1,0 +1,19 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sshca
+  namespace: skauswatch
+  labels:
+    app.kubernetes.io/name: sshca
+    app.kubernetes.io/component: api
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: sshca
+  ports:
+  - name: http
+    port: 5002
+    targetPort: 5002
+    protocol: TCP

@@ -4,6 +4,7 @@
 //! per container standards).
 
 mod auth;
+mod deprecated;
 mod error;
 mod flags;
 mod grpc;

@@ -1,0 +1,42 @@
+# Beta environment overrides (dal2 cluster)
+replicaCount: 2
+
+image:
+  registry: ghcr.io/penguintechinc/skauswatch
+  pullPolicy: Always
+  tag: latest
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+namespace: skauswatch
+
+env:
+  - name: LOG_LEVEL
+    value: "INFO"
+  - name: FLASK_ENV
+    value: "production"
+  - name: RELEASE_MODE
+    value: "false"
+  # Vault shim: forward to Vault sshca (absorbed service)
+  - name: VAULT_SSHCA_URL
+    value: "http://vault-sshca.vault.svc.cluster.local:8082"
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 125m
+    memory: 256Mi
+
+# Internal service only - no ingress
+ingress:
+  enabled: false

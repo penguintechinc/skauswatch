@@ -28,8 +28,8 @@ function TestComponent() {
 
   return (
     <div>
-      <div data-testid="icebox-flag">{getFlag('skauswatch.icebox') ? 'icebox enabled' : 'icebox disabled'}</div>
-      <div data-testid="darwin-flag">{getFlag('skauswatch.darwin') ? 'darwin enabled' : 'darwin disabled'}</div>
+      <div data-testid="vault-flag">{getFlag('skauswatch.vault') ? 'vault enabled' : 'vault disabled'}</div>
+      <div data-testid="codescan-flag">{getFlag('skauswatch.codescan') ? 'codescan enabled' : 'codescan disabled'}</div>
     </div>
   );
 }
@@ -44,9 +44,9 @@ describe('EntitlementsProvider', () => {
 
     // The provider starts in a loading state; wait for it to resolve.
     await waitFor(() => {
-      expect(screen.getByTestId('icebox-flag')).toBeInTheDocument();
+      expect(screen.getByTestId('vault-flag')).toBeInTheDocument();
     });
-    expect(screen.getByTestId('darwin-flag')).toBeInTheDocument();
+    expect(screen.getByTestId('codescan-flag')).toBeInTheDocument();
   });
 
   it('defaults flags to false when fetch fails', async () => {
@@ -57,8 +57,8 @@ describe('EntitlementsProvider', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByTestId('icebox-flag')).toHaveTextContent('icebox disabled');
-      expect(screen.getByTestId('darwin-flag')).toHaveTextContent('darwin disabled');
+      expect(screen.getByTestId('vault-flag')).toHaveTextContent('vault disabled');
+      expect(screen.getByTestId('codescan-flag')).toHaveTextContent('codescan disabled');
     });
   });
 
@@ -70,7 +70,7 @@ describe('EntitlementsProvider', () => {
     );
 
     // Component should render either loading, error, or the content
-    const content = screen.queryByTestId('icebox-flag');
+    const content = screen.queryByTestId('vault-flag');
     const loading = screen.queryByText('Loading...');
     expect(content || loading).toBeInTheDocument();
   });

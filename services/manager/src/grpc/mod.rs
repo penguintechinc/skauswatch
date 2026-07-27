@@ -11,7 +11,7 @@
 //! not in the audit's gated-method list). Dead/UNIMPLEMENTED stub RPCs are
 //! unauthenticated too — they do no work regardless of the caller. No
 //! in-repo caller exists for either service today (confirmed by repo-wide
-//! grep: EDR agents authenticate via the REST HMAC gate only, and workers
+//! grep: ENDPOINT agents authenticate via the REST HMAC gate only, and workers
 //! consume `s3scan:tasks`/publish results over Redis Streams, never gRPC) —
 //! gating introduces no breakage; any future caller must present a machine
 //! JWT minted with `skauswatch_auth::issue_service_token`.

@@ -3,7 +3,7 @@
 //! the `CurrentUser` extractor that mirrors `@auth_required`.
 //!
 //! Do NOT swap in the house-standard claims model here until the webui and
-//! EDR fleet migrate — the token shape is part of the v1 wire contract.
+//! ENDPOINT fleet migrate — the token shape is part of the v1 wire contract.
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;

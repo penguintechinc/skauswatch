@@ -1,7 +1,7 @@
 """Deterministic stub upstream shared by BOTH managers under parity test.
 
-Stands in for worker-scanner (ASM proxy), worker-darwin (Darwin proxy),
-log-receiver (SIEM ingest/health), and the S3 endpoint used by bucket
+Stands in for scanner (ASM proxy), worker-codescan (CodeScan proxy),
+logs (SIEM ingest/health), and the S3 endpoint used by bucket
 connection tests. Every response is a fixed JSON echo of method+path+query,
 so proxy-forwarding parity (path construction, query forwarding, body
 pass-through) is directly observable in the diff.

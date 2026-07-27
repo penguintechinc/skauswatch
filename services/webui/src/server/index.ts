@@ -12,9 +12,9 @@ const app = express();
 const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   managerUrl: process.env.MANAGER_URL || 'http://localhost:5000',
-  iceboxBackendUrl: process.env.ICEBOX_BACKEND_URL || 'http://icebox-backend:8000',
-  darwinBackendUrl: process.env.DARWIN_BACKEND_URL || 'http://darwin-backend:8080',
-  aaaMonitorUrl: process.env.AAA_MONITOR_URL || 'http://aaa-monitor:8000',
+  vaultBackendUrl: process.env.VAULT_BACKEND_URL || 'http://vault-backend:8000',
+  codescanBackendUrl: process.env.CODESCAN_BACKEND_URL || 'http://codescan-backend:8080',
+  aaaMonitorUrl: process.env.MONITOR_URL || 'http://monitor:8000',
   nodeEnv: process.env.NODE_ENV || 'development',
 };
 
@@ -51,41 +51,41 @@ const managerProxyOptions: Options = {
   },
 };
 
-// Proxy configuration for IceBox backend
-const iceboxProxyOptions: Options = {
-  target: config.iceboxBackendUrl,
+// Proxy configuration for Vault backend
+const vaultProxyOptions: Options = {
+  target: config.vaultBackendUrl,
   changeOrigin: true,
   pathRewrite: {
-    '^/api/icebox': '', // Strip /api/icebox prefix
+    '^/api/vault': '', // Strip /api/vault prefix
   },
   on: {
     proxyReq: (proxyReq, req) => {
-      console.log(`[IceBox Proxy] ${req.method} ${req.url} -> ${config.iceboxBackendUrl}`);
+      console.log(`[Vault Proxy] ${req.method} ${req.url} -> ${config.vaultBackendUrl}`);
     },
     error: (err, _req, res) => {
-      console.error('[IceBox Proxy Error]', err);
+      console.error('[Vault Proxy Error]', err);
       if (res && 'writeHead' in res) {
-        (res as Response).status(502).json({ error: 'IceBox backend unavailable' });
+        (res as Response).status(502).json({ error: 'Vault backend unavailable' });
       }
     },
   },
 };
 
-// Proxy configuration for Darwin backend
-const darwinProxyOptions: Options = {
-  target: config.darwinBackendUrl,
+// Proxy configuration for CodeScan backend
+const codescanProxyOptions: Options = {
+  target: config.codescanBackendUrl,
   changeOrigin: true,
   pathRewrite: {
-    '^/api/darwin': '', // Strip /api/darwin prefix
+    '^/api/codescan': '', // Strip /api/codescan prefix
   },
   on: {
     proxyReq: (proxyReq, req) => {
-      console.log(`[Darwin Proxy] ${req.method} ${req.url} -> ${config.darwinBackendUrl}`);
+      console.log(`[CodeScan Proxy] ${req.method} ${req.url} -> ${config.codescanBackendUrl}`);
     },
     error: (err, _req, res) => {
-      console.error('[Darwin Proxy Error]', err);
+      console.error('[CodeScan Proxy Error]', err);
       if (res && 'writeHead' in res) {
-        (res as Response).status(502).json({ error: 'Darwin backend unavailable' });
+        (res as Response).status(502).json({ error: 'CodeScan backend unavailable' });
       }
     },
   },
@@ -93,8 +93,8 @@ const darwinProxyOptions: Options = {
 
 // API proxies
 // Module-specific proxies (mount before general /api proxy to take precedence)
-app.use('/api/icebox', createProxyMiddleware(iceboxProxyOptions));
-app.use('/api/darwin', createProxyMiddleware(darwinProxyOptions));
+app.use('/api/vault', createProxyMiddleware(vaultProxyOptions));
+app.use('/api/codescan', createProxyMiddleware(codescanProxyOptions));
 
 // Manager backend proxy (unified API for auth, users, license features, and all core endpoints)
 app.use('/api', createProxyMiddleware(managerProxyOptions));
@@ -121,7 +121,7 @@ app.listen(config.port, () => {
   console.log(`WebUI server running on port ${config.port}`);
   console.log(`Environment: ${config.nodeEnv}`);
   console.log(`Manager API: ${config.managerUrl}`);
-  console.log(`IceBox Backend: ${config.iceboxBackendUrl}`);
-  console.log(`Darwin Backend: ${config.darwinBackendUrl}`);
-  console.log(`AAA Monitor: ${config.aaaMonitorUrl}`);
+  console.log(`Vault Backend: ${config.vaultBackendUrl}`);
+  console.log(`CodeScan Backend: ${config.codescanBackendUrl}`);
+  console.log(`Monitor: ${config.aaaMonitorUrl}`);
 });

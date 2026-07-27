@@ -38,7 +38,7 @@ readonly APP_HOST="${APP_HOST:-skauswatch.localhost.local}"
 readonly OVERLAY_PATH="${OVERLAY_PATH:-k8s/kustomize/overlays/alpha}"
 
 # Services with Dockerfiles (customize per repo)
-declare -a SERVICES=("flask-backend" "manager" "webui" "aaa-monitor" "edr-agent" "pki-server" "ssh-ca" "worker-scanner" "worker-s3" "worker-darwin")
+declare -a SERVICES=("flask-backend" "manager" "webui" "monitor" "endpoint-agent" "pki" "sshca" "scanner" "s3scan" "worker-codescan")
 
 # Image name prefix (used for docker build tags)
 readonly IMAGE_PREFIX="${APP_NAME}"

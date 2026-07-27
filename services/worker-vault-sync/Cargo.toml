@@ -1,0 +1,35 @@
+[package]
+name = "skauswatch-worker-vault-sync"
+description = "SkausWatch Vault cloud-vault sync worker — Redis Streams consumer syncing secrets to AWS/Azure/GCP/Oracle/Kubernetes (Rust port of the v1 sync-worker)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "skauswatch-worker-vault-sync"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+aws-sdk-secretsmanager = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+skauswatch-db = { workspace = true }
+skauswatch-vault = { workspace = true }
+skauswatch-streams = { workspace = true }
+skauswatch-telemetry = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

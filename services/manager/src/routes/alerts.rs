@@ -894,14 +894,14 @@ mod tests {
             ("severity".to_owned(), "high".to_owned()),
             ("severity".to_owned(), "critical".to_owned()),
             ("status".to_owned(), "pending".to_owned()),
-            ("source".to_owned(), "edr".to_owned()),
+            ("source".to_owned(), "endpoint".to_owned()),
         ];
         let q = parse_list_params(&pairs);
         assert_eq!(q.page, 3);
         assert_eq!(q.per_page, 100); // capped per v1 min(per_page, 100)
         assert_eq!(q.severity, vec!["high", "critical"]);
         assert_eq!(q.status, vec!["pending"]);
-        assert_eq!(q.source.as_deref(), Some("edr"));
+        assert_eq!(q.source.as_deref(), Some("endpoint"));
     }
 
     #[test]
@@ -918,14 +918,14 @@ mod tests {
     fn alert_pending_fields_match_v1_names_order_and_encoding() {
         let created = chrono::NaiveDate::from_ymd_opt(2026, 7, 22)
             .and_then(|d| d.and_hms_micro_opt(9, 30, 0, 42));
-        let fields = alert_pending_fields(7, "Suspicious login", "high", "edr", created);
+        let fields = alert_pending_fields(7, "Suspicious login", "high", "endpoint", created);
         assert_eq!(
             fields,
             vec![
                 ("alert_id".to_owned(), "7".to_owned()),
                 ("title".to_owned(), "Suspicious login".to_owned()),
                 ("severity".to_owned(), "high".to_owned()),
-                ("source".to_owned(), "edr".to_owned()),
+                ("source".to_owned(), "endpoint".to_owned()),
                 (
                     "created_at".to_owned(),
                     "2026-07-22T09:30:00.000042".to_owned()
@@ -980,7 +980,7 @@ mod tests {
             title: Some("t".to_owned()),
             description: Some("d".to_owned()),
             severity: Some("high".to_owned()),
-            source: Some("edr".to_owned()),
+            source: Some("endpoint".to_owned()),
             indicators: None,
         };
         assert!(validate_create(&base).is_ok());

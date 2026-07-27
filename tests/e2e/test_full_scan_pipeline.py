@@ -93,10 +93,10 @@ class TestFullScanPipeline:
         except botocore.exceptions.EndpointResolutionError:
             pytest.skip("MinIO endpoint not reachable")
 
-    def test_worker_scanner_health(self):
-        """Verify worker-scanner service is healthy if available.
+    def test_scanner_health(self):
+        """Verify scanner service is healthy if available.
 
-        The worker-scanner service may not be running in all environments.
+        The scanner service may not be running in all environments.
         This test gracefully skips if the service is not configured.
         """
         # Worker scanner URL not in conftest — would need to be added if service exists
@@ -104,8 +104,8 @@ class TestFullScanPipeline:
         scanner_url = None
         import os
 
-        if "WORKER_SCANNER_URL" in os.environ:
-            scanner_url = os.getenv("WORKER_SCANNER_URL")
+        if "SCANNER_URL" in os.environ:
+            scanner_url = os.getenv("SCANNER_URL")
         elif "SCANNER_URL" in os.environ:
             scanner_url = os.getenv("SCANNER_URL")
 

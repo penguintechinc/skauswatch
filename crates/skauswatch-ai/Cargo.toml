@@ -1,6 +1,6 @@
 [package]
 name = "skauswatch-ai"
-description = "Multi-provider AI abstraction (Anthropic, OpenAI, Ollama) shared by manager and Darwin"
+description = "Multi-provider AI abstraction (Anthropic, OpenAI, Ollama) shared by manager and CodeScan"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -10,7 +10,7 @@
 # Examples:
 #   ./scripts/migrate.sh                              # migrate all services on beta
 #   ./scripts/migrate.sh --env alpha                  # migrate all services on alpha
-#   ./scripts/migrate.sh --service worker-scanner     # migrate one service only
+#   ./scripts/migrate.sh --service scanner     # migrate one service only
 #   ./scripts/migrate.sh --dry-run                    # show current revision without upgrading
 
 set -euo pipefail
@@ -26,8 +26,8 @@ LOCAL_PG_PORT=15432   # local port for port-forward (avoids clash with local pos
 # === Services with Alembic migrations ===
 # Format: "helm-chart-name:service-dir:alembic-ini-path"
 MIGRATION_SERVICES=(
-  "worker-darwin:services/worker-darwin:alembic.ini"
-  "worker-scanner:services/worker-scanner:alembic/alembic.ini"
+  "worker-codescan:services/worker-codescan:alembic.ini"
+  "scanner:services/scanner:alembic/alembic.ini"
 )
 
 # === Colors ===
@@ -187,36 +187,36 @@ run_alembic() {
 
 # === Per-service migration functions ===
 
-migrate_worker_darwin() {
-  log_header "Migrating worker-darwin"
+migrate_worker_codescan() {
+  log_header "Migrating worker-codescan"
 
   # Use the postgres superuser (from postgres-credentials secret) so migrations
-  # can run even before the per-service 'darwin' role is created.
+  # can run even before the per-service 'codescan' role is created.
   local pg_user pg_pass db_name
   pg_user=$(k8s_secret_get "postgres-credentials" "username" "skauswatch")
   pg_pass=$(k8s_secret_get "postgres-credentials" "password" "skauswatch-secure-password-2025")
   db_name=$(k8s_secret_get "postgres-credentials" "database" "skauswatch")
 
-  # worker-darwin env.py reads through config/settings.py which uses:
-  #   DB_TYPE, DB_HOST, DB_PORT, DB_NAME, DARWIN_DB_USER, DARWIN_DB_PASS
+  # worker-codescan env.py reads through config/settings.py which uses:
+  #   DB_TYPE, DB_HOST, DB_PORT, DB_NAME, CODESCAN_DB_USER, CODESCAN_DB_PASS
   # EXTRA_PYTHONPATH lets the subshell import config.settings without shadowing alembic.
-  if ! EXTRA_PYTHONPATH="${PROJECT_ROOT}/services/worker-darwin" \
-      run_alembic "services/worker-darwin" "alembic.ini" \
+  if ! EXTRA_PYTHONPATH="${PROJECT_ROOT}/services/worker-codescan" \
+      run_alembic "services/worker-codescan" "alembic.ini" \
         "DB_TYPE=postgresql" \
         "DB_HOST=localhost" \
         "DB_PORT=${LOCAL_PG_PORT}" \
         "DB_NAME=${db_name}" \
-        "DARWIN_DB_USER=${pg_user}" \
-        "DARWIN_DB_PASS=${pg_pass}"; then
-    log_error "worker-darwin migration failed"
+        "CODESCAN_DB_USER=${pg_user}" \
+        "CODESCAN_DB_PASS=${pg_pass}"; then
+    log_error "worker-codescan migration failed"
     return 1
   fi
 
-  log_success "worker-darwin migration complete"
+  log_success "worker-codescan migration complete"
 }
 
-migrate_worker_scanner() {
-  log_header "Migrating worker-scanner"
+migrate_scanner() {
+  log_header "Migrating scanner"
 
   # Use the postgres superuser so migrations can run regardless of whether
   # the per-service 'app_user' role exists yet.
@@ -227,16 +227,16 @@ migrate_worker_scanner() {
 
   local database_url="postgresql://${pg_user}:${pg_pass}@localhost:${LOCAL_PG_PORT}/${db_name}"
 
-  # worker-scanner env.py reads DATABASE_URL directly.
+  # scanner env.py reads DATABASE_URL directly.
   # Do NOT add the service dir to PYTHONPATH — it contains an alembic/ subdir
   # that would shadow the installed alembic package.
-  if ! run_alembic "services/worker-scanner" "alembic/alembic.ini" \
+  if ! run_alembic "services/scanner" "alembic/alembic.ini" \
       "DATABASE_URL=${database_url}"; then
-    log_error "worker-scanner migration failed"
+    log_error "scanner migration failed"
     return 1
   fi
 
-  log_success "worker-scanner migration complete"
+  log_success "scanner migration complete"
 }
 
 # === Main ===
@@ -259,8 +259,8 @@ for svc_spec in "${MIGRATION_SERVICES[@]}"; do
   fi
 
   case "$svc_name" in
-    worker-darwin)  migrate_worker_darwin  || FAILED+=("$svc_name") ;;
-    worker-scanner) migrate_worker_scanner || FAILED+=("$svc_name") ;;
+    worker-codescan)  migrate_worker_codescan  || FAILED+=("$svc_name") ;;
+    scanner) migrate_scanner || FAILED+=("$svc_name") ;;
     *) log_warning "No migration function for ${svc_name}, skipping" ;;
   esac
 done

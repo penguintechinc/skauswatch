@@ -8,6 +8,8 @@ for anyone tracking the project. The terse release record lives in
 > **Status:** v2.0 is in active development on `release/v2.0.x` (not yet shipped).
 > SkausWatch has **never been deployed to production**, so v2 is free to change
 > wire contracts, schemas, routes, and module names without a data migration.
+> The module rename below is **complete** — every service, crate, stream
+> topic, DB table, and flag key in this repo uses the new names.
 
 ## What changed at a glance
 
@@ -19,7 +21,7 @@ for anyone tracking the project. The terse release record lives in
 - **Feature-flag + license gating** on every feature area via the
   `penguin-licensing` Rust crate (PostHog-compatible flags + license
   entitlement), default-OFF, fail-safe.
-- **Module rename** to descriptive names (below).
+- **Module rename** to descriptive names (below) — done.
 
 ## Module rename map
 

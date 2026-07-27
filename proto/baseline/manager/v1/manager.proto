@@ -1,6 +1,6 @@
 // Canonical source for the skauswatch manager gRPC contract.
 // WIRE-COMPAT POLICY: package name `skauswatch.manager` is part of the gRPC
-// method path and MUST NOT change — fielded v1 EDR agents depend on it.
+// method path and MUST NOT change — fielded v1 ENDPOINT agents depend on it.
 // Guarded by `buf breaking` in CI. New fields only; never renumber.
 syntax = "proto3";
 

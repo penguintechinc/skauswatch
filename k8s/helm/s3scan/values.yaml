@@ -1,0 +1,166 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch-s3scan
+  pullPolicy: IfNotPresent
+  tag: latest
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+
+# No service - s3scan is a consumer, not an API
+service:
+  enabled: false
+
+# No ingress - internal consumer only
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: "2"
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+env:
+  - name: FLASK_ENV
+    value: "production"
+  - name: FLASK_APP
+    value: "app:create_app()"
+  - name: SECRET_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-s3scan-secret
+        key: secret-key
+  - name: DB_TYPE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: db-type
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: db-host
+  - name: DB_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: db-port
+  - name: DB_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: db-name
+  - name: DB_USER
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-s3scan-secret
+        key: db-user
+  - name: DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-s3scan-secret
+        key: db-pass
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-s3scan-secret
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: release-mode
+
+livenessProbe:
+  exec:
+    command:
+      - /bin/sh
+      - -c
+      - "pgrep -f worker"
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  exec:
+    command:
+      - /bin/sh
+      - -c
+      - "pgrep -f worker"
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts:
+  - name: clamav-db
+    mountPath: /var/lib/clamav
+    readOnly: true
+  - name: yara-rules
+    mountPath: /etc/yara/rules
+    readOnly: true
+
+volumes:
+  - name: clamav-db
+    persistentVolumeClaim:
+      claimName: clamav-db-pvc
+  - name: yara-rules
+    configMap:
+      name: yara-rules-config
+
+configMapData:
+  db-type: "postgres"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"
+
+secretData:
+  secret-key: "changeme-in-production"
+  db-user: "app_user"
+  db-pass: "changeme-in-production"
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

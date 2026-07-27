@@ -20,16 +20,16 @@ class TestPKICertificateLifecycle:
     @pytest.fixture(autouse=True)
     def skip_if_pki_unavailable(self, check_services_available):
         """Skip tests if PKI Server service is not available."""
-        if not check_services_available.get("pki_server"):
+        if not check_services_available.get("pki"):
             pytest.skip("PKI Server service is not available")
 
-    def test_pki_health(self, pki_server_url: str):
+    def test_pki_health(self, pki_url: str):
         """Verify PKI Server service is healthy."""
-        response = requests.get(f"{pki_server_url}/healthz", timeout=5)
+        response = requests.get(f"{pki_url}/healthz", timeout=5)
         assert response.status_code == 200
 
     def test_request_certificate(
-        self, pki_server_url: str, auth_headers: dict
+        self, pki_url: str, auth_headers: dict
     ) -> Optional[str]:
         """Request a new certificate from the PKI server.
 
@@ -44,7 +44,7 @@ class TestPKICertificateLifecycle:
             "generate_key": True,
         }
         response = requests.post(
-            f"{pki_server_url}/api/v1/certificates",
+            f"{pki_url}/api/v1/certificates",
             json=payload,
             headers=auth_headers,
             timeout=15,
@@ -57,7 +57,7 @@ class TestPKICertificateLifecycle:
         return data.get("id") or data.get("cert_id")
 
     def test_issue_certificate(
-        self, pki_server_url: str, auth_headers: dict, request_id: Optional[str] = None
+        self, pki_url: str, auth_headers: dict, request_id: Optional[str] = None
     ) -> Optional[str]:
         """Issue a pending certificate request.
 
@@ -72,7 +72,7 @@ class TestPKICertificateLifecycle:
             "generate_key": True,
         }
         response = requests.post(
-            f"{pki_server_url}/api/v1/certificates",
+            f"{pki_url}/api/v1/certificates",
             json=payload,
             headers=auth_headers,
             timeout=15,
@@ -86,7 +86,7 @@ class TestPKICertificateLifecycle:
         return data.get("id") or data.get("cert_id")
 
     def test_verify_certificate_properties(
-        self, pki_server_url: str, auth_headers: dict, cert_id: Optional[str] = None
+        self, pki_url: str, auth_headers: dict, cert_id: Optional[str] = None
     ):
         """Verify issued certificate has correct properties.
 
@@ -101,7 +101,7 @@ class TestPKICertificateLifecycle:
             "generate_key": True,
         }
         response = requests.post(
-            f"{pki_server_url}/api/v1/certificates",
+            f"{pki_url}/api/v1/certificates",
             json=payload,
             headers=auth_headers,
             timeout=15,
@@ -117,7 +117,7 @@ class TestPKICertificateLifecycle:
 
         # Retrieve certificate
         get_response = requests.get(
-            f"{pki_server_url}/api/v1/certificates/{cert_id}",
+            f"{pki_url}/api/v1/certificates/{cert_id}",
             headers=auth_headers,
             timeout=10,
         )
@@ -130,7 +130,7 @@ class TestPKICertificateLifecycle:
         assert "serial_number" in retrieved or "id" in retrieved
 
     def test_revoke_certificate(
-        self, pki_server_url: str, auth_headers: dict, cert_id: Optional[str] = None
+        self, pki_url: str, auth_headers: dict, cert_id: Optional[str] = None
     ):
         """Revoke an issued certificate.
 
@@ -145,7 +145,7 @@ class TestPKICertificateLifecycle:
             "generate_key": True,
         }
         response = requests.post(
-            f"{pki_server_url}/api/v1/certificates",
+            f"{pki_url}/api/v1/certificates",
             json=payload,
             headers=auth_headers,
             timeout=15,
@@ -162,7 +162,7 @@ class TestPKICertificateLifecycle:
         # Revoke certificate
         revoke_payload = {"reason": "testing"}
         revoke_response = requests.post(
-            f"{pki_server_url}/api/v1/certificates/{cert_id}/revoke",
+            f"{pki_url}/api/v1/certificates/{cert_id}/revoke",
             json=revoke_payload,
             headers=auth_headers,
             timeout=10,
@@ -172,14 +172,14 @@ class TestPKICertificateLifecycle:
         assert revoke_response.status_code in (200, 204), f"Expected 200/204, got {revoke_response.status_code}: {revoke_response.text}"
 
     def test_verify_revocation_in_crl(
-        self, pki_server_url: str, serial_number: Optional[str] = None
+        self, pki_url: str, serial_number: Optional[str] = None
     ):
         """Verify revoked certificate appears in CRL (Certificate Revocation List).
 
         Ensures revocation is properly published.
         """
         response = requests.get(
-            f"{pki_server_url}/api/v1/ca/info",
+            f"{pki_url}/api/v1/ca/info",
             timeout=10,
         )
         if response.status_code in (404, 502, 503):
@@ -189,7 +189,7 @@ class TestPKICertificateLifecycle:
         assert "ca_cert" in data or "issuer" in data or "dn" in data
 
     def test_clean_up_certificate_data(
-        self, pki_server_url: str, auth_headers: dict, cert_id: Optional[str] = None
+        self, pki_url: str, auth_headers: dict, cert_id: Optional[str] = None
     ):
         """Clean up test certificate data after tests.
 
@@ -197,7 +197,7 @@ class TestPKICertificateLifecycle:
         """
         # Verify PKI server is still healthy
         response = requests.get(
-            f"{pki_server_url}/healthz",
+            f"{pki_url}/healthz",
             timeout=5,
         )
         assert response.status_code == 200, f"PKI server health check failed: {response.status_code}"

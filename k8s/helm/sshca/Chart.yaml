@@ -1,0 +1,15 @@
+apiVersion: v2
+name: skauswatch-sshca
+description: SkausWatch SSH CA Service
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skauswatch
+  - ssh
+  - ca
+  - flask
+  - python
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io

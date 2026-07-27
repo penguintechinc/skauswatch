@@ -24,22 +24,22 @@ jobs:
         include:
           - service: manager
             image_name: manager
-          - service: pki-server-new
-            image_name: pki-server
-          - service: ssh-ca
-            image_name: ssh-ca
-          - service: aaa-monitor
-            image_name: aaa-monitor
-          - service: worker-s3
-            image_name: worker-s3
-          - service: worker-scanner
-            image_name: worker-scanner
-          - service: worker-darwin
-            image_name: worker-darwin
+          - service: pki
+            image_name: pki
+          - service: sshca
+            image_name: sshca
+          - service: monitor
+            image_name: monitor
+          - service: s3scan
+            image_name: s3scan
+          - service: scanner
+            image_name: scanner
+          - service: worker-codescan
+            image_name: worker-codescan
           - service: webui
             image_name: webui
-          - service: edr-agent
-            image_name: edr-agent
+          - service: endpoint-agent
+            image_name: endpoint-agent
 
     steps:
       - name: Checkout code
@@ -96,22 +96,22 @@ jobs:
         include:
           - service: manager
             image_name: manager
-          - service: pki-server-new
-            image_name: pki-server
-          - service: ssh-ca
-            image_name: ssh-ca
-          - service: aaa-monitor
-            image_name: aaa-monitor
-          - service: worker-s3
-            image_name: worker-s3
-          - service: worker-scanner
-            image_name: worker-scanner
-          - service: worker-darwin
-            image_name: worker-darwin
+          - service: pki
+            image_name: pki
+          - service: sshca
+            image_name: sshca
+          - service: monitor
+            image_name: monitor
+          - service: s3scan
+            image_name: s3scan
+          - service: scanner
+            image_name: scanner
+          - service: worker-codescan
+            image_name: worker-codescan
           - service: webui
             image_name: webui
-          - service: edr-agent
-            image_name: edr-agent
+          - service: endpoint-agent
+            image_name: endpoint-agent
 
     steps:
       - name: Checkout code

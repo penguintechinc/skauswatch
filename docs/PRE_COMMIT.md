@@ -40,7 +40,7 @@ Before committing, run in this order (or use `./scripts/pre-commit/pre-commit.sh
   - All API health endpoints respond with 200 status
   - All services communicate successfully
   - Database connectivity verified
-  - IceBox: `icebox/tests/smoke/run-all.sh` (6-phase runner; flags: `--build-only`, `--skip-build`)
+  - Vault: `icebox/tests/smoke/run-all.sh` (6-phase runner; flags: `--build-only`, `--skip-build`)
   - See: [Testing Documentation - Smoke Tests](TESTING.md#smoke-tests)
 
 ### Feature Testing & Documentation
@@ -56,22 +56,22 @@ Before committing, run in this order (or use `./scripts/pre-commit/pre-commit.sh
 - [ ] **Integration tests**: `make test-integration` or `pytest tests/integration/`
   - Tests with real database and service communication
   - See: [Testing Documentation - Integration Tests](TESTING.md#integration-tests)
-- [ ] **PKI tests** (if modifying PKI Server): `pytest tests/integration/pki-server/`
+- [ ] **PKI tests** (if modifying PKI Server): `pytest tests/integration/pki/`
   - Certificate generation, validation, revocation
   - OCSP responder functionality
   - See: [Testing Documentation - PKI Testing](TESTING.md#pki-testing-strategy)
-- [ ] **SSH CA tests** (if modifying SSH CA): `pytest tests/integration/ssh-ca/`
+- [ ] **SSH CA tests** (if modifying SSH CA): `pytest tests/integration/sshca/`
   - SSH key pair generation and validation
   - SSH certificate issuance and validation
   - Certificate expiry and validation
-  - See: [Testing Documentation - SSH CA Testing](TESTING.md#ssh-ca-testing-strategy)
+  - See: [Testing Documentation - SSH CA Testing](TESTING.md#sshca-testing-strategy)
 
 ### Service-Specific Requirements
 
 **If modifying Manager service**:
 - [ ] Manager → PKI Server communication tests passing
 - [ ] Manager → SSH CA communication tests passing
-- [ ] Manager → AAA Monitor communication tests passing
+- [ ] Manager → Monitor communication tests passing
 - [ ] User authentication flow tests passing
 - [ ] Role-based access control tests passing
 
@@ -89,31 +89,31 @@ Before committing, run in this order (or use `./scripts/pre-commit/pre-commit.sh
 - [ ] Certificate expiry handling tests passing
 - [ ] Integration with Manager service verified
 
-**If modifying AAA Monitor service**:
+**If modifying Monitor service**:
 - [ ] Log parsing tests passing
 - [ ] Audit log storage tests passing
 - [ ] Threat detection tests passing
 - [ ] Integration with Manager service verified
 
-**If modifying IceBox sub-module** (`icebox/services/flask-backend/` or `icebox/webui/`):
-- [ ] Python linting: `cd .worktrees/icebox/icebox/services/flask-backend && bandit -r . && flake8 . && black --check . && isort --check . && mypy .`
-- [ ] React/TS linting: `cd .worktrees/icebox/icebox/webui && npm run lint`
-- [ ] IceBox unit tests: `pytest icebox/services/flask-backend/tests/ -v`
+**If modifying Vault sub-module** (`icebox/services/flask-backend/` or `icebox/webui/`):
+- [ ] Python linting: `cd .worktrees/vault/vault/services/flask-backend && bandit -r . && flake8 . && black --check . && isort --check . && mypy .`
+- [ ] React/TS linting: `cd .worktrees/vault/vault/webui && npm run lint`
+- [ ] Vault unit tests: `pytest icebox/services/flask-backend/tests/ -v`
   - `test_envelope.py` — AES-256-GCM roundtrip, tamper detection, MEK rotation
   - `test_jit_token.py` — HMAC token format, expiry, tamper detection
-- [ ] IceBox integration tests: `pytest icebox/services/flask-backend/tests/test_jit_flow_integration.py -v`
-- [ ] IceBox smoke tests (build-only): `icebox/tests/smoke/run-all.sh --build-only`
-- [ ] Verify PKI Server and SSH CA shims still proxy correctly to IceBox endpoints
+- [ ] Vault integration tests: `pytest icebox/services/flask-backend/tests/test_jit_flow_integration.py -v`
+- [ ] Vault smoke tests (build-only): `icebox/tests/smoke/run-all.sh --build-only`
+- [ ] Verify PKI Server and SSH CA shims still proxy correctly to Vault endpoints
 
-**If modifying PKI Server or SSH CA shims** (`services/pki-server-new/` or `services/ssh-ca/`):
+**If modifying PKI Server or SSH CA shims** (`services/pki/` or `services/sshca/`):
 - [ ] Verify shim proxy still attaches `Deprecation:` and `Link:` headers
-- [ ] Verify requests still forward correctly to `$ICEBOX_PKI_URL` / `$ICEBOX_SSH_CA_URL`
-- [ ] PKI integration tests: `pytest tests/integration/pki-server/`
-- [ ] SSH CA integration tests: `pytest tests/integration/ssh-ca/`
+- [ ] Verify requests still forward correctly to `$VAULT_PKI_URL` / `$VAULT_SSHCA_URL`
+- [ ] PKI integration tests: `pytest tests/integration/pki/`
+- [ ] SSH CA integration tests: `pytest tests/integration/sshca/`
 
-**If modifying Darwin sub-module** (`darwin/` or `services/worker-darwin/`):
-- [ ] Darwin unit tests: `cd darwin && pytest tests/ -v`
-- [ ] Worker-Darwin linting: `cd services/worker-darwin && bandit -r . && flake8 .`
+**If modifying CodeScan sub-module** (`codescan/` or `services/worker-codescan/`):
+- [ ] CodeScan unit tests: `cd codescan && pytest tests/ -v`
+- [ ] Worker-CodeScan linting: `cd services/worker-codescan && bandit -r . && flake8 .`
 
 **If modifying shared libraries (py_libs)**:
 - [ ] All dependent services rebuild successfully
@@ -211,11 +211,11 @@ Before committing changes to any service:
 - **Testing scope**: All new endpoints and modified functionality
 - **Test files location**: `tests/api/` directory with service-specific subdirectories
   - `tests/api/manager/` - Manager service API tests
-  - `tests/api/pki-server/` - PKI server API tests
-  - `tests/api/ssh-ca/` - SSH CA API tests
-  - `tests/api/aaa-monitor/` - AAA Monitor API tests
-  - `tests/api/worker-scanner/` - Worker-Scanner API tests
-  - `tests/api/icebox/` - IceBox API tests (when IceBox installed)
+  - `tests/api/pki/` - PKI server API tests
+  - `tests/api/sshca/` - SSH CA API tests
+  - `tests/api/monitor/` - Monitor API tests
+  - `tests/api/scanner/` - Scanner API tests
+  - `tests/api/vault/` - Vault API tests (when Vault installed)
 - **Run before commit**: Each test script should be executable and pass completely
 - **Test coverage**: Health checks, authentication, CRUD operations, error cases
 - **Command pattern**: `cd services/<service-name> && pytest tests/api/ -v`
@@ -226,7 +226,7 @@ Before committing changes to any service:
 
 - [ ] Manager → PKI Server communication tests passing
 - [ ] Manager → SSH CA communication tests passing
-- [ ] Manager → AAA Monitor communication tests passing
+- [ ] Manager → Monitor communication tests passing
 - [ ] All services respond to health checks
 - [ ] Database consistency verified across services
 

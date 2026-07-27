@@ -1,6 +1,6 @@
 # Local Development Guide - SkausWatch
 
-Complete guide to setting up a local development environment for SkausWatch's full ecosystem — 8 core services (Manager, PKI Server, SSH CA, AAA Monitor, Worker-S3, Worker-Scanner, EDR Agent, and WebUI) plus optional IceBox (licensed secrets vault) and Darwin (AI code review) sub-modules — running the application locally, and following the development workflow.
+Complete guide to setting up a local development environment for SkausWatch's full ecosystem — 8 core services (Manager, PKI Server, SSH CA, Monitor, S3scan, Scanner, ENDPOINT Agent, and WebUI) plus optional Vault (licensed secrets vault) and CodeScan (AI code review) sub-modules — running the application locally, and following the development workflow.
 
 ## Table of Contents
 
@@ -8,8 +8,8 @@ Complete guide to setting up a local development environment for SkausWatch's fu
 2. [Initial Setup](#initial-setup)
 3. [Starting Development Environment](#starting-development-environment)
 4. [Service Architecture](#service-architecture)
-5. [IceBox Sub-Module (Licensed Secrets Vault)](#icebox-sub-module-licensed-secrets-vault)
-6. [Darwin Sub-Module (AI Code Review)](#darwin-sub-module-ai-code-review)
+5. [Vault Sub-Module (Licensed Secrets Vault)](#vault-sub-module-licensed-secrets-vault)
+6. [CodeScan Sub-Module (AI Code Review)](#codescan-sub-module-ai-code-review)
 7. [Development Workflow](#development-workflow)
 8. [Common Tasks](#common-tasks)
 9. [Troubleshooting](#troubleshooting)
@@ -157,16 +157,16 @@ MANAGER_DEBUG=true
 MANAGER_SECRET_KEY=your-secret-key-for-dev
 
 # PKI Server (Port 5001)
-PKI_SERVER_PORT=5001
+PKI_PORT=5001
 PKI_DEBUG=true
 
 # SSH CA Server (Port 5002)
-SSH_CA_PORT=5002
-SSH_CA_DEBUG=true
+SSHCA_PORT=5002
+SSHCA_DEBUG=true
 
-# AAA Monitor (Port 5003)
-AAA_MONITOR_PORT=5003
-AAA_MONITOR_DEBUG=true
+# Monitor (Port 5003)
+MONITOR_PORT=5003
+MONITOR_DEBUG=true
 
 # Redis Cache
 REDIS_URL=redis://localhost:6379/0
@@ -181,9 +181,9 @@ NUCLEI_ENABLED=true
 ZAP_ENABLED=false
 OPENVAS_ENABLED=false
 
-# IceBox integration (when IceBox sub-module is installed)
-ICEBOX_PKI_URL=http://localhost:5101
-ICEBOX_SSH_CA_URL=http://localhost:5102
+# Vault integration (when Vault sub-module is installed)
+VAULT_PKI_URL=http://localhost:5101
+VAULT_SSHCA_URL=http://localhost:5102
 ```
 
 ### Database Initialization
@@ -215,17 +215,17 @@ make dev
 # - Manager service (port 5000)
 # - PKI Server shim (port 5001)
 # - SSH CA shim (port 5002)
-# - AAA Monitor (port 5003)
-# - Worker-S3 (background worker, no HTTP port)
-# - Worker-Scanner (background worker, no HTTP port)
-# - EDR Agent (DaemonSet in K8s; runs via kubectl in local dev)
+# - Monitor (port 5003)
+# - S3scan (background worker, no HTTP port)
+# - Scanner (background worker, no HTTP port)
+# - ENDPOINT Agent (DaemonSet in K8s; runs via kubectl in local dev)
 # - WebUI (port 3000)
 
 # Access the services:
 # Manager API:     http://localhost:5000
 # PKI Server API:  http://localhost:5001
 # SSH CA API:      http://localhost:5002
-# AAA Monitor API: http://localhost:5003
+# Monitor API: http://localhost:5003
 # WebUI:           http://localhost:3000
 ```
 
@@ -237,7 +237,7 @@ make dev
 docker-compose up -d manager
 
 # Start Manager, PKI, and database
-docker-compose up -d postgres redis manager pki-server
+docker-compose up -d postgres redis manager pki
 
 # Start without detaching (see logs)
 docker-compose up manager
@@ -252,7 +252,7 @@ docker-compose logs -f
 docker-compose logs -f manager
 
 # Last 100 lines, follow new entries
-docker-compose logs -f --tail=100 pki-server
+docker-compose logs -f --tail=100 pki
 ```
 
 **Stop services**:
@@ -279,15 +279,15 @@ docker-compose down && docker-compose up -d --build
 | Service | Purpose | Port | Language |
 |---------|---------|------|----------|
 | **Manager** (`manager-new`) | Configuration and management plane | 5000 | Python 3.13 + Quart |
-| **PKI Server** (`pki-server-new`) | Shim proxy → IceBox PKI (v1.x) | 5001 | Python 3.13 + Quart |
-| **SSH CA** (`ssh-ca`) | Shim proxy → IceBox SSH CA (v1.x) | 5002 | Python 3.13 + Quart |
-| **AAA Monitor** (`aaa-monitor`) | Audit logging and threat analysis | 5003 | Python 3.13 + FastAPI |
-| **Worker-S3** (`worker-s3`) | ClamAV + YARA + TI scan workers | — | Python 3.13 |
-| **Worker-Scanner** (`worker-scanner`) | Nuclei, ZAP, OpenVAS scanner | — | Python 3.13 |
-| **EDR Agent** (`edr-agent`) | Endpoint detection & response | — | Go 1.24 (DaemonSet) |
+| **PKI Server** (`pki`) | Shim proxy → Vault PKI (v1.x) | 5001 | Python 3.13 + Quart |
+| **SSH CA** (`sshca`) | Shim proxy → Vault SSH CA (v1.x) | 5002 | Python 3.13 + Quart |
+| **Monitor** (`monitor`) | Audit logging and threat analysis | 5003 | Python 3.13 + FastAPI |
+| **S3scan** (`s3scan`) | ClamAV + YARA + TI scan workers | — | Python 3.13 |
+| **Scanner** (`scanner`) | Nuclei, ZAP, OpenVAS scanner | — | Python 3.13 |
+| **ENDPOINT Agent** (`endpoint-agent`) | Endpoint detection & response | — | Go 1.24 (DaemonSet) |
 | **WebUI** (`webui`) | Frontend dashboard | 3000 | Node.js + React |
 
-> **Note on PKI Server and SSH CA**: In v1.x these services are shim proxies that forward certificate operations to the IceBox sub-module when IceBox is installed and `ICEBOX_PKI_URL` / `ICEBOX_SSH_CA_URL` are configured. When IceBox is not present they return appropriate 501/503 responses with `Deprecation:` headers indicating that full PKI and SSH CA functionality requires the IceBox module.
+> **Note on PKI Server and SSH CA**: In v1.x these services are shim proxies that forward certificate operations to the Vault sub-module when Vault is installed and `VAULT_PKI_URL` / `VAULT_SSHCA_URL` are configured. When Vault is not present they return appropriate 501/503 responses with `Deprecation:` headers indicating that full PKI and SSH CA functionality requires the Vault module.
 
 ### Shared Components
 
@@ -299,14 +299,14 @@ All services use shared security libraries:
 ### Service Dependencies
 
 ```
-Manager ─────────── PKI Server (shim → IceBox)
+Manager ─────────── PKI Server (shim → Vault)
    │                   │
-   ├── SSH CA (shim → IceBox) ──┤
+   ├── SSH CA (shim → Vault) ──┤
    │                   │
-   ├── AAA Monitor ────┘
+   ├── Monitor ────┘
    │
-   ├── Worker-S3
-   ├── Worker-Scanner
+   ├── S3scan
+   ├── Scanner
    └── WebUI
               │
          Shared Libraries
@@ -319,72 +319,72 @@ PostgreSQL Database   Redis Cache
 
 ---
 
-## IceBox Sub-Module (Licensed Secrets Vault)
+## Vault Sub-Module (Licensed Secrets Vault)
 
-IceBox is an optional licensed secrets vault sub-module that provides full PKI, SSH CA, envelope-encrypted secrets storage, JIT access controls, and cloud sync. It lives in a separate worktree.
+Vault is an optional licensed secrets vault sub-module that provides full PKI, SSH CA, envelope-encrypted secrets storage, JIT access controls, and cloud sync. It lives in a separate worktree.
 
-**Location:** `.worktrees/icebox/icebox/`
-**Branch:** `icebox-module` (branched from `v1.x`)
-**License requirement:** IceBox feature flag must be present in your `LICENSE_KEY`
+**Location:** `.worktrees/vault/vault/`
+**Branch:** `vault-module` (branched from `v1.x`)
+**License requirement:** Vault feature flag must be present in your `LICENSE_KEY`
 
 ### Prerequisites
 
-- IceBox feature enabled in license: `ICEBOX_MEK` env var must be set (AES-256 master encryption key)
-- The `icebox-module` worktree must be checked out:
+- Vault feature enabled in license: `VAULT_MEK` env var must be set (AES-256 master encryption key)
+- The `vault-module` worktree must be checked out:
 
 ```bash
-git worktree add .worktrees/icebox icebox-module
+git worktree add .worktrees/vault vault-module
 ```
 
-### Required Environment Variables (IceBox)
+### Required Environment Variables (Vault)
 
 ```bash
-ICEBOX_MEK=<32-byte-hex-or-base64-key>   # Master encryption key — REQUIRED
-ICEBOX_DB_HOST=localhost
-ICEBOX_DB_PORT=5432
-ICEBOX_DB_NAME=icebox_dev
-ICEBOX_DB_USER=icebox
-ICEBOX_DB_PASS=icebox
-REDIS_URL=redis://localhost:6379/1        # IceBox uses DB 1 by convention
-ICEBOX_PORT=5100                          # IceBox Flask backend
+VAULT_MEK=<32-byte-hex-or-base64-key>   # Master encryption key — REQUIRED
+VAULT_DB_HOST=localhost
+VAULT_DB_PORT=5432
+VAULT_DB_NAME=vault_dev
+VAULT_DB_USER=vault
+VAULT_DB_PASS=vault
+REDIS_URL=redis://localhost:6379/1        # Vault uses DB 1 by convention
+VAULT_PORT=5100                          # Vault Flask backend
 ```
 
 ### First-Time Database Migration
 
-Run the Alembic migration before starting IceBox for the first time:
+Run the Alembic migration before starting Vault for the first time:
 
 ```bash
-cd .worktrees/icebox/icebox
+cd .worktrees/vault/vault
 docker compose exec flask-backend alembic upgrade head
 ```
 
-### Starting IceBox
+### Starting Vault
 
 ```bash
-cd .worktrees/icebox/icebox
+cd .worktrees/vault/vault
 docker compose up -d
 ```
 
 This starts:
-- IceBox Flask backend (port 5100)
-- IceBox PKI service (port 5101)
-- IceBox SSH CA service (port 5102)
-- IceBox WebUI (port 5110)
-- IceBox sync-worker (background)
+- Vault Flask backend (port 5100)
+- Vault PKI service (port 5101)
+- Vault SSH CA service (port 5102)
+- Vault WebUI (port 5110)
+- Vault sync-worker (background)
 
-### Connecting Core Services to IceBox
+### Connecting Core Services to Vault
 
-Set these env vars in core SkausWatch services so PKI Server and SSH CA shims forward to IceBox:
+Set these env vars in core SkausWatch services so PKI Server and SSH CA shims forward to Vault:
 
 ```bash
-ICEBOX_PKI_URL=http://localhost:5101
-ICEBOX_SSH_CA_URL=http://localhost:5102
+VAULT_PKI_URL=http://localhost:5101
+VAULT_SSHCA_URL=http://localhost:5102
 ```
 
 These are already included in the `.env.example`. Restart the core services after setting them:
 
 ```bash
-docker compose restart pki-server ssh-ca
+docker compose restart pki sshca
 ```
 
 ### K8s Deploy (Alpha)
@@ -395,12 +395,12 @@ kubectl apply --context local-alpha -k icebox/k8s/kustomize/overlays/alpha
 
 ---
 
-## Darwin Sub-Module (AI Code Review)
+## CodeScan Sub-Module (AI Code Review)
 
-Darwin provides AI-powered code review and ASM surface scanning as an optional sub-module.
+CodeScan provides AI-powered code review and ASM surface scanning as an optional sub-module.
 
-**Location:** `darwin/` in the project root
-**Worker service:** `services/worker-darwin/`
+**Location:** `codescan/` in the project root
+**Worker service:** `services/worker-codescan/`
 
 See `darwin/README.md` for full setup instructions including API key configuration and scan profile setup.
 

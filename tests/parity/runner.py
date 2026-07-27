@@ -28,7 +28,7 @@ from corpus import CASES, SEED_PASSWORD  # noqa: E402
 
 V1_BASE = os.environ.get("PARITY_V1_URL", "http://127.0.0.1:15001")
 V2_BASE = os.environ.get("PARITY_V2_URL", "http://127.0.0.1:15002")
-EDR_API_SECRET = os.environ.get("EDR_API_SECRET", "parity-edr-secret")
+ENDPOINT_API_SECRET = os.environ.get("ENDPOINT_API_SECRET", "parity-endpoint-secret")
 REPORT_DIR = os.environ.get(
     "PARITY_REPORT_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
 )
@@ -93,8 +93,8 @@ def diff_json(a, b, path=""):
 
 
 def agent_key(agent_id):
-    """v1 EDR HMAC: hex(HMAC-SHA256(EDR_API_SECRET, agent_id))."""
-    return hmac.new(EDR_API_SECRET.encode(), agent_id.encode(), hashlib.sha256).hexdigest()
+    """v1 ENDPOINT HMAC: hex(HMAC-SHA256(ENDPOINT_API_SECRET, agent_id))."""
+    return hmac.new(ENDPOINT_API_SECRET.encode(), agent_id.encode(), hashlib.sha256).hexdigest()
 
 
 class Side:

@@ -5,8 +5,8 @@ mod alerts;
 mod approvals;
 mod asm;
 mod auth;
-mod darwin;
-mod edr;
+mod codescan;
+mod endpoint;
 mod license;
 mod research;
 mod s3_scan;
@@ -30,10 +30,10 @@ pub fn router(state: AppState) -> Router {
                 .merge(threat_intel::router())
                 .merge(approvals::router())
                 .merge(s3_scan::router())
-                .merge(edr::router())
+                .merge(endpoint::router())
                 .merge(siem::router())
                 .merge(asm::router())
-                .merge(darwin::router())
+                .merge(codescan::router())
                 .merge(research::router()),
         )
         .with_state(state)

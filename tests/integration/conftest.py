@@ -140,9 +140,9 @@ def service_urls(k8s_available) -> Dict[str, str]:
         # Set up port-forwards for K8s services
         services = {
             "manager": ("alpha-manager", 5000, "/healthz"),
-            "pki_server": ("alpha-pki-server", 5001, "/health"),
-            "ssh_ca": ("alpha-ssh-ca", 5002, "/health"),
-            "aaa_monitor": ("alpha-aaa-monitor", 5003, "/health"),
+            "pki": ("alpha-pki", 5001, "/health"),
+            "sshca": ("alpha-sshca", 5002, "/health"),
+            "monitor": ("alpha-monitor", 5003, "/health"),
         }
 
         for service_key, (k8s_service, svc_port, health_endpoint) in services.items():
@@ -160,12 +160,12 @@ def service_urls(k8s_available) -> Dict[str, str]:
         urls = {
             "manager": "http://localhost:5000",
             "manager_health": "/healthz",
-            "pki_server": "http://localhost:5001",
-            "pki_server_health": "/health",
-            "ssh_ca": "http://localhost:5002",
-            "ssh_ca_health": "/health",
-            "aaa_monitor": "http://localhost:5003",
-            "aaa_monitor_health": "/health",
+            "pki": "http://localhost:5001",
+            "pki_health": "/health",
+            "sshca": "http://localhost:5002",
+            "sshca_health": "/health",
+            "monitor": "http://localhost:5003",
+            "monitor_health": "/health",
         }
 
     return urls
@@ -224,10 +224,10 @@ async def manager_service_ready(service_urls) -> bool:
 @pytest.fixture(scope="session")
 async def pki_service_ready(service_urls) -> bool:
     """Check if PKI Server is ready."""
-    url = service_urls.get("pki_server")
+    url = service_urls.get("pki")
     if not url:
         return False
-    health_endpoint = service_urls.get("pki_server_health", "/health")
+    health_endpoint = service_urls.get("pki_health", "/health")
     return await _is_http_service_ready(
         url.replace("http://", "").split(":")[0],
         int(url.split(":")[-1]),
@@ -236,12 +236,12 @@ async def pki_service_ready(service_urls) -> bool:
 
 
 @pytest.fixture(scope="session")
-async def ssh_ca_service_ready(service_urls) -> bool:
+async def sshca_service_ready(service_urls) -> bool:
     """Check if SSH CA is ready."""
-    url = service_urls.get("ssh_ca")
+    url = service_urls.get("sshca")
     if not url:
         return False
-    health_endpoint = service_urls.get("ssh_ca_health", "/health")
+    health_endpoint = service_urls.get("sshca_health", "/health")
     return await _is_http_service_ready(
         url.replace("http://", "").split(":")[0],
         int(url.split(":")[-1]),
@@ -250,12 +250,12 @@ async def ssh_ca_service_ready(service_urls) -> bool:
 
 
 @pytest.fixture(scope="session")
-async def aaa_monitor_service_ready(service_urls) -> bool:
-    """Check if AAA Monitor is ready."""
-    url = service_urls.get("aaa_monitor")
+async def monitor_service_ready(service_urls) -> bool:
+    """Check if Monitor is ready."""
+    url = service_urls.get("monitor")
     if not url:
         return False
-    health_endpoint = service_urls.get("aaa_monitor_health", "/health")
+    health_endpoint = service_urls.get("monitor_health", "/health")
     return await _is_http_service_ready(
         url.replace("http://", "").split(":")[0],
         int(url.split(":")[-1]),

@@ -1,4 +1,4 @@
-//! /api/v1/siem — log-pipeline health, ingest proxy to the log-receiver,
+//! /api/v1/siem — log-pipeline health, ingest proxy to the logs,
 //! OpenSearch search/stats, and configuration. Contract:
 //! docs/v2-port/manager-contract.md §siem; Python source of truth:
 //! services/manager/api/v1/siem.py.
@@ -40,8 +40,8 @@ struct SiemSettings {
     enabled: bool,
     /// OpenSearch endpoint (`OPENSEARCH_URL`).
     opensearch_url: String,
-    /// Log-receiver service base URL (`LOG_RECEIVER_URL`).
-    log_receiver_url: String,
+    /// Log-receiver service base URL (`LOGS_URL`).
+    logs_url: String,
     /// Retention window in days (`LOG_RETENTION_DAYS`, default 90).
     retention_days: i64,
 }
@@ -53,7 +53,7 @@ impl SiemSettings {
         Self::from_values(
             std::env::var("SIEM_ENABLED").ok().as_deref(),
             std::env::var("OPENSEARCH_URL").ok().as_deref(),
-            std::env::var("LOG_RECEIVER_URL").ok().as_deref(),
+            std::env::var("LOGS_URL").ok().as_deref(),
             std::env::var("LOG_RETENTION_DAYS").ok().as_deref(),
         )
     }
@@ -65,7 +65,7 @@ impl SiemSettings {
     fn from_values(
         enabled: Option<&str>,
         opensearch_url: Option<&str>,
-        log_receiver_url: Option<&str>,
+        logs_url: Option<&str>,
         retention_days: Option<&str>,
     ) -> Self {
         Self {
@@ -73,9 +73,7 @@ impl SiemSettings {
             opensearch_url: opensearch_url
                 .unwrap_or("http://opensearch:9200")
                 .to_owned(),
-            log_receiver_url: log_receiver_url
-                .unwrap_or("http://log-receiver:5010")
-                .to_owned(),
+            logs_url: logs_url.unwrap_or("http://logs:5010").to_owned(),
             retention_days: retention_days.and_then(parse_py_int).unwrap_or(90),
         }
     }
@@ -88,18 +86,18 @@ fn parse_py_int(s: &str) -> Option<i64> {
     s.trim().parse::<i64>().ok()
 }
 
-/// v1 health payload: `log_receiver` ok/unavailable and an overall status
+/// v1 health payload: `logs` ok/unavailable and an overall status
 /// that degrades with it.
 fn health_json(receiver_ok: bool) -> serde_json::Value {
     serde_json::json!({
-        "log_receiver": if receiver_ok { "ok" } else { "unavailable" },
+        "logs": if receiver_ok { "ok" } else { "unavailable" },
         "status": if receiver_ok { "ok" } else { "degraded" },
     })
 }
 
-/// Probes `{log_receiver_url}/healthz` with the v1 5s timeout; only an exact
+/// Probes `{logs_url}/healthz` with the v1 5s timeout; only an exact
 /// 200 counts as healthy (v1 `resp.status_code == 200`).
-async fn probe_log_receiver(base_url: &str) -> bool {
+async fn probe_logs(base_url: &str) -> bool {
     let resp = reqwest::Client::new()
         .get(format!("{base_url}/healthz"))
         .timeout(Duration::from_secs(5))
@@ -108,15 +106,15 @@ async fn probe_log_receiver(base_url: &str) -> bool {
     matches!(resp, Ok(r) if r.status().as_u16() == 200)
 }
 
-/// GET /siem/health — unauthenticated log-receiver liveness probe. Always
+/// GET /siem/health — unauthenticated logs liveness probe. Always
 /// 200; the body carries ok/degraded, matching the v1 route.
 async fn siem_health() -> Json<serde_json::Value> {
     let settings = SiemSettings::from_env();
-    let receiver_ok = probe_log_receiver(&settings.log_receiver_url).await;
+    let receiver_ok = probe_logs(&settings.logs_url).await;
     Json(health_json(receiver_ok))
 }
 
-/// POST /siem/ingest — authenticated proxy to `{LOG_RECEIVER_URL}/ingest`
+/// POST /siem/ingest — authenticated proxy to `{LOGS_URL}/ingest`
 /// with the v1 10s timeout. The upstream status code and JSON body pass
 /// through verbatim; transport/parse failures are 500 (v1 uncaught httpx).
 async fn proxy_ingest(
@@ -125,18 +123,18 @@ async fn proxy_ingest(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let settings = SiemSettings::from_env();
     let resp = reqwest::Client::new()
-        .post(format!("{}/ingest", settings.log_receiver_url))
+        .post(format!("{}/ingest", settings.logs_url))
         .timeout(Duration::from_secs(10))
         .json(&body)
         .send()
         .await
-        .map_err(|e| ApiError::internal("log-receiver ingest", e))?;
+        .map_err(|e| ApiError::internal("logs ingest", e))?;
     let status = StatusCode::from_u16(resp.status().as_u16())
-        .map_err(|e| ApiError::internal("log-receiver ingest status", e))?;
+        .map_err(|e| ApiError::internal("logs ingest status", e))?;
     let payload: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| ApiError::internal("log-receiver ingest response", e))?;
+        .map_err(|e| ApiError::internal("logs ingest response", e))?;
     Ok((status, Json(payload)))
 }
 
@@ -308,7 +306,7 @@ fn config_json(settings: &SiemSettings) -> serde_json::Value {
         "enabled": settings.enabled,
         "retention_days": settings.retention_days,
         "opensearch_url": settings.opensearch_url,
-        "log_receiver_url": settings.log_receiver_url,
+        "logs_url": settings.logs_url,
         "free_tier_user_cap": FREE_TIER_USER_CAP,
     })
 }
@@ -446,7 +444,7 @@ mod tests {
         let body: serde_json::Value = res.json();
         assert_eq!(
             body,
-            serde_json::json!({"log_receiver": "unavailable", "status": "degraded"})
+            serde_json::json!({"logs": "unavailable", "status": "degraded"})
         );
     }
 
@@ -537,7 +535,7 @@ mod tests {
         let s = SiemSettings::from_values(None, None, None, None);
         assert!(s.enabled);
         assert_eq!(s.opensearch_url, "http://opensearch:9200");
-        assert_eq!(s.log_receiver_url, "http://log-receiver:5010");
+        assert_eq!(s.logs_url, "http://logs:5010");
         assert_eq!(s.retention_days, 90);
     }
 
@@ -551,7 +549,7 @@ mod tests {
         );
         assert!(!s.enabled);
         assert_eq!(s.opensearch_url, "http://os:9200");
-        assert_eq!(s.log_receiver_url, "http://lr:5010");
+        assert_eq!(s.logs_url, "http://lr:5010");
         assert_eq!(s.retention_days, 30);
 
         // Python: os.getenv("SIEM_ENABLED", "true").lower() == "true"
@@ -573,7 +571,7 @@ mod tests {
                 "enabled": true,
                 "retention_days": 90,
                 "opensearch_url": "http://opensearch:9200",
-                "log_receiver_url": "http://log-receiver:5010",
+                "logs_url": "http://logs:5010",
                 "free_tier_user_cap": 5,
             })
         );
@@ -583,11 +581,11 @@ mod tests {
     fn health_json_shapes_match_v1() {
         assert_eq!(
             health_json(true),
-            serde_json::json!({"log_receiver": "ok", "status": "ok"})
+            serde_json::json!({"logs": "ok", "status": "ok"})
         );
         assert_eq!(
             health_json(false),
-            serde_json::json!({"log_receiver": "unavailable", "status": "degraded"})
+            serde_json::json!({"logs": "unavailable", "status": "degraded"})
         );
     }
 
