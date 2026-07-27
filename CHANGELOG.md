@@ -32,12 +32,12 @@ feature-frozen (security fixes only) until v2.0.0 ships.
   no data migration, no fielded-agent compatibility constraint.)
 
 ### Deprecated
-- Old REST paths (`/api/v1/{endpoint,vault,codescan,aaa}/*`) — mounted as aliases with
-  `Deprecation`/`Sunset` headers; removed in a later release. Old feature-flag
-  keys read as fallbacks during transition. See `docs/MIGRATION.md`.
+- Old pre-rename REST paths (`/api/v1/{edr,icebox,darwin,aaa}/*`) — mounted as
+  aliases with `Deprecation`/`Sunset` headers; removed in a later release. Old
+  feature-flag keys read as fallbacks during transition. See `docs/MIGRATION.md`.
 
 ### Removed
-- All Python services and the Go ENDPOINT agent implementation (ported to Rust)
+- All Python services and the Go EDR (endpoint) agent implementation (ported to Rust)
 - Legacy `services/manager/`, `services/pki/`, `services/flask-backend/`,
   vendored `darwin/shared/`, py4web remnants
 - Standalone Vault and CodeScan webuis; Kustomize/raw K8s manifests (Helm only)
