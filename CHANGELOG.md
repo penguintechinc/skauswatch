@@ -23,11 +23,18 @@ feature-frozen (security fixes only) until v2.0.0 ships.
   as entitlement-gated lazy-loaded modules (`/icebox/*`, `/darwin/*`)
 
 ### Changed
-- Migrations: Alembic replaced by `sqlx migrate` with per-module v1 schema
-  baselines (zero schema changes in v2.0.0 — rollback is image-only)
-- Wire contracts preserved: `/api/v1` REST shapes, gRPC proto packages
-  (`skauswatch.manager`/`skauswatch.s3scan`/`skauswatch.pki`), Redis Streams
-  topics — v1 Go EDR agents remain compatible with the v2 manager
+- Migrations: Alembic replaced by `sqlx migrate`
+- **Modules renamed to descriptive names** — `edr`→`endpoint`, `icebox`→`vault`,
+  `darwin`→`codescan`, `worker-scanner`→`scanner`, `aaa-monitor`→`monitor`,
+  `pki-server`→`pki`, `ssh-ca`→`sshca`, `log-receiver`→`logs`. Full mapping and
+  path/flag/topic details in [`docs/MIGRATION.md`](docs/MIGRATION.md).
+  (SkausWatch never shipped to production, so wire/schema/name changes are free —
+  no data migration, no fielded-agent compatibility constraint.)
+
+### Deprecated
+- Old REST paths (`/api/v1/{edr,icebox,darwin,aaa}/*`) — mounted as aliases with
+  `Deprecation`/`Sunset` headers; removed in a later release. Old feature-flag
+  keys read as fallbacks during transition. See `docs/MIGRATION.md`.
 
 ### Removed
 - All Python services and the Go EDR agent implementation (ported to Rust)
