@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/manager", "services/worker-s3", "services/ssh-ca", "services/log-receiver", "services/pki-server", "services/worker-darwin", "services/worker-scanner"]
+members = ["crates/*", "services/manager", "services/worker-s3", "services/ssh-ca", "services/log-receiver", "services/pki-server", "services/worker-darwin", "services/worker-scanner", "services/icebox", "services/worker-icebox-sync"]
 
 [workspace.package]
 version = "2.0.0"
@@ -64,6 +64,13 @@ time = { version = "=0.3.53", default-features = false, features = ["std"] }
 
 # YARA malware pattern matching (worker-scanner): pure-Rust engine, no C deps
 yara-x = "=1.19.0"
+
+# IceBox vault: shared crypto crate + AES-256-GCM envelope (cross-decrypt parity
+# with v1 Python cryptography AESGCM — see docs/v2-port/icebox-crypto-gate.md)
+# + AWS Secrets Manager cloud-sync (other providers NotImplemented in v2.0).
+skauswatch-icebox = { path = "crates/skauswatch-icebox" }
+aes-gcm = "=0.10.3"
+aws-sdk-secretsmanager = "=1.90.0"
 
 # Content scanning (worker-s3): magic-byte file typing + SHA1 (md-5/sha2 above)
 infer = "=0.22.0"
