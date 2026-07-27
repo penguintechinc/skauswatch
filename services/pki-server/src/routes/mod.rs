@@ -1,6 +1,16 @@
 //! /api/v1 router assembly for the PKI service. Paths mirror the v1 Quart
 //! blueprints exactly (`/certificates`, `/ssh`, and the bare common routes),
 //! with no trailing-slash variance.
+//!
+//! AUTH (hardened, finding #1): every route in this router requires a valid
+//! `Authorization: Bearer <jwt>` — an HS256 access token signed with the
+//! shared `JWT_SECRET_KEY` — enforced as a single router-wide layer via
+//! `skauswatch_auth::AuthenticatedCaller` (no local user DB here, so this is
+//! signature/expiry/type only, unlike the manager's `CurrentUser`). Before
+//! this pass every one of these endpoints — including certificate issuance
+//! and private-key retrieval — was open to anyone on the network. `/healthz`
+//! `/readyz` (mounted separately in `main.rs`, merged in after this router)
+//! are not covered by this layer.
 
 pub mod common;
 pub mod ssh;
@@ -68,7 +78,92 @@ pub fn router(state: AppState) -> Router {
         .route("/ca/info", get(common::all_ca_info))
         .route("/audit", get(common::audit))
         .route("/expiring", get(common::expiring))
-        .route("/cleanup", post(common::cleanup));
+        .route("/cleanup", post(common::cleanup))
+        .layer(axum::middleware::from_extractor_with_state::<
+            skauswatch_auth::AuthenticatedCaller,
+            AppState,
+        >(state.clone()));
 
     Router::new().nest("/api/v1", api).with_state(state)
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)] // tests fail loudly by design
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::state::AppStateInner;
+
+    fn test_server() -> axum_test::TestServer {
+        axum_test::TestServer::new(super::router(AppStateInner::for_tests()))
+    }
+
+    fn bearer(server_secret: &str) -> String {
+        match skauswatch_auth::issue_service_token("tester", "admin", server_secret, 300) {
+            Ok(t) => format!("Bearer {t}"),
+            Err(e) => panic!("issue test token: {e}"),
+        }
+    }
+
+    /// Regression for finding #1: every one of these previously-open
+    /// endpoints (issuance, listing, CRL, CA cert download, SSH config
+    /// helpers, statistics, audit) must now reject an unauthenticated
+    /// caller with 401 before touching any CA/DB logic.
+    #[tokio::test]
+    async fn every_route_requires_jwt() {
+        let server = test_server();
+        for (method, path) in [
+            ("GET", "/api/v1/certificates"),
+            ("POST", "/api/v1/certificates"),
+            ("POST", "/api/v1/certificates/search"),
+            ("GET", "/api/v1/certificates/crl"),
+            ("POST", "/api/v1/certificates/ocsp"),
+            ("GET", "/api/v1/certificates/ca"),
+            ("GET", "/api/v1/certificates/ca/certificate"),
+            ("GET", "/api/v1/certificates/serial/abc"),
+            ("POST", "/api/v1/certificates/serial/abc/revoke"),
+            ("GET", "/api/v1/certificates/x/status"),
+            ("GET", "/api/v1/ssh/certificates"),
+            ("POST", "/api/v1/ssh/certificates"),
+            ("GET", "/api/v1/ssh/krl"),
+            ("GET", "/api/v1/ssh/ca"),
+            ("GET", "/api/v1/ssh/ca/public-key"),
+            ("POST", "/api/v1/ssh/config/known-hosts"),
+            ("POST", "/api/v1/ssh/verify"),
+            ("GET", "/api/v1/statistics"),
+            ("GET", "/api/v1/ca/info"),
+            ("GET", "/api/v1/audit"),
+            ("GET", "/api/v1/expiring"),
+            ("POST", "/api/v1/cleanup"),
+        ] {
+            let res = match method {
+                "GET" => server.get(path).await,
+                _ => server.post(path).await,
+            };
+            res.assert_status(StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_bearer_token_passes_the_auth_gate() {
+        let server = test_server();
+        // Auth passes; the request proceeds to the handler (which 400s on
+        // the empty body) — proving this is a real gate, not a stub that
+        // always rejects.
+        let res = server
+            .get("/api/v1/statistics")
+            .add_header(axum::http::header::AUTHORIZATION, bearer("test-secret"))
+            .await;
+        assert_ne!(res.status_code(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn token_signed_with_wrong_secret_is_rejected() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/statistics")
+            .add_header(axum::http::header::AUTHORIZATION, bearer("wrong-secret"))
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+    }
 }

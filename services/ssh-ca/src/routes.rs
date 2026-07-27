@@ -6,6 +6,18 @@
 //! operations and the canonical SSH REST shape in the v1 pki-server
 //! `api/v1/ssh.py`. The parity-critical piece — the certificate template — is
 //! ported faithfully; see `ca.rs` and `docs/v2-port/ssh-ca-contract.md`.
+//!
+//! AUTH (hardened, finding #2): `docs/v2-port/ssh-ca-contract.md` originally
+//! documented this as intentionally unauthenticated ("cluster-internal,
+//! reached by the manager/pki plane"), but a security audit determined that
+//! posture is unacceptable for a service holding an SSH CA signing key —
+//! anyone who can reach the pod can mint host/user SSH certificates. Every
+//! route now requires `Authorization: Bearer <jwt>` (HS256, shared
+//! `JWT_SECRET_KEY`), enforced as a router-wide layer via
+//! `skauswatch_auth::AuthenticatedCaller`. No in-repo caller exists today
+//! (confirmed by repo-wide grep for `ssh-ca`/`SSH_CA_URL`) — gating
+//! introduces no breakage; a future caller must present a machine JWT minted
+//! with `skauswatch_auth::issue_service_token`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -33,9 +45,20 @@ pub struct AppState {
     pub ca: Arc<SshCa>,
     /// The issued-certificate + revocation store.
     pub store: Arc<CertStore>,
+    /// Shared HS256 signing secret (`JWT_SECRET_KEY`) — every route below
+    /// requires a valid bearer token verified against this (finding #2).
+    pub jwt_secret: Arc<str>,
 }
 
-/// Builds the `/api/v1/ssh` router.
+impl skauswatch_auth::JwtSecretSource for AppState {
+    fn jwt_secret(&self) -> &str {
+        &self.jwt_secret
+    }
+}
+
+/// Builds the `/api/v1/ssh` router. Every route requires a valid bearer
+/// token (finding #2) — enforced as a single router-wide layer so no
+/// individual handler can accidentally be added without the gate.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route(
@@ -49,6 +72,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/ssh/krl", get(get_krl))
         .route("/api/v1/ssh/ca/public-key", get(get_ca_public_key))
+        .layer(axum::middleware::from_extractor_with_state::<
+            skauswatch_auth::AuthenticatedCaller,
+            AppState,
+        >(state.clone()))
         .with_state(state)
 }
 
@@ -303,6 +330,8 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    const TEST_JWT_SECRET: &str = "test-secret";
+
     fn test_state() -> AppState {
         // Missing path → ephemeral CA key (fine for tests).
         let ca = SshCa::load_or_generate(Path::new("/nonexistent-skauswatch-ssh-ca-key"))
@@ -310,7 +339,16 @@ mod tests {
         AppState {
             ca: Arc::new(ca),
             store: Arc::new(CertStore::new()),
+            jwt_secret: TEST_JWT_SECRET.into(),
         }
+    }
+
+    /// `Authorization` header value with a valid bearer token signed with
+    /// `TEST_JWT_SECRET`, matching `test_state()`.
+    fn auth_header() -> (&'static str, String) {
+        let token = skauswatch_auth::issue_service_token("tester", "admin", TEST_JWT_SECRET, 300)
+            .expect("issue test token");
+        ("Authorization", format!("Bearer {token}"))
     }
 
     fn subject_pub_line() -> String {
@@ -325,6 +363,7 @@ mod tests {
     #[tokio::test]
     async fn issue_get_list_revoke_flow() {
         let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
         let body = serde_json::json!({
             "certificate_type": "user",
             "public_key": subject_pub_line(),
@@ -332,7 +371,11 @@ mod tests {
             "validity_duration": 3600,
         });
 
-        let resp = server.post("/api/v1/ssh/certificates").json(&body).await;
+        let resp = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val.clone())
+            .json(&body)
+            .await;
         resp.assert_status(StatusCode::CREATED);
         let issued: serde_json::Value = resp.json();
         let cert_id = issued["certificate_id"]
@@ -353,6 +396,7 @@ mod tests {
         // GET it back.
         let got = server
             .get(&format!("/api/v1/ssh/certificates/{cert_id}"))
+            .add_header(hdr, val.clone())
             .await;
         got.assert_status_ok();
         assert_eq!(got.json::<serde_json::Value>()["status"], "active");
@@ -360,6 +404,7 @@ mod tests {
         // List with type filter.
         let list = server
             .get("/api/v1/ssh/certificates")
+            .add_header(hdr, val.clone())
             .add_query_param("type", "user")
             .await;
         list.assert_status_ok();
@@ -368,12 +413,16 @@ mod tests {
         // Revoke.
         let rev = server
             .post(&format!("/api/v1/ssh/certificates/{cert_id}/revoke"))
+            .add_header(hdr, val.clone())
             .json(&serde_json::json!({ "reason": "keyCompromise" }))
             .await;
         rev.assert_status_ok();
 
         // KRL reflects the revocation.
-        let krl = server.get("/api/v1/ssh/krl").await;
+        let krl = server
+            .get("/api/v1/ssh/krl")
+            .add_header(hdr, val.clone())
+            .await;
         krl.assert_status_ok();
         let krl_json: serde_json::Value = krl.json();
         assert_eq!(
@@ -385,15 +434,21 @@ mod tests {
     #[tokio::test]
     async fn unknown_certificate_is_404() {
         let server = axum_test::TestServer::new(router(test_state()));
-        let resp = server.get("/api/v1/ssh/certificates/nope").await;
+        let (hdr, val) = auth_header();
+        let resp = server
+            .get("/api/v1/ssh/certificates/nope")
+            .add_header(hdr, val)
+            .await;
         resp.assert_status(StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn missing_public_key_is_400() {
         let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
         let resp = server
             .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val)
             .json(&serde_json::json!({ "certificate_type": "user", "public_key": "" }))
             .await;
         resp.assert_status(StatusCode::BAD_REQUEST);
@@ -402,7 +457,11 @@ mod tests {
     #[tokio::test]
     async fn ca_public_key_endpoint() {
         let server = axum_test::TestServer::new(router(test_state()));
-        let resp = server.get("/api/v1/ssh/ca/public-key").await;
+        let (hdr, val) = auth_header();
+        let resp = server
+            .get("/api/v1/ssh/ca/public-key")
+            .add_header(hdr, val)
+            .await;
         resp.assert_status_ok();
         let json: serde_json::Value = resp.json();
         assert!(
@@ -411,5 +470,39 @@ mod tests {
                 .unwrap()
                 .starts_with("SHA256:")
         );
+    }
+
+    /// Regression for finding #2: this service holds an SSH CA signing
+    /// key — every route must reject an unauthenticated caller with 401
+    /// before touching the CA/store at all.
+    #[tokio::test]
+    async fn every_route_requires_jwt() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        for (method, path) in [
+            ("GET", "/api/v1/ssh/certificates"),
+            ("POST", "/api/v1/ssh/certificates"),
+            ("GET", "/api/v1/ssh/certificates/x"),
+            ("POST", "/api/v1/ssh/certificates/x/revoke"),
+            ("GET", "/api/v1/ssh/krl"),
+            ("GET", "/api/v1/ssh/ca/public-key"),
+        ] {
+            let resp = match method {
+                "GET" => server.get(path).await,
+                _ => server.post(path).await,
+            };
+            resp.assert_status(StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn token_signed_with_wrong_secret_is_rejected() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let bad_token = skauswatch_auth::issue_service_token("x", "admin", "wrong-secret", 300)
+            .expect("issue token");
+        let resp = server
+            .get("/api/v1/ssh/ca/public-key")
+            .add_header("Authorization", format!("Bearer {bad_token}"))
+            .await;
+        resp.assert_status(StatusCode::UNAUTHORIZED);
     }
 }

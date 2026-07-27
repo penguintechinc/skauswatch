@@ -16,15 +16,30 @@ pub struct AppStateInner {
     pub x509_config: X509CaConfig,
     /// REST/gRPC bind ports.
     pub server: ServerConfig,
+    /// Shared HS256 signing secret (`JWT_SECRET_KEY`) — every REST and gRPC
+    /// endpoint requires a valid bearer token verified against this (finding
+    /// #1): this service mints CA certificates and private keys, and had no
+    /// authentication at all before this hardening pass.
+    pub jwt_secret: String,
 }
 
 /// Cheap-to-clone handle used as axum/gRPC state.
 pub type AppState = Arc<AppStateInner>;
 
+impl skauswatch_auth::JwtSecretSource for AppStateInner {
+    fn jwt_secret(&self) -> &str {
+        &self.jwt_secret
+    }
+}
+
 impl AppStateInner {
     /// Builds state from the environment: loads/generates both CAs and
     /// connects the Postgres pool (with retry) via the shared `skauswatch-db`.
+    /// Fails fast (before any CA key material is touched) if `JWT_SECRET_KEY`
+    /// is missing in production — see `skauswatch_auth::load_jwt_secret`.
     pub async fn from_env() -> anyhow::Result<AppState> {
+        let jwt_secret = skauswatch_auth::load_jwt_secret().map_err(|e| anyhow::anyhow!("{e}"))?;
+
         let x509_config = X509CaConfig::from_env();
         let ssh_config = SshCaConfig::from_env();
         let server = ServerConfig::from_env();
@@ -48,6 +63,52 @@ impl AppStateInner {
             manager,
             x509_config,
             server,
+            jwt_secret,
         }))
+    }
+
+    /// Self-contained test constructor mirroring the manager's
+    /// `AppStateInner::for_tests`: a real (pure-Rust, `rcgen`-backed)
+    /// ephemeral X.509 CA, an in-memory `SshCa::for_tests()` (no
+    /// `ssh-keygen` subprocess — that binary isn't installed in the plain
+    /// `rust:*-bookworm` image this workspace builds/tests in), a lazy
+    /// (unconnected) Postgres pool, and a fixed, known `jwt_secret` so
+    /// route/gRPC auth-gate tests can mint valid bearer tokens without
+    /// touching the real environment or a live DB.
+    #[cfg(test)]
+    #[allow(clippy::panic)] // test-only constructor fails loudly by design
+    pub fn for_tests() -> AppState {
+        let dir =
+            std::env::temp_dir().join(format!("skauswatch-pki-test-{}", uuid::Uuid::new_v4()));
+        let x509_config = X509CaConfig {
+            ca_key_path: dir.join("ca.key").to_string_lossy().into_owned(),
+            ca_cert_path: dir.join("ca.crt").to_string_lossy().into_owned(),
+            ca_key_password: None,
+            default_validity_days: 365,
+            max_validity_days: 825,
+            default_key_algorithm: "RSA".to_owned(),
+            default_key_size: 2048,
+            crl_validity_days: 7,
+            ocsp_responder_url: None,
+        };
+
+        let x509 = Arc::new(
+            X509Ca::load_or_generate(x509_config.clone())
+                .unwrap_or_else(|e| panic!("test X.509 CA: {e}")),
+        );
+        let ssh = Arc::new(SshCa::for_tests());
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@127.0.0.1:1/test")
+            .unwrap_or_else(|e| panic!("lazy test pool: {e}"));
+
+        Arc::new(Self {
+            manager: Arc::new(CertManager::new(x509, ssh, db)),
+            x509_config,
+            server: ServerConfig {
+                api_port: 8001,
+                grpc_port: 50_052,
+            },
+            jwt_secret: "test-secret".to_owned(),
+        })
     }
 }

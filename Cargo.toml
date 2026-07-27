@@ -53,7 +53,17 @@ fred = "=10.1.0"
 
 # Object storage
 aws-config = "=1.9.0"
-aws-sdk-s3 = "=1.138.0"
+# RUSTSEC-2026-0098/0099/0104 (rustls-webpki 0.101.7 name-constraint bypass +
+# CRL-parse panic): aws-sdk-s3's default `"rustls"` feature pulls the legacy
+# hyper-rustls 0.24 -> rustls 0.21 -> rustls-webpki 0.101.7 path alongside the
+# modern safe default-https-client (rustls-aws-lc -> webpki 0.103.13) we use.
+# Trim to drop the legacy stack. See `cargo tree -i rustls-webpki@0.101.7`.
+aws-sdk-s3 = { version = "=1.138.0", default-features = false, features = [
+    "sigv4a",
+    "http-1x",
+    "default-https-client",
+    "rt-tokio",
+] }
 
 # PKI / X.509 (pki-server): rcgen builds/signs certs + CRLs, x509-parser reads
 # CA cert/CSR public keys for RFC 5280 method-1 (SHA1) key identifiers. aws_lc_rs
