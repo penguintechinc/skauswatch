@@ -5147,6 +5147,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "skauswatch-aaa-monitor"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "axum-test",
+ "chrono",
+ "clap",
+ "futures",
+ "jsonwebtoken",
+ "penguin-licensing",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "skauswatch-auth",
+ "skauswatch-common",
+ "skauswatch-telemetry",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tower-http 0.7.0",
+ "tracing",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "skauswatch-ai"
 version = "2.0.0"
 dependencies = [
@@ -6119,6 +6147,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
