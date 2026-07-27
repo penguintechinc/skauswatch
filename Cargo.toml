@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/manager", "services/worker-s3", "services/ssh-ca", "services/log-receiver", "services/pki-server", "services/worker-darwin", "services/worker-scanner", "services/icebox", "services/worker-icebox-sync", "services/edr-agent"]
+members = ["crates/*", "services/manager", "services/worker-s3", "services/ssh-ca", "services/log-receiver", "services/pki-server", "services/worker-darwin", "services/worker-scanner", "services/icebox", "services/worker-icebox-sync", "services/edr-agent", "services/aaa-monitor"]
 
 [workspace.package]
 version = "2.0.0"
@@ -112,6 +112,7 @@ serde_yaml = "=0.9.34"
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system", "user"] }
 netstat2 = "=0.11.2"
 walkdir = "=2.5.0"
+
 
 # Content scanning (worker-s3): magic-byte file typing + SHA1 (md-5/sha2 above)
 infer = "=0.22.0"
