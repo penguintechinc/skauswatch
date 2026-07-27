@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/manager", "services/worker-s3", "services/ssh-ca", "services/log-receiver", "services/pki-server", "services/worker-darwin", "services/worker-scanner", "services/icebox", "services/worker-icebox-sync"]
+members = ["crates/*", "services/manager", "services/worker-s3", "services/ssh-ca", "services/log-receiver", "services/pki-server", "services/worker-darwin", "services/worker-scanner", "services/icebox", "services/worker-icebox-sync", "services/edr-agent"]
 
 [workspace.package]
 version = "2.0.0"
@@ -71,6 +71,13 @@ yara-x = "=1.19.0"
 skauswatch-icebox = { path = "crates/skauswatch-icebox" }
 aes-gcm = "=0.10.3"
 aws-sdk-secretsmanager = "=1.90.0"
+
+# EDR agent (client, endpoint-side): viper-shaped YAML config, cross-platform
+# process/network enumeration, directory walking for file integrity checks
+serde_yaml = "=0.9.34"
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system", "user"] }
+netstat2 = "=0.11.2"
+walkdir = "=2.5.0"
 
 # Content scanning (worker-s3): magic-byte file typing + SHA1 (md-5/sha2 above)
 infer = "=0.22.0"
