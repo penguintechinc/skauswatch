@@ -103,6 +103,11 @@ async fn login(
         ));
     };
     if user.locked {
+        // Equalize wall-clock cost with the verify paths (unknown-email dummy
+        // + known-email real bcrypt) so response time cannot single out a
+        // currently-locked account — otherwise the #8 fix merely shifts the
+        // timing oracle onto lockout state.
+        let _ = auth::verify_password(&body.password, &DUMMY_PASSWORD_HASH);
         return Err(ApiError::Unauthorized(
             "Account is locked. Please try again later.".to_owned(),
         ));
