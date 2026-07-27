@@ -44,7 +44,12 @@ fn map_err(e: ManagerError) -> Status {
     match e {
         ManagerError::X509(crate::ca::x509::X509Error::BadRequest(m))
         | ManagerError::Ssh(crate::ca::ssh::SshError::BadRequest(m)) => Status::invalid_argument(m),
-        other => Status::internal(other.to_string()),
+        // Log the real cause server-side; never return sqlx/CA internals
+        // (constraint/column names, query context) to the caller.
+        other => {
+            tracing::error!(error = %other, "pki-server gRPC internal error");
+            Status::internal("Internal Server Error")
+        }
     }
 }
 

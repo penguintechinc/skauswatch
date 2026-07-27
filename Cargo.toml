@@ -52,12 +52,26 @@ sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-toki
 fred = "=10.1.0"
 
 # Object storage
-aws-config = "=1.9.0"
 # RUSTSEC-2026-0098/0099/0104 (rustls-webpki 0.101.7 name-constraint bypass +
 # CRL-parse panic): aws-sdk-s3's default `"rustls"` feature pulls the legacy
 # hyper-rustls 0.24 -> rustls 0.21 -> rustls-webpki 0.101.7 path alongside the
 # modern safe default-https-client (rustls-aws-lc -> webpki 0.103.13) we use.
 # Trim to drop the legacy stack. See `cargo tree -i rustls-webpki@0.101.7`.
+# aws-config: mirrors its own upstream `default` feature set (sso/sts +
+# credentials-process for the full credential-resolution chain used by
+# `aws_config::defaults()`, rt-tokio for the async runtime, default-https-client
+# for the modern rustls-aws-lc HTTP client) minus aws-config's own `"rustls"`
+# feature, which is left off deliberately even though it currently aliases to
+# the same safe default-https-client path — never opt in to a feature named
+# "rustls" on an AWS SDK crate, since upstream has repointed that exact name at
+# the legacy `tls-rustls` stack on other SDK crates (see aws-sdk-secretsmanager
+# below) and could do so here in a future release.
+aws-config = { version = "=1.9.0", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+    "credentials-process",
+    "sso",
+] }
 aws-sdk-s3 = { version = "=1.138.0", default-features = false, features = [
     "sigv4a",
     "http-1x",
@@ -80,7 +94,17 @@ yara-x = "=1.19.0"
 # + AWS Secrets Manager cloud-sync (other providers NotImplemented in v2.0).
 skauswatch-icebox = { path = "crates/skauswatch-icebox" }
 aes-gcm = "=0.10.3"
-aws-sdk-secretsmanager = "=1.90.0"
+# aws-sdk-secretsmanager's default feature set includes `"rustls"`, which (unlike
+# aws-config's same-named feature above) maps directly to the legacy
+# `aws-smithy-runtime/tls-rustls` -> legacy-rustls-ring -> rustls 0.21 ->
+# rustls-webpki 0.101.7 stack (RUSTSEC-2026-0098/0099/0104). worker-icebox-sync
+# builds the client directly via `Config::builder()` with static credentials
+# (see services/worker-icebox-sync/src/providers/aws.rs) — no SSO/STS/profile
+# resolution needed — so only the modern HTTP client + tokio runtime are kept.
+aws-sdk-secretsmanager = { version = "=1.90.0", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+] }
 
 # EDR agent (client, endpoint-side): viper-shaped YAML config, cross-platform
 # process/network enumeration, directory walking for file integrity checks

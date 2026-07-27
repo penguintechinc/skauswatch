@@ -293,8 +293,10 @@ impl S3ScanService for S3ScanGrpc {
         };
         let md5_hex = hex_lower(&<md5::Md5 as md5::Digest>::digest(&req.file_content));
         let sha256_hex = hex_lower(&<sha2::Sha256 as sha2::Digest>::digest(&req.file_content));
-        let file_size = i32::try_from(req.file_content.len())
-            .map_err(|e| Status::internal(format!("Error: {e}")))?;
+        let file_size = i32::try_from(req.file_content.len()).map_err(|e| {
+            tracing::error!(error = %e, "s3scan gRPC internal error");
+            Status::internal("Internal Server Error")
+        })?;
 
         // uploaded_by is a NOT NULL users reference — v1 passed the raw
         // value (0 when unset) and would have failed the same way; DB
@@ -312,7 +314,10 @@ impl S3ScanService for S3ScanGrpc {
         .bind(&sha256_hex)
         .execute(&self.state.db)
         .await
-        .map_err(|e| Status::internal(format!("Error: {e}")))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "s3scan gRPC internal error");
+            Status::internal("Internal Server Error")
+        })?;
 
         // Dispatch to the workers; publish failures are swallowed with a
         // warning exactly like every v1 HTTP publish site.
@@ -383,7 +388,10 @@ impl S3ScanService for S3ScanGrpc {
         .bind(&req.job_id)
         .fetch_optional(&self.state.db)
         .await
-        .map_err(|e| Status::internal(format!("Error: {e}")))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "s3scan gRPC internal error");
+            Status::internal("Internal Server Error")
+        })?;
 
         let Some((status, total, scanned, infected)) = row else {
             return Err(Status::not_found(format!("Job not found: {}", req.job_id)));
@@ -606,9 +614,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_adhoc_file_db_failure_is_internal_error_prefix() {
-        // Valid request against the unreachable test DB → v1 catch-all
-        // INTERNAL "Error: ..." surface.
+    async fn scan_adhoc_file_db_failure_is_generic_internal_error() {
+        // Valid request against the unreachable test DB → INTERNAL. The
+        // message must be generic (no sqlx/internal detail leaked to the
+        // caller); the real cause is logged server-side only.
         let err = match svc()
             .scan_adhoc_file(authed(AdhocScanRequest {
                 scan_id: "scan-1".to_owned(),
@@ -623,11 +632,7 @@ mod tests {
             Ok(_) => panic!("test DB is unreachable — insert must fail"),
         };
         assert_eq!(err.code(), Code::Internal);
-        assert!(
-            err.message().starts_with("Error: "),
-            "msg: {}",
-            err.message()
-        );
+        assert_eq!(err.message(), "Internal Server Error");
     }
 
     #[tokio::test]

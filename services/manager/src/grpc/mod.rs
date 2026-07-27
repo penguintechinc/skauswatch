@@ -119,8 +119,11 @@ fn now_ts() -> prost_types::Timestamp {
 
 /// Maps a DB failure onto INTERNAL. v1's grpc.aio surfaced unhandled DB
 /// exceptions as non-OK statuses too; the exact code was never contractual.
+/// The real cause is logged server-side; the caller gets a generic message
+/// so sqlx internals (constraint/column names, query context) never leak.
 fn db_err(e: sqlx::Error) -> Status {
-    Status::internal(format!("database error: {e}"))
+    tracing::error!(error = %e, "manager gRPC database error");
+    Status::internal("Internal Server Error")
 }
 
 #[cfg(test)]
