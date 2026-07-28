@@ -361,7 +361,7 @@ pub async fn set_adhoc_error(pool: &PgPool, scan_id: &str) -> Result<(), sqlx::E
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)] // tests fail loudly by design
+#[allow(clippy::panic, clippy::expect_used)] // tests fail loudly by design
 mod tests {
     use super::*;
 
@@ -408,5 +408,400 @@ mod tests {
         assert!(!cfg.path_style);
         assert_eq!(cfg.max_file_size_mb, 100);
         assert!(cfg.scan_enabled);
+    }
+
+    // ── real-Postgres tests (see docs/v2-port/testing-pattern.md) ──────────
+
+    async fn pool() -> PgPool {
+        skauswatch_testkit::db::test_pool(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).await
+    }
+
+    /// Seeds one `s3_bucket_configs` row, returning its primary key.
+    async fn seed_bucket(pool: &PgPool, scan_enabled: bool, yara_enabled: bool) -> i32 {
+        let row: (i32,) = sqlx::query_as(
+            "INSERT INTO s3_bucket_configs \
+             (name, endpoint_url, bucket_name, access_key_id, secret_access_key, region, \
+              path_style, prefix_filter, file_types_filter, max_file_size_mb, scan_enabled, \
+              yara_enabled, created_by) \
+             VALUES ($1, 'https://s3.example', 'test-bucket', 'AK', 'SK', NULL, NULL, NULL, \
+                     $2, NULL, $3, $4, 1) RETURNING id",
+        )
+        .bind(format!("bucket-{}", uuid::Uuid::new_v4()))
+        .bind(serde_json::json!([".exe", ".dll"]))
+        .bind(scan_enabled)
+        .bind(yara_enabled)
+        .fetch_one(pool)
+        .await
+        .expect("seed bucket");
+        row.0
+    }
+
+    /// Seeds one `s3_scan_jobs` row, returning its primary key.
+    async fn seed_job(
+        pool: &PgPool,
+        bucket_config_id: i32,
+        job_uuid: &str,
+        metadata: serde_json::Value,
+    ) -> i32 {
+        let row: (i32,) = sqlx::query_as(
+            "INSERT INTO s3_scan_jobs (job_id, bucket_config_id, job_type, status, triggered_by, metadata) \
+             VALUES ($1, $2, 'manual', 'pending', 1, $3) RETURNING id",
+        )
+        .bind(job_uuid)
+        .bind(bucket_config_id)
+        .bind(metadata)
+        .fetch_one(pool)
+        .await
+        .expect("seed job");
+        row.0
+    }
+
+    /// Seeds one `adhoc_scan_results` row.
+    async fn seed_adhoc(pool: &PgPool, scan_id: &str) {
+        sqlx::query(
+            "INSERT INTO adhoc_scan_results (scan_id, uploaded_by, original_filename) \
+             VALUES ($1, 1, 'upload.bin')",
+        )
+        .bind(scan_id)
+        .execute(pool)
+        .await
+        .expect("seed adhoc");
+    }
+
+    fn sample_result(job_pk: i32, bucket_config_id: i32) -> ResultRecord {
+        ResultRecord {
+            job_pk,
+            bucket_config_id,
+            object_key: "uploads/a.bin".to_owned(),
+            object_size: 1024,
+            object_etag: Some("\"etag\"".to_owned()),
+            detected_file_type: "application/octet-stream".to_owned(),
+            scan_status: "clean".to_owned(),
+            is_malware: false,
+            is_pup: false,
+            is_threat: false,
+            threat_names: serde_json::Value::Array(vec![]),
+            clamav_result: None,
+            ti_enrichment: None,
+            file_md5: Some("d41d8cd98f00b204e9800998ecf8427e".to_owned()),
+            file_sha1: Some("da39a3ee5e6b4b0d3255bfef95601890afd80709".to_owned()),
+            file_sha256: Some(
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
+            ),
+            tags_applied: None,
+            scan_duration_ms: 42,
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_bucket_config_found_uses_explicit_values() {
+        let pool = pool().await;
+        let id = seed_bucket(&pool, true, true).await;
+        let cfg = fetch_bucket_config(&pool, id)
+            .await
+            .expect("query")
+            .expect("row present");
+        assert_eq!(cfg.id, id);
+        assert_eq!(cfg.bucket_name, "test-bucket");
+        assert_eq!(
+            cfg.file_types_filter,
+            vec![".exe".to_owned(), ".dll".to_owned()]
+        );
+        assert!(cfg.scan_enabled);
+        assert!(cfg.yara_enabled);
+        // Nullable columns left NULL in the seed still resolve to defaults.
+        assert_eq!(cfg.region, "us-east-1");
+        assert_eq!(cfg.max_file_size_mb, 100);
+    }
+
+    #[tokio::test]
+    async fn fetch_bucket_config_missing_is_none() {
+        let pool = pool().await;
+        assert!(
+            fetch_bucket_config(&pool, 999_999)
+                .await
+                .expect("query")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_job_resolves_pk_bucket_and_prefix_override() {
+        let pool = pool().await;
+        let bucket_id = seed_bucket(&pool, true, false).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_job(
+            &pool,
+            bucket_id,
+            &job_uuid,
+            serde_json::json!({"prefix_filter": "uploads/"}),
+        )
+        .await;
+
+        let job = fetch_job(&pool, &job_uuid)
+            .await
+            .expect("query")
+            .expect("row present");
+        assert_eq!(job.pk, pk);
+        assert_eq!(job.bucket_config_id, bucket_id);
+        assert_eq!(job.prefix_override, Some("uploads/".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn fetch_job_without_prefix_metadata_has_no_override() {
+        let pool = pool().await;
+        let bucket_id = seed_bucket(&pool, true, false).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+
+        let job = fetch_job(&pool, &job_uuid)
+            .await
+            .expect("query")
+            .expect("row present");
+        assert_eq!(job.prefix_override, None);
+    }
+
+    #[tokio::test]
+    async fn fetch_job_missing_is_none() {
+        let pool = pool().await;
+        assert!(
+            fetch_job(&pool, "does-not-exist")
+                .await
+                .expect("query")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn set_job_running_stamps_status_and_total() {
+        let pool = pool().await;
+        let bucket_id = seed_bucket(&pool, true, false).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+
+        set_job_running(&pool, pk, 7).await.expect("update");
+
+        let row: (String, i32, Option<chrono::NaiveDateTime>) = sqlx::query_as(
+            "SELECT status, total_objects, started_at FROM s3_scan_jobs WHERE id = $1",
+        )
+        .bind(pk)
+        .fetch_one(&pool)
+        .await
+        .expect("select");
+        assert_eq!(row.0, "running");
+        assert_eq!(row.1, 7);
+        assert!(row.2.is_some());
+    }
+
+    #[tokio::test]
+    async fn bump_job_skipped_increments_counter() {
+        let pool = pool().await;
+        let bucket_id = seed_bucket(&pool, true, false).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+
+        bump_job_skipped(&pool, pk, 2).await.expect("bump 1");
+        bump_job_skipped(&pool, pk, 3).await.expect("bump 2");
+
+        let row: (i32,) = sqlx::query_as("SELECT skipped_objects FROM s3_scan_jobs WHERE id = $1")
+            .bind(pk)
+            .fetch_one(&pool)
+            .await
+            .expect("select");
+        assert_eq!(row.0, 5);
+    }
+
+    #[tokio::test]
+    async fn insert_result_persists_all_fields() {
+        let pool = pool().await;
+        let bucket_id = seed_bucket(&pool, true, false).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+        let record = sample_result(pk, bucket_id);
+
+        insert_result(&pool, &record).await.expect("insert");
+
+        let row: (String, String, bool, Option<String>) = sqlx::query_as(
+            "SELECT object_key, scan_status, is_malware, file_sha256 FROM s3_scan_results \
+             WHERE job_id = $1",
+        )
+        .bind(pk)
+        .fetch_one(&pool)
+        .await
+        .expect("select");
+        assert_eq!(row.0, "uploads/a.bin");
+        assert_eq!(row.1, "clean");
+        assert!(!row.2);
+        assert_eq!(row.3, record.file_sha256);
+    }
+
+    #[tokio::test]
+    async fn bump_job_counters_increments_conditionally() {
+        let pool = pool().await;
+        let bucket_id = seed_bucket(&pool, true, false).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+
+        bump_job_counters(&pool, pk, true, false, false)
+            .await
+            .expect("malware bump");
+        bump_job_counters(&pool, pk, false, true, false)
+            .await
+            .expect("pup bump");
+        bump_job_counters(&pool, pk, false, false, true)
+            .await
+            .expect("error bump");
+
+        let row: (i32, i32, i32, i32) = sqlx::query_as(
+            "SELECT scanned_objects, infected_objects, pup_objects, error_count \
+             FROM s3_scan_jobs WHERE id = $1",
+        )
+        .bind(pk)
+        .fetch_one(&pool)
+        .await
+        .expect("select");
+        assert_eq!(row, (3, 1, 1, 1));
+    }
+
+    #[tokio::test]
+    async fn maybe_complete_job_transitions_when_threshold_met() {
+        let pool = pool().await;
+        let bucket_id = seed_bucket(&pool, true, false).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+        set_job_running(&pool, pk, 2).await.expect("running");
+        bump_job_skipped(&pool, pk, 1).await.expect("skip 1");
+        bump_job_counters(&pool, pk, false, false, false)
+            .await
+            .expect("scan 1"); // scanned=1 + skipped=1 == total=2
+
+        maybe_complete_job(&pool, pk).await.expect("complete check");
+
+        let row: (String, Option<chrono::NaiveDateTime>) =
+            sqlx::query_as("SELECT status, completed_at FROM s3_scan_jobs WHERE id = $1")
+                .bind(pk)
+                .fetch_one(&pool)
+                .await
+                .expect("select");
+        assert_eq!(row.0, "completed");
+        assert!(row.1.is_some());
+    }
+
+    #[tokio::test]
+    async fn maybe_complete_job_noop_below_threshold() {
+        let pool = pool().await;
+        let bucket_id = seed_bucket(&pool, true, false).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+        set_job_running(&pool, pk, 5).await.expect("running");
+        bump_job_counters(&pool, pk, false, false, false)
+            .await
+            .expect("scan 1"); // scanned=1 + skipped=0 < total=5
+
+        maybe_complete_job(&pool, pk).await.expect("complete check");
+
+        let row: (String,) = sqlx::query_as("SELECT status FROM s3_scan_jobs WHERE id = $1")
+            .bind(pk)
+            .fetch_one(&pool)
+            .await
+            .expect("select");
+        assert_eq!(row.0, "running");
+    }
+
+    #[tokio::test]
+    async fn maybe_complete_job_noop_when_total_zero() {
+        let pool = pool().await;
+        let bucket_id = seed_bucket(&pool, true, false).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+        set_job_running(&pool, pk, 0).await.expect("running");
+
+        maybe_complete_job(&pool, pk).await.expect("complete check");
+
+        let row: (String,) = sqlx::query_as("SELECT status FROM s3_scan_jobs WHERE id = $1")
+            .bind(pk)
+            .fetch_one(&pool)
+            .await
+            .expect("select");
+        // total_objects = 0 fails the `total_objects > 0` guard — stays running.
+        assert_eq!(row.0, "running");
+    }
+
+    #[tokio::test]
+    async fn maybe_complete_job_noop_when_not_running() {
+        let pool = pool().await;
+        let bucket_id = seed_bucket(&pool, true, false).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+        // Job is still 'pending' — never transitioned to 'running'.
+
+        maybe_complete_job(&pool, pk).await.expect("complete check");
+
+        let row: (String,) = sqlx::query_as("SELECT status FROM s3_scan_jobs WHERE id = $1")
+            .bind(pk)
+            .fetch_one(&pool)
+            .await
+            .expect("select");
+        assert_eq!(row.0, "pending");
+    }
+
+    #[tokio::test]
+    async fn finish_adhoc_writes_terminal_verdict() {
+        let pool = pool().await;
+        let scan_id = uuid::Uuid::new_v4().to_string();
+        seed_adhoc(&pool, &scan_id).await;
+
+        finish_adhoc(
+            &pool,
+            &scan_id,
+            "infected",
+            true,
+            false,
+            true,
+            "application/x-msdownload",
+            &serde_json::json!(["Win.Test.EICAR"]),
+            Some(&serde_json::json!({"is_malware": true})),
+            17,
+        )
+        .await
+        .expect("finish");
+
+        let row: (String, bool, Option<chrono::NaiveDateTime>) = sqlx::query_as(
+            "SELECT scan_status, is_malware, scanned_at FROM adhoc_scan_results WHERE scan_id = $1",
+        )
+        .bind(&scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("select");
+        assert_eq!(row.0, "infected");
+        assert!(row.1);
+        assert!(row.2.is_some());
+    }
+
+    #[tokio::test]
+    async fn set_adhoc_error_marks_row_error() {
+        let pool = pool().await;
+        let scan_id = uuid::Uuid::new_v4().to_string();
+        seed_adhoc(&pool, &scan_id).await;
+
+        set_adhoc_error(&pool, &scan_id).await.expect("set error");
+
+        let row: (String,) =
+            sqlx::query_as("SELECT scan_status FROM adhoc_scan_results WHERE scan_id = $1")
+                .bind(&scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("select");
+        assert_eq!(row.0, "error");
+    }
+
+    #[tokio::test]
+    async fn set_adhoc_error_on_missing_row_is_a_noop_not_an_error() {
+        let pool = pool().await;
+        // No matching scan_id row exists — UPDATE affects zero rows, which is
+        // not itself an sqlx error.
+        set_adhoc_error(&pool, "does-not-exist")
+            .await
+            .expect("noop update");
     }
 }

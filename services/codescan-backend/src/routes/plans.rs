@@ -62,10 +62,10 @@ struct PlanRow {
     status: String,
     error_message: Option<String>,
     comment_posted: bool,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    created_at: Option<chrono::NaiveDateTime>,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    updated_at: Option<chrono::NaiveDateTime>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 const PLAN_COLUMNS: &str = "id, external_id, platform, repository, issue_number, issue_url, \
@@ -319,5 +319,87 @@ mod tests {
         ] {
             resp.assert_status(StatusCode::UNAUTHORIZED);
         }
+    }
+
+    fn create_body(repository: &str, issue_number: i32) -> serde_json::Value {
+        serde_json::json!({
+            "platform": "github",
+            "repository": repository,
+            "issue_number": issue_number,
+            "external_id": format!("gh-{repository}-{issue_number}"),
+        })
+    }
+
+    #[tokio::test]
+    async fn list_is_empty_against_a_fresh_db() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = crate::routes::test_support::sign_token(&state, "1", "viewer");
+        let server = test_server(state);
+        let resp = server
+            .get("/api/v1/codescan/plans")
+            .authorization_bearer(token)
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["total"], 0);
+        assert_eq!(body["plans"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn create_get_and_conflict_round_trip() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = crate::routes::test_support::sign_token(&state, "1", "viewer");
+        let server = test_server(state);
+
+        let created = server
+            .post("/api/v1/codescan/plans")
+            .authorization_bearer(&token)
+            .json(&create_body("org/repo", 42))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let created_body: serde_json::Value = created.json();
+        let plan_id = created_body["id"].as_i64().unwrap_or_default();
+        assert!(plan_id > 0);
+        assert_eq!(created_body["status"], "queued");
+
+        let fetched = server
+            .get(&format!("/api/v1/codescan/plans/{plan_id}"))
+            .authorization_bearer(&token)
+            .await;
+        fetched.assert_status_ok();
+        let fetched_body: serde_json::Value = fetched.json();
+        assert_eq!(fetched_body["repository"], "org/repo");
+
+        let dup = server
+            .post("/api/v1/codescan/plans")
+            .authorization_bearer(&token)
+            .json(&create_body("org/repo", 42))
+            .await;
+        dup.assert_status(StatusCode::CONFLICT);
+        let dup_body: serde_json::Value = dup.json();
+        assert_eq!(
+            dup_body["error"],
+            "Issue plan with this external_id already exists"
+        );
+
+        let listed = server
+            .get("/api/v1/codescan/plans?repository=org/repo")
+            .authorization_bearer(&token)
+            .await;
+        listed.assert_status_ok();
+        let listed_body: serde_json::Value = listed.json();
+        assert_eq!(listed_body["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_plan_404_on_unknown_id() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = crate::routes::test_support::sign_token(&state, "1", "viewer");
+        let server = test_server(state);
+        server
+            .get("/api/v1/codescan/plans/999999")
+            .authorization_bearer(token)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
     }
 }

@@ -504,8 +504,13 @@ fn build_subject(subject: &str) -> (DistinguishedName, String) {
         return (dn, format!("CN={}", escape_rfc4514(subject)));
     }
 
-    // Normalize to RFC 4514 order (most significant first).
-    let order = ["C", "ST", "L", "O", "OU", "E", "CN"];
+    // Normalize to RFC 4514 order (most significant first). The "E" (email)
+    // slot must match the `short` value `push_dn_value`/the parse loop above
+    // actually assigns email components — the OID string, not the letter
+    // "E" — otherwise `E=` subject components silently never match here and
+    // are dropped entirely from the issued certificate's subject (found via
+    // testing: an `E=`-only subject produced a completely empty DN).
+    let order = ["C", "ST", "L", "O", "OU", "1.2.840.113549.1.9.1", "CN"];
     let mut sorted: Vec<(&str, String, DnType)> = Vec::new();
     for &key in &order {
         for (short, value, dn_type) in &parsed {
@@ -773,6 +778,17 @@ const _: fn() = || {
 mod tests {
     use super::*;
 
+    /// `X509Ca` intentionally does not derive `Debug` (it holds the CA
+    /// private key PEM — never risk it reaching a `{:?}` log line), so
+    /// `Result<X509Ca, _>::unwrap_err()` isn't available. This extracts the
+    /// error without requiring `Debug` on the `Ok` side.
+    fn expect_err<T, E>(result: Result<T, E>) -> E {
+        match result {
+            Ok(_) => panic!("expected Err, got Ok"),
+            Err(e) => e,
+        }
+    }
+
     #[test]
     fn rfc4514_sorts_to_most_significant_first() {
         let (_, s) = build_subject("CN=example.com,O=Example,C=US");
@@ -806,5 +822,478 @@ mod tests {
         assert_eq!(hex_to_be_bytes("1"), Some(vec![1]));
         assert_eq!(hex_to_be_bytes("ff01"), Some(vec![0xff, 0x01]));
         assert_eq!(hex_to_be_bytes("zz"), None);
+        assert_eq!(hex_to_be_bytes(""), Some(vec![]));
+    }
+
+    fn tmp_config() -> X509CaConfig {
+        let dir =
+            std::env::temp_dir().join(format!("skauswatch-x509-test-{}", uuid::Uuid::new_v4()));
+        X509CaConfig {
+            ca_key_path: dir.join("ca.key").to_string_lossy().into_owned(),
+            ca_cert_path: dir.join("ca.crt").to_string_lossy().into_owned(),
+            ca_key_password: None,
+            default_validity_days: 365,
+            max_validity_days: 825,
+            default_key_algorithm: "RSA".into(),
+            default_key_size: 2048,
+            crl_validity_days: 7,
+            ocsp_responder_url: None,
+        }
+    }
+
+    fn base_params(subject: &str) -> X509IssueParams {
+        X509IssueParams {
+            subject: subject.into(),
+            key_algorithm: "RSA".into(),
+            key_size: 2048,
+            validity_days: 30,
+            san_dns: vec![],
+            san_ip: vec![],
+            san_email: vec![],
+            key_usage: vec![],
+            extended_key_usage: vec![],
+            is_ca: false,
+            path_length: None,
+            csr_pem: None,
+        }
+    }
+
+    #[test]
+    fn load_or_generate_writes_then_reloads_from_disk() {
+        let config = tmp_config();
+        let ca1 = X509Ca::load_or_generate(config.clone()).unwrap();
+        assert!(std::path::Path::new(&config.ca_key_path).exists());
+        assert!(std::path::Path::new(&config.ca_cert_path).exists());
+        assert_eq!(ca1.serial_counter(), 1);
+        assert_eq!(ca1.crl_number(), 0);
+        assert!(ca1.info().subject.contains("SkausWatch"));
+
+        // Second call loads the just-persisted key/cert from disk instead of
+        // generating a fresh CA.
+        let ca2 = X509Ca::load_or_generate(config).unwrap();
+        assert_eq!(ca1.ca_certificate_pem(), ca2.ca_certificate_pem());
+    }
+
+    #[test]
+    fn load_or_generate_propagates_unreadable_key_error() {
+        // Cert file present but key path points at a directory (unreadable
+        // as a file) — exercises the "read CA key" Internal error branch.
+        let dir =
+            std::env::temp_dir().join(format!("skauswatch-x509-baddir-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_dir = dir.join("ca.key");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        let cert_path = dir.join("ca.crt");
+        std::fs::write(&cert_path, "not-a-real-cert").unwrap();
+        let mut config = tmp_config();
+        config.ca_key_path = key_dir.to_string_lossy().into_owned();
+        config.ca_cert_path = cert_path.to_string_lossy().into_owned();
+        let err = expect_err(X509Ca::load_or_generate(config));
+        assert!(matches!(err, X509Error::Internal(_)));
+    }
+
+    #[test]
+    fn from_pem_builds_ca_directly() {
+        let config = tmp_config();
+        let ca = X509Ca::load_or_generate(config.clone()).unwrap();
+        let ca2 = X509Ca::from_pem(
+            config,
+            std::fs::read_to_string(std::path::Path::new(&ca.config.ca_key_path)).unwrap(),
+            ca.ca_certificate_pem().to_owned(),
+        )
+        .unwrap();
+        assert_eq!(ca2.info().subject, ca.info().subject);
+    }
+
+    #[test]
+    fn from_pem_rejects_garbage_cert() {
+        let err = expect_err(X509Ca::from_pem(
+            tmp_config(),
+            "not a key".into(),
+            "not a cert".into(),
+        ));
+        assert!(matches!(err, X509Error::Internal(_)));
+    }
+
+    #[test]
+    fn issue_rsa_leaf_certificate_has_expected_fields() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let issued = ca
+            .issue(&base_params("CN=example.com,O=Example,C=US"))
+            .unwrap();
+        assert_eq!(issued.serial_hex, "1");
+        assert_eq!(issued.subject, "C=US,O=Example,CN=example.com");
+        assert_eq!(issued.issuer, ca.info().subject);
+        assert_eq!(issued.key_algorithm, "RSA");
+        assert_eq!(issued.key_size, Some(2048));
+        assert!(issued.private_key_pem.is_some());
+        assert!(issued.certificate_pem.contains("BEGIN CERTIFICATE"));
+        assert_eq!(issued.fingerprint_sha256.len(), 64);
+        assert!(issued.not_after > issued.not_before);
+
+        // Serial counter increments across calls.
+        let issued2 = ca.issue(&base_params("CN=second.example.com")).unwrap();
+        assert_eq!(issued2.serial_hex, "2");
+    }
+
+    #[test]
+    fn issue_ecdsa_and_ed25519_and_larger_rsa_sizes() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        for (alg, size) in [
+            ("ECDSA", 256),
+            ("ECDSA", 384),
+            ("ECDSA", 521),
+            ("ed25519", 0),
+            ("rsa", 3072),
+            ("rsa", 4096),
+        ] {
+            let mut p = base_params("CN=alg-test.example.com");
+            p.key_algorithm = alg.into();
+            p.key_size = size;
+            let issued = ca.issue(&p).unwrap();
+            assert_eq!(issued.key_algorithm, alg.to_uppercase());
+            if alg.eq_ignore_ascii_case("ed25519") {
+                assert_eq!(issued.key_size, None);
+            } else {
+                assert_eq!(issued.key_size, Some(size));
+            }
+        }
+    }
+
+    #[test]
+    fn issue_rejects_unsupported_algorithm() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let mut p = base_params("CN=bad-alg.example.com");
+        p.key_algorithm = "DSA".into();
+        let err = ca.issue(&p).unwrap_err();
+        assert!(matches!(err, X509Error::BadRequest(_)));
+    }
+
+    #[test]
+    fn issue_validity_days_capped_at_max() {
+        let mut config = tmp_config();
+        config.max_validity_days = 10;
+        let ca = X509Ca::load_or_generate(config).unwrap();
+        let mut p = base_params("CN=cap.example.com");
+        p.validity_days = 9999;
+        let issued = ca.issue(&p).unwrap();
+        let days = (issued.not_after - issued.not_before).num_days();
+        assert!(days <= 10, "expected capped validity, got {days} days");
+    }
+
+    #[test]
+    fn issue_with_san_dns_ip_email_and_explicit_key_usages() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let mut p = base_params("CN=san.example.com");
+        p.san_dns = vec!["www.example.com".into(), "*.example.com".into()];
+        p.san_ip = vec!["10.0.0.1".into(), "::1".into()];
+        p.san_email = vec!["admin@example.com".into()];
+        p.key_usage = vec!["digital_signature".into(), "key_agreement".into()];
+        p.extended_key_usage = vec!["client_auth".into(), "code_signing".into()];
+        let issued = ca.issue(&p).unwrap();
+        assert!(issued.certificate_pem.contains("BEGIN CERTIFICATE"));
+    }
+
+    #[test]
+    fn issue_invalid_san_ip_is_bad_request() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let mut p = base_params("CN=bad-ip.example.com");
+        p.san_ip = vec!["not-an-ip".into()];
+        let err = ca.issue(&p).unwrap_err();
+        assert!(matches!(err, X509Error::BadRequest(_)));
+    }
+
+    #[test]
+    fn issue_non_ascii_san_dns_is_bad_request() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let mut p = base_params("CN=nonascii.example.com");
+        p.san_dns = vec!["exämple.com".into()];
+        let err = ca.issue(&p).unwrap_err();
+        assert!(matches!(err, X509Error::BadRequest(_)));
+    }
+
+    #[test]
+    fn issue_non_ascii_san_email_is_bad_request() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let mut p = base_params("CN=nonascii2.example.com");
+        p.san_email = vec!["usér@example.com".into()];
+        let err = ca.issue(&p).unwrap_err();
+        assert!(matches!(err, X509Error::BadRequest(_)));
+    }
+
+    #[test]
+    fn issue_ca_certificate_unconstrained_and_constrained_path_length() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let mut p = base_params("CN=intermediate.example.com,O=Example");
+        p.is_ca = true;
+        p.path_length = Some(2);
+        let issued = ca.issue(&p).unwrap();
+        assert!(issued.certificate_pem.contains("BEGIN CERTIFICATE"));
+
+        // Negative path_length falls back to unconstrained (`_ => Unconstrained`).
+        let mut p2 = base_params("CN=root-like.example.com");
+        p2.is_ca = true;
+        p2.path_length = Some(-1);
+        let issued2 = ca.issue(&p2).unwrap();
+        assert!(issued2.certificate_pem.contains("BEGIN CERTIFICATE"));
+
+        // is_ca with no path_length also unconstrained.
+        let mut p3 = base_params("CN=root-like2.example.com");
+        p3.is_ca = true;
+        ca.issue(&p3).unwrap();
+    }
+
+    #[test]
+    fn issue_from_csr_returns_no_private_key() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let subject_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let csr_params = CertificateParams::default();
+        let csr = csr_params.serialize_request(&subject_key).unwrap();
+        let csr_pem = csr.pem().unwrap();
+
+        let mut p = base_params("CN=csr.example.com");
+        p.csr_pem = Some(csr_pem);
+        let issued = ca.issue(&p).unwrap();
+        assert!(issued.private_key_pem.is_none());
+        assert!(issued.certificate_pem.contains("BEGIN CERTIFICATE"));
+    }
+
+    #[test]
+    fn issue_invalid_csr_pem_is_bad_request() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let mut p = base_params("CN=badcsr.example.com");
+        p.csr_pem = Some("not a real csr".into());
+        let err = ca.issue(&p).unwrap_err();
+        assert!(matches!(err, X509Error::BadRequest(_)));
+    }
+
+    #[test]
+    fn generate_crl_covers_all_named_reasons_and_unspecified() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let issued = ca.issue(&base_params("CN=revoke-me.example.com")).unwrap();
+        let reasons = [
+            "key_compromise",
+            "ca_compromise",
+            "affiliation_changed",
+            "superseded",
+            "cessation_of_operation",
+            "certificate_hold",
+            "privilege_withdrawn",
+            "unspecified",
+        ];
+        let entries: Vec<CrlEntry> = reasons
+            .iter()
+            .map(|r| CrlEntry {
+                serial_hex: issued.serial_hex.clone(),
+                revoked_at: chrono::Utc::now().naive_utc(),
+                reason: Some((*r).to_owned()),
+            })
+            .collect();
+        let (pem, number) = ca.generate_crl(&entries).unwrap();
+        assert!(pem.contains("BEGIN X509 CRL"));
+        assert_eq!(number, 1);
+
+        // None reason and an unrecognized reason name (omits the extension,
+        // per v1 CRLReason parity) both succeed.
+        let entries2 = vec![
+            CrlEntry {
+                serial_hex: issued.serial_hex.clone(),
+                revoked_at: chrono::Utc::now().naive_utc(),
+                reason: None,
+            },
+            CrlEntry {
+                serial_hex: issued.serial_hex,
+                revoked_at: chrono::Utc::now().naive_utc(),
+                reason: Some("totally_unknown_reason".into()),
+            },
+        ];
+        let (_, number2) = ca.generate_crl(&entries2).unwrap();
+        assert_eq!(number2, 2);
+    }
+
+    #[test]
+    fn generate_crl_empty_entries_succeeds() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let (pem, number) = ca.generate_crl(&[]).unwrap();
+        assert!(pem.contains("BEGIN X509 CRL"));
+        assert_eq!(number, 1);
+    }
+
+    #[test]
+    fn generate_crl_rejects_bad_serial_hex() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let entries = vec![CrlEntry {
+            serial_hex: "not-hex".into(),
+            revoked_at: chrono::Utc::now().naive_utc(),
+            reason: None,
+        }];
+        let err = ca.generate_crl(&entries).unwrap_err();
+        assert!(matches!(err, X509Error::BadRequest(_)));
+    }
+
+    #[test]
+    fn verify_accepts_own_leaf_and_rejects_foreign_or_garbage() {
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let issued = ca.issue(&base_params("CN=verify-me.example.com")).unwrap();
+        assert!(ca.verify(&issued.certificate_pem));
+
+        // A cert issued by a *different* CA fails the issuer/signature check.
+        let other_ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        let other_issued = other_ca
+            .issue(&base_params("CN=other.example.com"))
+            .unwrap();
+        assert!(!ca.verify(&other_issued.certificate_pem));
+
+        // Unparsable PEM never panics — verify_impl returns None -> false.
+        assert!(!ca.verify("not a certificate"));
+    }
+
+    #[test]
+    fn verify_rejects_a_leaf_whose_issuer_dn_does_not_match_at_all() {
+        // `generate_ca()` always uses the same hardcoded DN, so two
+        // freshly-generated CAs share a subject string and a leaf from one
+        // fails `ca.verify()` on the *signature* check, not the issuer-DN
+        // check. Build a CA with a genuinely different subject DN (via a
+        // hand-signed root, `from_pem`) to exercise the issuer-mismatch
+        // branch specifically.
+        let alt_key = KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut alt_dn = DistinguishedName::new();
+        alt_dn.push(
+            DnType::CommonName,
+            DnValue::Utf8String("totally-different-issuer".into()),
+        );
+        let mut alt_cp = CertificateParams::default();
+        alt_cp.distinguished_name = alt_dn;
+        alt_cp.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let alt_cert = alt_cp.self_signed(&alt_key).unwrap();
+        let alt_ca =
+            X509Ca::from_pem(tmp_config(), alt_key.serialize_pem(), alt_cert.pem()).unwrap();
+        let alt_issued = alt_ca
+            .issue(&base_params("CN=leaf-from-alt.example.com"))
+            .unwrap();
+
+        let ca = X509Ca::load_or_generate(tmp_config()).unwrap();
+        assert!(!ca.verify(&alt_issued.certificate_pem));
+    }
+
+    #[test]
+    fn build_subject_parses_all_recognized_components_and_skips_unknown() {
+        let (_, s) = build_subject("CN=x,O=Org,OU=Unit,C=US,ST=CA,L=City,E=a@b.com,X=ignored");
+        assert_eq!(
+            s,
+            "C=US,ST=CA,L=City,O=Org,OU=Unit,1.2.840.113549.1.9.1=a@b.com,CN=x"
+        );
+    }
+
+    #[test]
+    fn build_subject_skips_malformed_parts_without_equals() {
+        let (_, s) = build_subject("CN=x,garbage,O=Org");
+        assert_eq!(s, "O=Org,CN=x");
+    }
+
+    #[test]
+    fn push_dn_value_falls_back_to_utf8_for_non_printable_country() {
+        // '_' is outside PrintableString's allowed charset -> fallback branch.
+        let (dn, s) = build_subject("C=U_S");
+        assert_eq!(s, "C=U_S");
+        assert_eq!(dn.iter().count(), 1);
+    }
+
+    #[test]
+    fn push_dn_value_falls_back_to_utf8_for_non_ascii_email() {
+        let (_, s) = build_subject("E=usér@example.com");
+        assert_eq!(s, "1.2.840.113549.1.9.1=usér@example.com");
+    }
+
+    #[test]
+    fn escape_rfc4514_escapes_specials_and_leading_hash_and_edge_spaces() {
+        assert_eq!(escape_rfc4514("a,b"), "a\\,b");
+        assert_eq!(escape_rfc4514("#leading"), "\\#leading");
+        assert_eq!(escape_rfc4514(" leading"), "\\ leading");
+        assert_eq!(escape_rfc4514("trailing "), "trailing\\ ");
+        assert_eq!(
+            escape_rfc4514("a+b\"c\\d<e>f;g"),
+            "a\\+b\\\"c\\\\d\\<e\\>f\\;g"
+        );
+    }
+
+    #[test]
+    fn extended_key_usage_mapping_covers_all_names_and_drops_unknown() {
+        let eku = map_extended_key_usages(&[
+            "server_auth".into(),
+            "client_auth".into(),
+            "code_signing".into(),
+            "email_protection".into(),
+            "time_stamping".into(),
+            "ocsp_signing".into(),
+            "bogus".into(),
+        ]);
+        assert_eq!(eku.len(), 6);
+    }
+
+    #[test]
+    fn revocation_reason_mapping_covers_all_names() {
+        assert!(matches!(
+            map_revocation_reason(Some("key_compromise")),
+            Some(rcgen::RevocationReason::KeyCompromise)
+        ));
+        assert!(matches!(
+            map_revocation_reason(None),
+            Some(rcgen::RevocationReason::Unspecified)
+        ));
+        assert_eq!(map_revocation_reason(Some("nonsense")), None);
+    }
+
+    #[test]
+    fn generate_key_covers_all_algorithm_and_size_branches() {
+        for (alg, size) in [
+            ("RSA", 1024),
+            ("RSA", 3000),
+            ("RSA", 8192),
+            ("ECDSA", 200),
+            ("ECDSA", 300),
+            ("ECDSA", 999),
+            ("ED25519", 0),
+        ] {
+            generate_key(alg, size).unwrap();
+        }
+        assert!(generate_key("DSA", 1024).is_err());
+    }
+
+    #[test]
+    fn hex_lower_renders_two_digit_groups() {
+        assert_eq!(hex_lower(&[0x00, 0xab, 0xff]), "00abff");
+    }
+
+    #[test]
+    fn pem_str_to_der_rejects_garbage() {
+        assert!(pem_str_to_der("not pem at all").is_none());
+    }
+
+    #[test]
+    fn ts_to_naive_rejects_out_of_range_timestamp() {
+        assert!(ts_to_naive(i64::MAX).is_err());
+        assert!(ts_to_naive(0).is_ok());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod oid_short_name_extra {
+    use super::oid_short_name;
+    use x509_parser::der_parser::Oid;
+
+    #[test]
+    fn maps_all_known_short_names_and_passes_through_unknown() {
+        assert_eq!(oid_short_name(&Oid::from(&[2, 5, 4, 3]).unwrap()), "CN");
+        assert_eq!(oid_short_name(&Oid::from(&[2, 5, 4, 10]).unwrap()), "O");
+        assert_eq!(oid_short_name(&Oid::from(&[2, 5, 4, 11]).unwrap()), "OU");
+        assert_eq!(oid_short_name(&Oid::from(&[2, 5, 4, 6]).unwrap()), "C");
+        assert_eq!(oid_short_name(&Oid::from(&[2, 5, 4, 8]).unwrap()), "ST");
+        assert_eq!(oid_short_name(&Oid::from(&[2, 5, 4, 7]).unwrap()), "L");
+        assert_eq!(
+            oid_short_name(&Oid::from(&[1, 2, 3, 4]).unwrap()),
+            "1.2.3.4"
+        );
     }
 }

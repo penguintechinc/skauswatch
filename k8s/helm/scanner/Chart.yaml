@@ -9,8 +9,7 @@ keywords:
   - worker
   - scanner
   - vulnerability
-  - flask
-  - python
+  - rust
 maintainers:
   - name: Penguin Tech Inc
     email: support@penguintech.io

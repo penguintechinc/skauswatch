@@ -60,13 +60,13 @@ struct CredentialSummary {
     name: Option<String>,
     platform: String,
     credential_type: String,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    token_expires_at: Option<chrono::NaiveDateTime>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
     is_active: bool,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    created_at: Option<chrono::NaiveDateTime>,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    updated_at: Option<chrono::NaiveDateTime>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 const SUMMARY_COLUMNS: &str = "id, user_id, name, platform, credential_type, token_expires_at, \
@@ -458,5 +458,152 @@ mod tests {
         resp.assert_status(StatusCode::BAD_REQUEST);
         let body: serde_json::Value = resp.json();
         assert_eq!(body["valid"], false);
+    }
+
+    #[tokio::test]
+    async fn list_is_empty_against_a_fresh_db() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+        let resp = server
+            .get("/api/v1/credentials")
+            .authorization_bearer(token)
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn create_get_update_delete_round_trip_never_echoes_the_token() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+
+        let created = server
+            .post("/api/v1/credentials")
+            .authorization_bearer(&admin)
+            .json(&serde_json::json!({
+                "platform": "github",
+                "name": "ci-bot",
+                "token": "ghp_supersecrettoken1234",
+            }))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let created_body: serde_json::Value = created.json();
+        assert!(created_body["credential"].get("encrypted_token").is_none());
+        assert_eq!(created_body["credential"]["name"], "ci-bot");
+        let credential_id = created_body["credential"]["id"]
+            .as_i64()
+            .unwrap_or_default();
+        assert!(credential_id > 0);
+
+        let fetched = server
+            .get(&format!("/api/v1/credentials/{credential_id}"))
+            .authorization_bearer(&admin)
+            .await;
+        fetched.assert_status_ok();
+        let fetched_body: serde_json::Value = fetched.json();
+        assert!(fetched_body.get("encrypted_token").is_none());
+
+        let updated = server
+            .patch(&format!("/api/v1/credentials/{credential_id}"))
+            .authorization_bearer(&admin)
+            .json(&serde_json::json!({"name": "ci-bot-renamed", "token": "ghp_newtoken5678"}))
+            .await;
+        updated.assert_status_ok();
+        let updated_body: serde_json::Value = updated.json();
+        assert_eq!(updated_body["credential"]["name"], "ci-bot-renamed");
+        assert!(updated_body["credential"].get("encrypted_token").is_none());
+
+        let deleted = server
+            .delete(&format!("/api/v1/credentials/{credential_id}"))
+            .authorization_bearer(&admin)
+            .await;
+        deleted.assert_status_ok();
+
+        server
+            .get(&format!("/api/v1/credentials/{credential_id}"))
+            .authorization_bearer(&admin)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_blank_token() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+
+        let created = server
+            .post("/api/v1/credentials")
+            .authorization_bearer(&admin)
+            .json(&serde_json::json!({"platform": "gitlab", "token": "glpat-abcdef1234"}))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let created_body: serde_json::Value = created.json();
+        let credential_id = created_body["credential"]["id"]
+            .as_i64()
+            .unwrap_or_default();
+
+        let resp = server
+            .patch(&format!("/api/v1/credentials/{credential_id}"))
+            .authorization_bearer(&admin)
+            .json(&serde_json::json!({"token": "   "}))
+            .await;
+        resp.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_update_delete_404_on_unknown_id() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+
+        server
+            .get("/api/v1/credentials/999999")
+            .authorization_bearer(&admin)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        server
+            .patch("/api/v1/credentials/999999")
+            .authorization_bearer(&admin)
+            .json(&serde_json::json!({"name": "x"}))
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        server
+            .delete("/api/v1/credentials/999999")
+            .authorization_bearer(&admin)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_platform() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+
+        server
+            .post("/api/v1/credentials")
+            .authorization_bearer(&admin)
+            .json(&serde_json::json!({"platform": "github", "token": "ghp_aaaaaaaaaa"}))
+            .await
+            .assert_status(StatusCode::CREATED);
+        server
+            .post("/api/v1/credentials")
+            .authorization_bearer(&admin)
+            .json(&serde_json::json!({"platform": "gitlab", "token": "glpat-bbbbbbbbbb"}))
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        let resp = server
+            .get("/api/v1/credentials?platform=gitlab")
+            .authorization_bearer(&admin)
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["data"][0]["platform"], "gitlab");
     }
 }

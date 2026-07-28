@@ -1472,4 +1472,231 @@ mod tests {
         assert!(!valid_ip("-1.0.0.0"));
         assert!(valid_ip("fe80::1")); // colon passthrough, v1 parity
     }
+
+    use crate::routes::test_support::{authed_user, db_state};
+
+    fn dev_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
+        skauswatch_testkit::license::dev_license("skauswatch")
+    }
+
+    async fn server_for(state: AppState) -> axum_test::TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        axum_test::TestServer::new(app)
+    }
+
+    async fn seed_ioc(state: &AppState, itype: &str, value: &str, level: &str) -> i32 {
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO threat_indicators \
+             (indicator_type, value, threat_level, confidence, source, tags, metadata, \
+              created_at, updated_at) \
+             VALUES ($1, $2, $3, 0.5, 'unit-test', '[]', '{}', now(), now()) RETURNING id",
+        )
+        .bind(itype)
+        .bind(value)
+        .bind(level)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed_ioc: {e}"));
+        id
+    }
+
+    #[tokio::test]
+    async fn list_get_and_delete_iocs_round_trip() {
+        let state = db_state(dev_license()).await;
+        let id = seed_ioc(&state, "domain", "evil.example.com", "high").await;
+        let (_, viewer_tok) = authed_user(&state, "ti-viewer@example.com", "viewer").await;
+        let (_, admin_tok) = authed_user(&state, "ti-admin@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let list = server
+            .get("/api/v1/threat-intel/iocs")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+
+        let get = server
+            .get(&format!("/api/v1/threat-intel/iocs/{id}"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        get.assert_status_ok();
+        let body: serde_json::Value = get.json();
+        assert_eq!(body["value"], "evil.example.com");
+        assert!(body["updated_at"].is_string());
+
+        let missing = server
+            .get("/api/v1/threat-intel/iocs/999999")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        // Delete requires admin.
+        let forbidden = server
+            .delete(&format!("/api/v1/threat-intel/iocs/{id}"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let res = server
+            .delete(&format!("/api/v1/threat-intel/iocs/{id}"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        res.assert_status_ok();
+
+        let missing = server
+            .delete(&format!("/api/v1/threat-intel/iocs/{id}"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_ioc_requires_role_validates_and_conflicts() {
+        let state = db_state(dev_license()).await;
+        let (_, viewer_tok) = authed_user(&state, "ci-viewer@example.com", "viewer").await;
+        let (_, maint_tok) = authed_user(&state, "ci-maint@example.com", "maintainer").await;
+        let server = server_for(state).await;
+
+        let res = server
+            .post("/api/v1/threat-intel/iocs")
+            .authorization_bearer(&viewer_tok)
+            .json(&serde_json::json!({
+                "indicator_type": "ip", "value": "1.2.3.4", "source": "unit"
+            }))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+
+        let bad = server
+            .post("/api/v1/threat-intel/iocs")
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({"indicator_type": "ip", "value": "999.1.1.1", "source": "s"}))
+            .await;
+        bad.assert_status(StatusCode::BAD_REQUEST);
+
+        let res = server
+            .post("/api/v1/threat-intel/iocs")
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({
+                "indicator_type": "ip", "value": "203.0.113.9", "source": "unit-test"
+            }))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["ioc"]["value"], "203.0.113.9");
+
+        let dup = server
+            .post("/api/v1/threat-intel/iocs")
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({
+                "indicator_type": "ip", "value": "203.0.113.9", "source": "unit-test"
+            }))
+            .await;
+        dup.assert_status(StatusCode::CONFLICT);
+        let body: serde_json::Value = dup.json();
+        assert_eq!(body["error"], "IOC already exists");
+    }
+
+    #[tokio::test]
+    async fn bulk_create_iocs_upserts_and_reports_counts() {
+        let state = db_state(dev_license()).await;
+        seed_ioc(&state, "ip", "198.51.100.1", "medium").await;
+        let (_, maint_tok) = authed_user(&state, "bulk@example.com", "maintainer").await;
+        let server = server_for(state).await;
+
+        let missing = server
+            .post("/api/v1/threat-intel/iocs/bulk")
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({}))
+            .await;
+        missing.assert_status(StatusCode::BAD_REQUEST);
+
+        let res = server
+            .post("/api/v1/threat-intel/iocs/bulk")
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({
+                "indicators": [
+                    {"indicator_type": "ip", "value": "198.51.100.1", "source": "s"},
+                    {"indicator_type": "ip", "value": "198.51.100.2", "source": "s"},
+                ]
+            }))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["created_count"], 1);
+        assert_eq!(body["updated_count"], 1);
+        assert_eq!(body["error_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn search_and_lookup_iocs() {
+        let state = db_state(dev_license()).await;
+        seed_ioc(&state, "domain", "search-me.example.com", "critical").await;
+        let (_, token) = authed_user(&state, "search-ti@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let res = server
+            .post("/api/v1/threat-intel/iocs/search")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"query": "search-me"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+
+        let found = server
+            .post("/api/v1/threat-intel/iocs/lookup")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"type": "domain", "value": "search-me.example.com"}))
+            .await;
+        found.assert_status_ok();
+        let body: serde_json::Value = found.json();
+        assert_eq!(body["found"], true);
+
+        let not_found = server
+            .post("/api/v1/threat-intel/iocs/lookup")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"type": "domain", "value": "nope.example.com"}))
+            .await;
+        not_found.assert_status_ok();
+        let body: serde_json::Value = not_found.json();
+        assert_eq!(body["found"], false);
+
+        let bad = server
+            .post("/api/v1/threat-intel/iocs/lookup")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({}))
+            .await;
+        bad.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn statistics_and_feeds_are_authed() {
+        let state = db_state(dev_license()).await;
+        seed_ioc(&state, "ip", "203.0.113.55", "high").await;
+        let (_, token) = authed_user(&state, "ti-stats@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let stats = server
+            .get("/api/v1/threat-intel/statistics")
+            .authorization_bearer(&token)
+            .await;
+        stats.assert_status_ok();
+        let body: serde_json::Value = stats.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+        assert!(body["by_type"]["ip"].as_i64().unwrap_or(0) >= 1);
+
+        let feeds = server
+            .get("/api/v1/threat-intel/feeds")
+            .authorization_bearer(&token)
+            .await;
+        feeds.assert_status_ok();
+        let body: serde_json::Value = feeds.json();
+        assert_eq!(body["feeds"].as_array().map(Vec::len), Some(5));
+
+        let unauth = server.get("/api/v1/threat-intel/feeds").await;
+        unauth.assert_status(StatusCode::UNAUTHORIZED);
+    }
 }

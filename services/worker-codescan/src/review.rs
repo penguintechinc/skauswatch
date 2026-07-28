@@ -129,4 +129,29 @@ mod tests {
         let findings = parse_ai_response(json).expect("parse");
         assert_eq!(findings.len(), 0);
     }
+
+    #[test]
+    fn test_parse_ai_response_rejects_non_object_elements() {
+        let json = r#"["just a string, not a finding object"]"#;
+        let err = parse_ai_response(json).expect_err("non-object element must error");
+        assert!(err.to_string().contains("finding not an object"));
+    }
+
+    #[test]
+    fn test_parse_ai_response_fills_defaults_for_missing_fields() {
+        let json = r#"[{}]"#;
+        let findings = parse_ai_response(json).expect("parse");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line_start, 1);
+        assert_eq!(findings[0]._line_end, 1);
+        assert_eq!(findings[0].severity, "suggestion");
+        assert_eq!(findings[0].title, "Code Review Finding");
+        assert_eq!(findings[0].body, "");
+    }
+
+    #[test]
+    fn test_parse_ai_response_rejects_malformed_json() {
+        let json = "{not valid json";
+        assert!(parse_ai_response(json).is_err());
+    }
 }

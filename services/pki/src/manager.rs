@@ -762,3 +762,741 @@ fn parse_uuid(s: Option<&str>) -> Option<Uuid> {
 fn parse_uuid_owned(s: &str) -> Option<Uuid> {
     Uuid::parse_str(s).ok()
 }
+
+/// Unit tests for the parts of `CertManager` that don't require a real
+/// Postgres instance (see `docs/v2-port/testing-pattern.md` — pki has no
+/// `migrations/` directory, so DB-backed success paths — row-to-dict
+/// conversion, "found" branches of get/revoke, statistics counts, audit-log
+/// writes — cannot be exercised without one). What's covered here instead:
+/// the pure QueryBuilder-filter helpers, UUID parsing, the real
+/// error-mapping conversions, and every manager method's behavior up to
+/// (and including) the point a lazy/unreachable pool fails a query —
+/// including the fully-pure early-return branches (`(None, None)` identifier
+/// lookups resolve to `Ok(None)`/`Ok(false)` without ever touching the DB).
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::ca::ssh::SshCa;
+    use crate::ca::x509::X509Ca;
+    use crate::config::X509CaConfig;
+    use crate::error::ApiError;
+
+    fn tmp_x509_config() -> X509CaConfig {
+        let dir =
+            std::env::temp_dir().join(format!("skauswatch-manager-test-{}", uuid::Uuid::new_v4()));
+        X509CaConfig {
+            ca_key_path: dir.join("ca.key").to_string_lossy().into_owned(),
+            ca_cert_path: dir.join("ca.crt").to_string_lossy().into_owned(),
+            ca_key_password: None,
+            default_validity_days: 365,
+            max_validity_days: 825,
+            default_key_algorithm: "RSA".into(),
+            default_key_size: 2048,
+            crl_validity_days: 7,
+            ocsp_responder_url: None,
+        }
+    }
+
+    fn unreachable_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@127.0.0.1:1/test")
+            .unwrap_or_else(|e| panic!("lazy pool: {e}"))
+    }
+
+    fn test_manager() -> CertManager {
+        let x509 = Arc::new(X509Ca::load_or_generate(tmp_x509_config()).unwrap());
+        let ssh = Arc::new(SshCa::for_tests());
+        CertManager::new(x509, ssh, unreachable_pool())
+    }
+
+    fn x509_params(subject: &str) -> crate::ca::x509::X509IssueParams {
+        crate::ca::x509::X509IssueParams {
+            subject: subject.into(),
+            key_algorithm: "RSA".into(),
+            key_size: 2048,
+            validity_days: 30,
+            san_dns: vec![],
+            san_ip: vec![],
+            san_email: vec![],
+            key_usage: vec![],
+            extended_key_usage: vec![],
+            is_ca: false,
+            path_length: None,
+            csr_pem: None,
+        }
+    }
+
+    #[test]
+    fn push_x509_filters_builds_expected_where_clauses() {
+        let mut qb = QueryBuilder::new("SELECT 1 FROM x");
+        push_x509_filters(&mut qb, None, None, None);
+        assert_eq!(qb.sql().as_str(), "SELECT 1 FROM x");
+
+        let mut qb2 = QueryBuilder::new("SELECT 1 FROM x");
+        push_x509_filters(&mut qb2, Some("active"), None, None);
+        assert!(qb2.sql().as_str().contains(" WHERE status = "));
+
+        let mut qb3 = QueryBuilder::new("SELECT 1 FROM x");
+        push_x509_filters(
+            &mut qb3,
+            Some("active"),
+            Some("CN=x"),
+            Some(Utc::now().naive_utc()),
+        );
+        assert!(qb3.sql().as_str().contains(" WHERE status = "));
+        assert!(qb3.sql().as_str().contains(" AND subject LIKE "));
+        assert!(qb3.sql().as_str().contains(" AND not_after < "));
+    }
+
+    #[test]
+    fn push_ssh_filters_builds_expected_where_clauses() {
+        let mut qb = QueryBuilder::new("SELECT 1 FROM x");
+        push_ssh_filters(&mut qb, None, None, None);
+        assert_eq!(qb.sql().as_str(), "SELECT 1 FROM x");
+
+        let mut qb2 = QueryBuilder::new("SELECT 1 FROM x");
+        push_ssh_filters(&mut qb2, Some("active"), Some("user"), Some("alice"));
+        assert!(qb2.sql().as_str().contains(" WHERE status = "));
+        assert!(qb2.sql().as_str().contains(" AND certificate_type = "));
+        assert!(qb2.sql().as_str().contains(" = ANY(principals)"));
+    }
+
+    #[test]
+    fn parse_uuid_helpers_accept_valid_and_reject_invalid() {
+        let id = Uuid::new_v4();
+        assert_eq!(parse_uuid(Some(&id.to_string())), Some(id));
+        assert_eq!(parse_uuid(Some("not-a-uuid")), None);
+        assert_eq!(parse_uuid(None), None);
+        assert_eq!(parse_uuid_owned(&id.to_string()), Some(id));
+        assert_eq!(parse_uuid_owned("not-a-uuid"), None);
+    }
+
+    #[tokio::test]
+    async fn join_err_wraps_a_real_join_error() {
+        let handle = tokio::spawn(async { panic!("boom") });
+        let join_error = handle.await.unwrap_err();
+        let err = join_err(join_error);
+        assert!(matches!(
+            err,
+            ManagerError::X509(crate::ca::x509::X509Error::Internal(_))
+        ));
+    }
+
+    #[test]
+    fn manager_error_converts_to_api_error() {
+        let db_err: ApiError = ManagerError::Db(sqlx::Error::RowNotFound).into();
+        assert!(matches!(db_err, ApiError::Internal(_)));
+
+        let x509_bad: ApiError =
+            ManagerError::X509(crate::ca::x509::X509Error::BadRequest("bad".into())).into();
+        assert!(matches!(x509_bad, ApiError::BadRequest(_)));
+
+        let ssh_bad: ApiError =
+            ManagerError::Ssh(crate::ca::ssh::SshError::BadRequest("bad".into())).into();
+        assert!(matches!(ssh_bad, ApiError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn audit_swallows_db_errors_instead_of_propagating() {
+        let manager = test_manager();
+        // The unreachable pool means the INSERT fails; `audit()` returns `()`
+        // regardless — it must log and return, never panic or block forever.
+        manager
+            .audit(
+                "certificate_issued",
+                "x509",
+                Some(Uuid::new_v4()),
+                Some("1"),
+                Some("CN=test"),
+                "issue",
+                "success",
+                Some("actor-1"),
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn count_fails_against_unreachable_db_for_both_clause_shapes() {
+        let manager = test_manager();
+        assert!(manager.count("x509_certificates", "").await.is_err());
+        assert!(
+            manager
+                .count("x509_certificates", "WHERE status='active'")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_x509_runs_real_crypto_then_fails_on_db_insert() {
+        let manager = test_manager();
+        // Real RSA issuance happens (spawn_blocking) before the DB write is
+        // attempted, so this exercises manager.issue_x509's full parameter
+        // marshalling + bind chain, only failing at the final `.execute()`.
+        let err = manager
+            .issue_x509(x509_params("CN=manager-test.example.com"), Some("req-1"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ManagerError::Db(_)));
+    }
+
+    #[tokio::test]
+    async fn get_x509_resolves_none_without_db_when_identifier_is_unusable() {
+        let manager = test_manager();
+        // Neither a valid UUID nor a serial supplied -> Ok(None) with zero
+        // DB access (the `(None, None)` early-return arm).
+        assert_eq!(manager.get_x509(None, None, false).await.unwrap(), None);
+        assert_eq!(
+            manager
+                .get_x509(Some("not-a-uuid"), None, false)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn get_x509_touches_db_for_valid_uuid_or_serial() {
+        let manager = test_manager();
+        let id = Uuid::new_v4().to_string();
+        assert!(manager.get_x509(Some(&id), None, false).await.is_err());
+        assert!(
+            manager
+                .get_x509(None, Some("deadbeef"), false)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_x509_resolves_false_without_db_when_identifier_is_unusable() {
+        let manager = test_manager();
+        assert!(
+            !manager
+                .revoke_x509(None, None, "unspecified", None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !manager
+                .revoke_x509(Some("not-a-uuid"), None, "unspecified", None)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_x509_touches_db_for_valid_uuid_or_serial() {
+        let manager = test_manager();
+        let id = Uuid::new_v4().to_string();
+        assert!(
+            manager
+                .revoke_x509(Some(&id), None, "unspecified", Some("actor"))
+                .await
+                .is_err()
+        );
+        assert!(
+            manager
+                .revoke_x509(None, Some("deadbeef"), "unspecified", None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_x509_always_touches_db() {
+        let manager = test_manager();
+        assert!(
+            manager
+                .list_x509(
+                    Some("active"),
+                    Some("CN=x"),
+                    Some(Utc::now().naive_utc()),
+                    1,
+                    50
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_x509_crl_fails_reading_entries_from_db() {
+        let manager = test_manager();
+        assert!(manager.generate_x509_crl().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_ssh_resolves_none_without_db_when_identifier_is_unusable() {
+        let manager = test_manager();
+        assert_eq!(manager.get_ssh(None, None, false).await.unwrap(), None);
+        assert_eq!(
+            manager
+                .get_ssh(Some("not-a-uuid"), None, false)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn get_ssh_touches_db_for_valid_uuid_or_serial() {
+        let manager = test_manager();
+        let id = Uuid::new_v4().to_string();
+        assert!(manager.get_ssh(Some(&id), None, false).await.is_err());
+        assert!(manager.get_ssh(None, Some("1"), false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn revoke_ssh_resolves_false_without_db_when_identifier_is_unusable() {
+        let manager = test_manager();
+        assert!(
+            !manager
+                .revoke_ssh(None, None, "unspecified", None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !manager
+                .revoke_ssh(Some("not-a-uuid"), None, "unspecified", None)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_ssh_touches_db_for_valid_uuid_or_serial() {
+        let manager = test_manager();
+        let id = Uuid::new_v4().to_string();
+        assert!(
+            manager
+                .revoke_ssh(Some(&id), None, "unspecified", None)
+                .await
+                .is_err()
+        );
+        assert!(
+            manager
+                .revoke_ssh(None, Some("1"), "unspecified", None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_ssh_always_touches_db() {
+        let manager = test_manager();
+        assert!(
+            manager
+                .list_ssh(Some("active"), Some("user"), Some("alice"), 1, 50)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_ssh_krl_fails_reading_entries_from_db() {
+        let manager = test_manager();
+        assert!(manager.generate_ssh_krl().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn statistics_fails_against_unreachable_db() {
+        let manager = test_manager();
+        assert!(manager.statistics().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn db_accessor_returns_the_configured_pool() {
+        // `connect_lazy` requires an active Tokio context even just to
+        // construct the pool, so this needs `#[tokio::test]` like every
+        // other test here, despite not being `.await`-ing anything itself.
+        let manager = test_manager();
+        // Just confirms the accessor wires through; a real query against it
+        // is exercised by every DB-touching test above.
+        let _pool: &PgPool = manager.db();
+    }
+
+    // ===================== DB-backed success paths =====================
+    //
+    // A real, migrated Postgres schema (services/pki/migrations/) is now
+    // available (see docs/v2-port/testing-pattern.md), so the "found"
+    // branches this module's earlier tests explicitly couldn't reach —
+    // row-to-dict conversion, revoke's real update, list/CRL/KRL/statistics
+    // bodies, audit-log writes — are exercised here for real, against
+    // `crate::routes::test_support::db_state()`'s real X.509/SSH CA engines
+    // + real Postgres pool.
+
+    async fn db_manager() -> std::sync::Arc<CertManager> {
+        crate::routes::test_support::db_state()
+            .await
+            .manager
+            .clone()
+    }
+
+    fn x509_req(subject: &str) -> crate::ca::x509::X509IssueParams {
+        crate::ca::x509::X509IssueParams {
+            subject: subject.into(),
+            key_algorithm: "RSA".into(),
+            key_size: 2048,
+            validity_days: 365,
+            san_dns: vec!["db-test.example.com".into()],
+            san_ip: vec![],
+            san_email: vec![],
+            key_usage: vec![],
+            extended_key_usage: vec![],
+            is_ca: false,
+            path_length: None,
+            csr_pem: None,
+        }
+    }
+
+    fn ssh_req(pubkey: &str) -> crate::ca::ssh::SshIssueParams {
+        crate::ca::ssh::SshIssueParams {
+            public_key: pubkey.to_owned(),
+            certificate_type: "user".into(),
+            key_id: None,
+            principals: vec!["alice".into()],
+            validity_seconds: 3600,
+            extensions: None,
+            critical_options: None,
+            source_addresses: vec![],
+            force_command: None,
+            hostname: None,
+        }
+    }
+
+    fn gen_subject_pubkey() -> String {
+        let path = std::env::temp_dir().join(format!(
+            "skauswatch-pki-manager-dbtest-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let status = std::process::Command::new("ssh-keygen")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-f")
+            .arg(&path)
+            .arg("-N")
+            .arg("")
+            .arg("-q")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::read_to_string(format!("{}.pub", path.display()))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn issue_x509_persists_and_get_x509_finds_it_by_id_and_serial() {
+        let manager = db_manager().await;
+        let issued = manager
+            .issue_x509(
+                x509_req("CN=db-persist.example.com"),
+                Some(&Uuid::new_v4().to_string()),
+            )
+            .await
+            .unwrap();
+        let id = issued["id"].as_str().unwrap();
+        let serial = issued["serial_number"].as_str().unwrap();
+
+        let by_id = manager
+            .get_x509(Some(id), None, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_id["subject"], "CN=db-persist.example.com");
+        assert_eq!(by_id["san_dns"], serde_json::json!(["db-test.example.com"]));
+        assert!(
+            by_id["private_key_pem"]
+                .as_str()
+                .unwrap()
+                .contains("PRIVATE KEY")
+        );
+
+        let by_serial = manager
+            .get_x509(None, Some(serial), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_serial["serial_number"], serial);
+        assert!(by_serial.get("certificate_pem").is_none());
+
+        // Unknown-but-valid UUID -> Ok(None), real DB round trip (not the
+        // fully-DB-free (None,None) shortcut tested elsewhere).
+        assert_eq!(
+            manager
+                .get_x509(Some(&Uuid::new_v4().to_string()), None, false)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_x509_duplicate_serial_is_a_real_db_conflict() {
+        // Every fresh X509Ca's serial counter starts at 1, so the first
+        // certificate this brand-new manager issues will collide with a
+        // row seeded ahead of time carrying serial_number = "1" — proving
+        // the schema's `UNIQUE (serial_number)` constraint on
+        // x509_certificates is real, not just declared.
+        let manager = db_manager().await;
+        sqlx::query(
+            "INSERT INTO x509_certificates \
+             (id, serial_number, subject, issuer, not_before, not_after, key_algorithm, \
+              signature_algorithm, fingerprint_sha256, certificate_pem, san_dns, san_ip, \
+              san_email, key_usage, extended_key_usage, is_ca, status, metadata, \
+              created_at, updated_at) \
+             VALUES ($1,'1','CN=seed','CN=seed',now(),now(),'RSA','SHA256','deadbeef', \
+              'PEM','{}','{}','{}','{}','{}',false,'active','{}'::jsonb,now(),now())",
+        )
+        .bind(Uuid::new_v4())
+        .execute(manager.db())
+        .await
+        .unwrap();
+
+        let err = manager
+            .issue_x509(x509_req("CN=collides.example.com"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ManagerError::Db(_)));
+    }
+
+    #[tokio::test]
+    async fn revoke_x509_marks_revoked_and_is_idempotent() {
+        let manager = db_manager().await;
+        let issued = manager
+            .issue_x509(x509_req("CN=revoke-db.example.com"), None)
+            .await
+            .unwrap();
+        let id = issued["id"].as_str().unwrap();
+
+        assert!(
+            manager
+                .revoke_x509(Some(id), None, "key_compromise", Some("actor-1"))
+                .await
+                .unwrap()
+        );
+        let after = manager
+            .get_x509(Some(id), None, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after["status"], "revoked");
+        assert_eq!(after["revocation_reason"], "key_compromise");
+        assert!(after["revoked_at"].is_string());
+
+        // Idempotent: second revoke on an already-revoked cert still
+        // returns true without erroring (short-circuits before re-writing).
+        assert!(
+            manager
+                .revoke_x509(Some(id), None, "superseded", None)
+                .await
+                .unwrap()
+        );
+        let still = manager
+            .get_x509(Some(id), None, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still["revocation_reason"], "key_compromise"); // unchanged
+
+        // A genuinely nonexistent (but valid-format) id -> Ok(false).
+        assert!(
+            !manager
+                .revoke_x509(Some(&Uuid::new_v4().to_string()), None, "unspecified", None)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn list_x509_paginates_and_filters_real_rows() {
+        let manager = db_manager().await;
+        for i in 0..3 {
+            manager
+                .issue_x509(x509_req(&format!("CN=list-{i}.example.com")), None)
+                .await
+                .unwrap();
+        }
+        let (page1, total) = manager.list_x509(None, None, None, 1, 2).await.unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(page1.len(), 2);
+        let (page2, total2) = manager.list_x509(None, None, None, 2, 2).await.unwrap();
+        assert_eq!(total2, 3);
+        assert_eq!(page2.len(), 1);
+
+        let (filtered, ftotal) = manager
+            .list_x509(None, Some("list-1"), None, 1, 50)
+            .await
+            .unwrap();
+        assert_eq!(ftotal, 1);
+        assert_eq!(filtered[0]["subject"], "CN=list-1.example.com");
+    }
+
+    #[tokio::test]
+    async fn generate_x509_crl_lists_real_revoked_serials() {
+        let manager = db_manager().await;
+        let issued = manager
+            .issue_x509(x509_req("CN=crl-db.example.com"), None)
+            .await
+            .unwrap();
+        let id = issued["id"].as_str().unwrap();
+        let serial = issued["serial_number"].as_str().unwrap().to_owned();
+        manager
+            .revoke_x509(Some(id), None, "ca_compromise", None)
+            .await
+            .unwrap();
+
+        let crl = manager.generate_x509_crl().await.unwrap();
+        assert!(crl["crl_pem"].as_str().unwrap().contains("BEGIN X509 CRL"));
+        let revoked = crl["revoked_certificates"].as_array().unwrap();
+        assert!(revoked.iter().any(|e| e["serial_number"] == serial));
+    }
+
+    #[tokio::test]
+    async fn statistics_reflects_real_row_counts() {
+        let manager = db_manager().await;
+        let a = manager
+            .issue_x509(x509_req("CN=stat-a.example.com"), None)
+            .await
+            .unwrap();
+        manager
+            .issue_x509(x509_req("CN=stat-b.example.com"), None)
+            .await
+            .unwrap();
+        manager
+            .revoke_x509(Some(a["id"].as_str().unwrap()), None, "unspecified", None)
+            .await
+            .unwrap();
+
+        let stats = manager.statistics().await.unwrap();
+        assert_eq!(stats["x509"]["total"], 2);
+        assert_eq!(stats["x509"]["active"], 1);
+        assert_eq!(stats["x509"]["revoked"], 1);
+    }
+
+    #[tokio::test]
+    async fn issue_ssh_persists_and_get_ssh_finds_it() {
+        let manager = db_manager().await;
+        let pubkey = gen_subject_pubkey();
+        let issued = manager
+            .issue_ssh(ssh_req(&pubkey), Some(&Uuid::new_v4().to_string()))
+            .await
+            .unwrap();
+        let id = issued["id"].as_str().unwrap();
+        let serial = issued["serial_number"].as_str().unwrap();
+
+        let by_id = manager
+            .get_ssh(Some(id), None, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_id["principals"], serde_json::json!(["alice"]));
+        assert!(
+            by_id["certificate"]
+                .as_str()
+                .unwrap()
+                .contains("cert-v01@openssh.com")
+        );
+
+        let by_serial = manager
+            .get_ssh(None, Some(serial), false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_serial["serial_number"], serial);
+        assert!(by_serial.get("certificate").is_none());
+    }
+
+    #[tokio::test]
+    async fn revoke_ssh_marks_revoked_and_is_idempotent() {
+        let manager = db_manager().await;
+        let pubkey = gen_subject_pubkey();
+        let issued = manager.issue_ssh(ssh_req(&pubkey), None).await.unwrap();
+        let id = issued["id"].as_str().unwrap();
+
+        assert!(
+            manager
+                .revoke_ssh(Some(id), None, "key_compromise", None)
+                .await
+                .unwrap()
+        );
+        let after = manager
+            .get_ssh(Some(id), None, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after["status"], "revoked");
+
+        assert!(
+            manager
+                .revoke_ssh(Some(id), None, "superseded", None)
+                .await
+                .unwrap()
+        );
+        let still = manager
+            .get_ssh(Some(id), None, false)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still["revocation_reason"], "key_compromise"); // unchanged, idempotent
+    }
+
+    #[tokio::test]
+    async fn list_ssh_paginates_and_filters_real_rows() {
+        let manager = db_manager().await;
+        for _ in 0..2 {
+            let pubkey = gen_subject_pubkey();
+            manager.issue_ssh(ssh_req(&pubkey), None).await.unwrap();
+        }
+        let (items, total) = manager.list_ssh(None, None, None, 1, 50).await.unwrap();
+        assert_eq!(total, 2);
+        assert_eq!(items.len(), 2);
+
+        let (filtered, ftotal) = manager
+            .list_ssh(None, None, Some("alice"), 1, 50)
+            .await
+            .unwrap();
+        assert_eq!(ftotal, 2);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn generate_ssh_krl_lists_real_revoked_serials() {
+        let manager = db_manager().await;
+        let pubkey = gen_subject_pubkey();
+        let issued = manager.issue_ssh(ssh_req(&pubkey), None).await.unwrap();
+        let id = issued["id"].as_str().unwrap();
+        let serial = issued["serial_number"].as_str().unwrap().to_owned();
+        manager
+            .revoke_ssh(Some(id), None, "unspecified", None)
+            .await
+            .unwrap();
+
+        let krl = manager.generate_ssh_krl().await.unwrap();
+        assert!(!krl["krl_binary"].as_str().unwrap().is_empty());
+        let revoked = krl["revoked_keys"].as_array().unwrap();
+        assert!(revoked.iter().any(|e| e["serial_number"] == serial));
+    }
+
+    #[tokio::test]
+    async fn audit_persists_a_real_row() {
+        let manager = db_manager().await;
+        // issue_x509's success path calls `audit()` internally — assert the
+        // row actually landed instead of just that the call didn't panic.
+        manager
+            .issue_x509(x509_req("CN=audit-db.example.com"), Some("requester-xyz"))
+            .await
+            .unwrap();
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pki_audit_log WHERE event_type='certificate_issued' AND certificate_type='x509'",
+        )
+        .fetch_one(manager.db())
+        .await
+        .unwrap();
+        assert!(count >= 1);
+    }
+}

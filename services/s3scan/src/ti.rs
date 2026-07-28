@@ -71,6 +71,31 @@ pub async fn enrich(
     hashes: &Hashes,
     threat_names: &[String],
 ) -> serde_json::Value {
+    enrich_at(
+        client,
+        vt_key,
+        otx_key,
+        hashes,
+        threat_names,
+        VT_BASE_URL,
+        OTX_BASE_URL,
+    )
+    .await
+}
+
+/// Same as [`enrich`] with explicit base URLs — the real call target
+/// (`VT_BASE_URL`/`OTX_BASE_URL`) is otherwise a hardcoded constant with no
+/// other injection point, so tests point this at a mock server instead of
+/// the real VirusTotal/OTX APIs. `enrich` is the only production caller.
+async fn enrich_at(
+    client: &reqwest::Client,
+    vt_key: Option<&str>,
+    otx_key: Option<&str>,
+    hashes: &Hashes,
+    threat_names: &[String],
+    vt_base_url: &str,
+    otx_base_url: &str,
+) -> serde_json::Value {
     // Build the result as a map so field updates need no `as_object_mut`.
     let mut map = serde_json::Map::new();
     map.insert("vt_score".to_owned(), serde_json::Value::Null);
@@ -83,7 +108,7 @@ pub async fn enrich(
     map.insert("related_iocs".to_owned(), json!([]));
 
     let vt = match vt_key {
-        Some(key) => query_virustotal(client, key, &hashes.sha256).await,
+        Some(key) => query_virustotal(client, key, &hashes.sha256, vt_base_url).await,
         None => None,
     };
     if let Some((ratio, family)) = vt {
@@ -95,7 +120,7 @@ pub async fn enrich(
     }
 
     let otx = match otx_key {
-        Some(key) => query_otx(client, key, &hashes.sha256).await,
+        Some(key) => query_otx(client, key, &hashes.sha256, otx_base_url).await,
         None => None,
     };
     if let Some(pulses) = otx {
@@ -111,8 +136,9 @@ async fn query_virustotal(
     client: &reqwest::Client,
     api_key: &str,
     sha256: &str,
+    base_url: &str,
 ) -> Option<(f64, Option<String>)> {
-    let url = format!("{VT_BASE_URL}/files/{sha256}");
+    let url = format!("{base_url}/files/{sha256}");
     let resp = client
         .get(url)
         .header("x-apikey", api_key)
@@ -154,8 +180,9 @@ async fn query_otx(
     client: &reqwest::Client,
     api_key: &str,
     sha256: &str,
+    base_url: &str,
 ) -> Option<serde_json::Value> {
-    let url = format!("{OTX_BASE_URL}/indicators/file/{sha256}/pulses");
+    let url = format!("{base_url}/indicators/file/{sha256}/pulses");
     let resp = client
         .get(url)
         .header("X-OTX-API-KEY", api_key)
@@ -216,5 +243,236 @@ mod tests {
         assert_eq!(v["threat_family"], "Miner");
         assert!(v["otx_pulses"].as_array().expect("array").is_empty());
         assert!(v["vt_score"].is_null());
+    }
+
+    // ── enrich() / query_virustotal / query_otx — mocked HTTP ──────────────
+    //
+    // `VT_BASE_URL`/`OTX_BASE_URL` are hardcoded call targets with no other
+    // injection point, so these tests go through the private `enrich_at`
+    // seam to point both lookups at a wiremock server instead of the real
+    // internet. `enrich` itself is a one-line wrapper around `enrich_at`
+    // with the real constants — not independently tested beyond that.
+
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn hashes() -> Hashes {
+        Hashes {
+            md5: "d41d8cd98f00b204e9800998ecf8427e".to_owned(),
+            sha1: "da39a3ee5e6b4b0d3255bfef95601890afd80709".to_owned(),
+            sha256: "deadbeefcafe".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn enrich_without_keys_matches_default_result() {
+        let client = reqwest::Client::new();
+        let got = enrich_at(
+            &client,
+            None,
+            None,
+            &hashes(),
+            &[],
+            "http://unused",
+            "http://unused",
+        )
+        .await;
+        assert_eq!(got, default_result(&[]));
+    }
+
+    #[tokio::test]
+    async fn enrich_with_vt_success_sets_score_severity_and_raw_family() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/files/deadbeefcafe"))
+            .and(header("x-apikey", "vtkey"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"attributes": {
+                    "last_analysis_stats": {"malicious": 80, "undetected": 20},
+                    "names": ["Win32.Foo.bar"]
+                }}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let got = enrich_at(
+            &client,
+            Some("vtkey"),
+            None,
+            &hashes(),
+            &[],
+            &server.uri(),
+            "http://unused",
+        )
+        .await;
+        assert_eq!(got["vt_score"], 80.0);
+        assert_eq!(got["severity"], "critical");
+        // VT's family is used raw — unlike `extract_family_from_names`, no
+        // platform-prefix stripping is applied on this path.
+        assert_eq!(got["threat_family"], "Win32.Foo.bar");
+    }
+
+    #[tokio::test]
+    async fn enrich_with_vt_success_but_no_names_keeps_default_family() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/files/deadbeefcafe"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"attributes": {"last_analysis_stats": {"malicious": 0, "undetected": 10}}}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let got = enrich_at(
+            &client,
+            Some("vtkey"),
+            None,
+            &hashes(),
+            &["Win32.Agent.xyz".to_owned()],
+            &server.uri(),
+            "http://unused",
+        )
+        .await;
+        assert_eq!(got["vt_score"], 0.0);
+        // Default family (derived from the scan's own threat_names) survives
+        // because VT reported no `names`.
+        assert_eq!(got["threat_family"], "Agent.xyz");
+    }
+
+    #[tokio::test]
+    async fn enrich_with_vt_non_success_status_keeps_default() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/files/deadbeefcafe"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let got = enrich_at(
+            &client,
+            Some("vtkey"),
+            None,
+            &hashes(),
+            &[],
+            &server.uri(),
+            "http://unused",
+        )
+        .await;
+        assert!(got["vt_score"].is_null());
+        assert_eq!(got["severity"], "unknown");
+    }
+
+    #[tokio::test]
+    async fn enrich_with_vt_unparseable_body_keeps_default() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/files/deadbeefcafe"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let got = enrich_at(
+            &client,
+            Some("vtkey"),
+            None,
+            &hashes(),
+            &[],
+            &server.uri(),
+            "http://unused",
+        )
+        .await;
+        assert!(got["vt_score"].is_null());
+    }
+
+    #[tokio::test]
+    async fn enrich_with_otx_success_populates_pulses() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/indicators/file/deadbeefcafe/pulses"))
+            .and(header("X-OTX-API-KEY", "otxkey"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"id": 1, "name": "Pulse A", "tags": ["t1", "t2"], "adversary": "Group X"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let got = enrich_at(
+            &client,
+            None,
+            Some("otxkey"),
+            &hashes(),
+            &[],
+            "http://unused",
+            &server.uri(),
+        )
+        .await;
+        let pulses = got["otx_pulses"].as_array().expect("array");
+        assert_eq!(pulses.len(), 1);
+        assert_eq!(pulses[0]["name"], "Pulse A");
+        assert_eq!(pulses[0]["adversary"], "Group X");
+    }
+
+    #[tokio::test]
+    async fn enrich_with_otx_missing_results_keeps_default_empty_pulses() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/indicators/file/deadbeefcafe/pulses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let got = enrich_at(
+            &client,
+            None,
+            Some("otxkey"),
+            &hashes(),
+            &[],
+            "http://unused",
+            &server.uri(),
+        )
+        .await;
+        assert!(got["otx_pulses"].as_array().expect("array").is_empty());
+    }
+
+    #[tokio::test]
+    async fn enrich_with_both_keys_merges_vt_and_otx() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/files/deadbeefcafe"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"attributes": {"last_analysis_stats": {"malicious": 30, "undetected": 70}}}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/indicators/file/deadbeefcafe/pulses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{"id": 2, "name": "Pulse B", "tags": [], "adversary": null}]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let got = enrich_at(
+            &client,
+            Some("vtkey"),
+            Some("otxkey"),
+            &hashes(),
+            &[],
+            &server.uri(),
+            &server.uri(),
+        )
+        .await;
+        assert_eq!(got["vt_score"], 30.0);
+        assert_eq!(got["severity"], "medium");
+        assert_eq!(got["otx_pulses"].as_array().expect("array").len(), 1);
     }
 }

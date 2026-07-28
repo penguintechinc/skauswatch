@@ -164,10 +164,22 @@ impl SshCa {
             .cert_type(cert_type)
             .map_err(|e| SignError::Signing(format!("set cert type: {e}")))?;
 
-        for principal in params.principals {
+        // Empty principals ⇒ valid for all principals (documented contract,
+        // `docs/v2-port/sshca-contract.md`). The `ssh-key` builder treats an
+        // unset `valid_principals` as an error unless `all_principals_valid`
+        // is called explicitly — omitting this call previously made every
+        // request with an empty/omitted `principals` list fail signing with
+        // a 500 instead of producing the documented "golden ticket" cert.
+        if params.principals.is_empty() {
             builder
-                .valid_principal(principal.clone())
-                .map_err(|e| SignError::Signing(format!("add principal: {e}")))?;
+                .all_principals_valid()
+                .map_err(|e| SignError::Signing(format!("mark all principals valid: {e}")))?;
+        } else {
+            for principal in params.principals {
+                builder
+                    .valid_principal(principal.clone())
+                    .map_err(|e| SignError::Signing(format!("add principal: {e}")))?;
+            }
         }
         for (name, data) in params.critical_options {
             builder
@@ -259,6 +271,32 @@ mod tests {
         let ca_fp = ca.ca_key.public_key().fingerprint(HashAlg::Sha256);
         assert!(cert.validate_at(2_000, [ca_fp].iter()).is_ok());
         assert!(signed.public_key_fingerprint.starts_with("SHA256:"));
+        Ok(())
+    }
+
+    /// Regression: an empty principals list must sign successfully as a
+    /// "golden ticket" cert (documented contract, `sshca-contract.md`), not
+    /// fail signing — the `ssh-key` builder errors on an *unset*
+    /// `valid_principals`, which is a different state than "explicitly
+    /// valid for all", so the empty case must be handled explicitly.
+    #[test]
+    fn empty_principals_signs_as_valid_for_all() -> anyhow::Result<()> {
+        let ca = gen_ca();
+        let subject = gen_subject();
+        let signed = ca.sign(&SignParams {
+            certificate_type: CertificateType::User,
+            public_key_line: &subject,
+            principals: &[],
+            serial: 42,
+            key_id: "user-req-golden",
+            valid_after: 1_000,
+            valid_before: 2_000,
+            extensions: &BTreeMap::new(),
+            critical_options: &BTreeMap::new(),
+        })?;
+        let cert = Certificate::from_openssh(&signed.signed_certificate)?;
+        assert!(cert.valid_principals().is_empty());
+        assert!(cert.verify_signature().is_ok());
         Ok(())
     }
 
@@ -366,6 +404,72 @@ mod tests {
             dir.join("v2_host-cert.pub"),
             format!("{}\n", host.signed_certificate),
         )?;
+        Ok(())
+    }
+
+    /// Unique scratch path under the OS temp dir — avoids collisions with
+    /// any other test/process (`unsafe_code = "deny"` rules out reusing a
+    /// fixed path across parallel tests via env-var tricks).
+    fn scratch_key_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("skauswatch-sshca-test-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn load_or_generate_loads_a_real_ed25519_key_from_disk() -> anyhow::Result<()> {
+        let path = scratch_key_path();
+        let key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)?;
+        key.write_openssh_file(&path, ssh_key::LineEnding::LF)?;
+
+        let ca = SshCa::load_or_generate(&path)?;
+        std::fs::remove_file(&path)?;
+
+        assert!(ca.fingerprint().starts_with("SHA256:"));
+        assert_eq!(
+            ca.public_key_openssh(),
+            key.public_key().to_openssh()?.as_str()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn load_or_generate_rejects_rsa_ca_keys() -> anyhow::Result<()> {
+        let path = scratch_key_path();
+        let key = PrivateKey::random(&mut OsRng, Algorithm::Rsa { hash: None })?;
+        key.write_openssh_file(&path, ssh_key::LineEnding::LF)?;
+
+        let result = SshCa::load_or_generate(&path);
+        std::fs::remove_file(&path)?;
+
+        let err = match result {
+            Ok(_) => panic!("expected RSA CA key to be rejected"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("RSA"), "error was: {err}");
+        Ok(())
+    }
+
+    #[test]
+    fn load_or_generate_reports_a_corrupt_key_file() -> anyhow::Result<()> {
+        let path = scratch_key_path();
+        std::fs::write(&path, b"this is not an OpenSSH private key")?;
+
+        let result = SshCa::load_or_generate(&path);
+        std::fs::remove_file(&path)?;
+
+        let err = match result {
+            Ok(_) => panic!("expected a corrupt key file to fail to load"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("failed to load CA key"));
+        Ok(())
+    }
+
+    #[test]
+    fn load_or_generate_generates_ephemeral_key_when_file_missing() -> anyhow::Result<()> {
+        let path = scratch_key_path(); // never written — guaranteed absent
+        let ca = SshCa::load_or_generate(&path)?;
+        assert!(ca.fingerprint().starts_with("SHA256:"));
+        assert!(!ca.public_key_openssh().is_empty());
         Ok(())
     }
 

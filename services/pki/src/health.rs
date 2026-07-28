@@ -99,6 +99,7 @@ async fn readyz(State(readiness): State<Readiness>) -> (StatusCode, Json<serde_j
 }
 
 #[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -115,5 +116,52 @@ mod tests {
         let (code, Json(body)) = health_response("2.0.0", "error: refused", "2026-07-25T00:00:00");
         assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["status"], "unhealthy");
+    }
+
+    #[tokio::test]
+    async fn healthz_reports_unhealthy_against_an_unreachable_db() {
+        let state = crate::state::AppStateInner::for_tests();
+        let server = axum_test::TestServer::new(router(state, Readiness::new()));
+        let res = server.get("/healthz").await;
+        res.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["status"], "unhealthy");
+        assert!(body["database"].as_str().unwrap().starts_with("error:"));
+    }
+
+    #[tokio::test]
+    async fn version_info_reports_name_and_environment() {
+        let state = crate::state::AppStateInner::for_tests();
+        let server = axum_test::TestServer::new(router(state, Readiness::new()));
+        let res = server.get("/version").await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["name"], "SkausWatch PKI Server");
+        assert!(body["version"].is_string());
+        assert!(body["environment"].is_string());
+    }
+
+    #[tokio::test]
+    async fn readyz_reflects_the_readiness_flag() {
+        let state = crate::state::AppStateInner::for_tests();
+        let readiness = Readiness::new();
+        let server = axum_test::TestServer::new(router(state, readiness.clone()));
+
+        let not_ready = server.get("/readyz").await;
+        not_ready.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+
+        readiness.set_ready();
+        let ready = server.get("/readyz").await;
+        ready.assert_status_ok();
+    }
+
+    #[test]
+    fn get_version_never_returns_empty() {
+        // Covers whichever candidate path resolves in this environment (repo
+        // `.version` via the `CARGO_MANIFEST_DIR`-relative candidate, or the
+        // "0.0.0-dev" fallback if neither exists) — either way the result is
+        // a non-empty string.
+        let v = get_version();
+        assert!(!v.is_empty());
     }
 }

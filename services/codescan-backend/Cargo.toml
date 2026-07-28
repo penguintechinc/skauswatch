@@ -22,7 +22,6 @@ chrono = { workspace = true }
 clap = { workspace = true }
 jsonwebtoken = { workspace = true }
 penguin-licensing = { workspace = true, features = ["axum"] }
-rand = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -36,6 +35,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 axum-test = { workspace = true }
+skauswatch-testkit = { workspace = true }
 
 [lints]
 workspace = true

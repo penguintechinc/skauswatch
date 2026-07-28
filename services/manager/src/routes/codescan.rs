@@ -882,4 +882,173 @@ mod tests {
             ]
         );
     }
+
+    /// Exercises the thin per-route wrapper handlers (`codescan_status`,
+    /// `list_repos`, `create_repo`, ...) directly — bypassing the HTTP router
+    /// entirely, the same trick `routes/asm.rs` uses, since none of them
+    /// extract anything beyond `State`/`CurrentUser`/headers/body. The
+    /// workspace forbids `unsafe`, so these cannot mutate `WORKER_CODESCAN_URL`
+    /// to point at a wiremock upstream (unlike the `forward()`-level tests
+    /// above, which take the base URL as a plain argument); every call here
+    /// resolves the real default `http://worker-codescan:5005`, which is
+    /// unreachable in the test sandbox, so every non-forbidden/non-license-
+    /// denied call still exercises the wrapper's full body (license gate +
+    /// `proxy()` + response conversion) and lands on a transport-error
+    /// response rather than a 2xx.
+    #[tokio::test]
+    async fn wrapper_handlers_reach_proxy_against_the_default_upstream() {
+        let state = AppStateInner::for_tests(dev_license());
+        let headers = HeaderMap::new();
+
+        let status = codescan_status(
+            State(state.clone()),
+            user_with_role("viewer"),
+            headers.clone(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("status: {e:?}"));
+        assert!(status.status().is_client_error() || status.status().is_server_error());
+
+        let listed = list_repos(
+            State(state.clone()),
+            user_with_role("viewer"),
+            headers.clone(),
+            Query(vec![]),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("list_repos: {e:?}"));
+        assert!(listed.status().is_server_error() || listed.status().is_client_error());
+
+        let created = create_repo(
+            State(state.clone()),
+            user_with_role("admin"),
+            headers.clone(),
+            Bytes::from_static(br#"{"url":"https://example.com/r"}"#),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create_repo: {e:?}"));
+        assert!(created.status().is_server_error() || created.status().is_client_error());
+
+        let forbidden = create_repo(
+            State(state.clone()),
+            user_with_role("viewer"),
+            headers.clone(),
+            Bytes::new(),
+        )
+        .await;
+        assert!(matches!(forbidden, Err(ApiError::Forbidden(_))));
+
+        let fetched = get_repo(
+            State(state.clone()),
+            user_with_role("viewer"),
+            headers.clone(),
+            Path(1),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("get_repo: {e:?}"));
+        assert!(fetched.status().is_server_error() || fetched.status().is_client_error());
+
+        let updated = update_repo(
+            State(state.clone()),
+            user_with_role("admin"),
+            headers.clone(),
+            Path(1),
+            Bytes::from_static(b"{}"),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("update_repo: {e:?}"));
+        assert!(updated.status().is_server_error() || updated.status().is_client_error());
+
+        let deleted = delete_repo(
+            State(state.clone()),
+            user_with_role("admin"),
+            headers.clone(),
+            Path(1),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("delete_repo: {e:?}"));
+        assert!(deleted.status().is_server_error() || deleted.status().is_client_error());
+
+        let reviews = list_reviews(
+            State(state.clone()),
+            user_with_role("viewer"),
+            headers.clone(),
+            Query(vec![]),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("list_reviews: {e:?}"));
+        assert!(reviews.status().is_server_error() || reviews.status().is_client_error());
+
+        let review_created = create_review(
+            State(state.clone()),
+            user_with_role("maintainer"),
+            headers.clone(),
+            Bytes::from_static(b"{}"),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create_review: {e:?}"));
+        assert!(
+            review_created.status().is_server_error() || review_created.status().is_client_error()
+        );
+
+        let review_forbidden = create_review(
+            State(state.clone()),
+            user_with_role("admin"),
+            headers.clone(),
+            Bytes::new(),
+        )
+        .await;
+        assert!(matches!(review_forbidden, Err(ApiError::Forbidden(_))));
+
+        let review = get_review(
+            State(state.clone()),
+            user_with_role("viewer"),
+            headers.clone(),
+            Path(1),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("get_review: {e:?}"));
+        assert!(review.status().is_server_error() || review.status().is_client_error());
+
+        let plans = list_plans(
+            State(state.clone()),
+            user_with_role("viewer"),
+            headers.clone(),
+            Query(vec![]),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("list_plans: {e:?}"));
+        assert!(plans.status().is_server_error() || plans.status().is_client_error());
+
+        let plan_created = create_plan(
+            State(state.clone()),
+            user_with_role("viewer"),
+            headers.clone(),
+            Bytes::from_static(b"{}"),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("create_plan: {e:?}"));
+        assert!(plan_created.status().is_server_error() || plan_created.status().is_client_error());
+
+        let plan = get_plan(
+            State(state.clone()),
+            user_with_role("viewer"),
+            headers,
+            Path(1),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("get_plan: {e:?}"));
+        assert!(plan.status().is_server_error() || plan.status().is_client_error());
+
+        // License-denied path through a wrapper handler.
+        let gated_state = AppStateInner::for_tests(gated_license());
+        let denied = codescan_status(
+            State(gated_state),
+            user_with_role("viewer"),
+            HeaderMap::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("status: {e:?}"));
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    }
 }

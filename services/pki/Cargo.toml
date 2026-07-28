@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-pki"
 description = "SkausWatch PKI service — X.509 + SSH certificate authority (REST /api/v1 + gRPC PKIService, Rust port)"
 version.workspace = true
@@ -43,6 +44,7 @@ x509-parser = { workspace = true }
 
 [dev-dependencies]
 axum-test = { workspace = true }
+skauswatch-testkit = { workspace = true }
 
 [lints]
 workspace = true

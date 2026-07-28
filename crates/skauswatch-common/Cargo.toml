@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-common"
 description = "Shared configuration loading and error types for skauswatch services"
 version.workspace = true

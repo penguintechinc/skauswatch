@@ -82,17 +82,20 @@ async fn fetch_gitlab_diff(
         0
     };
 
-    let after_domain = &mr_url[url_start..];
+    // `url_start` points at the '/' separating host from path, so
+    // `mr_url[url_start..]` always has a leading slash — strip it, or
+    // `project_path` below picks up a stray leading "/" that gets
+    // percent-encoded into the API URL (`%2Fgroup%2Fproject` instead of
+    // `group%2Fproject`), breaking every GitLab request.
+    let after_domain = mr_url[url_start..].trim_start_matches('/');
     let project_path = after_domain
         .split("/-/merge_requests/")
         .next()
         .ok_or_else(|| anyhow::anyhow!("invalid gitlab mr url"))?;
 
-    let host = if let Some(base) = base_url {
-        base.trim_end_matches('/')
-    } else {
-        "https://gitlab.com"
-    };
+    let host = base_url
+        .map(|base| base.trim_end_matches('/'))
+        .unwrap_or("https://gitlab.com");
 
     let url = format!(
         "{}/api/v4/projects/{}/merge_requests/{}/diffs",
@@ -177,6 +180,191 @@ mod tests {
             result.expect("fetch should succeed against mock"),
             diff_content
         );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_pr_diff_unsupported_provider() {
+        let creds = GitCredentials {
+            provider: "bitbucket".to_string(),
+            token: "tok".to_string(),
+            base_url: None,
+        };
+        let result = fetch_pr_diff("https://bitbucket.org/x/y/pull/1", &creds).await;
+        let err = result.expect_err("unsupported provider must error");
+        assert!(err.to_string().contains("unsupported provider"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_github_diff_rejects_malformed_url() {
+        let creds = GitCredentials {
+            provider: "github".to_string(),
+            token: "tok".to_string(),
+            base_url: None,
+        };
+        let result = fetch_pr_diff("not-a-url", &creds).await;
+        let err = result.expect_err("malformed github url must error");
+        assert!(err.to_string().contains("invalid github pr url"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_github_diff_surfaces_api_error_status() {
+        let mock_server = MockServer::start().await;
+        Mock::given(path("/repos/owner/repo/pulls/123"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+
+        let creds = GitCredentials {
+            provider: "github".to_string(),
+            token: "tok".to_string(),
+            base_url: Some(mock_server.uri()),
+        };
+        let result = fetch_pr_diff("https://github.com/owner/repo/pull/123", &creds).await;
+        let err = result.expect_err("404 must surface as an error");
+        assert!(err.to_string().contains("github api error"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_gitlab_diff_with_mock() {
+        let mock_server = MockServer::start().await;
+        Mock::given(path(
+            "/api/v4/projects/group%2Fproject/merge_requests/456/diffs",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {"diff": "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+y"},
+            {"diff": "--- a/g\n+++ b/g\n@@ -1 +1 @@\n-1\n+2"},
+        ])))
+        .mount(&mock_server)
+        .await;
+
+        let creds = GitCredentials {
+            provider: "gitlab".to_string(),
+            token: "tok".to_string(),
+            base_url: Some(mock_server.uri()),
+        };
+        let result = fetch_pr_diff(
+            "https://gitlab.com/group/project/-/merge_requests/456",
+            &creds,
+        )
+        .await;
+        let diff = result.expect("fetch should succeed against mock");
+        assert!(diff.contains("-x\n+y"));
+        assert!(diff.contains("-1\n+2"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_gitlab_diff_self_hosted_base_url_trims_trailing_slash() {
+        let mock_server = MockServer::start().await;
+        Mock::given(path(
+            "/api/v4/projects/group%2Fproject/merge_requests/1/diffs",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&mock_server)
+        .await;
+
+        let creds = GitCredentials {
+            provider: "gitlab".to_string(),
+            token: "tok".to_string(),
+            // Trailing slash must be trimmed before building the API URL.
+            base_url: Some(format!("{}/", mock_server.uri())),
+        };
+        let result = fetch_pr_diff(
+            "https://gitlab.company.com/group/project/-/merge_requests/1",
+            &creds,
+        )
+        .await;
+        assert_eq!(result.expect("fetch should succeed"), "");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_gitlab_diff_surfaces_api_error_status() {
+        let mock_server = MockServer::start().await;
+        Mock::given(path(
+            "/api/v4/projects/group%2Fproject/merge_requests/9/diffs",
+        ))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&mock_server)
+        .await;
+
+        let creds = GitCredentials {
+            provider: "gitlab".to_string(),
+            token: "tok".to_string(),
+            base_url: Some(mock_server.uri()),
+        };
+        let result = fetch_pr_diff(
+            "https://gitlab.com/group/project/-/merge_requests/9",
+            &creds,
+        )
+        .await;
+        let err = result.expect_err("500 must surface as an error");
+        assert!(err.to_string().contains("gitlab api error"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_gitlab_diff_rejects_malformed_url() {
+        let creds = GitCredentials {
+            provider: "gitlab".to_string(),
+            token: "tok".to_string(),
+            base_url: None,
+        };
+        // A single path segment (no slashes at all) trips the `parts.len() <
+        // 2` guard in fetch_gitlab_diff.
+        let result = fetch_pr_diff("nakedstring", &creds).await;
+        let err = result.expect_err("malformed gitlab url must error");
+        assert!(err.to_string().contains("invalid gitlab mr url"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_gitlab_diff_without_a_url_scheme() {
+        let mock_server = MockServer::start().await;
+        Mock::given(path(
+            "/api/v4/projects/gitlab.example.com%2Fgroup%2Fproject/merge_requests/12/diffs",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&mock_server)
+        .await;
+
+        let creds = GitCredentials {
+            provider: "gitlab".to_string(),
+            token: "tok".to_string(),
+            base_url: Some(mock_server.uri()),
+        };
+        // No "://" at all — exercises the `mr_url.find("://")` `None` arm
+        // (url_start falls back to 0, so the whole string is treated as the
+        // path, including the host segment).
+        let result = fetch_pr_diff(
+            "gitlab.example.com/group/project/-/merge_requests/12",
+            &creds,
+        )
+        .await;
+        assert_eq!(result.expect("fetch should succeed against mock"), "");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_gitlab_diff_tolerates_non_array_response_body() {
+        let mock_server = MockServer::start().await;
+        Mock::given(path(
+            "/api/v4/projects/group%2Fproject/merge_requests/3/diffs",
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"error": "oops"})),
+        )
+        .mount(&mock_server)
+        .await;
+
+        let creds = GitCredentials {
+            provider: "gitlab".to_string(),
+            token: "tok".to_string(),
+            base_url: Some(mock_server.uri()),
+        };
+        // A 200 response whose body isn't a JSON array (`data.as_array()` is
+        // `None`) must not panic — it just yields no diff content.
+        let result = fetch_pr_diff(
+            "https://gitlab.com/group/project/-/merge_requests/3",
+            &creds,
+        )
+        .await;
+        assert_eq!(result.expect("fetch should succeed against mock"), "");
     }
 
     #[test]

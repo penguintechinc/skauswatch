@@ -3,10 +3,9 @@
 //! backend's `cryptography.fernet.Fernet` (`app/git/credentials.py`) with a
 //! pure-Rust, no-C-deps equivalent. Plaintext tokens are never logged.
 
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
-use rand::RngCore;
 
 /// Nonce length for AES-256-GCM, in bytes.
 const NONCE_LEN: usize = 12;
@@ -59,15 +58,15 @@ impl CredentialCipher {
     /// Encrypts a plaintext token. Output is `nonce || ciphertext`, suitable
     /// for storage in the `encrypted_token BYTEA` column.
     pub fn encrypt(&self, plaintext: &str) -> Result<Vec<u8>, CryptoError> {
-        let mut nonce_bytes = [0u8; NONCE_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from(nonce_bytes);
+        // 96-bit random nonce drawn from the OS CSPRNG via aes-gcm's AeadCore —
+        // the idiomatic AEAD nonce source, so this crate needs no direct `rand` dep.
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let ciphertext = self
             .cipher
             .encrypt(&nonce, plaintext.as_bytes())
             .map_err(|_| CryptoError::Encrypt)?;
         let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(nonce.as_ref());
         out.extend_from_slice(&ciphertext);
         Ok(out)
     }

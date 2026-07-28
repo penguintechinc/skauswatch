@@ -10,8 +10,7 @@ keywords:
   - codescan
   - ai
   - code-review
-  - flask
-  - python
+  - rust
 maintainers:
   - name: Penguin Tech Inc
     email: support@penguintech.io

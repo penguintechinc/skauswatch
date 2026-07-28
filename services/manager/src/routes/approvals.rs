@@ -1246,4 +1246,300 @@ mod tests {
             Err(ApiError::Validation(_))
         ));
     }
+
+    use crate::routes::test_support::{authed_user, db_state};
+
+    fn dev_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
+        skauswatch_testkit::license::dev_license("skauswatch")
+    }
+
+    async fn server_for(state: AppState) -> axum_test::TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        axum_test::TestServer::new(app)
+    }
+
+    async fn seed_approval(
+        state: &AppState,
+        requester_id: i32,
+        request_type: &str,
+        required: i32,
+    ) -> i32 {
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO approval_requests \
+             (request_type, resource_id, resource_type, requester_id, status, \
+              required_approvals, current_approvals, approvers, approval_history, metadata, \
+              expires_at, created_at, updated_at) \
+             VALUES ($1, 'res-1', 'thing', $2, 'pending', $3, 0, '[]', '[]', '{}', \
+                     now() + interval '1 day', now(), now()) RETURNING id",
+        )
+        .bind(request_type)
+        .bind(requester_id)
+        .bind(required)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed_approval: {e}"));
+        id
+    }
+
+    #[tokio::test]
+    async fn list_and_get_approvals_round_trip() {
+        let state = db_state(dev_license()).await;
+        let (requester_id, _) = authed_user(&state, "appr-req@example.com", "maintainer").await;
+        let id = seed_approval(&state, requester_id, "certificate", 1).await;
+        let (_, token) = authed_user(&state, "appr-viewer@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let list = server
+            .get("/api/v1/approvals")
+            .authorization_bearer(&token)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+
+        let get = server
+            .get(&format!("/api/v1/approvals/{id}"))
+            .authorization_bearer(&token)
+            .await;
+        get.assert_status_ok();
+        let body: serde_json::Value = get.json();
+        assert_eq!(body["request_type"], "certificate");
+        assert_eq!(body["approvers"], serde_json::json!([]));
+
+        let missing = server
+            .get("/api/v1/approvals/999999")
+            .authorization_bearer(&token)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_pending_requires_role_and_excludes_decided() {
+        let state = db_state(dev_license()).await;
+        let (requester_id, _) = authed_user(&state, "pend-req@example.com", "maintainer").await;
+        let id = seed_approval(&state, requester_id, "user", 2).await;
+        let (viewer_id, viewer_tok) =
+            authed_user(&state, "pend-viewer@example.com", "viewer").await;
+        let (_, admin_tok) = authed_user(&state, "pend-admin@example.com", "admin").await;
+
+        // Mark as already decided by the admin so it's excluded from the
+        // admin's own pending list but still shows for a fresh reviewer.
+        sqlx::query("UPDATE approval_requests SET approval_history = $2 WHERE id = $1")
+            .bind(id)
+            .bind(serde_json::json!([{"user_id": viewer_id, "approved": true}]))
+            .execute(&state.db)
+            .await
+            .unwrap_or_else(|e| panic!("seed history: {e}"));
+
+        let server = server_for(state).await;
+
+        let forbidden = server
+            .get("/api/v1/approvals/pending")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let res = server
+            .get("/api/v1/approvals/pending")
+            .authorization_bearer(&admin_tok)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        let items = body["items"].as_array().cloned().unwrap_or_default();
+        assert!(items.iter().any(|i| i["id"] == id));
+    }
+
+    #[tokio::test]
+    async fn create_approval_validates_then_succeeds() {
+        let state = db_state(dev_license()).await;
+        let (_, token) = authed_user(&state, "create-appr@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let bad = server
+            .post("/api/v1/approvals")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"request_type": "deployment"}))
+            .await;
+        bad.assert_status(StatusCode::BAD_REQUEST);
+
+        let res = server
+            .post("/api/v1/approvals")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({
+                "request_type": "certificate",
+                "resource_id": "cert-9",
+                "resource_type": "tls_certificate",
+            }))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["approval"]["status"], "pending");
+        assert_eq!(body["approval"]["request_type"], "certificate");
+    }
+
+    #[tokio::test]
+    async fn decide_approval_enforces_guards_and_completes() {
+        let state = db_state(dev_license()).await;
+        let (requester_id, requester_tok) =
+            authed_user(&state, "decide-req@example.com", "maintainer").await;
+        let (reviewer_id, reviewer_tok) =
+            authed_user(&state, "decide-rev@example.com", "admin").await;
+        let (_, viewer_tok) = authed_user(&state, "decide-viewer@example.com", "viewer").await;
+        let id = seed_approval(&state, requester_id, "user", 1).await;
+        let server = server_for(state).await;
+
+        // Role gate.
+        let res = server
+            .post(&format!("/api/v1/approvals/{id}/decide"))
+            .authorization_bearer(&viewer_tok)
+            .json(&serde_json::json!({"approved": true}))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+
+        // Own-request guard.
+        let res = server
+            .post(&format!("/api/v1/approvals/{id}/decide"))
+            .authorization_bearer(&requester_tok)
+            .json(&serde_json::json!({"approved": true}))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Cannot approve your own request");
+
+        // Missing `approved` field.
+        let res = server
+            .post(&format!("/api/v1/approvals/{id}/decide"))
+            .authorization_bearer(&reviewer_tok)
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+
+        // Successful approve reaches required_approvals=1 → approved.
+        let res = server
+            .post(&format!("/api/v1/approvals/{id}/decide"))
+            .authorization_bearer(&reviewer_tok)
+            .json(&serde_json::json!({"approved": true, "reason": "looks fine"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["approval"]["status"], "approved");
+        assert_eq!(body["approval"]["current_approvals"], 1);
+        assert!(body["approval"]["completed_at"].is_string());
+
+        // Already-decided by the same reviewer.
+        let res = server
+            .post(&format!("/api/v1/approvals/{id}/decide"))
+            .authorization_bearer(&reviewer_tok)
+            .json(&serde_json::json!({"approved": true}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Approval request already approved");
+
+        // Missing target.
+        let missing = server
+            .post("/api/v1/approvals/999999/decide")
+            .authorization_bearer(&reviewer_tok)
+            .json(&serde_json::json!({"approved": true}))
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+        let _ = reviewer_id;
+    }
+
+    #[tokio::test]
+    async fn decide_approval_expired_persists_status_and_400s() {
+        let state = db_state(dev_license()).await;
+        let (requester_id, _) = authed_user(&state, "exp-req@example.com", "maintainer").await;
+        let (_, reviewer_tok) = authed_user(&state, "exp-rev@example.com", "admin").await;
+        let id = seed_approval(&state, requester_id, "service", 1).await;
+        sqlx::query(
+            "UPDATE approval_requests SET expires_at = now() - interval '1 hour' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("expire: {e}"));
+        let server = server_for(state).await;
+
+        let res = server
+            .post(&format!("/api/v1/approvals/{id}/decide"))
+            .authorization_bearer(&reviewer_tok)
+            .json(&serde_json::json!({"approved": true}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Approval request has expired");
+
+        let get = server
+            .get(&format!("/api/v1/approvals/{id}"))
+            .authorization_bearer(&reviewer_tok)
+            .await;
+        get.assert_status_ok();
+        let body: serde_json::Value = get.json();
+        assert_eq!(body["status"], "expired");
+    }
+
+    #[tokio::test]
+    async fn cancel_approval_requester_or_admin_only_and_pending_only() {
+        let state = db_state(dev_license()).await;
+        let (requester_id, requester_tok) =
+            authed_user(&state, "cancel-req@example.com", "maintainer").await;
+        let (_, other_tok) = authed_user(&state, "cancel-other@example.com", "viewer").await;
+        let id = seed_approval(&state, requester_id, "configuration", 1).await;
+        let server = server_for(state).await;
+
+        let forbidden = server
+            .post(&format!("/api/v1/approvals/{id}/cancel"))
+            .authorization_bearer(&other_tok)
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let missing = server
+            .post("/api/v1/approvals/999999/cancel")
+            .authorization_bearer(&requester_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        let res = server
+            .post(&format!("/api/v1/approvals/{id}/cancel"))
+            .authorization_bearer(&requester_tok)
+            .await;
+        res.assert_status_ok();
+
+        // Already cancelled (now rejected) — can't cancel twice.
+        let again = server
+            .post(&format!("/api/v1/approvals/{id}/cancel"))
+            .authorization_bearer(&requester_tok)
+            .await;
+        again.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn approval_statistics_requires_role_and_reports_buckets() {
+        let state = db_state(dev_license()).await;
+        let (requester_id, _) = authed_user(&state, "stat-req@example.com", "maintainer").await;
+        seed_approval(&state, requester_id, "certificate", 1).await;
+        let (_, viewer_tok) = authed_user(&state, "stat-viewer@example.com", "viewer").await;
+        let (_, admin_tok) = authed_user(&state, "stat-admin@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let forbidden = server
+            .get("/api/v1/approvals/statistics")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let res = server
+            .get("/api/v1/approvals/statistics")
+            .authorization_bearer(&admin_tok)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+        assert!(body["by_status"]["pending"].as_i64().unwrap_or(0) >= 1);
+        assert!(body["by_type"]["certificate"].as_i64().unwrap_or(0) >= 1);
+        assert!(body["last_7_days"].as_i64().unwrap_or(0) >= 1);
+    }
 }

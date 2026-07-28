@@ -1,0 +1,47 @@
+# Gamma overrides — dal2-gamma cluster (validates main-branch builds), namespace: skauswatch.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/manager
+  tag: "gamma-0000000000"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+service:
+  type: ClusterIP
+
+ingress:
+  enabled: false
+
+httproute:
+  enabled: true
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch-gamma.penguintech.cloud
+  rules:
+    - path: /api
+      service: skauswatch-manager
+      port: 5000
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+configMapData:
+  log-level: "info"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "5"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"

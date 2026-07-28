@@ -376,8 +376,377 @@ async fn register(
 }
 
 #[cfg(test)]
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
+
+    use crate::routes::test_support::{authed_user, db_state};
+
+    fn dev_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
+        skauswatch_testkit::license::dev_license("skauswatch")
+    }
+
+    async fn test_server_with_state(state: AppState) -> axum_test::TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        axum_test::TestServer::new(app)
+    }
+
+    /// Seeds a user row with a real bcrypt hash for `password`, bypassing
+    /// the HTTP surface so login tests exercise a known-good credential.
+    async fn seed_login_user(
+        state: &AppState,
+        email: &str,
+        password: &str,
+        role: &str,
+        is_active: bool,
+    ) -> i32 {
+        let hash = auth::hash_password(password).unwrap_or_else(|e| panic!("hash: {e:?}"));
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO users (email, password_hash, full_name, role, is_active, \
+             failed_login_attempts, created_at) \
+             VALUES ($1, $2, 'Test User', $3, $4, 0, now()) RETURNING id",
+        )
+        .bind(email)
+        .bind(&hash)
+        .bind(role)
+        .bind(is_active)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed_login_user: {e}"));
+        id
+    }
+
+    #[tokio::test]
+    async fn login_rejects_invalid_email_and_empty_password() {
+        let state = db_state(dev_license()).await;
+        let server = test_server_with_state(state).await;
+
+        let res = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "not-an-email", "password": "x"}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["details"][0]["loc"], serde_json::json!(["email"]));
+
+        let res = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "a@example.com", "password": ""}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["details"][0]["loc"], serde_json::json!(["password"]));
+    }
+
+    #[tokio::test]
+    async fn login_rejects_unknown_email() {
+        let state = db_state(dev_license()).await;
+        let server = test_server_with_state(state).await;
+        let res = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "ghost@example.com", "password": "whatever1"}))
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Invalid email or password");
+    }
+
+    #[tokio::test]
+    async fn login_rejects_wrong_password_and_locks_after_max_attempts() {
+        let state = db_state(dev_license()).await;
+        seed_login_user(
+            &state,
+            "lockout@example.com",
+            "correct-horse",
+            "viewer",
+            true,
+        )
+        .await;
+        let server = test_server_with_state(state).await;
+
+        // max_login_attempts = 5 (test default) — 5 wrong attempts land the
+        // account in the locked state; the 6th sees the lockout message.
+        for _ in 0..5 {
+            let res = server
+                .post("/api/v1/auth/login")
+                .json(&serde_json::json!({"email": "lockout@example.com", "password": "wrong"}))
+                .await;
+            res.assert_status(StatusCode::UNAUTHORIZED);
+            let body: serde_json::Value = res.json();
+            assert_eq!(body["error"], "Invalid email or password");
+        }
+        let res = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "lockout@example.com", "password": "wrong"}))
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Account is locked. Please try again later.");
+
+        // Even the correct password is rejected while locked.
+        let res = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "lockout@example.com", "password": "correct-horse"}))
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Account is locked. Please try again later.");
+    }
+
+    #[tokio::test]
+    async fn login_rejects_deactivated_account_with_correct_password() {
+        let state = db_state(dev_license()).await;
+        seed_login_user(&state, "gone@example.com", "correct-horse", "viewer", false).await;
+        let server = test_server_with_state(state).await;
+        let res = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "gone@example.com", "password": "correct-horse"}))
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Account is deactivated");
+    }
+
+    #[tokio::test]
+    async fn login_succeeds_and_issues_token_pair() {
+        let state = db_state(dev_license()).await;
+        let id = seed_login_user(&state, "ok@example.com", "correct-horse", "admin", true).await;
+        let server = test_server_with_state(state).await;
+        let res = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "OK@Example.com", "password": "correct-horse"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["token_type"], "Bearer");
+        assert!(body["access_token"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(
+            body["refresh_token"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        );
+        assert_eq!(body["user"]["id"], id);
+        assert_eq!(body["user"]["email"], "ok@example.com");
+        assert_eq!(body["user"]["role"], "admin");
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_garbage_and_unknown_tokens() {
+        let state = db_state(dev_license()).await;
+        let server = test_server_with_state(state).await;
+        let res = server
+            .post("/api/v1/auth/refresh")
+            .json(&serde_json::json!({"refresh_token": "not-a-jwt"}))
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+
+        // Well-formed but never issued (never stored) → revoked message.
+        let state2 = db_state(dev_license()).await;
+        let fabricated = create_refresh_token(1, &state2.auth.jwt_secret, 7)
+            .unwrap_or_else(|e| panic!("encode: {e:?}"));
+        let server2 = test_server_with_state(state2).await;
+        let res = server2
+            .post("/api/v1/auth/refresh")
+            .json(&serde_json::json!({"refresh_token": fabricated}))
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Refresh token has been revoked");
+    }
+
+    #[tokio::test]
+    async fn refresh_rotates_token_and_revokes_the_old_one() {
+        let state = db_state(dev_license()).await;
+        seed_login_user(&state, "rot@example.com", "correct-horse", "viewer", true).await;
+        let server = test_server_with_state(state).await;
+
+        let login = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "rot@example.com", "password": "correct-horse"}))
+            .await;
+        login.assert_status_ok();
+        let login_body: serde_json::Value = login.json();
+        let refresh_token = login_body["refresh_token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let first = server
+            .post("/api/v1/auth/refresh")
+            .json(&serde_json::json!({"refresh_token": refresh_token}))
+            .await;
+        first.assert_status_ok();
+        let first_body: serde_json::Value = first.json();
+        assert_eq!(first_body["token_type"], "Bearer");
+        assert!(
+            first_body["access_token"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        );
+
+        // The original refresh token was revoked by rotation — reusing it
+        // must now fail.
+        let reused = server
+            .post("/api/v1/auth/refresh")
+            .json(&serde_json::json!({"refresh_token": refresh_token}))
+            .await;
+        reused.assert_status(StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = reused.json();
+        assert_eq!(body["error"], "Refresh token has been revoked");
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_deactivated_user() {
+        let state = db_state(dev_license()).await;
+        let id =
+            seed_login_user(&state, "deact@example.com", "correct-horse", "viewer", true).await;
+        let refresh = create_refresh_token(id, &state.auth.jwt_secret, 7)
+            .unwrap_or_else(|e| panic!("encode: {e:?}"));
+        sqlx::query(
+            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked) \
+             VALUES ($1, $2, now() + interval '7 days', false)",
+        )
+        .bind(id)
+        .bind(token_hash(&refresh))
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed refresh: {e}"));
+        sqlx::query("UPDATE users SET is_active = false WHERE id = $1")
+            .bind(id)
+            .execute(&state.db)
+            .await
+            .unwrap_or_else(|e| panic!("deactivate: {e}"));
+
+        let server = test_server_with_state(state).await;
+        let res = server
+            .post("/api/v1/auth/refresh")
+            .json(&serde_json::json!({"refresh_token": refresh}))
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "User not found or deactivated");
+    }
+
+    #[tokio::test]
+    async fn logout_requires_auth_and_revokes_tokens() {
+        let state = db_state(dev_license()).await;
+        let (id, token) = authed_user(&state, "logout@example.com", "viewer").await;
+        sqlx::query(
+            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked) \
+             VALUES ($1, 'h1', now() + interval '7 days', false), \
+                    ($1, 'h2', now() + interval '7 days', false)",
+        )
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed refresh tokens: {e}"));
+        let server = test_server_with_state(state).await;
+
+        let unauth = server.post("/api/v1/auth/logout").await;
+        unauth.assert_status(StatusCode::UNAUTHORIZED);
+
+        let res = server
+            .post("/api/v1/auth/logout")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["message"], "Successfully logged out");
+        assert_eq!(body["tokens_revoked"], 2);
+    }
+
+    #[tokio::test]
+    async fn me_requires_auth_and_returns_current_user_shape() {
+        let state = db_state(dev_license()).await;
+        let (id, token) = authed_user(&state, "me@example.com", "maintainer").await;
+        let server = test_server_with_state(state).await;
+
+        let unauth = server.get("/api/v1/auth/me").await;
+        unauth.assert_status(StatusCode::UNAUTHORIZED);
+
+        let res = server
+            .get("/api/v1/auth/me")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["id"], id);
+        assert_eq!(body["email"], "me@example.com");
+        assert_eq!(body["role"], "maintainer");
+        assert_eq!(body["is_active"], true);
+        assert!(body["created_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn register_validates_email_password_and_full_name() {
+        let state = db_state(dev_license()).await;
+        let server = test_server_with_state(state).await;
+
+        let res = server
+            .post("/api/v1/auth/register")
+            .json(&serde_json::json!({"email": "bad", "password": "longenough1"}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+
+        let res = server
+            .post("/api/v1/auth/register")
+            .json(&serde_json::json!({"email": "a@example.com", "password": "short"}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+
+        let res = server
+            .post("/api/v1/auth/register")
+            .json(&serde_json::json!({
+                "email": "a@example.com",
+                "password": "x".repeat(129),
+            }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+
+        let res = server
+            .post("/api/v1/auth/register")
+            .json(&serde_json::json!({
+                "email": "a@example.com",
+                "password": "longenough1",
+                "full_name": "x".repeat(256),
+            }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn register_succeeds_then_rejects_duplicate_email() {
+        let state = db_state(dev_license()).await;
+        let server = test_server_with_state(state).await;
+
+        let res = server
+            .post("/api/v1/auth/register")
+            .json(&serde_json::json!({
+                "email": "New@Example.com",
+                "password": "longenough1",
+                "full_name": "New Person",
+            }))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["message"], "Registration successful");
+        assert_eq!(body["user"]["email"], "new@example.com");
+        assert_eq!(body["user"]["role"], "viewer");
+
+        let dup = server
+            .post("/api/v1/auth/register")
+            .json(&serde_json::json!({
+                "email": "new@example.com",
+                "password": "anotherpass1",
+            }))
+            .await;
+        dup.assert_status(StatusCode::CONFLICT);
+        let body: serde_json::Value = dup.json();
+        assert_eq!(body["error"], "Email already registered");
+    }
 
     /// Regression for finding #8 (login timing oracle): the unknown-email
     /// dummy verify must actually pay bcrypt's real cost-factor work, not

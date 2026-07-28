@@ -21,3 +21,19 @@ impl Default for AsmOrchestrator {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_and_default_both_construct_the_placeholder() {
+        // Phase 3 stub: Nuclei/ZAP/OpenVAS orchestration is not implemented
+        // yet (see `crate::scan::execute_scan`'s "not yet implemented"
+        // branch for those scan types) — this only proves the placeholder
+        // type constructs via both paths, matching the trivial contract it
+        // currently offers.
+        let _ = AsmOrchestrator::new();
+        let _ = AsmOrchestrator::default();
+    }
+}

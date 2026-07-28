@@ -64,3 +64,74 @@ impl ScannerResult {
         ]
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests fail loudly by design
+mod tests {
+    use super::*;
+
+    fn sample(error_message: Option<&str>) -> ScannerResult {
+        ScannerResult {
+            job_id: "job-1".to_owned(),
+            scan_type: "yara".to_owned(),
+            findings_count: 2,
+            findings: serde_json::json!({"matches": ["rule_a"]}),
+            duration_sec: 1.25,
+            status: "success".to_owned(),
+            error_message: error_message.map(str::to_owned),
+            timestamp: "2026-07-28T00:00:00+00:00".to_owned(),
+        }
+    }
+
+    #[test]
+    fn to_entry_fields_preserves_order_and_values() {
+        let fields = sample(None).to_entry_fields();
+        assert_eq!(
+            fields,
+            vec![
+                ("job_id".to_owned(), "job-1".to_owned()),
+                ("scan_type".to_owned(), "yara".to_owned()),
+                ("findings_count".to_owned(), "2".to_owned()),
+                (
+                    "findings".to_owned(),
+                    serde_json::to_string(&serde_json::json!({"matches": ["rule_a"]}))
+                        .expect("serialize")
+                ),
+                ("duration_sec".to_owned(), "1.25".to_owned()),
+                ("status".to_owned(), "success".to_owned()),
+                ("error_message".to_owned(), String::new()),
+                (
+                    "timestamp".to_owned(),
+                    "2026-07-28T00:00:00+00:00".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn to_entry_fields_renders_some_error_message_verbatim() {
+        let fields = sample(Some("boom")).to_entry_fields();
+        let (_, error_field) = fields
+            .into_iter()
+            .find(|(k, _)| k == "error_message")
+            .expect("error_message field present");
+        assert_eq!(error_field, "boom");
+    }
+
+    #[test]
+    fn scanner_task_roundtrips_through_json() {
+        let task = ScannerTask {
+            job_id: "job-2".to_owned(),
+            target: "/tmp/file".to_owned(),
+            scan_type: "clamav".to_owned(),
+            file_path: Some("/tmp/file".to_owned()),
+            params: serde_json::json!({}),
+            submitted_at: "2026-07-28T00:00:00+00:00".to_owned(),
+        };
+        let encoded = serde_json::to_string(&task).expect("encode");
+        let decoded: ScannerTask = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(decoded.job_id, "job-2");
+        assert_eq!(decoded.scan_type, "clamav");
+        assert_eq!(decoded.file_path.as_deref(), Some("/tmp/file"));
+    }
+}

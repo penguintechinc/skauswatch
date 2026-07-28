@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-sshca"
 description = "SkausWatch SSH certificate authority — OpenSSH user/host cert signing (Rust port of the v1 sshca)"
 version.workspace = true

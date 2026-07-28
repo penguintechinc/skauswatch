@@ -77,9 +77,38 @@ pub async fn serve(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn serve_binds_and_shuts_down_cleanly_on_signal() {
+        // Real bind on the default GRPC_PORT (nothing else in this test
+        // binary listens on it) — the shutdown future already has its
+        // value ready, so `serve_with_shutdown` binds, starts serving, and
+        // returns almost immediately without needing a real client.
+        let state = crate::state::AppStateInner::for_tests();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let _ = tx.send(());
+        let shutdown = async move {
+            let _ = rx.await;
+        };
+        let result = serve(state, shutdown).await;
+        assert!(
+            result.is_ok(),
+            "serve() should shut down cleanly: {result:?}"
+        );
+    }
+
     #[test]
     fn grpc_port_defaults_to_v1_50052() {
         assert_eq!(DEFAULT_GRPC_PORT, 50_052);
+    }
+
+    #[test]
+    fn enabled_and_port_default_when_env_unset() {
+        // Neither GRPC_ENABLED nor GRPC_PORT is set in this test process ->
+        // both fall back to their documented defaults.
+        assert!(std::env::var("GRPC_ENABLED").is_err());
+        assert!(enabled());
+        assert!(std::env::var("GRPC_PORT").is_err());
+        assert_eq!(port(), DEFAULT_GRPC_PORT);
     }
 
     #[test]

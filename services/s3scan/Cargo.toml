@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-s3scan"
 description = "SkausWatch s3scan worker — Redis Streams consumer (Rust port of the v1 s3scan)"
 version.workspace = true
@@ -39,6 +40,8 @@ skauswatch-telemetry = { workspace = true }
 
 [dev-dependencies]
 fred = { workspace = true }
+skauswatch-testkit = { workspace = true }
+wiremock = { workspace = true }
 
 [lints]
 workspace = true

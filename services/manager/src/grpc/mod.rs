@@ -37,16 +37,22 @@ const DEFAULT_GRPC_PORT: u16 = 50051;
 /// Whether the gRPC server should run — v1 `GRPC_ENABLED` semantics:
 /// enabled unless the env var (lowercased) is anything other than "true".
 pub fn enabled() -> bool {
-    std::env::var("GRPC_ENABLED")
-        .map(|v| v.to_lowercase() == "true")
-        .unwrap_or(true)
+    enabled_from(std::env::var("GRPC_ENABLED").ok().as_deref())
+}
+
+/// Pure form of [`enabled`] for tests.
+fn enabled_from(raw: Option<&str>) -> bool {
+    raw.map(|v| v.to_lowercase() == "true").unwrap_or(true)
 }
 
 /// Resolves the gRPC listen port from `GRPC_PORT` (default 50051).
 pub fn port() -> u16 {
-    std::env::var("GRPC_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
+    port_from(std::env::var("GRPC_PORT").ok().as_deref())
+}
+
+/// Pure form of [`port`] for tests.
+fn port_from(raw: Option<&str>) -> u16 {
+    raw.and_then(|p| p.parse().ok())
         .unwrap_or(DEFAULT_GRPC_PORT)
 }
 
@@ -129,8 +135,12 @@ fn db_err(e: sqlx::Error) -> Status {
 #[cfg(test)]
 #[allow(clippy::panic)] // test helpers fail loudly by design
 pub(crate) mod test_util {
-    use crate::state::{AppState, AppStateInner};
+    use std::path::Path;
+    use std::sync::Arc;
+
     use penguin_licensing::{LicenseClient, LicenseConfig};
+
+    use crate::state::{AppState, AppStateInner};
 
     /// Test AppState: unreachable lazy DB pool, no stream producer —
     /// exercises validation/routing/status layers without infrastructure.
@@ -144,6 +154,44 @@ pub(crate) mod test_util {
             Err(e) => panic!("license client: {e}"),
         };
         AppStateInner::for_tests(client)
+    }
+
+    /// Test AppState backed by a real, migrated Postgres pool holding this
+    /// service's own tables — for RPC success paths that issue real queries
+    /// (`ManagerService`: alerts/threat_indicators/audit_logs).
+    pub(crate) async fn db_state() -> AppState {
+        let cfg = match LicenseConfig::new("skauswatch") {
+            Ok(c) => c,
+            Err(e) => panic!("license config: {e}"),
+        };
+        let client: Arc<LicenseClient> = match LicenseClient::new(cfg) {
+            Ok(c) => c,
+            Err(e) => panic!("license client: {e}"),
+        };
+        let pool =
+            skauswatch_testkit::db::test_pool(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
+                .await;
+        AppStateInner::for_tests_with_db(client, pool)
+    }
+
+    /// Like [`db_state`] but also layers in `services/s3scan`'s migrations —
+    /// `S3ScanService` RPCs query `s3_scan_jobs`/`s3_scan_results`/
+    /// `adhoc_scan_results`, tables owned by the s3scan worker.
+    pub(crate) async fn db_state_with_s3scan() -> AppState {
+        let cfg = match LicenseConfig::new("skauswatch") {
+            Ok(c) => c,
+            Err(e) => panic!("license config: {e}"),
+        };
+        let client: Arc<LicenseClient> = match LicenseClient::new(cfg) {
+            Ok(c) => c,
+            Err(e) => panic!("license client: {e}"),
+        };
+        let pool = skauswatch_testkit::db::test_pool_multi(&[
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")),
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../s3scan/migrations")),
+        ])
+        .await;
+        AppStateInner::for_tests_with_db(client, pool)
     }
 }
 
@@ -185,5 +233,67 @@ mod tests {
     fn grpc_port_defaults_to_v1_50051() {
         // Env-free default; deployments override via GRPC_PORT.
         assert_eq!(DEFAULT_GRPC_PORT, 50051);
+    }
+
+    #[test]
+    fn enabled_from_matches_v1_semantics() {
+        assert!(enabled_from(None)); // default true
+        assert!(enabled_from(Some("true")));
+        assert!(enabled_from(Some("TRUE")));
+        assert!(!enabled_from(Some("false")));
+        assert!(!enabled_from(Some("nope")));
+    }
+
+    #[test]
+    fn port_from_parses_or_falls_back() {
+        assert_eq!(port_from(None), DEFAULT_GRPC_PORT);
+        assert_eq!(port_from(Some("9000")), 9000);
+        assert_eq!(port_from(Some("not-a-port")), DEFAULT_GRPC_PORT);
+    }
+
+    #[test]
+    fn require_jwt_accepts_valid_and_rejects_missing() {
+        let empty = tonic::metadata::MetadataMap::new();
+        assert!(require_jwt(&empty, "s3cret").is_err());
+
+        let token = match skauswatch_auth::issue_service_token("1", "admin", "s3cret", 300) {
+            Ok(t) => t,
+            Err(e) => panic!("issue token: {e}"),
+        };
+        let mut md = tonic::metadata::MetadataMap::new();
+        let value = match format!("Bearer {token}").parse() {
+            Ok(v) => v,
+            Err(e) => panic!("metadata value: {e}"),
+        };
+        md.insert("authorization", value);
+        assert!(require_jwt(&md, "s3cret").is_ok());
+    }
+
+    #[test]
+    fn method_not_implemented_matches_v1_grpcio_message() {
+        let s = method_not_implemented();
+        assert_eq!(s.code(), tonic::Code::Unimplemented);
+        assert_eq!(s.message(), "Method not implemented!");
+    }
+
+    #[test]
+    fn db_err_maps_to_internal_without_leaking_detail() {
+        let e = sqlx::Error::RowNotFound;
+        let s = db_err(e);
+        assert_eq!(s.code(), tonic::Code::Internal);
+        assert_eq!(s.message(), "Internal Server Error");
+    }
+
+    #[tokio::test]
+    async fn serve_binds_and_shuts_down_cleanly() {
+        // No env override: `port()` resolves the fixed default 50051 — this
+        // is the only test in the crate that ever binds a socket, so there
+        // is no port-conflict risk. An already-resolved shutdown future
+        // makes `serve_with_shutdown` return almost immediately after
+        // binding (workspace policy forbids `unsafe`, so this deliberately
+        // avoids mutating `GRPC_PORT` to pick an ephemeral port instead).
+        let state = test_util::test_state();
+        let result = serve(state, async {}).await;
+        assert!(result.is_ok());
     }
 }

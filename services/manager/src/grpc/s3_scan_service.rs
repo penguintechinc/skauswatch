@@ -664,6 +664,125 @@ mod tests {
         assert_eq!(err.message(), "api_version v9 not supported");
     }
 
+    async fn seed_bucket_and_job(pool: &sqlx::PgPool) -> (i32, String) {
+        let (bucket_id,): (i32,) = sqlx::query_as(
+            "INSERT INTO s3_bucket_configs \
+             (name, endpoint_url, bucket_name, access_key_id, secret_access_key, region, \
+              use_ssl, path_style, scan_enabled, yara_enabled, created_by, created_at, \
+              updated_at) \
+             VALUES ('grpc-bucket', 'http://parity-stub:9999', 'bkt', 'AKIATESTKEY123456', \
+                     'supersecretvalue1234', 'us-east-1', false, true, true, false, 1, now(), \
+                     now()) RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed bucket: {e}"));
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO s3_scan_jobs (job_id, bucket_config_id, job_type, status, \
+             triggered_by, created_at) VALUES ($1, $2, 'full_scan', 'running', 1, now())",
+        )
+        .bind(&job_uuid)
+        .bind(bucket_id)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed job: {e}"));
+        (bucket_id, job_uuid)
+    }
+
+    #[tokio::test]
+    async fn report_scan_result_and_get_scan_status_round_trip_against_real_db() {
+        let state = crate::grpc::test_util::db_state_with_s3scan().await;
+        let (_, job_uuid) = seed_bucket_and_job(&state.db).await;
+        let svc = S3ScanGrpc::new(state);
+
+        let ack = match svc
+            .report_scan_result(authed(ScanResult {
+                task_id: "task-real".to_owned(),
+                job_id: job_uuid.clone(),
+                object_key: "a/b.exe".to_owned(),
+                is_malware: true,
+                is_threat: true,
+                scan_status: "infected".to_owned(),
+                threat_names: vec!["Win.Trojan.Agent".to_owned()],
+                file_sha256: "e".repeat(64),
+                api_version: "v1".to_owned(),
+                ..Default::default()
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("report_scan_result: {e:?}"),
+        };
+        assert!(ack.accepted);
+
+        let status = match svc
+            .get_scan_status(authed(ScanStatusRequest {
+                job_id: job_uuid.clone(),
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("get_scan_status: {e:?}"),
+        };
+        assert_eq!(status.job_id, job_uuid);
+        assert_eq!(status.scanned, 1);
+        assert_eq!(status.infected, 1);
+
+        let missing = match svc
+            .get_scan_status(authed(ScanStatusRequest {
+                job_id: "no-such-job".to_owned(),
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("expected not found"),
+        };
+        assert_eq!(missing.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn report_scan_result_for_unknown_job_acks_false() {
+        let state = crate::grpc::test_util::db_state_with_s3scan().await;
+        let svc = S3ScanGrpc::new(state);
+        let ack = match svc
+            .report_scan_result(authed(ScanResult {
+                task_id: "task-x".to_owned(),
+                job_id: "totally-unknown-job".to_owned(),
+                api_version: "v1".to_owned(),
+                ..Default::default()
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("report_scan_result: {e:?}"),
+        };
+        assert!(!ack.accepted);
+    }
+
+    #[tokio::test]
+    async fn scan_adhoc_file_succeeds_and_dispatches_against_real_db() {
+        let state = crate::grpc::test_util::db_state_with_s3scan().await;
+        let svc = S3ScanGrpc::new(state);
+        let resp = match svc
+            .scan_adhoc_file(authed(AdhocScanRequest {
+                scan_id: String::new(),
+                file_content: vec![1, 2, 3, 4],
+                filename: "grpc-upload.bin".to_owned(),
+                uploaded_by: 1,
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("scan_adhoc_file: {e:?}"),
+        };
+        assert!(!resp.scan_id.is_empty());
+        assert_eq!(resp.status, "pending");
+    }
+
     #[test]
     fn parse_json_field_handles_empty_invalid_and_valid() {
         assert!(parse_json_field("").is_none());

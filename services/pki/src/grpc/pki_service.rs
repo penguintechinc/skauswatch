@@ -724,3 +724,671 @@ fn proto_status_name(i: i32) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// Tests for the gRPC servicer. Pure mapping helpers (enum <-> proto, JSON
+/// dict accessors, response builders) are unit-tested directly — no gRPC
+/// call needed. RPC-level tests cover: the `api_version` gate on every
+/// method, the fully-DB-free `not_found`/`invalid_argument` branches (an
+/// unusable identifier resolves to `Ok(None)`/`Ok(false)` in the manager
+/// without a query, or the SSH CA engine itself rejects empty principals),
+/// and the real-crypto-then-`internal`-on-unreachable-DB path. See
+/// `docs/v2-port/testing-pattern.md` — pki has no `migrations/` directory,
+/// so "found"/list/CRL/KRL/statistics success bodies are out of scope.
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use skauswatch_proto::pki::{cert_query, revoke_request};
+    use tonic::Code;
+
+    use super::*;
+    use crate::state::AppStateInner;
+
+    fn grpc() -> PkiGrpc {
+        PkiGrpc::new(AppStateInner::for_tests())
+    }
+
+    fn real_ca_grpc() -> PkiGrpc {
+        PkiGrpc::new(AppStateInner::for_tests_with_real_ca())
+    }
+
+    fn assert_unimplemented(status: Status) {
+        assert_eq!(status.code(), Code::Unimplemented);
+        assert!(status.message().contains("not supported"));
+    }
+
+    // ---------- api_version gate: one test per RPC ----------
+
+    #[tokio::test]
+    async fn issue_x509_certificate_rejects_unknown_api_version() {
+        let status = grpc()
+            .issue_x509_certificate(Request::new(X509CertRequest {
+                api_version: "v2".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn get_x509_certificate_rejects_unknown_api_version() {
+        let status = grpc()
+            .get_x509_certificate(Request::new(CertQuery {
+                api_version: "v2".into(),
+                identifier: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn revoke_x509_certificate_rejects_unknown_api_version() {
+        let status = grpc()
+            .revoke_x509_certificate(Request::new(RevokeRequest {
+                api_version: "v2".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn get_x509_status_rejects_unknown_api_version() {
+        let status = grpc()
+            .get_x509_status(Request::new(CertQuery {
+                api_version: "v2".into(),
+                identifier: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn list_x509_certificates_rejects_unknown_api_version() {
+        let status = grpc()
+            .list_x509_certificates(Request::new(ListCertRequest {
+                api_version: "v2".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn issue_ssh_certificate_rejects_unknown_api_version() {
+        let status = grpc()
+            .issue_ssh_certificate(Request::new(SshCertRequest {
+                api_version: "v2".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn get_ssh_certificate_rejects_unknown_api_version() {
+        let status = grpc()
+            .get_ssh_certificate(Request::new(CertQuery {
+                api_version: "v2".into(),
+                identifier: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn revoke_ssh_certificate_rejects_unknown_api_version() {
+        let status = grpc()
+            .revoke_ssh_certificate(Request::new(RevokeRequest {
+                api_version: "v2".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn get_ssh_status_rejects_unknown_api_version() {
+        let status = grpc()
+            .get_ssh_status(Request::new(CertQuery {
+                api_version: "v2".into(),
+                identifier: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn list_ssh_certificates_rejects_unknown_api_version() {
+        let status = grpc()
+            .list_ssh_certificates(Request::new(ListCertRequest {
+                api_version: "v2".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn get_crl_rejects_unknown_api_version() {
+        let status = grpc()
+            .get_crl(Request::new(Empty {
+                api_version: "v2".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn get_krl_rejects_unknown_api_version() {
+        let status = grpc()
+            .get_krl(Request::new(Empty {
+                api_version: "v2".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn get_x509ca_info_rejects_unknown_api_version() {
+        let status = grpc()
+            .get_x509ca_info(Request::new(Empty {
+                api_version: "v2".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn get_sshca_info_rejects_unknown_api_version() {
+        let status = grpc()
+            .get_sshca_info(Request::new(Empty {
+                api_version: "v2".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    #[tokio::test]
+    async fn get_statistics_rejects_unknown_api_version() {
+        let status = grpc()
+            .get_statistics(Request::new(Empty {
+                api_version: "v2".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_unimplemented(status);
+    }
+
+    // ---------- fully DB-free success/error branches ----------
+
+    #[tokio::test]
+    async fn get_x509_certificate_not_found_without_db_for_bad_identifier() {
+        let svc = grpc();
+        for identifier in [None, Some(cert_query::Identifier::Id("not-a-uuid".into()))] {
+            let status = svc
+                .get_x509_certificate(Request::new(CertQuery {
+                    api_version: String::new(),
+                    identifier,
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(status.code(), Code::NotFound);
+        }
+    }
+
+    #[tokio::test]
+    async fn get_ssh_certificate_not_found_without_db_for_bad_identifier() {
+        let status = grpc()
+            .get_ssh_certificate(Request::new(CertQuery {
+                api_version: "v1".into(),
+                identifier: Some(cert_query::Identifier::Id("not-a-uuid".into())),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn get_x509_status_not_found_without_db_for_bad_identifier() {
+        let status = grpc()
+            .get_x509_status(Request::new(CertQuery {
+                api_version: "v1".into(),
+                identifier: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn get_ssh_status_not_found_without_db_for_bad_identifier() {
+        let status = grpc()
+            .get_ssh_status(Request::new(CertQuery {
+                api_version: "v1".into(),
+                identifier: Some(cert_query::Identifier::Id("bad".into())),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn revoke_x509_certificate_not_found_without_db_for_bad_identifier() {
+        let svc = grpc();
+        for identifier in [
+            None,
+            Some(revoke_request::Identifier::Id("not-a-uuid".into())),
+        ] {
+            let status = svc
+                .revoke_x509_certificate(Request::new(RevokeRequest {
+                    api_version: "v1".into(),
+                    identifier,
+                    reason: 0,
+                    invalidity_date: String::new(),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(status.code(), Code::NotFound);
+        }
+    }
+
+    #[tokio::test]
+    async fn revoke_ssh_certificate_not_found_without_db_for_bad_identifier() {
+        let status = grpc()
+            .revoke_ssh_certificate(Request::new(RevokeRequest {
+                api_version: "v1".into(),
+                identifier: Some(revoke_request::Identifier::Id("bad".into())),
+                reason: 0,
+                invalidity_date: String::new(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn issue_ssh_certificate_empty_principals_is_invalid_argument() {
+        // The SSH CA engine itself rejects this before any DB call — proves
+        // map_err's BadRequest -> invalid_argument branch.
+        let status = grpc()
+            .issue_ssh_certificate(Request::new(SshCertRequest {
+                api_version: "v1".into(),
+                public_key: "ssh-ed25519 AAAA".into(),
+                certificate_type: 1,
+                key_id: "k".into(),
+                principals: vec![],
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    // ---------- DB-touching handlers: real work, then internal on unreachable DB ----------
+
+    #[tokio::test]
+    async fn issue_x509_certificate_runs_real_crypto_then_internal_on_db() {
+        let status = grpc()
+            .issue_x509_certificate(Request::new(X509CertRequest {
+                api_version: "v1".into(),
+                subject: "CN=grpc-test.example.com".into(),
+                is_ca: false,
+                // Non-empty so the key_usage/extended_key_usage
+                // filter_map loops actually iterate (proto enum ints, not
+                // KU_UNSPECIFIED/EKU_UNSPECIFIED).
+                key_usage: vec![1, 2],
+                extended_key_usage: vec![1],
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Internal);
+        assert_eq!(status.message(), "Internal Server Error");
+    }
+
+    #[tokio::test]
+    async fn issue_x509_certificate_invalid_csr_is_invalid_argument() {
+        // Exercises map_err's X509(BadRequest) arm specifically (the SSH
+        // arm is covered by issue_ssh_certificate_empty_principals_is_invalid_argument).
+        let status = grpc()
+            .issue_x509_certificate(Request::new(X509CertRequest {
+                api_version: "v1".into(),
+                subject: "CN=grpc-badcsr.example.com".into(),
+                csr_pem: "not a real csr".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn list_x509_certificates_defaults_page_then_internal_on_db() {
+        let status = grpc()
+            .list_x509_certificates(Request::new(ListCertRequest {
+                api_version: "v1".into(),
+                page: 0,
+                page_size: 0,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Internal);
+    }
+
+    #[tokio::test]
+    async fn list_ssh_certificates_internal_on_db() {
+        let status = grpc()
+            .list_ssh_certificates(Request::new(ListCertRequest {
+                api_version: "v1".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Internal);
+    }
+
+    #[tokio::test]
+    async fn get_crl_internal_on_db() {
+        let status = grpc()
+            .get_crl(Request::new(Empty {
+                api_version: "v1".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Internal);
+    }
+
+    #[tokio::test]
+    async fn get_krl_internal_on_db() {
+        let status = grpc()
+            .get_krl(Request::new(Empty {
+                api_version: "v1".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Internal);
+    }
+
+    #[tokio::test]
+    async fn get_statistics_internal_on_db() {
+        let status = grpc()
+            .get_statistics(Request::new(Empty {
+                api_version: "v1".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Internal);
+    }
+
+    // ---------- fully DB-free successful RPCs ----------
+
+    #[tokio::test]
+    async fn get_x509ca_info_succeeds_without_db() {
+        let resp = grpc()
+            .get_x509ca_info(Request::new(Empty {
+                api_version: String::new(),
+            }))
+            .await
+            .unwrap_or_else(|e| panic!("get_x509ca_info: {e}"))
+            .into_inner();
+        assert!(resp.subject.contains("SkausWatch"));
+        assert!(resp.ca_certificate_pem.contains("BEGIN CERTIFICATE"));
+        assert_eq!(resp.serial_counter, 1);
+    }
+
+    #[tokio::test]
+    async fn get_sshca_info_succeeds_without_db() {
+        let resp = grpc()
+            .get_sshca_info(Request::new(Empty {
+                api_version: "v1".into(),
+            }))
+            .await
+            .unwrap_or_else(|e| panic!("get_sshca_info: {e}"))
+            .into_inner();
+        assert_eq!(resp.key_type, "ed25519");
+        assert!(resp.ca_public_key.starts_with("ssh-"));
+    }
+
+    #[tokio::test]
+    async fn health_check_reports_healthy_true_regardless_of_db_and_ignores_api_version() {
+        let resp = grpc()
+            .health_check(Request::new(Empty {
+                api_version: "totally-unchecked".into(),
+            }))
+            .await
+            .unwrap_or_else(|e| panic!("health_check: {e}"))
+            .into_inner();
+        assert!(resp.healthy);
+        assert_eq!(resp.components.get("database"), Some(&false));
+        assert_eq!(resp.components.get("x509_ca"), Some(&true));
+    }
+
+    #[tokio::test]
+    async fn issue_ssh_certificate_real_ca_signs_then_internal_on_db() {
+        // Real ssh-keygen-backed CA + a real subject key -> genuine signing
+        // happens before the DB insert fails.
+        let path = std::env::temp_dir().join(format!(
+            "skauswatch-pki-grpc-subject-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let status = std::process::Command::new("ssh-keygen")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-f")
+            .arg(&path)
+            .arg("-N")
+            .arg("")
+            .arg("-q")
+            .status()
+            .unwrap_or_else(|e| panic!("run ssh-keygen: {e}"));
+        assert!(status.success());
+        let pubkey = std::fs::read_to_string(format!("{}.pub", path.display()))
+            .unwrap_or_else(|e| panic!("read pubkey: {e}"));
+
+        let grpc_status = real_ca_grpc()
+            .issue_ssh_certificate(Request::new(SshCertRequest {
+                api_version: "v1".into(),
+                public_key: pubkey,
+                certificate_type: 1,
+                key_id: "grpc-test".into(),
+                principals: vec!["alice".into()],
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(grpc_status.code(), Code::Internal);
+    }
+
+    // ---------- pure mapping / accessor helpers ----------
+
+    #[test]
+    fn key_alg_round_trips_and_defaults_to_rsa() {
+        assert_eq!(key_alg_from_proto(1), "RSA");
+        assert_eq!(key_alg_from_proto(2), "ECDSA");
+        assert_eq!(key_alg_from_proto(3), "ED25519");
+        assert_eq!(key_alg_from_proto(0), "RSA");
+        assert_eq!(key_alg_to_proto("rsa"), 1);
+        assert_eq!(key_alg_to_proto("ECDSA"), 2);
+        assert_eq!(key_alg_to_proto("ed25519"), 3);
+        assert_eq!(key_alg_to_proto("bogus"), 0);
+    }
+
+    #[test]
+    fn reason_from_proto_covers_all_named_reasons_and_default() {
+        assert_eq!(reason_from_proto(1), "key_compromise");
+        assert_eq!(reason_from_proto(2), "ca_compromise");
+        assert_eq!(reason_from_proto(3), "affiliation_changed");
+        assert_eq!(reason_from_proto(4), "superseded");
+        assert_eq!(reason_from_proto(5), "cessation_of_operation");
+        assert_eq!(reason_from_proto(6), "certificate_hold");
+        assert_eq!(reason_from_proto(7), "privilege_withdrawn");
+        assert_eq!(reason_from_proto(0), "unspecified");
+        assert_eq!(reason_from_proto(99), "unspecified");
+    }
+
+    #[test]
+    fn key_usage_and_eku_from_proto_cover_all_variants_and_unknown() {
+        for i in 1..=6 {
+            assert!(key_usage_from_proto(i).is_some());
+        }
+        assert_eq!(key_usage_from_proto(0), None);
+        assert_eq!(key_usage_from_proto(99), None);
+
+        for i in 1..=6 {
+            assert!(eku_from_proto(i).is_some());
+        }
+        assert_eq!(eku_from_proto(0), None);
+    }
+
+    #[test]
+    fn ssh_type_round_trips() {
+        assert_eq!(ssh_type_from_proto(1), "user");
+        assert_eq!(ssh_type_from_proto(2), "host");
+        assert_eq!(ssh_type_from_proto(0), "user");
+        assert_eq!(ssh_type_to_proto("host"), 2);
+        assert_eq!(ssh_type_to_proto("user"), 1);
+        assert_eq!(ssh_type_to_proto("bogus"), 1);
+    }
+
+    #[test]
+    fn status_to_proto_covers_all_named_statuses_and_default() {
+        assert_eq!(status_to_proto("active"), 1);
+        assert_eq!(status_to_proto("revoked"), 2);
+        assert_eq!(status_to_proto("expired"), 3);
+        assert_eq!(status_to_proto("pending"), 4);
+        assert_eq!(status_to_proto("bogus"), 0);
+    }
+
+    #[test]
+    fn query_ids_and_revoke_ids_map_each_oneof_variant() {
+        assert_eq!(
+            query_ids(&Some(cert_query::Identifier::Id("x".into()))),
+            (Some("x".to_owned()), None)
+        );
+        assert_eq!(
+            query_ids(&Some(cert_query::Identifier::SerialNumber("s".into()))),
+            (None, Some("s".to_owned()))
+        );
+        assert_eq!(query_ids(&None), (None, None));
+
+        assert_eq!(
+            revoke_ids(&Some(revoke_request::Identifier::Id("x".into()))),
+            (Some("x".to_owned()), None)
+        );
+        assert_eq!(
+            revoke_ids(&Some(revoke_request::Identifier::SerialNumber("s".into()))),
+            (None, Some("s".to_owned()))
+        );
+        assert_eq!(revoke_ids(&None), (None, None));
+    }
+
+    #[test]
+    fn none_if_empty_and_opt_str_are_pass_through_helpers() {
+        assert_eq!(none_if_empty(""), None);
+        assert_eq!(none_if_empty("x"), Some("x"));
+        assert_eq!(opt_str("y".into()), "y");
+    }
+
+    #[test]
+    fn js_ji_arr_extract_from_json_with_missing_field_defaults() {
+        let v = serde_json::json!({
+            "s": "hello",
+            "n": 42,
+            "a": ["x", "y", 1],
+        });
+        assert_eq!(js(&v, "s"), "hello");
+        assert_eq!(js(&v, "missing"), "");
+        assert_eq!(ji(&v, "n"), 42);
+        assert_eq!(ji(&v, "missing"), 0);
+        assert_eq!(arr(&v, "a"), vec!["x".to_owned(), "y".to_owned()]);
+        assert_eq!(arr(&v, "missing"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn json_str_map_converts_object_and_defaults_on_missing() {
+        let v = serde_json::json!({ "k1": "v1", "k2": "v2" });
+        let m = json_str_map(Some(&v));
+        assert_eq!(m.get("k1"), Some(&"v1".to_owned()));
+        assert_eq!(m.len(), 2);
+        assert!(json_str_map(None).is_empty());
+    }
+
+    #[test]
+    fn x509_response_and_ssh_response_map_dict_fields() {
+        let d = serde_json::json!({
+            "id": "id-1",
+            "serial_number": "1a",
+            "subject": "CN=x",
+            "issuer": "CN=ca",
+            "not_before": "2026-01-01T00:00:00",
+            "not_after": "2027-01-01T00:00:00",
+            "key_algorithm": "ECDSA",
+            "key_size": 256,
+            "fingerprint_sha256": "abc",
+            "certificate_pem": "PEM",
+            "private_key_pem": "KEY",
+            "san_dns": ["a.example.com"],
+            "san_ip": ["10.0.0.1"],
+            "status": "revoked",
+            "created_at": "2026-01-01T00:00:00",
+        });
+        let resp = x509_response(&d);
+        assert_eq!(resp.key_algorithm, 2);
+        assert_eq!(resp.status, 2);
+        assert_eq!(resp.san_dns, vec!["a.example.com".to_owned()]);
+
+        let ssh_d = serde_json::json!({
+            "id": "id-2",
+            "serial_number": "2",
+            "key_id": "kid",
+            "certificate_type": "host",
+            "principals": ["h.example.com"],
+            "valid_after": "2026-01-01T00:00:00",
+            "valid_before": "2027-01-01T00:00:00",
+            "key_type": "ed25519",
+            "certificate": "CERT",
+            "ca_public_key": "ssh-ed25519 AAAA",
+            "extensions": { "e1": "v1" },
+            "critical_options": { "c1": "v1" },
+            "status": "active",
+            "created_at": "2026-01-01T00:00:00",
+        });
+        let ssh_resp = ssh_response(&ssh_d);
+        assert_eq!(ssh_resp.certificate_type, 2);
+        assert_eq!(ssh_resp.status, 1);
+        assert_eq!(ssh_resp.extensions.get("e1"), Some(&"v1".to_owned()));
+    }
+
+    #[test]
+    fn pages_rounds_up_and_zero_page_size_is_zero() {
+        assert_eq!(pages(0, 50), 0);
+        assert_eq!(pages(1, 50), 1);
+        assert_eq!(pages(50, 50), 1);
+        assert_eq!(pages(51, 50), 2);
+        assert_eq!(pages(10, 0), 0);
+    }
+
+    #[test]
+    fn proto_status_name_covers_all_named_statuses_and_unspecified() {
+        assert_eq!(proto_status_name(1), Some("active"));
+        assert_eq!(proto_status_name(2), Some("revoked"));
+        assert_eq!(proto_status_name(3), Some("expired"));
+        assert_eq!(proto_status_name(4), Some("pending"));
+        assert_eq!(proto_status_name(0), None);
+    }
+}

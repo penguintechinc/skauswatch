@@ -78,6 +78,7 @@ async fn health_check(State(state): State<AppState>) -> (StatusCode, Json<serde_
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
+    use crate::routes::test_support::{dev_state, state_with_store};
 
     #[test]
     fn health_body_degrades_without_a_store() {
@@ -99,5 +100,43 @@ mod tests {
         let Json(body) = version_info().await;
         assert_eq!(body["name"], "SkausWatch Monitor Service");
         assert_eq!(body["status"], "running");
+    }
+
+    #[tokio::test]
+    async fn health_check_degrades_without_a_configured_store() {
+        let (code, Json(body)) = health_check(State(dev_state())).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["status"], "degraded");
+    }
+
+    #[tokio::test]
+    async fn health_check_is_healthy_with_a_configured_store() {
+        let store =
+            crate::es::ElasticsearchStore::new("http://127.0.0.1:1", "aaa-events-*", None, None);
+        let (code, Json(body)) = health_check(State(state_with_store(store))).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(body["status"], "healthy");
+        assert_eq!(body["event_store"], "connected");
+    }
+
+    fn test_server(state: AppState) -> axum_test::TestServer {
+        let app = axum::Router::new().merge(router()).with_state(state);
+        axum_test::TestServer::new(app)
+    }
+
+    #[tokio::test]
+    async fn health_route_serves_over_http() {
+        let server = test_server(dev_state());
+        let res = server.get("/health").await;
+        res.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn version_route_serves_over_http() {
+        let server = test_server(dev_state());
+        let res = server.get("/version").await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["name"], "SkausWatch Monitor Service");
     }
 }

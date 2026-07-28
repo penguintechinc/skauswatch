@@ -8,6 +8,8 @@ mod alerts;
 mod dashboard;
 mod events;
 mod health;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use axum::Router;
 
@@ -21,4 +23,28 @@ pub fn router() -> Router<AppState> {
         .merge(dashboard::router())
         .merge(events::router())
         .merge(alerts::router())
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::routes::test_support::dev_state;
+
+    /// Mirrors `main.rs::serve()`'s router assembly exactly: the same route
+    /// set is mounted flat (v1 paths, preserved verbatim) and nested under
+    /// `/api/v1` (house standard alias, `backend.md` API Versioning) from
+    /// one binary — both mount points must resolve.
+    #[tokio::test]
+    async fn routes_are_reachable_both_flat_and_under_api_v1() {
+        let api = router();
+        let app = Router::new()
+            .merge(api.clone())
+            .nest("/api/v1", api)
+            .with_state(dev_state());
+        let server = axum_test::TestServer::new(app);
+
+        server.get("/version").await.assert_status_ok();
+        server.get("/api/v1/version").await.assert_status_ok();
+    }
 }

@@ -139,3 +139,195 @@ pub struct RepoConfigRecord {
     pub _repo_url: String,
     pub _repo_name: String,
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// These three tables (`codescan_repo_configs`, `codescan_reviews`,
+    /// `codescan_review_comments`) are OWNED by codescan-backend; this
+    /// worker only consumes them (see
+    /// services/codescan-backend/migrations/0001_codescan_schema.sql header
+    /// comment). worker-codescan ships no migrations of its own, so tests
+    /// point the shared harness at codescan-backend's migrations dir.
+    async fn test_pool() -> PgPool {
+        skauswatch_testkit::db::test_pool(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../codescan-backend/migrations"
+        ))
+        .await
+    }
+
+    async fn seed_repo_config(pool: &PgPool) -> i64 {
+        let row = sqlx::query(
+            "INSERT INTO codescan_repo_configs (tenant_id, provider, repo_url, repo_name) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
+        )
+        .bind(1i64)
+        .bind("github")
+        .bind("https://github.com/acme/widgets")
+        .bind("acme/widgets")
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed repo config: {e}"));
+        row.get::<i64, _>(0)
+    }
+
+    async fn seed_review(pool: &PgPool, repo_config_id: i64) -> i64 {
+        let row = sqlx::query(
+            "INSERT INTO codescan_reviews \
+             (repo_config_id, tenant_id, status, ai_provider, ai_model) \
+             VALUES ($1, $2, 'queued', $3, $4) RETURNING id",
+        )
+        .bind(repo_config_id)
+        .bind(1i64)
+        .bind("ollama")
+        .bind("test-model")
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed review: {e}"));
+        row.get::<i64, _>(0)
+    }
+
+    #[tokio::test]
+    async fn update_review_status_changes_status() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let review = seed_review(&pool, repo).await;
+
+        update_review_status(&pool, review, "processing")
+            .await
+            .unwrap_or_else(|e| panic!("update status: {e}"));
+
+        let row = sqlx::query("SELECT status FROM codescan_reviews WHERE id = $1")
+            .bind(review)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<String, _>(0), "processing");
+    }
+
+    #[tokio::test]
+    async fn complete_review_sets_summary_and_comment_count() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let review = seed_review(&pool, repo).await;
+
+        complete_review(&pool, review, "all clear", 3)
+            .await
+            .unwrap_or_else(|e| panic!("complete review: {e}"));
+
+        let row = sqlx::query(
+            "SELECT status, summary, comments_count, completed_at FROM codescan_reviews WHERE id = $1",
+        )
+        .bind(review)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<String, _>(0), "completed");
+        assert_eq!(row.get::<String, _>(1), "all clear");
+        assert_eq!(row.get::<i32, _>(2), 3);
+        assert!(
+            row.get::<Option<chrono::DateTime<chrono::Utc>>, _>(3)
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_review_failed_sets_error_message() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let review = seed_review(&pool, repo).await;
+
+        mark_review_failed(&pool, review, "boom")
+            .await
+            .unwrap_or_else(|e| panic!("mark failed: {e}"));
+
+        let row = sqlx::query("SELECT status, error_message FROM codescan_reviews WHERE id = $1")
+            .bind(review)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<String, _>(0), "failed");
+        assert_eq!(row.get::<String, _>(1), "boom");
+    }
+
+    #[tokio::test]
+    async fn insert_review_comment_persists_a_finding() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let review = seed_review(&pool, repo).await;
+
+        let comment_id = insert_review_comment(
+            &pool,
+            review,
+            "src/main.rs",
+            42,
+            "**Title**\n\nBody text",
+            "critical",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("insert comment: {e}"));
+        assert!(comment_id > 0);
+
+        let row = sqlx::query(
+            "SELECT file_path, line_number, comment, severity FROM codescan_review_comments \
+             WHERE id = $1",
+        )
+        .bind(comment_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<String, _>(0), "src/main.rs");
+        assert_eq!(row.get::<i32, _>(1), 42);
+        assert_eq!(row.get::<String, _>(2), "**Title**\n\nBody text");
+        assert_eq!(row.get::<String, _>(3), "critical");
+    }
+
+    #[tokio::test]
+    async fn get_review_returns_the_seeded_row() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let review = seed_review(&pool, repo).await;
+
+        let record = get_review(&pool, review)
+            .await
+            .unwrap_or_else(|e| panic!("get review: {e}"));
+        assert_eq!(record._id, review);
+        assert_eq!(record.repo_config_id, repo);
+        assert_eq!(record._status, "queued");
+        assert_eq!(record._ai_provider.as_deref(), Some("ollama"));
+        assert_eq!(record._ai_model.as_deref(), Some("test-model"));
+        assert_eq!(record._tenant_id, 1);
+    }
+
+    #[tokio::test]
+    async fn get_review_errors_when_missing() {
+        let pool = test_pool().await;
+        let result = get_review(&pool, 999_999_999).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_repo_config_returns_the_seeded_row() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+
+        let record = get_repo_config(&pool, repo)
+            .await
+            .unwrap_or_else(|e| panic!("get repo config: {e}"));
+        assert_eq!(record._id, repo);
+        assert_eq!(record._tenant_id, 1);
+        assert_eq!(record._provider, "github");
+        assert_eq!(record._repo_url, "https://github.com/acme/widgets");
+        assert_eq!(record._repo_name, "acme/widgets");
+    }
+
+    #[tokio::test]
+    async fn get_repo_config_errors_when_missing() {
+        let pool = test_pool().await;
+        let result = get_repo_config(&pool, 999_999_999).await;
+        assert!(result.is_err());
+    }
+}

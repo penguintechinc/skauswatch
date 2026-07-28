@@ -706,6 +706,95 @@ mod tests {
         ));
     }
 
+    /// Authed coverage for every route that reaches past `CurrentUser` (real
+    /// DB). The workspace forbids `unsafe`, so these tests cannot mutate
+    /// `LOGS_URL`/`OPENSEARCH_URL` to point at a wiremock upstream — the
+    /// upstream-reachable success shapes (`search_response_extracts_sources_and_total`,
+    /// `stats_response_passes_buckets_through`) are already covered at the
+    /// pure shaping-function level above. `get_siem_config`/
+    /// `update_siem_config` never call an upstream at all, so those still
+    /// exercise their full authed body here; `proxy_ingest`/`search_logs`/
+    /// `siem_stats` still reach past auth into `reqwest`, which fails fast
+    /// against the unreachable default hosts (500), still exercising the
+    /// handler bodies up to the upstream call.
+    #[tokio::test]
+    async fn authed_routes_reach_past_the_auth_gate() {
+        let state = crate::routes::test_support::db_state(
+            skauswatch_testkit::license::dev_license("skauswatch"),
+        )
+        .await;
+        let (_, viewer_tok) =
+            crate::routes::test_support::authed_user(&state, "siem-viewer@example.com", "viewer")
+                .await;
+        let (_, admin_tok) =
+            crate::routes::test_support::authed_user(&state, "siem-admin@example.com", "admin")
+                .await;
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        let server = axum_test::TestServer::new(app);
+
+        let ingest = server
+            .post("/api/v1/siem/ingest")
+            .authorization_bearer(&viewer_tok)
+            .json(&serde_json::json!({"event": "x"}))
+            .await;
+        assert_eq!(ingest.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let search = server
+            .get("/api/v1/siem/search?q=login")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        assert_eq!(search.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let stats = server
+            .get("/api/v1/siem/stats")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        assert_eq!(stats.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let cfg = server
+            .get("/api/v1/siem/config")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        cfg.assert_status_ok();
+        let body: serde_json::Value = cfg.json();
+        assert_eq!(body["free_tier_user_cap"], 5);
+
+        // Non-admin PUT /config is forbidden; admin PUT succeeds.
+        let forbidden = server
+            .put("/api/v1/siem/config")
+            .authorization_bearer(&viewer_tok)
+            .json(&serde_json::json!({"retention_days": 30}))
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let put_ok = server
+            .put("/api/v1/siem/config")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"retention_days": 30}))
+            .await;
+        put_ok.assert_status_ok();
+        let body: serde_json::Value = put_ok.json();
+        assert_eq!(body["retention_days"], 30);
+
+        let bad_put = server
+            .put("/api/v1/siem/config")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"retention_days": 999}))
+            .await;
+        bad_put.assert_status(StatusCode::BAD_REQUEST);
+
+        let null_body = server
+            .put("/api/v1/siem/config")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::Value::Null)
+            .await;
+        null_body.assert_status_ok();
+        let body: serde_json::Value = null_body.json();
+        assert_eq!(body["retention_days"], serde_json::Value::Null);
+    }
+
     #[test]
     fn stats_agg_body_matches_v1() {
         assert_eq!(

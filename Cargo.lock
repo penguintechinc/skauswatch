@@ -5185,13 +5185,13 @@ dependencies = [
  "clap",
  "jsonwebtoken",
  "penguin-licensing",
- "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
  "skauswatch-db",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
@@ -5292,6 +5292,7 @@ dependencies = [
  "skauswatch-proto",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
@@ -5322,6 +5323,7 @@ dependencies = [
  "skauswatch-auth",
  "skauswatch-common",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
@@ -5355,6 +5357,7 @@ dependencies = [
  "skauswatch-proto",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "sqlx",
  "thiserror 2.0.18",
  "time",
@@ -5410,11 +5413,13 @@ dependencies = [
  "skauswatch-db",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -5438,6 +5443,7 @@ dependencies = [
  "skauswatch-db",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
@@ -5503,6 +5509,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "skauswatch-testkit"
+version = "2.0.0"
+dependencies = [
+ "penguin-licensing",
+ "skauswatch-auth",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "skauswatch-vault"
 version = "2.0.0"
 dependencies = [
@@ -5531,6 +5549,7 @@ dependencies = [
  "skauswatch-db",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "skauswatch-vault",
  "sqlx",
  "tokio",
@@ -5557,6 +5576,7 @@ dependencies = [
  "skauswatch-db",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
@@ -5581,11 +5601,13 @@ dependencies = [
  "skauswatch-db",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "skauswatch-vault",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

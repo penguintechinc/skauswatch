@@ -104,4 +104,19 @@ mod tests {
             "CodeScan AI review requires a CodeScan license."
         );
     }
+
+    #[tokio::test]
+    async fn status_reports_zero_queue_depth_against_an_empty_db() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = crate::routes::test_support::sign_token(&state, "1", "viewer");
+        let server = test_server(state);
+        let resp = server
+            .get("/api/v1/codescan/status")
+            .authorization_bearer(token)
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["status"], "ok");
+        assert_eq!(body["queue_depth"], 0);
+    }
 }

@@ -204,6 +204,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn healthz_reports_database_connected_against_real_db() {
+        let license = skauswatch_testkit::license::dev_license("skauswatch");
+        let state = crate::routes::test_support::db_state(license).await;
+        let server = axum_test::TestServer::new(router(state, Readiness::new()));
+        let resp = server.get("/healthz").await;
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["database"], "connected");
+        // Streams producer is still None in tests, so overall status stays
+        // unhealthy even with a real DB — see `for_tests_with_db`.
+        assert_eq!(body["redis"], "not initialized");
+        assert_eq!(body["status"], "unhealthy");
+    }
+
+    #[tokio::test]
+    async fn version_endpoint_reports_name_version_and_environment() {
+        let server = axum_test::TestServer::new(router(test_state(), Readiness::new()));
+        let resp = server.get("/version").await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["name"], "SkausWatch Manager Service");
+        assert!(body["version"].is_string());
+        assert!(body["environment"].is_string());
+    }
+
+    #[tokio::test]
     async fn readyz_keeps_v1_ready_shape() {
         let readiness = Readiness::new();
         let server = axum_test::TestServer::new(router(test_state(), readiness.clone()));

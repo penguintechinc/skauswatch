@@ -147,4 +147,172 @@ mod tests {
             Err(ClamError::Unparseable(_))
         ));
     }
+
+    // ── scan_bytes() — real Unix-socket transport ───────────────────────────
+    //
+    // A fake clamd: accepts one connection, drains the `INSTREAM` framing
+    // (the `zINSTREAM\0` command, each length-prefixed chunk, the zero-length
+    // terminator), then writes back a fixed reply. Good enough to exercise
+    // the real wire protocol `scan_inner` speaks without a real ClamAV
+    // daemon.
+
+    use tokio::net::UnixListener;
+
+    fn unique_socket_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("s3scan-clamd-test-{}.sock", uuid::Uuid::new_v4()))
+    }
+
+    /// Binds a listener, accepts one connection, drains the INSTREAM frames,
+    /// then runs `on_drained` (write a reply, or hang, or close immediately).
+    fn spawn_fake_clamd<F, Fut>(path: std::path::PathBuf, on_drained: F)
+    where
+        F: FnOnce(UnixStream) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let listener = UnixListener::bind(&path).expect("bind fake clamd socket");
+        tokio::spawn(async move {
+            let (mut stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            // "zINSTREAM\0" command.
+            let mut cmd = [0u8; 10];
+            if stream.read_exact(&mut cmd).await.is_err() {
+                return;
+            }
+            loop {
+                let mut len_buf = [0u8; 4];
+                if stream.read_exact(&mut len_buf).await.is_err() {
+                    return;
+                }
+                let len = u32::from_be_bytes(len_buf);
+                if len == 0 {
+                    break;
+                }
+                let mut chunk = vec![0u8; len as usize];
+                if stream.read_exact(&mut chunk).await.is_err() {
+                    return;
+                }
+            }
+            on_drained(stream).await;
+        });
+    }
+
+    #[tokio::test]
+    async fn unreachable_socket_is_io_error() {
+        let err = scan_bytes(
+            "/nonexistent/s3scan-clamd.sock",
+            Duration::from_secs(2),
+            b"data",
+        )
+        .await
+        .expect_err("expected io error");
+        assert!(matches!(err, ClamError::Io(_)));
+    }
+
+    #[tokio::test]
+    async fn clean_reply_over_real_socket() {
+        let path = unique_socket_path();
+        spawn_fake_clamd(path.clone(), |mut stream| async move {
+            let _ = stream.write_all(b"stream: OK\0").await;
+            let _ = stream.flush().await;
+        });
+        tokio::task::yield_now().await;
+
+        let v = scan_bytes(
+            path.to_str().expect("utf8 path"),
+            Duration::from_secs(5),
+            b"hello",
+        )
+        .await
+        .expect("scan");
+        assert_eq!(v, ClamVerdict::default());
+    }
+
+    #[tokio::test]
+    async fn malware_reply_over_real_socket_multi_chunk_payload() {
+        let path = unique_socket_path();
+        spawn_fake_clamd(path.clone(), |mut stream| async move {
+            let _ = stream
+                .write_all(b"stream: Win.Test.EICAR_HDB-1 FOUND\0")
+                .await;
+            let _ = stream.flush().await;
+        });
+        tokio::task::yield_now().await;
+
+        // Larger than CHUNK (8192) so the write loop spans multiple frames.
+        let payload = vec![0x41u8; CHUNK * 2 + 37];
+        let v = scan_bytes(
+            path.to_str().expect("utf8 path"),
+            Duration::from_secs(5),
+            &payload,
+        )
+        .await
+        .expect("scan");
+        assert!(v.is_malware);
+        assert_eq!(v.threat_names, vec!["Win.Test.EICAR_HDB-1".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn error_reply_over_real_socket() {
+        let path = unique_socket_path();
+        spawn_fake_clamd(path.clone(), |mut stream| async move {
+            let _ = stream
+                .write_all(b"INSTREAM size limit exceeded ERROR\0")
+                .await;
+            let _ = stream.flush().await;
+        });
+        tokio::task::yield_now().await;
+
+        let err = scan_bytes(
+            path.to_str().expect("utf8 path"),
+            Duration::from_secs(5),
+            b"x",
+        )
+        .await
+        .expect_err("expected reply error");
+        assert!(matches!(err, ClamError::Reply(_)));
+    }
+
+    #[tokio::test]
+    async fn unparseable_reply_over_real_socket() {
+        let path = unique_socket_path();
+        spawn_fake_clamd(path.clone(), |mut stream| async move {
+            let _ = stream.write_all(b"gibberish\0").await;
+            let _ = stream.flush().await;
+        });
+        tokio::task::yield_now().await;
+
+        let err = scan_bytes(
+            path.to_str().expect("utf8 path"),
+            Duration::from_secs(5),
+            b"x",
+        )
+        .await
+        .expect_err("expected unparseable error");
+        assert!(matches!(err, ClamError::Unparseable(_)));
+    }
+
+    #[tokio::test]
+    async fn scan_times_out_when_daemon_never_replies() {
+        let path = unique_socket_path();
+        spawn_fake_clamd(path.clone(), |stream| async move {
+            // Keep `stream` alive (an unused/underscore-bound parameter would
+            // be dropped — and the connection closed — before this async
+            // block ever runs) then hang forever without replying, so
+            // `scan_bytes`'s outer `tokio::time::timeout` must win.
+            let _keep_alive = stream;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+
+        let err = scan_bytes(
+            path.to_str().expect("utf8 path"),
+            Duration::from_millis(200),
+            b"x",
+        )
+        .await
+        .expect_err("expected timeout");
+        assert!(matches!(err, ClamError::Timeout));
+    }
 }

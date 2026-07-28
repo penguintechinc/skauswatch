@@ -151,3 +151,254 @@ pub async fn put_object_tags(
         .await
         .is_ok()
 }
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::expect_used)] // tests fail loudly by design
+mod tests {
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    /// Builds a client pointed at a mock server, matching how `handler.rs`
+    /// builds clients from stored bucket credentials / inline task creds.
+    fn mock_client(uri: &str) -> Client {
+        client_from_credentials(uri, "AKTEST", "SKTEST", "us-east-1", true)
+    }
+
+    fn contents_xml(key: &str, size: i64, etag: &str) -> String {
+        format!(
+            "<Contents><Key>{key}</Key><LastModified>2024-01-01T00:00:00.000Z</LastModified>\
+             <ETag>&quot;{etag}&quot;</ETag><Size>{size}</Size><StorageClass>STANDARD</StorageClass></Contents>"
+        )
+    }
+
+    fn list_bucket_result(
+        bucket: &str,
+        contents: &str,
+        truncated: bool,
+        next_token: Option<&str>,
+    ) -> String {
+        let next = next_token
+            .map(|t| format!("<NextContinuationToken>{t}</NextContinuationToken>"))
+            .unwrap_or_default();
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Name>{bucket}</Name><Prefix></Prefix><MaxKeys>1000</MaxKeys>\
+             <IsTruncated>{truncated}</IsTruncated>{contents}{next}</ListBucketResult>"
+        )
+    }
+
+    fn s3_error_xml(code: &str, message: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <Error><Code>{code}</Code><Message>{message}</Message>\
+             <RequestId>req-1</RequestId><HostId>host-1</HostId></Error>"
+        )
+    }
+
+    #[tokio::test]
+    async fn list_all_objects_empty_bucket() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/empty-bucket/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                list_bucket_result("empty-bucket", "", false, None),
+                "application/xml",
+            ))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let got = list_all_objects(&client, "empty-bucket", None)
+            .await
+            .expect("list");
+        assert!(got.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_all_objects_maps_key_size_and_etag() {
+        let server = MockServer::start().await;
+        let contents = contents_xml("uploads/a.bin", 1024, "abc123");
+        Mock::given(method("GET"))
+            .and(path("/bkt/"))
+            .and(query_param_is_missing("prefix"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                list_bucket_result("bkt", &contents, false, None),
+                "application/xml",
+            ))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let got = list_all_objects(&client, "bkt", None).await.expect("list");
+        assert_eq!(
+            got,
+            vec![ObjectMeta {
+                key: "uploads/a.bin".to_owned(),
+                size: 1024,
+                etag: "\"abc123\"".to_owned(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_all_objects_sends_nonempty_prefix() {
+        let server = MockServer::start().await;
+        let contents = contents_xml("uploads/a.bin", 10, "e1");
+        Mock::given(method("GET"))
+            .and(path("/bkt/"))
+            .and(query_param("prefix", "uploads/"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                list_bucket_result("bkt", &contents, false, None),
+                "application/xml",
+            ))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let got = list_all_objects(&client, "bkt", Some("uploads/"))
+            .await
+            .expect("list");
+        assert_eq!(got.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_all_objects_follows_pagination() {
+        let server = MockServer::start().await;
+        let page1 = contents_xml("a.bin", 1, "e1");
+        let page2 = contents_xml("b.bin", 2, "e2");
+        // First request (no continuation-token) — truncated, hands back a token.
+        Mock::given(method("GET"))
+            .and(path("/bkt/"))
+            .and(query_param_is_missing("continuation-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                list_bucket_result("bkt", &page1, true, Some("tok-1")),
+                "application/xml",
+            ))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // Second request carries the token — final page.
+        Mock::given(method("GET"))
+            .and(path("/bkt/"))
+            .and(query_param("continuation-token", "tok-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                list_bucket_result("bkt", &page2, false, None),
+                "application/xml",
+            ))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let got = list_all_objects(&client, "bkt", None).await.expect("list");
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].key, "a.bin");
+        assert_eq!(got[1].key, "b.bin");
+    }
+
+    #[tokio::test]
+    async fn list_all_objects_propagates_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bkt/"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_raw(s3_error_xml("InternalError", "boom"), "application/xml"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let err = list_all_objects(&client, "bkt", None)
+            .await
+            .expect_err("expected error");
+        assert!(err.contains("list_objects_v2"));
+    }
+
+    #[tokio::test]
+    async fn download_object_returns_bytes_within_limit() {
+        let server = MockServer::start().await;
+        let body = b"hello world".to_vec();
+        Mock::given(method("GET"))
+            .and(path("/bkt/uploads/a.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let got = download_object(&client, "bkt", "uploads/a.bin", 1024)
+            .await
+            .expect("download")
+            .expect("bytes present");
+        assert_eq!(got, body);
+    }
+
+    #[tokio::test]
+    async fn download_object_skips_when_content_length_exceeds_max() {
+        let server = MockServer::start().await;
+        let body = vec![0u8; 2048];
+        Mock::given(method("GET"))
+            .and(path("/bkt/big.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let got = download_object(&client, "bkt", "big.bin", 1024)
+            .await
+            .expect("download");
+        assert_eq!(got, None);
+    }
+
+    #[tokio::test]
+    async fn download_object_propagates_http_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bkt/missing.bin"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_raw(s3_error_xml("NoSuchKey", "not found"), "application/xml"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let err = download_object(&client, "bkt", "missing.bin", 1024)
+            .await
+            .expect_err("expected error");
+        assert!(err.contains("get_object"));
+    }
+
+    #[tokio::test]
+    async fn put_object_tags_succeeds_on_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/bkt/a.bin"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let tags = vec![("malware".to_owned(), "false".to_owned())];
+        assert!(put_object_tags(&client, "bkt", "a.bin", &tags).await);
+    }
+
+    #[tokio::test]
+    async fn put_object_tags_returns_false_on_http_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/bkt/a.bin"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_raw(s3_error_xml("InternalError", "boom"), "application/xml"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = mock_client(&server.uri());
+        let tags = vec![("malware".to_owned(), "false".to_owned())];
+        assert!(!put_object_tags(&client, "bkt", "a.bin", &tags).await);
+    }
+}

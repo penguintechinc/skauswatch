@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-s3"
 description = "S3/MinIO client construction shared by scan services and workers"
 version.workspace = true

@@ -703,4 +703,186 @@ mod tests {
         let body: Value = res.json();
         assert_eq!(body["error"], "Invalid token");
     }
+
+    /// Direct handler-call happy-path tests — none of these handlers extract
+    /// `State<AppState>`, so a hand-built `CurrentUser` fully exercises the
+    /// success bodies without needing a database (same trick used in
+    /// `routes/asm.rs`).
+    fn user() -> CurrentUser {
+        CurrentUser {
+            id: 1,
+            email: "user@example.com".to_owned(),
+            full_name: None,
+            role: "viewer".to_owned(),
+            is_active: true,
+            mfa_enabled: false,
+            created_at: None,
+        }
+    }
+
+    async fn body_of(resp: Response) -> Value {
+        let bytes = match axum::body::to_bytes(resp.into_body(), usize::MAX).await {
+            Ok(b) => b,
+            Err(e) => panic!("body: {e}"),
+        };
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("non-JSON body: {e}"))
+    }
+
+    #[tokio::test]
+    async fn lookup_composite_classifies_and_gates_shodan_maltego() {
+        let resp = match lookup(
+            user(),
+            ApiJson(LookupBody {
+                query: Some("evil.example.com".to_owned()),
+                indicator_type: None,
+                include_whois: None,
+                include_dns: None,
+                include_asn: None,
+                include_shodan: None,
+                include_maltego: None,
+                timeout: None,
+            }),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_of(resp).await;
+        assert_eq!(body["indicator_type"], "domain");
+        assert!(body["whois"].is_object());
+        assert!(body["dns"].is_object());
+
+        // Timeout out of bounds → validation error.
+        let err = match lookup(
+            user(),
+            ApiJson(LookupBody {
+                query: Some("x".to_owned()),
+                indicator_type: None,
+                include_whois: None,
+                include_dns: None,
+                include_asn: None,
+                include_shodan: None,
+                include_maltego: None,
+                timeout: Some(1),
+            }),
+        )
+        .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("expected validation error"),
+        };
+        assert!(matches!(err, ApiError::Validation(_)));
+
+        // Shodan requested but not enabled/keyed → 503.
+        let resp = match lookup(
+            user(),
+            ApiJson(LookupBody {
+                query: Some("1.2.3.4".to_owned()),
+                indicator_type: None,
+                include_whois: Some(false),
+                include_dns: Some(false),
+                include_asn: Some(false),
+                include_shodan: Some(true),
+                include_maltego: None,
+                timeout: None,
+            }),
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn whois_dns_asn_lookups_return_intended_empty_envelopes() {
+        let resp = match whois_lookup(
+            user(),
+            ApiJson(QueryTypeBody {
+                query: Some("evil.example.com".to_owned()),
+                indicator_type: Some("domain".to_owned()),
+            }),
+        )
+        .await
+        {
+            Ok(Json(v)) => v,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(resp, whois_empty());
+
+        let missing_type = match whois_lookup(
+            user(),
+            ApiJson(QueryTypeBody {
+                query: Some("x".to_owned()),
+                indicator_type: None,
+            }),
+        )
+        .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("expected validation error"),
+        };
+        assert!(matches!(missing_type, ApiError::Validation(_)));
+
+        let dns = match dns_lookup(
+            user(),
+            ApiJson(DnsBody {
+                query: Some("evil.example.com".to_owned()),
+                indicator_type: None,
+            }),
+        )
+        .await
+        {
+            Ok(Json(v)) => v,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(dns, dns_empty());
+
+        let asn = match asn_lookup(
+            user(),
+            ApiJson(QueryTypeBody {
+                query: Some("AS15169".to_owned()),
+                indicator_type: Some("asn".to_owned()),
+            }),
+        )
+        .await
+        {
+            Ok(Json(v)) => v,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(asn, json!({"error": "No ASN data found"}));
+    }
+
+    #[tokio::test]
+    async fn shodan_and_maltego_are_disabled_by_default() {
+        // The workspace forbids `unsafe`, so these tests cannot mutate
+        // SHODAN_ENABLED/SHODAN_API_KEY/MALTEGO_ENABLED to drive the
+        // "enabled" 200 success branch through the HTTP surface — that path
+        // is covered at the pure-function level instead
+        // (`shodan_gate_requires_flag_and_key`/`maltego_gate_is_flag_only`
+        // above). With the ambient env unset (both flags default false),
+        // both handlers must answer the "not enabled" 503 regardless of body.
+        let disabled = shodan_lookup(user(), axum::body::Bytes::new()).await;
+        assert_eq!(disabled.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_of(disabled).await;
+        assert_eq!(body["error"], "Shodan integration not enabled");
+
+        let maltego_disabled = maltego_lookup(user(), axum::body::Bytes::new()).await;
+        assert_eq!(maltego_disabled.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_of(maltego_disabled).await;
+        assert_eq!(body["error"], "Maltego integration not enabled");
+    }
+
+    #[tokio::test]
+    async fn get_config_reports_env_derived_settings() {
+        let Json(body) = match get_config(user()).await {
+            Ok(v) => v,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(body["whois_enabled"], true);
+        assert!(body["research_enabled"].is_boolean());
+    }
 }

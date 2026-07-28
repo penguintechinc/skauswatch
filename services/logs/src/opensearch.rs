@@ -120,6 +120,53 @@ pub async fn ensure_ism_policy(client: &reqwest::Client, base_url: &str, retenti
 mod tests {
     use super::*;
     use chrono::TimeZone as _;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn ensure_ism_policy_applies_successfully() {
+        let mock = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/_plugins/_ism/policies/{ISM_POLICY_ID}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"_id": ISM_POLICY_ID})),
+            )
+            .mount(&mock)
+            .await;
+
+        let client = reqwest::Client::new();
+        ensure_ism_policy(&client, &mock.uri(), 90).await;
+
+        let requests = mock.received_requests().await.unwrap();
+        assert_eq!(
+            requests.len(),
+            1,
+            "exactly one PUT to the ISM policy endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_ism_policy_swallows_error_response() {
+        let mock = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/_plugins/_ism/policies/{ISM_POLICY_ID}")))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock)
+            .await;
+
+        let client = reqwest::Client::new();
+        // Must not panic — v1 `ensure_ism_policy` swallows errors so startup
+        // continues when OpenSearch rejects the policy.
+        ensure_ism_policy(&client, &mock.uri(), 90).await;
+    }
+
+    #[tokio::test]
+    async fn ensure_ism_policy_swallows_transport_failure() {
+        let client = reqwest::Client::new();
+        // Nothing listens on this port — connection refused, exercising the
+        // outer transport-error arm (as opposed to an HTTP-level error status).
+        ensure_ism_policy(&client, "http://127.0.0.1:1", 90).await;
+    }
 
     #[test]
     fn daily_index_uses_dotted_date() {

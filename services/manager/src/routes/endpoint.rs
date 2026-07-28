@@ -1415,4 +1415,257 @@ mod tests {
         assert_eq!(v["inactive"], 0);
         assert_eq!(v["disconnected"], 0);
     }
+
+    use crate::routes::test_support::{authed_user, db_state};
+
+    fn dev_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
+        skauswatch_testkit::license::dev_license("skauswatch")
+    }
+
+    async fn server_for(state: AppState) -> axum_test::TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        axum_test::TestServer::new(app)
+    }
+
+    async fn seed_agent(state: &AppState, agent_id: &str, status: &str) -> i32 {
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO endpoint_agents \
+             (agent_id, hostname, ip_address, os_type, os_version, agent_version, status, \
+              last_heartbeat, metadata, created_at, updated_at) \
+             VALUES ($1, 'host-1', '10.0.0.1', 'linux', 'Ubuntu', '1.0', $2, now(), '{}', \
+                     now(), now()) RETURNING id",
+        )
+        .bind(agent_id)
+        .bind(status)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed_agent: {e}"));
+        id
+    }
+
+    #[tokio::test]
+    async fn register_agent_inserts_then_reregisters() {
+        let state = db_state(dev_license()).await;
+        let server = server_for(state).await;
+
+        let create = server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "agent-x1")
+            .add_header("X-API-Key", valid_key("agent-x1"))
+            .json(&serde_json::json!({
+                "agent_id": "agent-x1", "hostname": "h1", "agent_version": "2.0"
+            }))
+            .await;
+        create.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = create.json();
+        assert_eq!(body["status"], "active");
+
+        let reregister = server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "agent-x1")
+            .add_header("X-API-Key", valid_key("agent-x1"))
+            .json(&serde_json::json!({
+                "agent_id": "agent-x1", "hostname": "h1-updated", "agent_version": "2.1"
+            }))
+            .await;
+        reregister.assert_status(StatusCode::OK);
+        let body: serde_json::Value = reregister.json();
+        assert_eq!(body["message"], "Agent re-registered");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_requires_registration_then_merges_metadata() {
+        let state = db_state(dev_license()).await;
+        let server = server_for(state).await;
+
+        let unregistered = server
+            .post("/api/v1/endpoint/heartbeat")
+            .add_header("X-Agent-ID", "ghost-agent")
+            .add_header("X-API-Key", valid_key("ghost-agent"))
+            .json(&serde_json::json!({"agent_id": "ghost-agent"}))
+            .await;
+        unregistered.assert_status(StatusCode::NOT_FOUND);
+        let body: serde_json::Value = unregistered.json();
+        assert_eq!(body["error"], "Agent not registered");
+
+        server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "agent-hb")
+            .add_header("X-API-Key", valid_key("agent-hb"))
+            .json(&serde_json::json!({
+                "agent_id": "agent-hb", "hostname": "h", "agent_version": "1"
+            }))
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        let res = server
+            .post("/api/v1/endpoint/heartbeat")
+            .add_header("X-Agent-ID", "agent-hb")
+            .add_header("X-API-Key", valid_key("agent-hb"))
+            .json(&serde_json::json!({"agent_id": "agent-hb", "status": "active"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn events_are_stored_when_agent_is_registered() {
+        let state = db_state(dev_license()).await;
+        let server = server_for(state).await;
+        server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "agent-ev")
+            .add_header("X-API-Key", valid_key("agent-ev"))
+            .json(&serde_json::json!({
+                "agent_id": "agent-ev", "hostname": "h", "agent_version": "1"
+            }))
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        let res = server
+            .post("/api/v1/endpoint/events")
+            .add_header("X-Agent-ID", "agent-ev")
+            .add_header("X-API-Key", valid_key("agent-ev"))
+            .json(&serde_json::json!([
+                {"agent_id": "agent-ev", "event_type": "process_start", "severity": "low"},
+                {"agent_id": "unknown-agent", "event_type": "process_start"},
+            ]))
+            .await;
+        res.assert_status(StatusCode::ACCEPTED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["events_received"], 2);
+        assert_eq!(body["events_stored"], 1);
+        assert_eq!(body["errors"][0]["error"], "Agent not registered");
+    }
+
+    #[tokio::test]
+    async fn agent_config_reflects_metadata_overrides() {
+        let state = db_state(dev_license()).await;
+        let server = server_for(state).await;
+
+        let missing = server
+            .get("/api/v1/endpoint/config")
+            .add_header("X-Agent-ID", "cfg-ghost")
+            .add_header("X-API-Key", valid_key("cfg-ghost"))
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "cfg-agent")
+            .add_header("X-API-Key", valid_key("cfg-agent"))
+            .json(&serde_json::json!({
+                "agent_id": "cfg-agent", "hostname": "h", "agent_version": "1",
+                "metadata": {"reporting_interval": 15}
+            }))
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        let res = server
+            .get("/api/v1/endpoint/config")
+            .add_header("X-Agent-ID", "cfg-agent")
+            .add_header("X-API-Key", valid_key("cfg-agent"))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["config"]["reporting_interval"], 15);
+        assert_eq!(body["config"]["heartbeat_interval"], 30);
+    }
+
+    #[tokio::test]
+    async fn list_get_and_events_for_agents_require_jwt() {
+        let state = db_state(dev_license()).await;
+        seed_agent(&state, "op-agent-1", "active").await;
+        let (_, viewer_tok) = authed_user(&state, "op-viewer@example.com", "viewer").await;
+        let (_, admin_tok) = authed_user(&state, "op-admin@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let forbidden = server
+            .get("/api/v1/endpoint/agents")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let list = server
+            .get("/api/v1/endpoint/agents")
+            .authorization_bearer(&admin_tok)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+
+        let get = server
+            .get("/api/v1/endpoint/agents/op-agent-1")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        get.assert_status_ok();
+        let body: serde_json::Value = get.json();
+        assert_eq!(body["agent_id"], "op-agent-1");
+
+        let missing = server
+            .get("/api/v1/endpoint/agents/nope")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        let events = server
+            .get("/api/v1/endpoint/agents/op-agent-1/events")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        events.assert_status_ok();
+
+        let missing_events = server
+            .get("/api/v1/endpoint/agents/nope/events")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        missing_events.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn deactivate_agent_requires_admin() {
+        let state = db_state(dev_license()).await;
+        seed_agent(&state, "deact-agent", "active").await;
+        let (_, viewer_tok) = authed_user(&state, "deact-viewer@example.com", "viewer").await;
+        let (_, admin_tok) = authed_user(&state, "deact-admin@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let forbidden = server
+            .post("/api/v1/endpoint/agents/deact-agent/deactivate")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let missing = server
+            .post("/api/v1/endpoint/agents/nope/deactivate")
+            .authorization_bearer(&admin_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        let res = server
+            .post("/api/v1/endpoint/agents/deact-agent/deactivate")
+            .authorization_bearer(&admin_tok)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["message"], "Agent deactivated");
+    }
+
+    #[tokio::test]
+    async fn statistics_endpoint_reports_counts() {
+        let state = db_state(dev_license()).await;
+        seed_agent(&state, "stat-agent", "active").await;
+        let (_, token) = authed_user(&state, "stat-ep@example.com", "viewer").await;
+        let server = server_for(state).await;
+        let res = server
+            .get("/api/v1/endpoint/statistics")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["total_agents"].as_i64().unwrap_or(0) >= 1);
+        assert!(body["agents_by_status"]["active"].as_i64().unwrap_or(0) >= 1);
+    }
 }

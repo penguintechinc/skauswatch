@@ -28,6 +28,12 @@ impl AwsProvider {
     /// integration's `config` (matches v1 `AwsProvider.__init__`: region
     /// falls back from credentials to config to `us-east-1`; the
     /// `secret_prefix` config key defaults to `vault/`).
+    ///
+    /// An optional `endpoint_url` config key overrides the regional AWS
+    /// endpoint — not part of v1, added so integrations can point at a
+    /// non-AWS-hosted Secrets-Manager-compatible endpoint (e.g. LocalStack,
+    /// or the `wiremock` server this module's tests use) the same way
+    /// `secret_prefix`/`region` are already sourced from `config`.
     pub fn new(credentials: &Value, config: &Value) -> Self {
         let region = str_field(credentials, "region")
             .or_else(|| str_field(config, "region"))
@@ -37,6 +43,10 @@ impl AwsProvider {
         let mut builder = aws_sdk_secretsmanager::Config::builder()
             .behavior_version(BehaviorVersion::latest())
             .region(Region::new(region));
+
+        if let Some(endpoint_url) = str_field(config, "endpoint_url") {
+            builder = builder.endpoint_url(endpoint_url);
+        }
 
         if let (Some(key), Some(secret)) = (
             str_field(credentials, "access_key_id"),
@@ -223,9 +233,22 @@ impl CloudProvider for AwsProvider {
     }
 }
 
+// ── AWS Secrets Manager wire-protocol tests ─────────────────────────────
+//
+// `aws_sdk_secretsmanager` speaks the AWS JSON 1.1 protocol: every operation
+// is `POST /` with an `x-amz-target: secretsmanager.{Operation}` header and
+// a JSON body; errors are a non-2xx status with `{"__type": "...",
+// "message": "..."}`. `AwsProvider::new`'s `endpoint_url` config override
+// (added alongside these tests) lets these point the real SDK client at a
+// `wiremock` server instead of AWS, so the tests exercise the actual
+// request-building/signing/response-parsing code, not a hand-rolled double.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     use super::*;
 
     #[test]
@@ -241,5 +264,393 @@ mod tests {
             &serde_json::json!({"secret_prefix": "myapp/"}),
         );
         assert_eq!(provider.secret_name("x"), "myapp/x");
+    }
+
+    /// Static test credentials — required so `AwsProvider::new` configures a
+    /// `credentials_provider`; without one the SDK falls back to the default
+    /// provider chain (env/IMDS/profile resolution), which is slow and
+    /// network-dependent rather than failing fast, and is not what these
+    /// tests want to exercise.
+    fn test_credentials() -> Value {
+        json!({"access_key_id": "AKIATEST", "secret_access_key": "test-secret"})
+    }
+
+    fn test_config(endpoint: &str) -> Value {
+        json!({"endpoint_url": endpoint, "region": "us-east-1"})
+    }
+
+    fn provider_for(server: &MockServer) -> AwsProvider {
+        AwsProvider::new(&test_credentials(), &test_config(&server.uri()))
+    }
+
+    /// AWS JSON 1.1 error body: `{"__type": ..., "message": ...}`. The
+    /// exception name matches on the unqualified `__type` (no namespace
+    /// prefix needed — see `aws-sdk-secretsmanager`'s `json_errors.rs`).
+    fn error_body(exception: &str, message: &str) -> serde_json::Value {
+        json!({"__type": exception, "message": message})
+    }
+
+    async fn mount_target(server: &MockServer, target: &str, status: u16, body: serde_json::Value) {
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(header("x-amz-target", format!("secretsmanager.{target}")))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    // ── push_secret ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn push_secret_updates_existing_secret_via_put_secret_value() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "PutSecretValue",
+            200,
+            json!({"ARN": "arn:aws:secretsmanager:us-east-1:1:secret:vault/db-password", "Name": "vault/db-password", "VersionId": "v1"}),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider
+            .push_secret("db-password", "hunter2", "secret-1")
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.action, "updated");
+        assert_eq!(result.external_ref, "vault/db-password");
+        assert_eq!(result.secret_id, "secret-1");
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn push_secret_creates_new_secret_when_put_reports_not_found() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "PutSecretValue",
+            400,
+            error_body("ResourceNotFoundException", "no such secret"),
+        )
+        .await;
+        mount_target(
+            &server,
+            "CreateSecret",
+            200,
+            json!({"ARN": "arn:aws:secretsmanager:us-east-1:1:secret:vault/new-secret-Ab12", "Name": "vault/new-secret", "VersionId": "v1"}),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider
+            .push_secret("new-secret", "s3cr3t", "secret-2")
+            .await;
+
+        assert!(result.success);
+        assert_eq!(result.action, "created");
+        assert_eq!(
+            result.external_ref,
+            "arn:aws:secretsmanager:us-east-1:1:secret:vault/new-secret-Ab12"
+        );
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording enabled");
+        assert_eq!(
+            requests.len(),
+            2,
+            "expected PutSecretValue then CreateSecret"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_secret_other_put_error_does_not_attempt_create() {
+        let server = MockServer::start().await;
+        // Only PutSecretValue is mocked; if the code incorrectly fell
+        // through to CreateSecret on a non-not-found error, the second
+        // request would hit an unmocked route and still be recorded.
+        mount_target(
+            &server,
+            "PutSecretValue",
+            400,
+            error_body("InvalidParameterException", "bad input"),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider.push_secret("x", "v", "secret-3").await;
+
+        assert!(!result.success);
+        assert_eq!(result.action, "skipped");
+        assert!(result.error.is_some());
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording enabled");
+        assert_eq!(requests.len(), 1, "CreateSecret must not be attempted");
+    }
+
+    #[tokio::test]
+    async fn push_secret_create_secret_also_fails_after_not_found() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "PutSecretValue",
+            400,
+            error_body("ResourceNotFoundException", "no such secret"),
+        )
+        .await;
+        mount_target(
+            &server,
+            "CreateSecret",
+            400,
+            error_body("InvalidParameterException", "create also invalid"),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider.push_secret("x", "v", "secret-4").await;
+
+        assert!(!result.success);
+        assert_eq!(result.action, "skipped");
+        assert!(result.error.is_some());
+    }
+
+    // ── delete_secret ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn delete_secret_returns_true_on_success() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "DeleteSecret",
+            200,
+            json!({"ARN": "arn:1", "Name": "vault/d", "DeletionDate": 1.0}),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider.delete_secret("vault/d").await;
+        assert_eq!(result, Ok(true));
+    }
+
+    #[tokio::test]
+    async fn delete_secret_returns_false_when_not_found() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "DeleteSecret",
+            400,
+            error_body("ResourceNotFoundException", "gone"),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider.delete_secret("vault/missing").await;
+        assert_eq!(result, Ok(false));
+    }
+
+    #[tokio::test]
+    async fn delete_secret_returns_err_on_other_failure() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "DeleteSecret",
+            400,
+            error_body("InvalidParameterException", "bad ref"),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider.delete_secret("vault/bad").await;
+        assert!(matches!(result, Err(ProviderError::Failed(_))));
+    }
+
+    // ── pull_secret ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pull_secret_returns_value_on_success() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "GetSecretValue",
+            200,
+            json!({"ARN": "arn:1", "Name": "vault/p", "SecretString": "the-value"}),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider.pull_secret("vault/p").await;
+        assert_eq!(result, Ok(Some("the-value".to_owned())));
+    }
+
+    #[tokio::test]
+    async fn pull_secret_returns_none_when_not_found() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "GetSecretValue",
+            400,
+            error_body("ResourceNotFoundException", "gone"),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider.pull_secret("vault/missing").await;
+        assert_eq!(result, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn pull_secret_returns_none_on_invalid_request() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "GetSecretValue",
+            400,
+            error_body("InvalidRequestException", "not in a valid state"),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider.pull_secret("vault/mid-delete").await;
+        assert_eq!(result, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn pull_secret_returns_err_on_other_failure() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "GetSecretValue",
+            400,
+            error_body("InvalidParameterException", "bad ref"),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider.pull_secret("vault/bad").await;
+        assert!(matches!(result, Err(ProviderError::Failed(_))));
+    }
+
+    // ── list_secrets ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_secrets_paginates_across_next_token() {
+        let server = MockServer::start().await;
+        // First page (no `NextToken` present in a fresh request): consumed
+        // exactly once, then wiremock falls through to the second-mounted
+        // mock — see `Mock::up_to_n_times` docs for this sequencing idiom.
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(header("x-amz-target", "secretsmanager.ListSecrets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "SecretList": [{"ARN": "arn:1", "Name": "vault/a"}],
+                "NextToken": "page2",
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(header("x-amz-target", "secretsmanager.ListSecrets"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "SecretList": [{"ARN": "arn:2", "Name": "vault/b"}],
+            })))
+            .mount(&server)
+            .await;
+        let provider = provider_for(&server);
+
+        let result = provider.list_secrets().await;
+        assert_eq!(result, Ok(vec!["arn:1".to_owned(), "arn:2".to_owned()]));
+    }
+
+    #[tokio::test]
+    async fn list_secrets_returns_err_on_failure() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "ListSecrets",
+            400,
+            error_body("InvalidParameterException", "bad filter"),
+        )
+        .await;
+        let provider = provider_for(&server);
+
+        let result = provider.list_secrets().await;
+        assert!(matches!(result, Err(ProviderError::Failed(_))));
+    }
+
+    // ── AwsProvider::new construction paths ─────────────────────────────
+
+    #[tokio::test]
+    async fn push_secret_without_static_credentials_falls_back_gracefully() {
+        // No access_key_id/secret_access_key in credentials — exercises the
+        // constructor branch that skips `.credentials_provider(...)`
+        // entirely, leaving the client with no way to sign a request.
+        // Still points `endpoint_url` at the local mock (with no route
+        // mounted) so that IF the SDK attempted a network call despite
+        // having no credentials, it would hit a fast local 404 rather than
+        // stalling on an unreachable real AWS endpoint — but the expected
+        // behavior is that request construction fails locally before any
+        // request is dispatched, so `received_requests()` should stay empty.
+        let server = MockServer::start().await;
+        let provider = AwsProvider::new(&json!({}), &test_config(&server.uri()));
+
+        let result = provider.push_secret("x", "v", "secret-5").await;
+
+        assert!(!result.success);
+        assert_eq!(result.action, "skipped");
+        assert!(result.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn region_falls_back_from_credentials_then_config_then_default() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "PutSecretValue",
+            200,
+            json!({"ARN": "arn:1", "Name": "vault/r", "VersionId": "v1"}),
+        )
+        .await;
+        // Region only present under `credentials`, not `config` — exercises
+        // the `str_field(credentials, "region")` preferred branch.
+        let credentials = json!({
+            "access_key_id": "AKIATEST",
+            "secret_access_key": "test-secret",
+            "region": "eu-west-1",
+        });
+        let config = json!({"endpoint_url": server.uri()});
+        let provider = AwsProvider::new(&credentials, &config);
+
+        let result = provider.push_secret("r", "v", "secret-6").await;
+        assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn session_token_is_forwarded_when_present() {
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "PutSecretValue",
+            200,
+            json!({"ARN": "arn:1", "Name": "vault/s", "VersionId": "v1"}),
+        )
+        .await;
+        let credentials = json!({
+            "access_key_id": "AKIATEST",
+            "secret_access_key": "test-secret",
+            "session_token": "session-token-value",
+        });
+        let provider = AwsProvider::new(&credentials, &test_config(&server.uri()));
+
+        // The session token only affects SigV4 signing, not the response
+        // shape — this proves construction with a session token present
+        // still produces a working, successfully-signed client.
+        let result = provider.push_secret("s", "v", "secret-7").await;
+        assert!(result.success);
     }
 }

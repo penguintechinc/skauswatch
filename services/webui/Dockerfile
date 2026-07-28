@@ -33,10 +33,20 @@ RUN chown -R webui:webui /app
 
 USER webui
 
+# Env var names/defaults must match what src/server/index.ts actually reads
+# (process.env.MANAGER_URL / VAULT_BACKEND_URL / CODESCAN_BACKEND_URL /
+# MONITOR_URL) — the old FLASK_API_URL/GO_API_URL vars pointed at
+# flask-backend/go-backend, which don't exist post-Rust-port and aren't read
+# by any code path. Hosts match the k8s "service name = directory name"
+# convention; ports match each Rust service's actual default (manager 5000,
+# vault 8080, codescan-backend 5005, monitor 8003) — Helm values override
+# these per environment same as any other service.
 ENV NODE_ENV=production \
     PORT=3000 \
-    FLASK_API_URL=http://flask-backend:5000 \
-    GO_API_URL=http://go-backend:8080
+    MANAGER_URL=http://manager:5000 \
+    VAULT_BACKEND_URL=http://vault:8080 \
+    CODESCAN_BACKEND_URL=http://codescan-backend:5005 \
+    MONITOR_URL=http://monitor:8003
 
 EXPOSE 3000
 

@@ -62,10 +62,10 @@ struct RepoConfig {
     description: Option<String>,
     is_active: bool,
     credential_id: Option<i64>,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    created_at: Option<chrono::NaiveDateTime>,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    updated_at: Option<chrono::NaiveDateTime>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 const REPO_CONFIG_COLUMNS: &str = "id, tenant_id, team_id, owner_id, provider, repo_url, \
@@ -460,5 +460,126 @@ mod tests {
         resp.assert_status(StatusCode::FORBIDDEN);
         let body: serde_json::Value = resp.json();
         assert_eq!(body["error"], "Insufficient permissions");
+    }
+
+    fn create_body(repo_name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "provider": "github",
+            "repo_url": format!("https://github.com/a/{repo_name}"),
+            "repo_name": repo_name,
+        })
+    }
+
+    #[tokio::test]
+    async fn list_is_empty_against_a_fresh_db() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = sign_token(&state, "1", "viewer");
+        let server = test_server(state);
+        let resp = server
+            .get("/api/v1/codescan/repos")
+            .authorization_bearer(token)
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["total"], 0);
+        assert_eq!(body["data"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn create_get_update_delete_round_trip() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+
+        let created = server
+            .post("/api/v1/codescan/repos")
+            .authorization_bearer(&admin)
+            .json(&create_body("roundtrip-repo"))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let created_body: serde_json::Value = created.json();
+        let repo_id = created_body["config"]["id"].as_i64().unwrap_or_default();
+        assert!(repo_id > 0, "expected a positive assigned id");
+        assert_eq!(created_body["config"]["repo_name"], "roundtrip-repo");
+        assert_eq!(created_body["config"]["enabled"], true);
+
+        let fetched = server
+            .get(&format!("/api/v1/codescan/repos/{repo_id}"))
+            .authorization_bearer(&admin)
+            .await;
+        fetched.assert_status_ok();
+        let fetched_body: serde_json::Value = fetched.json();
+        assert_eq!(fetched_body["repo_name"], "roundtrip-repo");
+
+        let updated = server
+            .put(&format!("/api/v1/codescan/repos/{repo_id}"))
+            .authorization_bearer(&admin)
+            .json(&serde_json::json!({"enabled": false, "display_name": "Round Trip"}))
+            .await;
+        updated.assert_status_ok();
+        let updated_body: serde_json::Value = updated.json();
+        assert_eq!(updated_body["config"]["enabled"], false);
+        assert_eq!(updated_body["config"]["display_name"], "Round Trip");
+
+        let deleted = server
+            .delete(&format!("/api/v1/codescan/repos/{repo_id}"))
+            .authorization_bearer(&admin)
+            .await;
+        deleted.assert_status_ok();
+        let deleted_body: serde_json::Value = deleted.json();
+        assert_eq!(deleted_body["deleted"], true);
+
+        let missing = server
+            .get(&format!("/api/v1/codescan/repos/{repo_id}"))
+            .authorization_bearer(&admin)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_duplicate_provider_and_repo_name() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+
+        let first = server
+            .post("/api/v1/codescan/repos")
+            .authorization_bearer(&admin)
+            .json(&create_body("dup-repo"))
+            .await;
+        first.assert_status(StatusCode::CREATED);
+
+        let second = server
+            .post("/api/v1/codescan/repos")
+            .authorization_bearer(&admin)
+            .json(&create_body("dup-repo"))
+            .await;
+        second.assert_status(StatusCode::CONFLICT);
+        let body: serde_json::Value = second.json();
+        assert_eq!(body["error"], "Repository already configured");
+    }
+
+    #[tokio::test]
+    async fn get_update_delete_404_on_unknown_id() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+
+        server
+            .get("/api/v1/codescan/repos/999999")
+            .authorization_bearer(&admin)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        server
+            .put("/api/v1/codescan/repos/999999")
+            .authorization_bearer(&admin)
+            .json(&serde_json::json!({"enabled": false}))
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        server
+            .delete("/api/v1/codescan/repos/999999")
+            .authorization_bearer(&admin)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
     }
 }

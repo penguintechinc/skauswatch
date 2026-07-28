@@ -8,8 +8,7 @@ keywords:
   - skauswatch
   - aaa
   - monitor
-  - flask
-  - python
+  - rust
 maintainers:
   - name: Penguin Tech Inc
     email: support@penguintech.io

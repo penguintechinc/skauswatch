@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-auth"
 description = "JWT/OIDC validation, mandatory-claims model, and tenant/scope middleware"
 version.workspace = true

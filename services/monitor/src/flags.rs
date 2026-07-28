@@ -35,25 +35,40 @@ pub async fn flag_denied(state: &AppState) -> Option<Response> {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use penguin_licensing::{LicenseClient, LicenseConfig};
-
-    fn dev_license() -> std::sync::Arc<LicenseClient> {
-        let cfg = match LicenseConfig::new("skauswatch") {
-            Ok(c) => c,
-            Err(e) => panic!("license config: {e}"),
-        };
-        match LicenseClient::new(cfg) {
-            Ok(c) => c,
-            Err(e) => panic!("license client: {e}"),
-        }
-    }
 
     #[tokio::test]
     async fn dev_bypass_allows_the_flag() {
-        let state = crate::state::AppStateInner::for_tests(dev_license());
+        let state = crate::state::AppStateInner::for_tests(
+            skauswatch_testkit::license::dev_license("skauswatch"),
+        );
         assert!(flag_denied(&state).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn gated_license_denies_the_flag_with_a_403_envelope() {
+        let state = crate::state::AppStateInner::for_tests(
+            skauswatch_testkit::license::gated_license("skauswatch"),
+        );
+        let resp = match flag_denied(&state).await {
+            Some(r) => r,
+            None => panic!("expected the gated license to deny the flag"),
+        };
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+        let bytes = match axum::body::to_bytes(resp.into_body(), usize::MAX).await {
+            Ok(b) => b,
+            Err(e) => panic!("read body: {e}"),
+        };
+        let body: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => panic!("parse body: {e}"),
+        };
+        assert_eq!(body["error"], "Forbidden");
+        assert_eq!(
+            body["detail"],
+            "monitor is not enabled for this deployment."
+        );
     }
 }

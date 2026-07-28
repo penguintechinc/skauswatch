@@ -11,6 +11,8 @@ mod license;
 mod research;
 mod s3_scan;
 mod siem;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod threat_intel;
 mod users;
 

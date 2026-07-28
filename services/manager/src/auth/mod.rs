@@ -31,7 +31,21 @@ pub struct AccessClaims {
     pub iat: i64,
 }
 
-/// Refresh-token claims — exact v1 shape.
+/// Refresh-token claims — v1 shape (`sub`/`type`/`exp`/`iat`) plus a `jti`
+/// nonce. Bug found via real-DB testing (`docs/v2-port/testing-pattern.md`):
+/// v1's Python `datetime.utcnow().timestamp()` carries microsecond
+/// precision, but the Rust port's `Utc::now().timestamp()` truncates to
+/// whole seconds — so two refresh tokens minted for the same user within
+/// the same wall-clock second (e.g. login immediately followed by refresh,
+/// or two concurrent refreshes) become byte-identical JWTs. Since
+/// `refresh_tokens.token_hash` is `UNIQUE` (schema authority:
+/// `tests/parity/seed_v2.sql`), the second `INSERT` in `issue_token_pair`
+/// then fails with a constraint violation, surfacing as a 500 on an
+/// otherwise-valid request. `jti` is a fresh UUID per issuance, guaranteeing
+/// `token_hash` uniqueness regardless of timing; it is never validated on
+/// decode (`#[serde(default)]`), so it changes nothing about the v1 wire
+/// contract — no client ever inspects individual JWT claims, only the
+/// opaque `access_token`/`refresh_token` strings in the HTTP response body.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RefreshClaims {
     /// String-encoded user id.
@@ -43,6 +57,9 @@ pub struct RefreshClaims {
     pub exp: i64,
     /// Issued-at (epoch seconds).
     pub iat: i64,
+    /// Per-issuance random nonce — see struct docs.
+    #[serde(default)]
+    pub jti: String,
 }
 
 /// Issues a v1-shape access token.
@@ -80,6 +97,7 @@ pub fn create_refresh_token(
         token_type: "refresh".to_owned(),
         exp: now + expires_days * 86_400,
         iat: now,
+        jti: uuid::Uuid::new_v4().to_string(),
     };
     jsonwebtoken::encode(
         &Header::default(),
@@ -331,5 +349,124 @@ mod tests {
             token_hash("abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    fn parts_with_auth(header: Option<&str>) -> axum::http::request::Parts {
+        let mut builder = axum::http::Request::builder().method("GET").uri("/x");
+        if let Some(h) = header {
+            builder = builder.header(axum::http::header::AUTHORIZATION, h);
+        }
+        let req = match builder.body(()) {
+            Ok(r) => r,
+            Err(e) => panic!("request: {e}"),
+        };
+        req.into_parts().0
+    }
+
+    fn dev_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
+        skauswatch_testkit::license::dev_license("skauswatch")
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_missing_header() {
+        let state = crate::state::AppStateInner::for_tests(dev_license());
+        let mut parts = parts_with_auth(None);
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Unauthorized(msg)) => {
+                assert_eq!(msg, "Missing or invalid authorization header");
+            }
+            other => panic!("expected 401, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_non_bearer_scheme() {
+        let state = crate::state::AppStateInner::for_tests(dev_license());
+        let mut parts = parts_with_auth(Some("Token abc"));
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Unauthorized(msg)) => {
+                assert_eq!(msg, "Missing or invalid authorization header");
+            }
+            other => panic!("expected 401, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_garbage_token() {
+        let state = crate::state::AppStateInner::for_tests(dev_license());
+        let mut parts = parts_with_auth(Some("Bearer not-a-jwt"));
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "Invalid token"),
+            other => panic!("expected 401, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_unknown_user_id_against_real_db() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = create_access_token(999_999, "admin", &state.auth.jwt_secret, 30)
+            .unwrap_or_else(|e| panic!("encode: {e:?}"));
+        let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "User not found or inactive"),
+            other => panic!("expected 401, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_inactive_user() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id,): (i32,) = match sqlx::query_as(
+            "INSERT INTO users (email, password_hash, full_name, role, is_active, created_at) \
+             VALUES ('inactive@example.com', 'x', 'Inactive', 'viewer', false, now()) \
+             RETURNING id",
+        )
+        .fetch_one(&state.db)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => panic!("seed: {e}"),
+        };
+        let token = create_access_token(id, "viewer", &state.auth.jwt_secret, 30)
+            .unwrap_or_else(|e| panic!("encode: {e:?}"));
+        let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "User not found or inactive"),
+            other => panic!("expected 401, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_resolves_active_user_from_db() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) =
+            crate::routes::test_support::authed_user(&state, "active@example.com", "admin").await;
+        let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+        assert_eq!(user.email, "active@example.com");
+        assert_eq!(user.role, "admin");
+        assert!(user.is_active);
+    }
+
+    #[test]
+    fn require_role_allows_and_denies() {
+        let user = CurrentUser {
+            id: 1,
+            email: "u@example.com".to_owned(),
+            full_name: None,
+            role: "viewer".to_owned(),
+            is_active: true,
+            mfa_enabled: false,
+            created_at: None,
+        };
+        assert!(user.require_role(&["viewer", "admin"]).is_ok());
+        match user.require_role(&["admin"]) {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
+            other => panic!("expected 403, got {other:?}"),
+        }
     }
 }

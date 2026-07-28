@@ -111,4 +111,91 @@ impl AppStateInner {
             jwt_secret: "test-secret".to_owned(),
         })
     }
+
+    /// Builds a real (rcgen-backed X.509, `ssh-keygen`-backed SSH) pair of CA
+    /// engines rooted at a fresh temp dir, plus the matching `X509CaConfig` —
+    /// the shared setup behind [`Self::for_tests_with_real_ca`] and
+    /// [`Self::for_tests_with_db`], so both test constructors build CA
+    /// material identically and only differ in which DB pool they wire in.
+    #[cfg(test)]
+    #[allow(clippy::panic)] // test-only helper fails loudly by design
+    fn real_test_cas() -> (Arc<X509Ca>, Arc<SshCa>, X509CaConfig) {
+        let dir =
+            std::env::temp_dir().join(format!("skauswatch-pki-realca-{}", uuid::Uuid::new_v4()));
+        let x509_config = X509CaConfig {
+            ca_key_path: dir.join("ca.key").to_string_lossy().into_owned(),
+            ca_cert_path: dir.join("ca.crt").to_string_lossy().into_owned(),
+            ca_key_password: None,
+            default_validity_days: 365,
+            max_validity_days: 825,
+            default_key_algorithm: "RSA".to_owned(),
+            default_key_size: 2048,
+            crl_validity_days: 7,
+            ocsp_responder_url: None,
+        };
+        let ssh_config = SshCaConfig {
+            ca_key_path: dir.join("sshca").to_string_lossy().into_owned(),
+            ca_public_key_path: dir.join("sshca.pub").to_string_lossy().into_owned(),
+            ca_key_password: None,
+            default_validity_seconds: 86_400,
+            max_validity_seconds: 604_800,
+            default_key_type: "ed25519".to_owned(),
+            krl_path: dir.join("revoked_keys").to_string_lossy().into_owned(),
+        };
+
+        let x509 = Arc::new(
+            X509Ca::load_or_generate(x509_config.clone())
+                .unwrap_or_else(|e| panic!("real test X.509 CA: {e}")),
+        );
+        let ssh = Arc::new(
+            SshCa::load_or_generate(ssh_config).unwrap_or_else(|e| panic!("real test SSH CA: {e}")),
+        );
+        (x509, ssh, x509_config)
+    }
+
+    /// Like [`Self::for_tests`], but with a *real* `ssh-keygen`-backed
+    /// `SshCa::load_or_generate` instead of the canned `SshCa::for_tests()`
+    /// — for router/gRPC tests that need genuine SSH certificate issuance to
+    /// execute (real subprocess, real signing) before the still-unreachable
+    /// DB call fails. Requires `ssh-keygen` on `PATH` (present on the CI
+    /// `ubuntu-latest` runner; install `openssh-client` for local runs in a
+    /// stripped-down `rust:*-bookworm` container — see
+    /// `docs/v2-port/testing-pattern.md`).
+    #[cfg(test)]
+    #[allow(clippy::panic)] // test-only constructor fails loudly by design
+    pub fn for_tests_with_real_ca() -> AppState {
+        let (x509, ssh, x509_config) = Self::real_test_cas();
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@127.0.0.1:1/test")
+            .unwrap_or_else(|e| panic!("lazy test pool: {e}"));
+
+        Arc::new(Self {
+            manager: Arc::new(CertManager::new(x509, ssh, db)),
+            x509_config,
+            server: ServerConfig {
+                api_port: 8001,
+                grpc_port: 50_052,
+            },
+            jwt_secret: "test-secret".to_owned(),
+        })
+    }
+
+    /// Same real CA engines as [`Self::for_tests_with_real_ca`], but wired to
+    /// a real, migrated Postgres pool instead of a lazy/unreachable one — for
+    /// DB-backed success-path tests (issue -> get, revoke -> get, list,
+    /// CRL/KRL, statistics, audit log) per `docs/v2-port/testing-pattern.md`'s
+    /// `for_tests_with_db` fan-out pattern.
+    #[cfg(test)]
+    pub fn for_tests_with_db(db: sqlx::PgPool) -> AppState {
+        let (x509, ssh, x509_config) = Self::real_test_cas();
+        Arc::new(Self {
+            manager: Arc::new(CertManager::new(x509, ssh, db)),
+            x509_config,
+            server: ServerConfig {
+                api_port: 8001,
+                grpc_port: 50_052,
+            },
+            jwt_secret: "test-secret".to_owned(),
+        })
+    }
 }

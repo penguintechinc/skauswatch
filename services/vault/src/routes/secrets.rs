@@ -531,6 +531,13 @@ mod tests {
         TestServer::new(app)
     }
 
+    fn test_server_with_state(state: crate::state::AppState) -> TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        TestServer::new(app)
+    }
+
     fn token(scopes: &str) -> String {
         use chrono::Utc;
         use jsonwebtoken::{EncodingKey, Header};
@@ -648,5 +655,384 @@ mod tests {
             }
             other => panic!("expected InsufficientScope, got {other:?}"),
         }
+    }
+
+    // -- DB-backed handler tests (real Postgres via skauswatch-testkit) --
+
+    use crate::routes::test_support::{db_state, sign_token};
+
+    #[tokio::test]
+    async fn create_secret_response_never_leaks_encrypted_fields() {
+        let state = db_state(dev_license()).await;
+        let token = sign_token(&state, "owner-1", "secrets:write");
+        let server = test_server_with_state(state);
+
+        let resp = server
+            .post("/api/v1/secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"name": "db-password", "value": "hunter2", "type": "db_password"}))
+            .await;
+        resp.assert_status(axum::http::StatusCode::CREATED);
+        let body: Value = resp.json();
+        assert_eq!(body["name"], "db-password");
+        assert_eq!(body["secret_type"], "db_password");
+        assert!(body.get("encrypted_value").is_none());
+        assert!(body.get("encrypted_dek").is_none());
+        assert!(body.get("value").is_none());
+    }
+
+    #[tokio::test]
+    async fn create_secret_defaults_type_to_api_key() {
+        let state = db_state(dev_license()).await;
+        let token = sign_token(&state, "owner-1", "secrets:write");
+        let server = test_server_with_state(state);
+        let resp = server
+            .post("/api/v1/secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"name": "n", "value": "v"}))
+            .await;
+        resp.assert_status(axum::http::StatusCode::CREATED);
+        let body: Value = resp.json();
+        assert_eq!(body["secret_type"], "api_key");
+    }
+
+    #[tokio::test]
+    async fn list_secrets_is_empty_against_a_fresh_db() {
+        let state = db_state(dev_license()).await;
+        let token = sign_token(&state, "u", "secrets:read");
+        let server = test_server_with_state(state);
+        let resp = server
+            .get("/api/v1/secrets")
+            .authorization_bearer(&token)
+            .await;
+        resp.assert_status_ok();
+        let body: Value = resp.json();
+        assert_eq!(body["total"], 0);
+        assert_eq!(body["secrets"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn list_secrets_filters_by_type_and_paginates() {
+        let state = db_state(dev_license()).await;
+        let token = sign_token(&state, "owner-1", "secrets:write secrets:read");
+        let server = test_server_with_state(state);
+
+        for (name, kind) in [("a", "api_key"), ("b", "api_key"), ("c", "token")] {
+            let resp = server
+                .post("/api/v1/secrets")
+                .authorization_bearer(&token)
+                .json(&json!({"name": name, "value": "v", "type": kind}))
+                .await;
+            resp.assert_status(axum::http::StatusCode::CREATED);
+        }
+
+        let filtered = server
+            .get("/api/v1/secrets?type=api_key")
+            .authorization_bearer(&token)
+            .await;
+        filtered.assert_status_ok();
+        let filtered_body: Value = filtered.json();
+        assert_eq!(filtered_body["total"], 2);
+
+        let paged = server
+            .get("/api/v1/secrets?page=1&per_page=1")
+            .authorization_bearer(&token)
+            .await;
+        paged.assert_status_ok();
+        let paged_body: Value = paged.json();
+        assert_eq!(paged_body["total"], 3);
+        assert_eq!(paged_body["secrets"].as_array().map(Vec::len), Some(1));
+        assert_eq!(paged_body["per_page"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_secret_404_on_unknown_id() {
+        let state = db_state(dev_license()).await;
+        let token = sign_token(&state, "u", "secrets:read");
+        let server = test_server_with_state(state);
+        let resp = server
+            .get("/api/v1/secrets/does-not-exist")
+            .authorization_bearer(&token)
+            .await;
+        resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn update_secret_round_trip_and_404() {
+        let state = db_state(dev_license()).await;
+        let token = sign_token(&state, "owner-1", "secrets:write secrets:read");
+        let server = test_server_with_state(state);
+
+        let created = server
+            .post("/api/v1/secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"name": "orig", "value": "v"}))
+            .await;
+        let id = created.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let updated = server
+            .put(&format!("/api/v1/secrets/{id}"))
+            .authorization_bearer(&token)
+            .json(&json!({"name": "renamed", "tags": ["x"]}))
+            .await;
+        updated.assert_status_ok();
+        let updated_body: Value = updated.json();
+        assert_eq!(updated_body["name"], "renamed");
+        assert_eq!(updated_body["tags"], json!(["x"]));
+
+        let missing = server
+            .put("/api/v1/secrets/does-not-exist")
+            .authorization_bearer(&token)
+            .json(&json!({"name": "x"}))
+            .await;
+        missing.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_secret_round_trip_and_404() {
+        let state = db_state(dev_license()).await;
+        let token = sign_token(
+            &state,
+            "owner-1",
+            "secrets:write secrets:read secrets:delete",
+        );
+        let server = test_server_with_state(state);
+
+        let created = server
+            .post("/api/v1/secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"name": "gone-soon", "value": "v"}))
+            .await;
+        let id = created.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let deleted = server
+            .delete(&format!("/api/v1/secrets/{id}"))
+            .authorization_bearer(&token)
+            .await;
+        deleted.assert_status(axum::http::StatusCode::NO_CONTENT);
+
+        let refetch = server
+            .get(&format!("/api/v1/secrets/{id}"))
+            .authorization_bearer(&token)
+            .await;
+        refetch.assert_status(axum::http::StatusCode::NOT_FOUND);
+
+        let missing = server
+            .delete("/api/v1/secrets/does-not-exist")
+            .authorization_bearer(&token)
+            .await;
+        missing.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_secret_value_round_trips_plaintext_via_bearer_token() {
+        let state = db_state(dev_license()).await;
+        let token = sign_token(&state, "owner-1", "secrets:write secrets:read");
+        let server = test_server_with_state(state);
+
+        let created = server
+            .post("/api/v1/secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"name": "n", "value": "correct-horse-battery-staple"}))
+            .await;
+        let id = created.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let value_resp = server
+            .get(&format!("/api/v1/secrets/{id}/value"))
+            .authorization_bearer(&token)
+            .await;
+        value_resp.assert_status_ok();
+        let value_body: Value = value_resp.json();
+        assert_eq!(value_body["value"], "correct-horse-battery-staple");
+    }
+
+    #[tokio::test]
+    async fn get_secret_value_rejects_invalid_token() {
+        let state = db_state(dev_license()).await;
+        let server = test_server_with_state(state);
+        let resp = server
+            .get("/api/v1/secrets/does-not-matter/value")
+            .authorization_bearer("garbage-not-a-jwt")
+            .await;
+        resp.assert_status(axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_secret_value_404_on_unknown_id() {
+        let state = db_state(dev_license()).await;
+        let token = sign_token(&state, "u", "secrets:read");
+        let server = test_server_with_state(state);
+        let resp = server
+            .get("/api/v1/secrets/does-not-exist/value")
+            .authorization_bearer(&token)
+            .await;
+        resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_secret_value_accepts_a_valid_jit_token() {
+        use sha2::{Digest, Sha256};
+
+        let state = db_state(dev_license()).await;
+        let owner_token = sign_token(&state, "owner-1", "secrets:write");
+        let server = test_server_with_state(state.clone());
+
+        let created = server
+            .post("/api/v1/secrets")
+            .authorization_bearer(&owner_token)
+            .json(&json!({"name": "jit-target", "value": "jit-plaintext"}))
+            .await;
+        let secret_id = created.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let expires_epoch = chrono::Utc::now().timestamp() + 3600;
+        let grant_id = "grant-1";
+        let grantee_id = "grantee-1";
+        let jit_token = format!("jit:{grant_id}:{grantee_id}:{expires_epoch}");
+        let mut hasher = Sha256::new();
+        hasher.update(jit_token.as_bytes());
+        let hash = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+
+        // Satisfies `vault_jit_grants_request_id_fkey` — a real grant only
+        // ever exists once `approve_jit_request` has created its parent
+        // `vault_jit_requests` row.
+        sqlx::query(
+            "INSERT INTO vault_jit_requests (id, secret_id, requestor_id, reason, \
+             requested_duration_seconds, status, created_at) \
+             VALUES ('request-1', $1, $2, 'test', 3600, 'approved', $3)",
+        )
+        .bind(&secret_id)
+        .bind(grantee_id)
+        .bind(chrono::Utc::now().naive_utc())
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed jit request: {e}"));
+
+        sqlx::query(
+            "INSERT INTO vault_jit_grants (id, request_id, secret_id, grantee_id, \
+             access_token_hash, expires_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(grant_id)
+        .bind("request-1")
+        .bind(&secret_id)
+        .bind(grantee_id)
+        .bind(&hash)
+        .bind(
+            chrono::DateTime::from_timestamp(expires_epoch, 0)
+                .unwrap_or_default()
+                .naive_utc(),
+        )
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed jit grant: {e}"));
+
+        let resp = server
+            .get(&format!("/api/v1/secrets/{secret_id}/value"))
+            .authorization_bearer(&jit_token)
+            .await;
+        resp.assert_status_ok();
+        let body: Value = resp.json();
+        assert_eq!(body["value"], "jit-plaintext");
+    }
+
+    #[tokio::test]
+    async fn list_secret_versions_round_trip_and_404() {
+        let state = db_state(dev_license()).await;
+        let token = sign_token(&state, "owner-1", "secrets:write secrets:read");
+        let server = test_server_with_state(state);
+
+        let created = server
+            .post("/api/v1/secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"name": "n", "value": "v"}))
+            .await;
+        let id = created.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let versions = server
+            .get(&format!("/api/v1/secrets/{id}/versions"))
+            .authorization_bearer(&token)
+            .await;
+        versions.assert_status_ok();
+        let body: Value = versions.json();
+        assert_eq!(body["versions"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["versions"][0]["version_number"], 1);
+
+        let missing = server
+            .get("/api/v1/secrets/does-not-exist/versions")
+            .authorization_bearer(&token)
+            .await;
+        missing.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn rotate_secret_creates_new_version_and_updates_value() {
+        let state = db_state(dev_license()).await;
+        let token = sign_token(&state, "owner-1", "secrets:write secrets:read");
+        let server = test_server_with_state(state);
+
+        let created = server
+            .post("/api/v1/secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"name": "n", "value": "old-value"}))
+            .await;
+        let id = created.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let rotated = server
+            .post(&format!("/api/v1/secrets/{id}/rotate"))
+            .authorization_bearer(&token)
+            .json(&json!({"value": "new-value"}))
+            .await;
+        rotated.assert_status_ok();
+        let rotated_body: Value = rotated.json();
+        assert_eq!(rotated_body["version"], 2);
+
+        let value_resp = server
+            .get(&format!("/api/v1/secrets/{id}/value"))
+            .authorization_bearer(&token)
+            .await;
+        let value_body: Value = value_resp.json();
+        assert_eq!(value_body["value"], "new-value");
+
+        let versions = server
+            .get(&format!("/api/v1/secrets/{id}/versions"))
+            .authorization_bearer(&token)
+            .await;
+        let versions_body: Value = versions.json();
+        assert_eq!(versions_body["versions"].as_array().map(Vec::len), Some(2));
+
+        let empty_value = server
+            .post(&format!("/api/v1/secrets/{id}/rotate"))
+            .authorization_bearer(&token)
+            .json(&json!({"value": ""}))
+            .await;
+        empty_value.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+        let missing = server
+            .post("/api/v1/secrets/does-not-exist/rotate")
+            .authorization_bearer(&token)
+            .json(&json!({"value": "x"}))
+            .await;
+        missing.assert_status(axum::http::StatusCode::NOT_FOUND);
     }
 }

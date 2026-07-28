@@ -1,9 +1,11 @@
-replicaCount: 1
+# Default (prod-safe baseline) values for skauswatch-worker-codescan.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
 
 image:
-  repository: ghcr.io/penguintechinc/skauswatch-worker-codescan
+  repository: ghcr.io/penguintechinc/skauswatch/worker-codescan
   pullPolicy: IfNotPresent
-  tag: latest
+  tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -26,40 +28,29 @@ securityContext:
   capabilities:
     drop:
       - ALL
-  readOnlyRootFilesystem: false
+  readOnlyRootFilesystem: true
+
+healthPort: 8080
+metricsPort: 9090
 
 service:
   enabled: true
-  type: ClusterIP
-  port: 5005
-  targetPort: 5005
 
-# No ingress - internal service only
 ingress:
   enabled: false
 
 resources:
   limits:
-    cpu: "500m"
-    memory: 512Mi
+    cpu: 1000m
+    memory: 1Gi
   requests:
-    cpu: 100m
-    memory: 128Mi
-
-celery:
-  replicaCount: 1
-  resources:
-    limits:
-      cpu: "1"
-      memory: 1Gi
-    requests:
-      cpu: 100m
-      memory: 128Mi
+    cpu: 500m
+    memory: 512Mi
 
 autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 3
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
   targetCPUUtilizationPercentage: 70
   targetMemoryUtilizationPercentage: 80
 
@@ -67,35 +58,49 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# services/worker-codescan/src/config.rs: pure Redis Streams consumer + AI
+# provider — no DB access, no Celery (the Rust rewrite dropped the Python
+# Celery broker entirely; see removed templates/deployment-celery.yaml).
 env:
-  - name: CODESCAN_PORT
-    value: "5005"
-  - name: FLASK_ENV
-    value: "production"
-  - name: DB_HOST
-    value: "postgres"
-  - name: DB_PORT
-    value: "5432"
-  - name: DB_NAME
+  - name: CONSUMER_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: HEALTH_PORT
+    value: "8080"
+  - name: RUST_LOG
     valueFrom:
       configMapKeyRef:
         name: skauswatch-worker-codescan-config
-        key: db-name
-  - name: CODESCAN_DB_USER
+        key: log-level
+  - name: REDIS_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: redis-url
+  - name: REDIS_KEY_PREFIX
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: redis-key-prefix
+  - name: REDIS_PASSWORD
     valueFrom:
       secretKeyRef:
         name: skauswatch-worker-codescan-secret
-        key: codescan-db-user
-  - name: CODESCAN_DB_PASS
+        key: redis-password
+        optional: true
+  - name: CONSUMER_GROUP
+    value: "codescan-workers"
+  - name: AI_PROVIDER
     valueFrom:
-      secretKeyRef:
-        name: skauswatch-worker-codescan-secret
-        key: codescan-db-pass
-  - name: CODESCAN_CELERY_BROKER_URL
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: ai-provider
+  - name: AI_MODEL
     valueFrom:
-      secretKeyRef:
-        name: skauswatch-worker-codescan-secret
-        key: celery-broker-url
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: ai-model
   - name: ANTHROPIC_API_KEY
     valueFrom:
       secretKeyRef:
@@ -108,31 +113,6 @@ env:
         name: skauswatch-worker-codescan-secret
         key: openai-api-key
         optional: true
-  - name: CODESCAN_AI_PROVIDER
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-worker-codescan-config
-        key: codescan-ai-provider
-  - name: CODESCAN_AI_MODEL
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-worker-codescan-config
-        key: codescan-ai-model
-  - name: CODESCAN_FREE_TIER_USER_CAP
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-worker-codescan-config
-        key: codescan-free-tier-user-cap
-  - name: CODESCAN_MAX_REPOS_FREE
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-worker-codescan-config
-        key: codescan-max-repos-free
-  - name: CODESCAN_MAX_REVIEWS_PER_DAY
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-worker-codescan-config
-        key: codescan-max-reviews-per-day
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
@@ -152,35 +132,36 @@ env:
 livenessProbe:
   httpGet:
     path: /healthz
-    port: 5005
-  initialDelaySeconds: 30
-  periodSeconds: 30
+    port: health
+  initialDelaySeconds: 10
+  periodSeconds: 10
   timeoutSeconds: 5
   failureThreshold: 3
 
 readinessProbe:
   httpGet:
-    path: /healthz
-    port: 5005
-  initialDelaySeconds: 10
-  periodSeconds: 10
+    path: /readyz
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 5
   timeoutSeconds: 3
   failureThreshold: 2
 
+volumeMounts: []
+
+volumes: []
+
 configMapData:
+  log-level: "info"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+  ai-provider: "anthropic"
+  ai-model: "claude-opus-4-5"
   license-server-url: "https://license.penguintech.io"
-  release-mode: "false"
-  db-name: "skauswatch"
-  codescan-ai-provider: "anthropic"
-  codescan-ai-model: "claude-opus-4-5"
-  codescan-free-tier-user-cap: "3"
-  codescan-max-repos-free: "3"
-  codescan-max-reviews-per-day: "10"
+  release-mode: "true"
 
 secretData:
-  codescan-db-user: "codescan"
-  codescan-db-pass: "changeme-in-production"
-  celery-broker-url: "redis://:changeme@redis:6379/2"
+  redis-password: ""
   anthropic-api-key: ""
   openai-api-key: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

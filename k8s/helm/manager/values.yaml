@@ -1,9 +1,11 @@
+# Default (prod-safe baseline) values for skauswatch-manager.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
 replicaCount: 3
 
 image:
-  repository: ghcr.io/penguintechinc/skauswatch-manager
+  repository: ghcr.io/penguintechinc/skauswatch/manager
   pullPolicy: IfNotPresent
-  tag: latest
+  tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -28,13 +30,16 @@ securityContext:
       - ALL
   readOnlyRootFilesystem: true
 
-containerPort: 5000
+# REST (API_PORT), gRPC control plane (GRPC_PORT), Prometheus metrics.
+httpPort: 5000
+grpcPort: 50051
+metricsPort: 9090
 
 service:
   type: ClusterIP
   port: 5000
-  targetPort: 5000
   grpcPort: 50051
+  metricsPort: 9090
   annotations: {}
 
 ingress:
@@ -42,9 +47,9 @@ ingress:
   className: "nginx"
   annotations: {}
   hosts:
-    - host: skauswatch.example.com
+    - host: skauswatch.app
       paths:
-        - path: /
+        - path: /api
           pathType: Prefix
   tls: []
 
@@ -52,7 +57,7 @@ httproute:
   enabled: false
   gatewayName: shared
   gatewayNamespace: gateway
-  host: skauswatch.example.com
+  host: skauswatch.app
   rules:
     - path: /api
       service: skauswatch-manager
@@ -60,11 +65,11 @@ httproute:
 
 resources:
   limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
     cpu: 500m
     memory: 512Mi
-  requests:
-    cpu: 125m
-    memory: 256Mi
 
 autoscaling:
   enabled: true
@@ -80,20 +85,17 @@ tolerations: []
 affinity: {}
 
 env:
-  - name: FLASK_ENV
-    value: "production"
-  - name: FLASK_APP
-    value: "app:create_app()"
-  - name: SECRET_KEY
+  - name: API_PORT
+    value: "5000"
+  - name: GRPC_PORT
+    value: "50051"
+  - name: GRPC_ENABLED
+    value: "true"
+  - name: RUST_LOG
     valueFrom:
-      secretKeyRef:
-        name: skauswatch-manager-secret
-        key: secret-key
-  - name: SECURITY_PASSWORD_SALT
-    valueFrom:
-      secretKeyRef:
-        name: skauswatch-manager-secret
-        key: password-salt
+      configMapKeyRef:
+        name: skauswatch-manager-config
+        key: log-level
   - name: DB_TYPE
     valueFrom:
       configMapKeyRef:
@@ -114,6 +116,11 @@ env:
       configMapKeyRef:
         name: skauswatch-manager-config
         key: db-name
+  - name: DB_POOL_SIZE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-manager-config
+        key: db-pool-size
   - name: DB_USER
     valueFrom:
       secretKeyRef:
@@ -124,11 +131,6 @@ env:
       secretKeyRef:
         name: skauswatch-manager-secret
         key: db-pass
-  - name: DB_POOL_SIZE
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-manager-config
-        key: db-pool-size
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
@@ -148,17 +150,17 @@ env:
 livenessProbe:
   httpGet:
     path: /healthz
-    port: 5000
-  initialDelaySeconds: 30
+    port: http
+  initialDelaySeconds: 10
   periodSeconds: 10
   timeoutSeconds: 5
   failureThreshold: 3
 
 readinessProbe:
   httpGet:
-    path: /healthz
-    port: 5000
-  initialDelaySeconds: 10
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
   periodSeconds: 5
   timeoutSeconds: 3
   failureThreshold: 2
@@ -168,17 +170,16 @@ volumeMounts: []
 volumes: []
 
 configMapData:
-  db-type: "postgres"
+  log-level: "info"
+  db-type: "postgresql"
   db-host: "postgres"
   db-port: "5432"
   db-name: "skauswatch"
-  db-pool-size: "10"
+  db-pool-size: "20"
   license-server-url: "https://license.penguintech.io"
-  release-mode: "false"
+  release-mode: "true"
 
 secretData:
-  secret-key: "changeme-in-production"
-  password-salt: "changeme-in-production"
-  db-user: "app_user"
+  db-user: "changeme-in-production"
   db-pass: "changeme-in-production"
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

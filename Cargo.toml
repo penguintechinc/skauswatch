@@ -23,6 +23,10 @@ skauswatch-streams = { path = "crates/skauswatch-streams" }
 skauswatch-proto = { path = "crates/skauswatch-proto" }
 skauswatch-ai = { path = "crates/skauswatch-ai" }
 skauswatch-s3 = { path = "crates/skauswatch-s3" }
+# Test-only harness (isolated-schema DB pools, JWT minting, LicenseClient
+# builders) — see docs/v2-port/testing-pattern.md. Added as a dev-dependency
+# by service crates, never a runtime dependency.
+skauswatch-testkit = { path = "crates/skauswatch-testkit" }
 
 # Async runtime
 tokio = { version = "=1.52.3", features = ["full"] }
@@ -93,9 +97,12 @@ yara-x = "=1.19.0"
 # with v1 Python cryptography AESGCM — see docs/v2-port/vault-crypto-gate.md)
 # + AWS Secrets Manager cloud-sync (other providers NotImplemented in v2.0).
 skauswatch-vault = { path = "crates/skauswatch-vault" }
-aes-gcm = "=0.10.3"
-# CSPRNG (codescan-backend AEAD nonces for git-credential tokens at rest)
-rand = "=0.8.5"
+# aes-gcm's `getrandom` feature re-exports `OsRng` so codescan-backend can draw
+# git-credential AEAD nonces via `Aes256Gcm::generate_nonce(&mut OsRng)` — the
+# idiomatic AEAD nonce source, which lets that crate drop its direct `rand` dep.
+# (rand 0.8.x remains transitively via fred/jsonwebtoken/rsa — this is a direct-
+# dependency cleanup, not removal from the lock.)
+aes-gcm = { version = "=0.10.3", features = ["getrandom"] }
 # aws-sdk-secretsmanager's default feature set includes `"rustls"`, which (unlike
 # aws-config's same-named feature above) maps directly to the legacy
 # `aws-smithy-runtime/tls-rustls` -> legacy-rustls-ring -> rustls 0.21 ->

@@ -123,22 +123,12 @@ async fn stream_events(
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::models::{EventType, LogSource, Severity};
+    use crate::models::EventSearchResponse;
+    use crate::routes::test_support::{dev_state, gated_state, state_with_store};
     use axum::http::StatusCode;
     use chrono::Utc;
-    use penguin_licensing::{LicenseClient, LicenseConfig};
-
-    fn dev_state() -> AppState {
-        let cfg = match LicenseConfig::new("skauswatch") {
-            Ok(c) => c,
-            Err(e) => panic!("license config: {e}"),
-        };
-        let client = match LicenseClient::new(cfg) {
-            Ok(c) => c,
-            Err(e) => panic!("license client: {e}"),
-        };
-        crate::state::AppStateInner::for_tests(client)
-    }
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_server(state: AppState) -> axum_test::TestServer {
         let app = axum::Router::new().merge(router()).with_state(state);
@@ -162,6 +152,168 @@ mod tests {
         let server = test_server(dev_state());
         let res = server.get("/events/abc-123").await;
         res.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn search_events_flag_denied_is_forbidden() {
+        let server = test_server(gated_state());
+        let res = server
+            .post("/events/search")
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Forbidden");
+    }
+
+    #[tokio::test]
+    async fn get_event_flag_denied_is_forbidden() {
+        let server = test_server(gated_state());
+        let res = server.get("/events/abc-123").await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn stream_events_flag_denied_is_forbidden() {
+        let server = test_server(gated_state());
+        let res = server.get("/events/stream").await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn search_events_returns_hits_from_the_configured_store() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/aaa-events-*/_search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "hits": {"total": {"value": 1}, "hits": [
+                    {"_source": {"id": "e1", "source": "kubernetes", "event_type": "authentication", "severity": "high", "message": "login failed"}}
+                ]},
+            })))
+            .mount(&mock_server)
+            .await;
+        let store =
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+        let server = test_server(state_with_store(store));
+
+        let res = server
+            .post("/events/search")
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status_ok();
+        let body: EventSearchResponse = res.json();
+        assert_eq!(body.total, 1);
+        assert_eq!(body.events[0].id, "e1");
+    }
+
+    #[tokio::test]
+    async fn search_events_backend_error_is_internal_server_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/aaa-events-*/_search"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+        let store =
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+        let server = test_server(state_with_store(store));
+
+        let res = server
+            .post("/events/search")
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn get_event_returns_the_stored_event() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/aaa-events-*/_doc/e1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "_source": {"id": "e1", "source": "system", "event_type": "process", "severity": "low", "message": "hi"},
+            })))
+            .mount(&mock_server)
+            .await;
+        let store =
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+        let server = test_server(state_with_store(store));
+
+        let res = server.get("/events/e1").await;
+        res.assert_status_ok();
+        let body: BaseEvent = res.json();
+        assert_eq!(body.id, "e1");
+    }
+
+    #[tokio::test]
+    async fn get_event_with_backend_404_is_not_found() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/aaa-events-*/_doc/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock_server)
+            .await;
+        let store =
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+        let server = test_server(state_with_store(store));
+
+        let res = server.get("/events/missing").await;
+        res.assert_status(StatusCode::NOT_FOUND);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["detail"], "Event not found");
+    }
+
+    #[tokio::test]
+    async fn get_event_backend_error_is_internal_server_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/aaa-events-*/_doc/e1"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock_server)
+            .await;
+        let store =
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+        let server = test_server(state_with_store(store));
+
+        let res = server.get("/events/e1").await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn stream_events_skips_non_matching_and_delivers_matching_events() {
+        let state = dev_state();
+        let filters = StreamParams {
+            sources: vec![LogSource::Kubernetes],
+            event_types: vec![],
+            severities: vec![],
+        };
+        let resp = match stream_events(State(state.clone()), Query(filters)).await {
+            Ok(sse) => sse.into_response(),
+            Err(_) => panic!("expected sse ok, flag should be enabled by dev_state"),
+        };
+        let mut stream = resp.into_body().into_data_stream();
+
+        let mut skipped = sample_event();
+        skipped.id = "skip-1".to_owned();
+        skipped.source = LogSource::Auditd;
+        let mut delivered = sample_event();
+        delivered.id = "deliver-1".to_owned();
+        delivered.source = LogSource::Kubernetes;
+
+        if state.event_bus.send(skipped).is_err() {
+            panic!("expected at least one live subscriber for the skipped event");
+        }
+        if state.event_bus.send(delivered).is_err() {
+            panic!("expected at least one live subscriber for the delivered event");
+        }
+
+        let chunk = match tokio::time::timeout(Duration::from_secs(2), stream.next()).await {
+            Ok(Some(Ok(bytes))) => bytes,
+            other => panic!("expected an SSE data chunk, got {other:?}"),
+        };
+        let text = String::from_utf8_lossy(&chunk);
+        assert!(text.contains("deliver-1"), "chunk: {text}");
+        assert!(!text.contains("skip-1"), "chunk: {text}");
     }
 
     fn sample_event() -> BaseEvent {

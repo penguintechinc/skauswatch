@@ -185,4 +185,123 @@ mod tests {
         );
         assert_eq!(user_agent(&headers).len(), 512);
     }
+
+    // -- DB-backed tests (real Postgres via skauswatch-testkit) --
+
+    use axum_test::TestServer;
+    use skauswatch_testkit::license::dev_license;
+
+    use crate::routes::test_support::{db_state, sign_token};
+
+    fn test_server_with_state(state: crate::state::AppState) -> TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        TestServer::new(app)
+    }
+
+    #[tokio::test]
+    async fn write_audit_inserts_a_row() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("9.9.9.9, 1.1.1.1"),
+        );
+
+        write_audit(&state, "actor-1", "secret.create", "res-1", &headers).await;
+
+        let row: (String, String, Option<String>) = sqlx::query_as(
+            "SELECT actor_id, action, ip_address FROM vault_audit_log WHERE resource_id = $1",
+        )
+        .bind("res-1")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("read audit row: {e}"));
+        assert_eq!(row.0, "actor-1");
+        assert_eq!(row.1, "secret.create");
+        assert_eq!(row.2.as_deref(), Some("9.9.9.9"));
+    }
+
+    #[tokio::test]
+    async fn write_audit_swallows_db_errors_instead_of_panicking() {
+        let state = db_state(dev_license("skauswatch")).await;
+        state.db.close().await;
+        // The pool is closed, so this must hit the `Err` branch of
+        // `write_audit`'s query and merely log a warning, never panic or
+        // propagate — a slow/down audit sink must never block the caller.
+        write_audit(
+            &state,
+            "actor-1",
+            "secret.create",
+            "res-1",
+            &HeaderMap::new(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn get_audit_log_requires_scope_paginates_and_filters() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let no_scope = sign_token(&state, "u", "secrets:read");
+        let server = test_server_with_state(state.clone());
+
+        server
+            .get("/api/v1/audit/log")
+            .authorization_bearer(&no_scope)
+            .await
+            .assert_status(axum::http::StatusCode::FORBIDDEN);
+
+        let reader = sign_token(&state, "u", "audit:read");
+        let empty = server
+            .get("/api/v1/audit/log")
+            .authorization_bearer(&reader)
+            .await;
+        empty.assert_status_ok();
+        assert_eq!(empty.json::<Value>()["total"], 0);
+
+        for (actor, action) in [("alice", "secret.create"), ("bob", "secret.delete")] {
+            write_audit(&state, actor, action, "res-x", &HeaderMap::new()).await;
+        }
+
+        let all = server
+            .get("/api/v1/audit/log")
+            .authorization_bearer(&reader)
+            .await;
+        assert_eq!(all.json::<Value>()["total"], 2);
+
+        let by_actor = server
+            .get("/api/v1/audit/log?actor_id=alice")
+            .authorization_bearer(&reader)
+            .await;
+        let by_actor_body: Value = by_actor.json();
+        assert_eq!(by_actor_body["total"], 1);
+        assert_eq!(by_actor_body["entries"][0]["actor_id"], "alice");
+
+        let by_action = server
+            .get("/api/v1/audit/log?action=secret.delete")
+            .authorization_bearer(&reader)
+            .await;
+        assert_eq!(by_action.json::<Value>()["total"], 1);
+
+        let by_resource_type = server
+            .get("/api/v1/audit/log?resource_type=secret")
+            .authorization_bearer(&reader)
+            .await;
+        assert_eq!(by_resource_type.json::<Value>()["total"], 2);
+
+        let by_resource_id = server
+            .get("/api/v1/audit/log?resource_id=res-x")
+            .authorization_bearer(&reader)
+            .await;
+        assert_eq!(by_resource_id.json::<Value>()["total"], 2);
+
+        let paged = server
+            .get("/api/v1/audit/log?page=1&per_page=1")
+            .authorization_bearer(&reader)
+            .await;
+        let paged_body: Value = paged.json();
+        assert_eq!(paged_body["entries"].as_array().map(Vec::len), Some(1));
+        assert_eq!(paged_body["per_page"], 1);
+    }
 }
