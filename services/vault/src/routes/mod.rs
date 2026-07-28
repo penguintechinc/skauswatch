@@ -6,6 +6,8 @@ pub mod jit;
 pub mod one_time;
 pub mod secrets;
 pub mod sync;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use axum::Router;
 use axum::middleware;

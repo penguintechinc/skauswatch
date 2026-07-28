@@ -335,3 +335,520 @@ pub async fn cert_status(
         "revocation_reason": cert.get("revocation_reason"),
     })))
 }
+
+/// Router-level tests for the X.509 handlers, run against the full
+/// production router (auth layer included) with `AppStateInner::for_tests()`
+/// — a real (rcgen-backed) X.509 CA and an unreachable lazy DB pool. Per
+/// `docs/v2-port/testing-pattern.md`, pki has no `migrations/` directory:
+/// "found"/success DB branches (issuance persisted then re-fetched, listing
+/// real rows, revoking a real row) cannot be exercised without one, so
+/// these tests cover validation, the auth gate, the fully-DB-free
+/// `(None, None)`-identifier 404 branches, and every DB-touching handler's
+/// real-crypto-then-500 path.
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::state::AppStateInner;
+
+    use super::paginated;
+
+    #[test]
+    fn paginated_computes_page_count_and_zero_page_size_is_zero() {
+        let items = vec![serde_json::json!({"serial_number": "1a"})];
+        let body = paginated(items.clone(), 101, 2, 50).0;
+        assert_eq!(body["total"], 101);
+        assert_eq!(body["pages"], 3);
+        assert_eq!(body["certificates"], serde_json::json!(items));
+
+        let zero_size = paginated(vec![], 5, 1, 0).0;
+        assert_eq!(zero_size["pages"], 0);
+    }
+
+    fn test_server() -> axum_test::TestServer {
+        axum_test::TestServer::new(crate::routes::router(AppStateInner::for_tests()))
+    }
+
+    fn bearer() -> String {
+        match skauswatch_auth::issue_service_token("tester", "admin", "test-secret", 300) {
+            Ok(t) => format!("Bearer {t}"),
+            Err(e) => panic!("issue test token: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_rejects_invalid_body_with_validation_details() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/certificates")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({ "subject": "", "key_algorithm": "DSA" }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Validation error");
+        assert!(body["details"].as_array().unwrap().len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn issue_valid_body_runs_real_crypto_then_500s_on_unreachable_db() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/certificates")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({
+                "subject": "CN=route-test.example.com",
+                "san_dns": ["route-test.example.com"],
+            }))
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Internal Server Error");
+    }
+
+    #[tokio::test]
+    async fn get_cert_with_unparseable_id_is_404_without_touching_db() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/certificates/not-a-uuid")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_cert_with_valid_uuid_hits_db_and_500s() {
+        let server = test_server();
+        let res = server
+            .get(&format!("/api/v1/certificates/{}", uuid::Uuid::new_v4()))
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_query_param("include_private_key", "true")
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn get_by_serial_always_touches_db() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/certificates/serial/abc123")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn revoke_cert_with_unparseable_id_is_404_without_touching_db() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/certificates/not-a-uuid/revoke")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn revoke_cert_with_valid_uuid_hits_db_and_500s() {
+        let server = test_server();
+        let res = server
+            .post(&format!(
+                "/api/v1/certificates/{}/revoke",
+                uuid::Uuid::new_v4()
+            ))
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({ "reason": "key_compromise" }))
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn revoke_by_serial_always_touches_db() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/certificates/serial/abc123/revoke")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn list_with_filters_touches_db() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/certificates")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_query_param("status", "active")
+            .add_query_param("subject", "example")
+            .add_query_param("expires_before", "2030-01-01T00:00:00")
+            .add_query_param("page", "2")
+            .add_query_param("page_size", "5")
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn search_rejects_invalid_json_and_500s_on_valid_body() {
+        let server = test_server();
+        let bad = server
+            .post("/api/v1/certificates/search")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .bytes(axum::body::Bytes::from_static(b"not json"))
+            .await;
+        bad.assert_status(StatusCode::BAD_REQUEST);
+
+        let ok = server
+            .post("/api/v1/certificates/search")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({ "subject": "example", "status": "active" }))
+            .await;
+        ok.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn get_crl_touches_db_and_500s() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/certificates/crl")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(axum::http::header::ACCEPT, "application/pkix-crl")
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn ocsp_binary_content_type_is_not_implemented() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/certificates/ocsp")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(axum::http::header::CONTENT_TYPE, "application/ocsp-request")
+            .bytes(axum::body::Bytes::from_static(b"\x30\x03"))
+            .await;
+        res.assert_status(StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn ocsp_missing_serial_number_is_bad_request() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/certificates/ocsp")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ocsp_with_serial_touches_db_and_500s() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/certificates/ocsp")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({ "serial_number": "abc123" }))
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn ca_info_never_touches_db() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/certificates/ca")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["subject"].as_str().unwrap().contains("SkausWatch"));
+        assert!(
+            body["ca_certificate_pem"]
+                .as_str()
+                .unwrap()
+                .contains("BEGIN CERTIFICATE")
+        );
+    }
+
+    #[tokio::test]
+    async fn download_ca_cert_returns_pem_with_expected_headers() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/certificates/ca/certificate")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status_ok();
+        assert_eq!(
+            res.header(axum::http::header::CONTENT_TYPE),
+            "application/x-pem-file"
+        );
+        let text = res.text();
+        assert!(text.contains("BEGIN CERTIFICATE"));
+    }
+
+    #[tokio::test]
+    async fn cert_status_with_unparseable_id_is_404_without_touching_db() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/certificates/not-a-uuid/status")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cert_status_with_valid_uuid_hits_db_and_500s() {
+        let server = test_server();
+        let res = server
+            .get(&format!(
+                "/api/v1/certificates/{}/status",
+                uuid::Uuid::new_v4()
+            ))
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ===================== DB-backed success paths =====================
+
+    async fn db_server() -> axum_test::TestServer {
+        axum_test::TestServer::new(crate::routes::router(
+            crate::routes::test_support::db_state().await,
+        ))
+    }
+
+    async fn issue_one(server: &axum_test::TestServer, subject: &str) -> serde_json::Value {
+        let res = server
+            .post("/api/v1/certificates")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({ "subject": subject, "san_dns": ["www.example.com"] }))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        res.json()
+    }
+
+    #[tokio::test]
+    async fn issue_persists_and_get_by_id_and_serial_find_it() {
+        let server = db_server().await;
+        let issued = issue_one(&server, "CN=route-db-issue.example.com").await;
+        assert_eq!(issued["san_dns"], serde_json::json!(["www.example.com"]));
+        let id = issued["id"].as_str().unwrap();
+        let serial = issued["serial_number"].as_str().unwrap();
+
+        let by_id = server
+            .get(&format!("/api/v1/certificates/{id}"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .await;
+        by_id.assert_status_ok();
+        let by_id_json: serde_json::Value = by_id.json();
+        // include_private_key defaults false -> field stripped.
+        assert!(by_id_json.get("private_key_pem").is_none());
+
+        let with_pk = server
+            .get(&format!("/api/v1/certificates/{id}"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_query_param("include_private_key", "true")
+            .await;
+        let with_pk_json: serde_json::Value = with_pk.json();
+        assert!(
+            with_pk_json["private_key_pem"]
+                .as_str()
+                .unwrap()
+                .contains("PRIVATE KEY")
+        );
+
+        let by_serial = server
+            .get(&format!("/api/v1/certificates/serial/{serial}"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .await;
+        by_serial.assert_status_ok();
+        // get_by_serial always strips the private key, per the handler.
+        let by_serial_json: serde_json::Value = by_serial.json();
+        assert!(by_serial_json.get("private_key_pem").is_none());
+    }
+
+    #[tokio::test]
+    async fn revoke_by_id_and_by_serial_succeed_on_real_rows() {
+        let server = db_server().await;
+        let issued = issue_one(&server, "CN=route-db-revoke.example.com").await;
+        let id = issued["id"].as_str().unwrap();
+
+        let res = server
+            .post(&format!("/api/v1/certificates/{id}/revoke"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({ "reason": "key_compromise" }))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["message"], "Certificate revoked");
+
+        let status = server
+            .get(&format!("/api/v1/certificates/{id}/status"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .await;
+        status.assert_status_ok();
+        let status_json: serde_json::Value = status.json();
+        assert_eq!(status_json["status"], "revoked");
+
+        let issued2 = issue_one(&server, "CN=route-db-revoke2.example.com").await;
+        let serial2 = issued2["serial_number"].as_str().unwrap();
+        let res2 = server
+            .post(&format!("/api/v1/certificates/serial/{serial2}/revoke"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({}))
+            .await;
+        res2.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn list_and_search_return_real_rows() {
+        let server = db_server().await;
+        issue_one(&server, "CN=route-db-list-1.example.com").await;
+        issue_one(&server, "CN=route-db-list-2.example.com").await;
+
+        let list_res = server
+            .get("/api/v1/certificates")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .await;
+        list_res.assert_status_ok();
+        let list_json: serde_json::Value = list_res.json();
+        assert!(list_json["total"].as_i64().unwrap() >= 2);
+
+        let search_res = server
+            .post("/api/v1/certificates/search")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({ "subject": "route-db-list-1" }))
+            .await;
+        search_res.assert_status_ok();
+        let search_json: serde_json::Value = search_res.json();
+        assert_eq!(search_json["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_crl_returns_real_pem_in_json_and_pkix_variants() {
+        let server = db_server().await;
+        let issued = issue_one(&server, "CN=route-db-crl.example.com").await;
+        let id = issued["id"].as_str().unwrap();
+        server
+            .post(&format!("/api/v1/certificates/{id}/revoke"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status_ok();
+
+        let json_res = server
+            .get("/api/v1/certificates/crl")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .await;
+        json_res.assert_status_ok();
+        let json_body: serde_json::Value = json_res.json();
+        assert!(
+            json_body["crl_pem"]
+                .as_str()
+                .unwrap()
+                .contains("BEGIN X509 CRL")
+        );
+
+        let pkix_res = server
+            .get("/api/v1/certificates/crl")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(axum::http::header::ACCEPT, "application/pkix-crl")
+            .await;
+        pkix_res.assert_status_ok();
+        assert_eq!(
+            pkix_res.header(axum::http::header::CONTENT_TYPE),
+            "application/pkix-crl"
+        );
+        assert!(pkix_res.text().contains("BEGIN X509 CRL"));
+    }
+
+    #[tokio::test]
+    async fn ocsp_reports_good_unknown_and_revoked_for_real_rows() {
+        let server = db_server().await;
+        let issued = issue_one(&server, "CN=route-db-ocsp.example.com").await;
+        let serial = issued["serial_number"].as_str().unwrap().to_owned();
+        let id = issued["id"].as_str().unwrap();
+
+        let good = server
+            .post("/api/v1/certificates/ocsp")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({ "serial_number": serial }))
+            .await;
+        good.assert_status_ok();
+        let good_json: serde_json::Value = good.json();
+        assert_eq!(good_json["status"], "good");
+
+        let unknown = server
+            .post("/api/v1/certificates/ocsp")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({ "serial_number": "does-not-exist" }))
+            .await;
+        unknown.assert_status_ok();
+        let unknown_json: serde_json::Value = unknown.json();
+        assert_eq!(unknown_json["status"], "unknown");
+
+        server
+            .post(&format!("/api/v1/certificates/{id}/revoke"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({ "reason": "ca_compromise" }))
+            .await
+            .assert_status_ok();
+        let revoked = server
+            .post("/api/v1/certificates/ocsp")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({ "serial_number": serial }))
+            .await;
+        revoked.assert_status_ok();
+        let revoked_json: serde_json::Value = revoked.json();
+        assert_eq!(revoked_json["status"], "revoked");
+        assert_eq!(revoked_json["revocation_reason"], "ca_compromise");
+    }
+}

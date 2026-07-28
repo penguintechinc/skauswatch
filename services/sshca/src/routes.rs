@@ -455,6 +455,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zero_validity_duration_is_400() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
+        let resp = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val)
+            .json(&serde_json::json!({
+                "certificate_type": "user",
+                "public_key": subject_pub_line(),
+                "validity_duration": 0,
+            }))
+            .await;
+        resp.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn invalid_subject_key_is_400_via_http() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
+        let resp = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val)
+            .json(&serde_json::json!({
+                "certificate_type": "user",
+                "public_key": "not-a-real-openssh-key",
+            }))
+            .await;
+        resp.assert_status(StatusCode::BAD_REQUEST);
+        let json: serde_json::Value = resp.json();
+        assert!(json["error"].as_str().is_some());
+    }
+
+    /// Explicit `extensions` map is used verbatim (not the default
+    /// user-cert permit set).
+    #[tokio::test]
+    async fn explicit_extensions_are_used_verbatim() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
+        let resp = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val)
+            .json(&serde_json::json!({
+                "certificate_type": "user",
+                "public_key": subject_pub_line(),
+                "extensions": {"permit-pty": ""},
+            }))
+            .await;
+        resp.assert_status(StatusCode::CREATED);
+        let issued: serde_json::Value = resp.json();
+        let signed = issued["signed_certificate"].as_str().expect("signed");
+        let cert = ssh_key::Certificate::from_openssh(signed).expect("parse cert");
+        assert_eq!(cert.extensions().0.len(), 1);
+        assert!(cert.extensions().0.contains_key("permit-pty"));
+    }
+
+    /// Host certificates default to no extensions (only user certs get the
+    /// default permit set).
+    #[tokio::test]
+    async fn host_certificate_defaults_to_no_extensions() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
+        let resp = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val)
+            .json(&serde_json::json!({
+                "certificate_type": "host",
+                "public_key": subject_pub_line(),
+                "principals": ["host.example.com"],
+            }))
+            .await;
+        resp.assert_status(StatusCode::CREATED);
+        let issued: serde_json::Value = resp.json();
+        let signed = issued["signed_certificate"].as_str().expect("signed");
+        let cert = ssh_key::Certificate::from_openssh(signed).expect("parse cert");
+        assert_eq!(cert.cert_type(), ssh_key::certificate::CertType::Host);
+        assert!(cert.extensions().0.is_empty());
+    }
+
+    /// `source_address`/`force_command` shorthands map onto the
+    /// corresponding OpenSSH critical options (v1 accepted, but dropped
+    /// them).
+    #[tokio::test]
+    async fn source_address_and_force_command_become_critical_options() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
+        let resp = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val)
+            .json(&serde_json::json!({
+                "certificate_type": "user",
+                "public_key": subject_pub_line(),
+                "source_address": "10.0.0.0/8",
+                "force_command": "/usr/bin/true",
+            }))
+            .await;
+        resp.assert_status(StatusCode::CREATED);
+        let issued: serde_json::Value = resp.json();
+        let signed = issued["signed_certificate"].as_str().expect("signed");
+        let cert = ssh_key::Certificate::from_openssh(signed).expect("parse cert");
+        assert!(cert.critical_options().0.contains_key("source-address"));
+        assert!(cert.critical_options().0.contains_key("force-command"));
+    }
+
+    #[tokio::test]
+    async fn revoking_unknown_certificate_is_404() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
+        let resp = server
+            .post("/api/v1/ssh/certificates/nope/revoke")
+            .add_header(hdr, val)
+            .json(&serde_json::json!({ "reason": "keyCompromise" }))
+            .await;
+        resp.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn ca_public_key_text_plain_via_accept_header() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
+        let resp = server
+            .get("/api/v1/ssh/ca/public-key")
+            .add_header(hdr, val)
+            .add_header("Accept", "text/plain")
+            .await;
+        resp.assert_status_ok();
+        let text = resp.text();
+        assert!(text.starts_with("ssh-ed25519") || text.starts_with("ssh-"));
+    }
+
+    #[tokio::test]
+    async fn list_respects_limit_clamp() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
+        for _ in 0..3 {
+            let resp = server
+                .post("/api/v1/ssh/certificates")
+                .add_header(hdr, val.clone())
+                .json(&serde_json::json!({
+                    "certificate_type": "user",
+                    "public_key": subject_pub_line(),
+                }))
+                .await;
+            resp.assert_status(StatusCode::CREATED);
+        }
+        let list = server
+            .get("/api/v1/ssh/certificates")
+            .add_header(hdr, val)
+            .add_query_param("limit", 1)
+            .await;
+        list.assert_status_ok();
+        let json: serde_json::Value = list.json();
+        assert_eq!(json["total"], 1);
+    }
+
+    #[tokio::test]
     async fn ca_public_key_endpoint() {
         let server = axum_test::TestServer::new(router(test_state()));
         let (hdr, val) = auth_header();

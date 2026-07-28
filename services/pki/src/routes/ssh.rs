@@ -317,3 +317,557 @@ pub async fn verify(
     }
     Ok(Json(info).into_response())
 }
+
+/// Router-level tests for the SSH handlers. Handlers that back a real
+/// `ssh-keygen` subprocess (`issue`, `verify`) use
+/// `AppStateInner::for_tests_with_real_ca()`; everything else uses the
+/// cheaper canned `AppStateInner::for_tests()`. See the module doc on
+/// `routes::x509::tests` and `docs/v2-port/testing-pattern.md` for why
+/// DB-backed success branches (a real issued cert re-fetched, listing real
+/// rows) are out of scope here — pki has no `migrations/` directory.
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::state::AppStateInner;
+
+    use super::paginated;
+
+    #[test]
+    fn paginated_computes_page_count_and_zero_page_size_is_zero() {
+        let items = vec![serde_json::json!({"id": "1"})];
+        let body = paginated(items.clone(), 101, 2, 50).0;
+        assert_eq!(body["total"], 101);
+        assert_eq!(body["pages"], 3);
+        assert_eq!(body["certificates"], serde_json::json!(items));
+
+        let zero_size = paginated(vec![], 5, 1, 0).0;
+        assert_eq!(zero_size["pages"], 0);
+    }
+
+    fn test_server() -> axum_test::TestServer {
+        axum_test::TestServer::new(crate::routes::router(AppStateInner::for_tests()))
+    }
+
+    fn real_ca_server() -> axum_test::TestServer {
+        axum_test::TestServer::new(crate::routes::router(
+            AppStateInner::for_tests_with_real_ca(),
+        ))
+    }
+
+    fn bearer() -> String {
+        match skauswatch_auth::issue_service_token("tester", "admin", "test-secret", 300) {
+            Ok(t) => format!("Bearer {t}"),
+            Err(e) => panic!("issue test token: {e}"),
+        }
+    }
+
+    fn gen_subject_pubkey() -> String {
+        let path = std::env::temp_dir().join(format!(
+            "skauswatch-ssh-route-subject-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let status = std::process::Command::new("ssh-keygen")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-f")
+            .arg(&path)
+            .arg("-N")
+            .arg("")
+            .arg("-q")
+            .status()
+            .unwrap_or_else(|e| panic!("run ssh-keygen: {e}"));
+        assert!(status.success());
+        std::fs::read_to_string(format!("{}.pub", path.display()))
+            .unwrap_or_else(|e| panic!("read generated pubkey: {e}"))
+            .trim()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn issue_rejects_invalid_body() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({ "public_key": "bad", "key_id": "k", "principals": [] }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn issue_valid_body_signs_real_certificate_then_500s_on_unreachable_db() {
+        let server = real_ca_server();
+        let pubkey = gen_subject_pubkey();
+        let res = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({
+                "public_key": pubkey,
+                "key_id": "route-test",
+                "principals": ["alice"],
+            }))
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn get_cert_with_unparseable_id_is_404_without_touching_db() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/ssh/certificates/not-a-uuid")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_cert_with_valid_uuid_hits_db_and_500s() {
+        let server = test_server();
+        let res = server
+            .get(&format!(
+                "/api/v1/ssh/certificates/{}",
+                uuid::Uuid::new_v4()
+            ))
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn get_by_serial_always_touches_db() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/ssh/certificates/serial/123")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn revoke_cert_with_unparseable_id_is_404_without_touching_db() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/ssh/certificates/not-a-uuid/revoke")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn revoke_cert_with_valid_uuid_hits_db_and_500s() {
+        let server = test_server();
+        let res = server
+            .post(&format!(
+                "/api/v1/ssh/certificates/{}/revoke",
+                uuid::Uuid::new_v4()
+            ))
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn list_touches_db() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/ssh/certificates")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_query_param("status", "active")
+            .add_query_param("type", "user")
+            .add_query_param("principal", "alice")
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn get_krl_touches_db_json_and_binary_accept_variants() {
+        let server = test_server();
+        let json_res = server
+            .get("/api/v1/ssh/krl")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        json_res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+
+        let bin_res = server
+            .get("/api/v1/ssh/krl")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(axum::http::header::ACCEPT, "application/octet-stream")
+            .await;
+        bin_res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn ca_info_never_touches_db() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/ssh/ca")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["ca_public_key"].as_str().unwrap().starts_with("ssh-"));
+    }
+
+    #[tokio::test]
+    async fn ca_public_key_supports_json_and_text_plain() {
+        let server = test_server();
+        let json_res = server
+            .get("/api/v1/ssh/ca/public-key")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        json_res.assert_status_ok();
+        let body: serde_json::Value = json_res.json();
+        assert!(body["ca_public_key"].as_str().unwrap().starts_with("ssh-"));
+
+        let text_res = server
+            .get("/api/v1/ssh/ca/public-key")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(axum::http::header::ACCEPT, "text/plain")
+            .await;
+        text_res.assert_status_ok();
+        assert!(text_res.text().starts_with("ssh-"));
+    }
+
+    #[tokio::test]
+    async fn known_hosts_requires_hostnames_and_succeeds_when_present() {
+        let server = test_server();
+        let bad = server
+            .post("/api/v1/ssh/config/known-hosts")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({}))
+            .await;
+        bad.assert_status(StatusCode::BAD_REQUEST);
+
+        let ok = server
+            .post("/api/v1/ssh/config/known-hosts")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({ "hostnames": ["a.example.com"] }))
+            .await;
+        ok.assert_status_ok();
+        let body: serde_json::Value = ok.json();
+        assert!(
+            body["known_hosts"]
+                .as_str()
+                .unwrap()
+                .starts_with("@cert-authority")
+        );
+    }
+
+    #[tokio::test]
+    async fn authorized_keys_never_touches_db() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/ssh/config/authorized-keys")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({ "principals": ["alice"], "options": {} }))
+            .await;
+        res.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn ssh_config_never_touches_db() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/ssh/config/ssh-config")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({ "hostname": "host.example.com" }))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(
+            body["ssh_config"]
+                .as_str()
+                .unwrap()
+                .contains("Host host.example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn cert_status_with_unparseable_id_is_404_without_touching_db() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/ssh/certificates/not-a-uuid/status")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn cert_status_with_valid_uuid_hits_db_and_500s() {
+        let server = test_server();
+        let res = server
+            .get(&format!(
+                "/api/v1/ssh/certificates/{}/status",
+                uuid::Uuid::new_v4()
+            ))
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn verify_requires_certificate_field() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/ssh/verify")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn verify_parses_a_real_certificate_then_500s_overlaying_revocation_from_db() {
+        // Mint a real signed certificate directly against the manager
+        // (bypassing HTTP, where issuance always 500s on the unreachable
+        // DB insert before returning the cert) so /verify has genuine
+        // cert-v01 bytes to feed `ssh-keygen -L` for real.
+        let state = AppStateInner::for_tests_with_real_ca();
+        let pubkey = gen_subject_pubkey();
+        let issued = state
+            .manager
+            .issue_ssh(
+                crate::ca::ssh::SshIssueParams {
+                    public_key: pubkey,
+                    certificate_type: "user".into(),
+                    key_id: Some("verify-test".into()),
+                    principals: vec!["alice".into()],
+                    validity_seconds: 3600,
+                    extensions: None,
+                    critical_options: None,
+                    source_addresses: vec![],
+                    force_command: None,
+                    hostname: None,
+                },
+                None,
+            )
+            .await;
+        // The manager's INSERT still fails against the unreachable pool —
+        // real signing already happened via spawn_blocking before that, so
+        // pull the certificate PEM out of the CA engine directly instead.
+        assert!(issued.is_err(), "manager insert should fail without a DB");
+
+        let real_issued = state
+            .manager
+            .ssh
+            .issue(&crate::ca::ssh::SshIssueParams {
+                public_key: gen_subject_pubkey(),
+                certificate_type: "user".into(),
+                key_id: Some("verify-test-2".into()),
+                principals: vec!["alice".into()],
+                validity_seconds: 3600,
+                extensions: None,
+                critical_options: None,
+                source_addresses: vec![],
+                force_command: None,
+                hostname: None,
+            })
+            .unwrap_or_else(|e| panic!("real ssh issue: {e}"));
+
+        let server = axum_test::TestServer::new(crate::routes::router(state));
+        let res = server
+            .post("/api/v1/ssh/verify")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({ "certificate": real_issued.certificate }))
+            .await;
+        // check_certificate() ran for real (parsed type/serial/key_id); the
+        // handler then tries to overlay revocation status from the DB and
+        // fails there, so the *observable* outcome is still 500 — but the
+        // real spawn_blocking + parse path executed, unlike the BadRequest
+        // test above which never reaches it.
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ===================== DB-backed success paths =====================
+
+    async fn db_server() -> axum_test::TestServer {
+        axum_test::TestServer::new(crate::routes::router(
+            crate::routes::test_support::db_state().await,
+        ))
+    }
+
+    async fn issue_one(server: &axum_test::TestServer, key_id: &str) -> serde_json::Value {
+        let res = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({
+                "public_key": gen_subject_pubkey(),
+                "key_id": key_id,
+                "principals": ["alice"],
+            }))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        res.json()
+    }
+
+    #[tokio::test]
+    async fn issue_persists_and_get_by_id_and_serial_find_it() {
+        let server = db_server().await;
+        let issued = issue_one(&server, "route-db-issue").await;
+        assert_eq!(issued["key_id"], "route-db-issue");
+        let id = issued["id"].as_str().unwrap();
+        let serial = issued["serial_number"].as_str().unwrap();
+
+        let by_id = server
+            .get(&format!("/api/v1/ssh/certificates/{id}"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .await;
+        by_id.assert_status_ok();
+        let by_id_json: serde_json::Value = by_id.json();
+        assert!(
+            by_id_json["certificate"]
+                .as_str()
+                .unwrap()
+                .contains("cert-v01@openssh.com")
+        );
+
+        let by_serial = server
+            .get(&format!("/api/v1/ssh/certificates/serial/{serial}"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .await;
+        by_serial.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn revoke_succeeds_on_a_real_row_and_reflects_in_status() {
+        let server = db_server().await;
+        let issued = issue_one(&server, "route-db-revoke").await;
+        let id = issued["id"].as_str().unwrap();
+
+        let res = server
+            .post(&format!("/api/v1/ssh/certificates/{id}/revoke"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({ "reason": "key_compromise" }))
+            .await;
+        res.assert_status_ok();
+
+        let status = server
+            .get(&format!("/api/v1/ssh/certificates/{id}/status"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .await;
+        status.assert_status_ok();
+        let status_json: serde_json::Value = status.json();
+        assert_eq!(status_json["status"], "revoked");
+    }
+
+    #[tokio::test]
+    async fn list_returns_real_rows() {
+        let server = db_server().await;
+        issue_one(&server, "route-db-list-1").await;
+        issue_one(&server, "route-db-list-2").await;
+
+        let res = server
+            .get("/api/v1/ssh/certificates")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["total"].as_i64().unwrap() >= 2);
+    }
+
+    #[tokio::test]
+    async fn get_krl_returns_real_binary_in_json_and_octet_stream_variants() {
+        let server = db_server().await;
+        let issued = issue_one(&server, "route-db-krl").await;
+        let id = issued["id"].as_str().unwrap();
+        server
+            .post(&format!("/api/v1/ssh/certificates/{id}/revoke"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status_ok();
+
+        let json_res = server
+            .get("/api/v1/ssh/krl")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .await;
+        json_res.assert_status_ok();
+        let json_body: serde_json::Value = json_res.json();
+        assert!(!json_body["krl_binary"].as_str().unwrap().is_empty());
+
+        let bin_res = server
+            .get("/api/v1/ssh/krl")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(axum::http::header::ACCEPT, "application/octet-stream")
+            .await;
+        bin_res.assert_status_ok();
+        assert_eq!(
+            bin_res.header(axum::http::header::CONTENT_TYPE),
+            "application/octet-stream"
+        );
+        assert!(!bin_res.as_bytes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn verify_overlays_real_revocation_status_from_the_db() {
+        let server = db_server().await;
+        let issued = issue_one(&server, "route-db-verify").await;
+        let cert = issued["certificate"].as_str().unwrap().to_owned();
+        let id = issued["id"].as_str().unwrap();
+
+        let before = server
+            .post("/api/v1/ssh/verify")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({ "certificate": cert }))
+            .await;
+        before.assert_status_ok();
+        let before_json: serde_json::Value = before.json();
+        assert_ne!(before_json["status"], serde_json::json!("revoked"));
+
+        server
+            .post(&format!("/api/v1/ssh/certificates/{id}/revoke"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status_ok();
+
+        let after = server
+            .post("/api/v1/ssh/verify")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .json(&serde_json::json!({ "certificate": cert }))
+            .await;
+        after.assert_status_ok();
+        let after_json: serde_json::Value = after.json();
+        assert_eq!(after_json["status"], "revoked");
+    }
+}

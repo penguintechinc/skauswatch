@@ -139,18 +139,26 @@ async fn is_secret_owner(
     Ok(count > 0)
 }
 
-#[derive(Deserialize)]
-struct ListQuery {
-    #[serde(default)]
-    status: Vec<String>,
-}
-
 async fn list_jit_requests(
     State(state): State<AppState>,
     user: CurrentUser,
-    Query(q): Query<ListQuery>,
+    // `status` is a repeated-key filter (`?status=a&status=b`), matching v1's
+    // `request.args.getlist("status")`. `axum::extract::Query<T>` is backed
+    // by `serde_urlencoded`, which cannot deserialize repeated keys into a
+    // `Vec<String>` field (see its own `Query` doc comment, which points at
+    // `axum_extra::extract::Query` for that — not a dependency this crate
+    // carries). `Query<Vec<(String, String)>>` sidesteps that: serde_urlencoded
+    // deserializes the whole query string as an ordered sequence of raw pairs
+    // just fine, so every occurrence of `status` is preserved and filtered
+    // out here instead of relying on struct-field deserialization.
+    Query(raw_query): Query<Vec<(String, String)>>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_any_scope(&["jit:request", "jit:approve"])?;
+    let status_filter: Vec<String> = raw_query
+        .iter()
+        .filter(|(k, _)| k == "status")
+        .map(|(_, v)| v.clone())
+        .collect();
     let has_approve = user.scopes.contains("jit:approve");
 
     let rows = if has_approve {
@@ -177,11 +185,11 @@ async fn list_jit_requests(
         .await?
     };
 
-    let filtered: Vec<&RequestRow> = if q.status.is_empty() {
+    let filtered: Vec<&RequestRow> = if status_filter.is_empty() {
         rows.iter().collect()
     } else {
         rows.iter()
-            .filter(|r| q.status.contains(&r.status))
+            .filter(|r| status_filter.contains(&r.status))
             .collect()
     };
 
@@ -456,6 +464,373 @@ mod tests {
         let expired = generate_jit_token("g", "u", 1);
         assert!(
             validate_jit_token(&state, &expired, "secret-1")
+                .await
+                .is_none()
+        );
+    }
+
+    // -- DB-backed handler tests (real Postgres via skauswatch-testkit) --
+
+    use axum_test::TestServer;
+    use skauswatch_testkit::license::dev_license;
+
+    use crate::routes::test_support::{db_state, sign_token};
+
+    fn test_server_with_state(state: crate::state::AppState) -> TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        TestServer::new(app)
+    }
+
+    async fn seed_secret(state: &crate::state::AppState, owner_id: &str) -> String {
+        let secret_id = Uuid::new_v4().to_string();
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "INSERT INTO vault_secrets (id, name, description, secret_type, encrypted_value, \
+             encrypted_dek, dek_version, tags, secret_metadata, expires_at, created_at, \
+             updated_at, created_by) VALUES ($1,'n',NULL,'api_key','ct','dek',1,NULL,NULL,NULL,$2,$2,$3)",
+        )
+        .bind(&secret_id)
+        .bind(now)
+        .bind(owner_id)
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed secret: {e}"));
+        sqlx::query(
+            "INSERT INTO vault_secret_owners (secret_id, owner_type, owner_id) \
+             VALUES ($1, 'user', $2)",
+        )
+        .bind(&secret_id)
+        .bind(owner_id)
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed owner: {e}"));
+        secret_id
+    }
+
+    /// Seeds a `vault_jit_requests` row with a fixed `id` — satisfies the
+    /// `vault_jit_grants_request_id_fkey` FK for tests that hand-craft a
+    /// grant row directly (bypassing `approve_jit_request`).
+    async fn seed_jit_request_row(state: &crate::state::AppState, id: &str, secret_id: &str) {
+        sqlx::query(
+            "INSERT INTO vault_jit_requests (id, secret_id, requestor_id, reason, \
+             requested_duration_seconds, status, created_at) \
+             VALUES ($1,$2,'requestor-1','test',3600,'approved',$3)",
+        )
+        .bind(id)
+        .bind(secret_id)
+        .bind(Utc::now().naive_utc())
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed jit request row: {e}"));
+    }
+
+    #[tokio::test]
+    async fn create_jit_request_validates_body_and_secret_existence() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let token = sign_token(&state, "requestor-1", "jit:request");
+        let server = test_server_with_state(state.clone());
+
+        let missing_fields = server
+            .post("/api/v1/jit/requests")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({}))
+            .await;
+        missing_fields.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+        let unknown_secret = server
+            .post("/api/v1/jit/requests")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"secret_id": "does-not-exist", "reason": "need it"}))
+            .await;
+        unknown_secret.assert_status(axum::http::StatusCode::NOT_FOUND);
+
+        let secret_id = seed_secret(&state, "owner-1").await;
+        let too_long = server
+            .post("/api/v1/jit/requests")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({
+                "secret_id": secret_id,
+                "reason": "need it",
+                "requested_duration_seconds": 999_999,
+            }))
+            .await;
+        too_long.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+        let created = server
+            .post("/api/v1/jit/requests")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"secret_id": secret_id, "reason": "need it"}))
+            .await;
+        created.assert_status(axum::http::StatusCode::CREATED);
+        let body: Value = created.json();
+        assert_eq!(body["status"], "pending");
+        assert_eq!(body["secret_id"], secret_id);
+    }
+
+    #[tokio::test]
+    async fn list_jit_requests_scopes_by_requestor_without_approve_scope() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let secret_id = seed_secret(&state, "owner-1").await;
+        let requestor_token = sign_token(&state, "requestor-1", "jit:request");
+        let other_token = sign_token(&state, "requestor-2", "jit:request");
+        let server = test_server_with_state(state.clone());
+
+        server
+            .post("/api/v1/jit/requests")
+            .authorization_bearer(&requestor_token)
+            .json(&serde_json::json!({"secret_id": secret_id, "reason": "need it"}))
+            .await
+            .assert_status(axum::http::StatusCode::CREATED);
+
+        let mine = server
+            .get("/api/v1/jit/requests")
+            .authorization_bearer(&requestor_token)
+            .await;
+        mine.assert_status_ok();
+        assert_eq!(
+            mine.json::<Value>()["requests"].as_array().map(Vec::len),
+            Some(1)
+        );
+
+        let theirs = server
+            .get("/api/v1/jit/requests")
+            .authorization_bearer(&other_token)
+            .await;
+        theirs.assert_status_ok();
+        assert_eq!(
+            theirs.json::<Value>()["requests"].as_array().map(Vec::len),
+            Some(0)
+        );
+
+        let no_scope = sign_token(&state, "nobody", "");
+        server
+            .get("/api/v1/jit/requests")
+            .authorization_bearer(&no_scope)
+            .await
+            .assert_status(axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_jit_requests_with_approve_scope_sees_owned_secret_requests_and_status_filter() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let secret_id = seed_secret(&state, "owner-1").await;
+        let requestor_token = sign_token(&state, "requestor-1", "jit:request");
+        let owner_token = sign_token(&state, "owner-1", "jit:approve");
+        let server = test_server_with_state(state.clone());
+
+        server
+            .post("/api/v1/jit/requests")
+            .authorization_bearer(&requestor_token)
+            .json(&serde_json::json!({"secret_id": secret_id, "reason": "need it"}))
+            .await
+            .assert_status(axum::http::StatusCode::CREATED);
+
+        let all = server
+            .get("/api/v1/jit/requests")
+            .authorization_bearer(&owner_token)
+            .await;
+        assert_eq!(
+            all.json::<Value>()["requests"].as_array().map(Vec::len),
+            Some(1)
+        );
+
+        // `status` is a `Vec<String>` query param — the extractor requires
+        // repeated keys (`status=a&status=b`), not a single scalar value.
+        let no_match = server
+            .get("/api/v1/jit/requests?status=rejected&status=approved")
+            .authorization_bearer(&owner_token)
+            .await;
+        assert_eq!(
+            no_match.json::<Value>()["requests"]
+                .as_array()
+                .map(Vec::len),
+            Some(0)
+        );
+
+        let matching = server
+            .get("/api/v1/jit/requests?status=pending&status=rejected")
+            .authorization_bearer(&owner_token)
+            .await;
+        assert_eq!(
+            matching.json::<Value>()["requests"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn approve_jit_request_full_flow_and_conflict() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let secret_id = seed_secret(&state, "owner-1").await;
+        let requestor_token = sign_token(&state, "requestor-1", "jit:request");
+        let owner_token = sign_token(&state, "owner-1", "jit:approve");
+        let non_owner_token = sign_token(&state, "someone-else", "jit:approve");
+        let server = test_server_with_state(state.clone());
+
+        let created = server
+            .post("/api/v1/jit/requests")
+            .authorization_bearer(&requestor_token)
+            .json(&serde_json::json!({"secret_id": secret_id, "reason": "need it"}))
+            .await;
+        let request_id = created.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let forbidden = server
+            .patch(&format!("/api/v1/jit/requests/{request_id}/approve"))
+            .authorization_bearer(&non_owner_token)
+            .json(&serde_json::json!({}))
+            .await;
+        forbidden.assert_status(axum::http::StatusCode::FORBIDDEN);
+
+        let approved = server
+            .patch(&format!("/api/v1/jit/requests/{request_id}/approve"))
+            .authorization_bearer(&owner_token)
+            .json(&serde_json::json!({"approved_duration_seconds": 120}))
+            .await;
+        approved.assert_status_ok();
+        let approved_body: Value = approved.json();
+        assert!(
+            approved_body["access_token"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("jit:")
+        );
+
+        let already = server
+            .patch(&format!("/api/v1/jit/requests/{request_id}/approve"))
+            .authorization_bearer(&owner_token)
+            .json(&serde_json::json!({}))
+            .await;
+        already.assert_status(axum::http::StatusCode::CONFLICT);
+
+        let missing = server
+            .patch("/api/v1/jit/requests/does-not-exist/approve")
+            .authorization_bearer(&owner_token)
+            .json(&serde_json::json!({}))
+            .await;
+        missing.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reject_jit_request_full_flow_and_conflict() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let secret_id = seed_secret(&state, "owner-1").await;
+        let requestor_token = sign_token(&state, "requestor-1", "jit:request");
+        let owner_token = sign_token(&state, "owner-1", "jit:approve");
+        let non_owner_token = sign_token(&state, "someone-else", "jit:approve");
+        let server = test_server_with_state(state.clone());
+
+        let created = server
+            .post("/api/v1/jit/requests")
+            .authorization_bearer(&requestor_token)
+            .json(&serde_json::json!({"secret_id": secret_id, "reason": "need it"}))
+            .await;
+        let request_id = created.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let forbidden = server
+            .patch(&format!("/api/v1/jit/requests/{request_id}/reject"))
+            .authorization_bearer(&non_owner_token)
+            .await;
+        forbidden.assert_status(axum::http::StatusCode::FORBIDDEN);
+
+        let rejected = server
+            .patch(&format!("/api/v1/jit/requests/{request_id}/reject"))
+            .authorization_bearer(&owner_token)
+            .await;
+        rejected.assert_status_ok();
+        assert_eq!(rejected.json::<Value>()["status"], "rejected");
+
+        let already = server
+            .patch(&format!("/api/v1/jit/requests/{request_id}/reject"))
+            .authorization_bearer(&owner_token)
+            .await;
+        already.assert_status(axum::http::StatusCode::CONFLICT);
+
+        let missing = server
+            .patch("/api/v1/jit/requests/does-not-exist/reject")
+            .authorization_bearer(&owner_token)
+            .await;
+        missing.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn validate_jit_token_full_success_and_db_backed_rejections() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let secret_id = seed_secret(&state, "owner-1").await;
+
+        let expires_epoch = Utc::now().timestamp() + 3600;
+        let grant_id = "grant-1";
+        let grantee_id = "grantee-1";
+        let token = generate_jit_token(grant_id, grantee_id, expires_epoch);
+        let hash = token_hash(&token);
+
+        seed_jit_request_row(&state, "req-1", &secret_id).await;
+        sqlx::query(
+            "INSERT INTO vault_jit_grants (id, request_id, secret_id, grantee_id, \
+             access_token_hash, expires_at) VALUES ($1,'req-1',$2,$3,$4,$5)",
+        )
+        .bind(grant_id)
+        .bind(&secret_id)
+        .bind(grantee_id)
+        .bind(&hash)
+        .bind(
+            chrono::DateTime::from_timestamp(expires_epoch, 0)
+                .unwrap_or_default()
+                .naive_utc(),
+        )
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed grant: {e}"));
+
+        assert_eq!(
+            validate_jit_token(&state, &token, &secret_id).await,
+            Some(grantee_id.to_owned())
+        );
+
+        // Wrong secret id: grant row exists but doesn't match.
+        assert!(
+            validate_jit_token(&state, &token, "some-other-secret")
+                .await
+                .is_none()
+        );
+
+        // Tampered token (hash mismatch).
+        let tampered = generate_jit_token(grant_id, grantee_id, expires_epoch + 1);
+        assert!(
+            validate_jit_token(&state, &tampered, &secret_id)
+                .await
+                .is_none()
+        );
+
+        // Grant row that has already expired in the DB (independent of the
+        // token's own embedded expiry epoch).
+        let past_epoch = Utc::now().timestamp() + 10;
+        let past_grant_id = "grant-2";
+        let past_token = generate_jit_token(past_grant_id, grantee_id, past_epoch);
+        let past_hash = token_hash(&past_token);
+        seed_jit_request_row(&state, "req-2", &secret_id).await;
+        sqlx::query(
+            "INSERT INTO vault_jit_grants (id, request_id, secret_id, grantee_id, \
+             access_token_hash, expires_at) VALUES ($1,'req-2',$2,$3,$4,$5)",
+        )
+        .bind(past_grant_id)
+        .bind(&secret_id)
+        .bind(grantee_id)
+        .bind(&past_hash)
+        .bind(Utc::now().naive_utc() - chrono::Duration::seconds(3600))
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed expired grant: {e}"));
+        assert!(
+            validate_jit_token(&state, &past_token, &secret_id)
                 .await
                 .is_none()
         );

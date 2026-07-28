@@ -110,3 +110,133 @@ pub async fn fallback_not_found() -> Response {
     )
         .into_response()
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::*;
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let status_ok_to_read = resp.status();
+        let bytes = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap_or_else(|e| panic!("read body ({status_ok_to_read}): {e}"));
+        serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parse json: {e}"))
+    }
+
+    #[tokio::test]
+    async fn bad_request_maps_to_400_bare_body() {
+        let resp = ApiError::BadRequest("bad".to_owned()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(resp).await, serde_json::json!({"error": "bad"}));
+    }
+
+    #[tokio::test]
+    async fn unauthorized_maps_to_401_bare_body() {
+        let resp = ApiError::Unauthorized("nope".to_owned()).into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_json(resp).await, serde_json::json!({"error": "nope"}));
+    }
+
+    #[tokio::test]
+    async fn forbidden_maps_to_403_bare_body() {
+        let resp = ApiError::Forbidden("no".to_owned()).into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_json(resp).await, serde_json::json!({"error": "no"}));
+    }
+
+    #[tokio::test]
+    async fn insufficient_scope_maps_to_403_with_required_and_missing() {
+        let resp = ApiError::InsufficientScope {
+            required: vec!["secrets:read".to_owned()],
+            missing: vec!["secrets:read".to_owned()],
+        }
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "Insufficient scope");
+        assert_eq!(body["required"], serde_json::json!(["secrets:read"]));
+        assert_eq!(body["missing"], serde_json::json!(["secrets:read"]));
+    }
+
+    #[tokio::test]
+    async fn not_found_maps_to_404_bare_body() {
+        let resp = ApiError::NotFound("gone".to_owned()).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(resp).await, serde_json::json!({"error": "gone"}));
+    }
+
+    #[tokio::test]
+    async fn conflict_maps_to_409_bare_body() {
+        let resp = ApiError::Conflict("dup".to_owned()).into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(resp).await, serde_json::json!({"error": "dup"}));
+    }
+
+    #[tokio::test]
+    async fn gone_maps_to_410_bare_body() {
+        let resp = ApiError::Gone("expired".to_owned()).into_response();
+        assert_eq!(resp.status(), StatusCode::GONE);
+        assert_eq!(
+            body_json(resp).await,
+            serde_json::json!({"error": "expired"})
+        );
+    }
+
+    #[tokio::test]
+    async fn license_required_maps_to_402_with_license_server() {
+        let resp = ApiError::LicenseRequired {
+            license_server: "https://license.penguintech.io".to_owned(),
+        }
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::PAYMENT_REQUIRED);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "Vault license required");
+        assert_eq!(body["license_server"], "https://license.penguintech.io");
+        assert!(body.get("detail").is_some());
+    }
+
+    #[tokio::test]
+    async fn internal_maps_to_500_without_leaking_detail() {
+        let resp = ApiError::Internal.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        assert_eq!(body, serde_json::json!({"error": "Internal Server Error"}));
+    }
+
+    #[tokio::test]
+    async fn fallback_not_found_matches_v1_quart_shape() {
+        let resp = fallback_not_found().await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_json(resp).await;
+        assert_eq!(body["error"], "Not Found");
+        assert!(
+            body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("404 Not Found")
+        );
+    }
+
+    #[test]
+    fn internal_helper_logs_and_returns_internal_variant() {
+        assert!(matches!(
+            ApiError::internal("context", "boom"),
+            ApiError::Internal
+        ));
+    }
+
+    #[test]
+    fn sqlx_error_converts_to_internal() {
+        let err: ApiError = sqlx::Error::RowNotFound.into();
+        assert!(matches!(err, ApiError::Internal));
+    }
+
+    #[test]
+    fn envelope_error_converts_to_internal() {
+        let err: ApiError = skauswatch_vault::EnvelopeError::MekVersionNotLoaded(1).into();
+        assert!(matches!(err, ApiError::Internal));
+    }
+}

@@ -90,3 +90,96 @@ pub async fn fallback_not_found() -> Response {
     )
         .into_response()
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        serde_json::from_slice(&bytes).expect("body is JSON")
+    }
+
+    #[tokio::test]
+    async fn bad_request_renders_bare_error_shape() {
+        let resp = ApiError::BadRequest("public_key is required".to_owned()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], "public_key is required");
+    }
+
+    #[tokio::test]
+    async fn not_found_renders_bare_error_shape() {
+        let resp = ApiError::NotFound("Certificate not found".to_owned()).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], "Certificate not found");
+    }
+
+    #[tokio::test]
+    async fn validation_renders_structured_details() {
+        let details = vec![serde_json::json!({"loc": [], "msg": "bad", "type": "value_error"})];
+        let resp = ApiError::Validation(details.clone()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], "Validation error");
+        assert_eq!(json["details"], serde_json::Value::Array(details));
+    }
+
+    #[tokio::test]
+    async fn internal_helper_logs_and_returns_generic_500() {
+        let err = ApiError::internal("ssh certificate signing", "boom: raw cause");
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = body_json(resp).await;
+        // The real cause is logged (see ApiError::internal), never echoed —
+        // this service holds an SSH CA signing key.
+        assert_eq!(json["error"], "Internal Server Error");
+        assert!(json.get("boom: raw cause").is_none());
+    }
+
+    #[tokio::test]
+    async fn internal_variant_renders_generic_500() {
+        let resp = ApiError::Internal.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], "Internal Server Error");
+    }
+
+    #[tokio::test]
+    async fn fallback_not_found_renders_enveloped_shape() {
+        let resp = fallback_not_found().await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], "Not Found");
+        assert!(
+            json["detail"]
+                .as_str()
+                .expect("detail string")
+                .contains("404 Not Found")
+        );
+    }
+
+    #[tokio::test]
+    async fn api_json_rejects_malformed_body_with_validation_shape() {
+        let req = axum::extract::Request::builder()
+            .method("POST")
+            .uri("/x")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from("{not valid json"))
+            .expect("build request");
+        let result = ApiJson::<serde_json::Value>::from_request(req, &()).await;
+        let err = match result {
+            Ok(_) => panic!("expected a rejection for malformed JSON"),
+            Err(e) => e,
+        };
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["error"], "Validation error");
+        assert!(json["details"].as_array().is_some_and(|d| !d.is_empty()));
+    }
+}

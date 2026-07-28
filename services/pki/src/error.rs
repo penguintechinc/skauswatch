@@ -143,7 +143,7 @@ pub async fn fallback_not_found() -> Response {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)] // tests fail loudly by design
+#[allow(clippy::panic, clippy::unwrap_used)] // tests fail loudly by design
 mod tests {
     use super::*;
 
@@ -188,5 +188,36 @@ mod tests {
             ApiError::Internal(m) => assert_eq!(m, "boom"),
             other => panic!("expected Internal, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn service_unavailable_answers_503_with_the_given_message() {
+        let resp = ApiError::ServiceUnavailable("CA not initialized".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = match axum::body::to_bytes(resp.into_body(), usize::MAX).await {
+            Ok(b) => b,
+            Err(e) => panic!("read body: {e}"),
+        };
+        let json: serde_json::Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => panic!("body not JSON: {e}"),
+        };
+        assert_eq!(json["error"], "CA not initialized");
+    }
+
+    #[tokio::test]
+    async fn fallback_not_found_answers_the_v1_quart_framework_404_shape() {
+        let resp = fallback_not_found().await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = match axum::body::to_bytes(resp.into_body(), usize::MAX).await {
+            Ok(b) => b,
+            Err(e) => panic!("read body: {e}"),
+        };
+        let json: serde_json::Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => panic!("body not JSON: {e}"),
+        };
+        assert_eq!(json["error"], "Not Found");
+        assert!(json["detail"].as_str().unwrap().contains("404 Not Found"));
     }
 }

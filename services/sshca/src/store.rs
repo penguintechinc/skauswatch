@@ -195,6 +195,23 @@ mod tests {
     }
 
     #[test]
+    fn default_impl_matches_new() {
+        let store = CertStore::default();
+        assert_eq!(store.next_serial(), SERIAL_SEED + 1);
+        assert!(store.list(None, None, 100).is_empty());
+    }
+
+    #[test]
+    fn list_stops_once_limit_is_reached() {
+        let store = CertStore::new();
+        for (i, serial) in (1_000_001..1_000_004).enumerate() {
+            store.insert(sample(&format!("c{i}"), serial, CertificateType::User));
+        }
+        let limited = store.list(None, None, 1);
+        assert_eq!(limited.len(), 1);
+    }
+
+    #[test]
     fn serial_starts_at_seed_plus_one() {
         let store = CertStore::new();
         assert_eq!(store.next_serial(), SERIAL_SEED + 1);

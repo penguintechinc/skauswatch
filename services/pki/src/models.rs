@@ -289,6 +289,7 @@ pub struct AuthorizedKeysRequest {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)] // tests fail loudly by design
 mod tests {
     use super::*;
 
@@ -361,5 +362,136 @@ mod tests {
         assert!(valid_dns("www.example.com"));
         assert!(!valid_dns("localhost"));
         assert!(!valid_dns("-bad.example.com"));
+    }
+
+    #[test]
+    fn valid_dns_rejects_empty_and_overlong_names() {
+        assert!(!valid_dns(""));
+        assert!(!valid_dns(&"a.".repeat(130))); // > 253 chars
+    }
+
+    fn base_x509_req() -> X509CertificateRequest {
+        X509CertificateRequest {
+            subject: "CN=x".into(),
+            key_algorithm: "RSA".into(),
+            key_size: 2048,
+            validity_days: 30,
+            san_dns: vec![],
+            san_ip: vec![],
+            san_email: vec![],
+            key_usage: vec![],
+            extended_key_usage: vec![],
+            is_ca: false,
+            path_length: None,
+            csr_pem: None,
+            generate_key: true,
+        }
+    }
+
+    #[test]
+    fn x509_rejects_too_many_san_entries() {
+        let mut req = base_x509_req();
+        req.san_dns = (0..51).map(|i| format!("h{i}.example.com")).collect();
+        req.san_ip = (0..21).map(|i| format!("10.0.0.{}", i % 255)).collect();
+        req.san_email = (0..11).map(|i| format!("u{i}@example.com")).collect();
+        let errs = req.validate().unwrap_err();
+        let msgs: Vec<String> = errs
+            .iter()
+            .map(|e| e["msg"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(msgs.iter().any(|m| m.contains("50 entries")));
+        assert!(msgs.iter().any(|m| m.contains("20 entries")));
+        assert!(msgs.iter().any(|m| m.contains("10 entries")));
+    }
+
+    #[test]
+    fn x509_rejects_invalid_dns_san_entry() {
+        let mut req = base_x509_req();
+        req.san_dns = vec!["not a dns name".into()];
+        let errs = req.validate().unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| { e["msg"].as_str().unwrap().contains("Invalid DNS name") })
+        );
+    }
+
+    #[test]
+    fn x509_rejects_path_length_out_of_range() {
+        let mut req = base_x509_req();
+        req.is_ca = true;
+        req.path_length = Some(15);
+        let errs = req.validate().unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e["msg"].as_str().unwrap().contains("0..10"))
+        );
+    }
+
+    fn base_ssh_req() -> SshCertificateRequest {
+        SshCertificateRequest {
+            public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabcdefghij".into(),
+            certificate_type: "user".into(),
+            key_id: "k1".into(),
+            principals: vec!["alice".into()],
+            validity_seconds: 3600,
+            extensions: None,
+            critical_options: None,
+            source_addresses: vec![],
+            force_command: None,
+            hostname: None,
+        }
+    }
+
+    #[test]
+    fn ssh_accepts_ecdsa_public_key_format() {
+        let mut req = base_ssh_req();
+        req.public_key = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY".into();
+        // Long enough (>=50 chars) and matches the ecdsa-sha2 prefix branch.
+        assert!(req.public_key.len() >= 50);
+        assert!(req.validate().is_ok());
+    }
+
+    #[test]
+    fn ssh_rejects_empty_key_id() {
+        let mut req = base_ssh_req();
+        req.key_id = String::new();
+        let errs = req.validate().unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e["msg"].as_str().unwrap().contains("1..256"))
+        );
+    }
+
+    #[test]
+    fn ssh_rejects_invalid_principal_characters() {
+        let mut req = base_ssh_req();
+        req.principals = vec!["bad principal!".into()];
+        let errs = req.validate().unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| { e["msg"].as_str().unwrap().contains("Invalid principal") })
+        );
+    }
+
+    #[test]
+    fn ssh_rejects_validity_seconds_out_of_range() {
+        let mut req = base_ssh_req();
+        req.validity_seconds = 30;
+        let errs = req.validate().unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e["msg"].as_str().unwrap().contains("60..604800"))
+        );
+    }
+
+    #[test]
+    fn ssh_rejects_unknown_certificate_type() {
+        let mut req = base_ssh_req();
+        req.certificate_type = "bogus".into();
+        let errs = req.validate().unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| { e["msg"].as_str().unwrap().contains("must be user or host") })
+        );
     }
 }

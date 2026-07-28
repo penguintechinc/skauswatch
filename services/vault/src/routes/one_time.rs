@@ -183,7 +183,11 @@ async fn retrieve_one_time_secret(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use axum_test::TestServer;
+    use skauswatch_testkit::license::dev_license;
+
     use super::*;
+    use crate::routes::test_support::{db_state, sign_token};
 
     #[test]
     fn generate_token_produces_distinct_url_safe_tokens_with_matching_hash() {
@@ -199,5 +203,125 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
         assert_eq!(h1, expect);
+    }
+
+    fn test_server_with_state(state: crate::state::AppState) -> TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        TestServer::new(app)
+    }
+
+    #[tokio::test]
+    async fn create_requires_write_scope() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let token = sign_token(&state, "u", "secrets:read");
+        let server = test_server_with_state(state);
+        let resp = server
+            .post("/api/v1/one-time-secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"value": "v"}))
+            .await;
+        resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn create_validates_value_and_ttl() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let token = sign_token(&state, "u", "secrets:write");
+        let server = test_server_with_state(state);
+
+        server
+            .post("/api/v1/one-time-secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"value": ""}))
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+        server
+            .post("/api/v1/one-time-secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"value": "v", "ttl_seconds": 1}))
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+        server
+            .post("/api/v1/one-time-secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"value": "v", "ttl_seconds": 999_999_999}))
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_and_retrieve_round_trip_then_single_use_enforced() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let token = sign_token(&state, "u", "secrets:write");
+        let server = test_server_with_state(state);
+
+        let created = server
+            .post("/api/v1/one-time-secrets")
+            .authorization_bearer(&token)
+            .json(&json!({"value": "share-me-once", "ttl_seconds": 300}))
+            .await;
+        created.assert_status(axum::http::StatusCode::CREATED);
+        let created_body: Value = created.json();
+        let view_path = created_body["view_url"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let one_time_token = view_path.rsplit('/').next().unwrap_or_default().to_owned();
+
+        let first = server
+            .get(&format!("/api/v1/one-time-secrets/{one_time_token}"))
+            .await;
+        first.assert_status_ok();
+        assert_eq!(first.json::<Value>()["value"], "share-me-once");
+
+        let second = server
+            .get(&format!("/api/v1/one-time-secrets/{one_time_token}"))
+            .await;
+        second.assert_status(axum::http::StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn retrieve_unknown_token_is_404() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let server = test_server_with_state(state);
+        let resp = server
+            .get("/api/v1/one-time-secrets/not-a-real-token")
+            .await;
+        resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn retrieve_expired_secret_is_gone() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let server = test_server_with_state(state.clone());
+
+        let (token, token_hash) = generate_token();
+        let (ciphertext, dek, dek_version) = crate::routes::test_support::test_envelope()
+            .encrypt("stale")
+            .unwrap_or_else(|e| panic!("encrypt: {e}"));
+        sqlx::query(
+            "INSERT INTO vault_one_time_secrets (id, token_hash, encrypted_value, \
+             encrypted_dek, dek_version, expires_at, created_by, created_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,'u',$7)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&token_hash)
+        .bind(ciphertext)
+        .bind(dek)
+        .bind(dek_version as i32)
+        .bind(Utc::now().naive_utc() - chrono::Duration::seconds(60))
+        .bind(Utc::now().naive_utc())
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed expired one-time secret: {e}"));
+
+        let resp = server
+            .get(&format!("/api/v1/one-time-secrets/{token}"))
+            .await;
+        resp.assert_status(axum::http::StatusCode::GONE);
     }
 }

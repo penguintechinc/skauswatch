@@ -211,3 +211,351 @@ fn push_audit_filters(
         qb.push("certificate_type = ").push_bind(c.to_owned());
     }
 }
+
+/// Router-level + unit tests for the common handlers. Every REST handler
+/// here queries Postgres directly with no DB-free branch (unlike x509/ssh's
+/// `(None, None)`-identifier shortcuts) — see
+/// `docs/v2-port/testing-pattern.md` on why pki, lacking a `migrations/`
+/// directory, can only exercise these up through the point the unreachable
+/// pool fails. `push_audit_filters` is still fully unit-testable in
+/// isolation since `QueryBuilder::sql()` needs no live connection.
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use axum::http::StatusCode;
+    use sqlx::QueryBuilder;
+
+    use crate::state::AppStateInner;
+
+    use super::push_audit_filters;
+
+    fn test_server() -> axum_test::TestServer {
+        axum_test::TestServer::new(crate::routes::router(AppStateInner::for_tests()))
+    }
+
+    fn bearer() -> String {
+        match skauswatch_auth::issue_service_token("tester", "admin", "test-secret", 300) {
+            Ok(t) => format!("Bearer {t}"),
+            Err(e) => panic!("issue test token: {e}"),
+        }
+    }
+
+    #[test]
+    fn push_audit_filters_builds_expected_where_clauses() {
+        let mut qb = QueryBuilder::new("SELECT 1 FROM x");
+        push_audit_filters(&mut qb, None, None);
+        assert_eq!(qb.sql().as_str(), "SELECT 1 FROM x");
+
+        let mut qb2 = QueryBuilder::new("SELECT 1 FROM x");
+        push_audit_filters(&mut qb2, Some("certificate_issued"), Some("x509"));
+        assert!(qb2.sql().as_str().contains(" WHERE event_type = "));
+        assert!(qb2.sql().as_str().contains(" AND certificate_type = "));
+    }
+
+    #[tokio::test]
+    async fn statistics_touches_db_and_500s() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/statistics")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn all_ca_info_never_touches_db() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/ca/info")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(
+            body["x509"]["subject"]
+                .as_str()
+                .unwrap()
+                .contains("SkausWatch")
+        );
+        assert!(
+            body["ssh"]["ca_public_key"]
+                .as_str()
+                .unwrap()
+                .starts_with("ssh-")
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_with_filters_touches_db_and_500s() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/audit")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_query_param("event_type", "certificate_issued")
+            .add_query_param("certificate_type", "x509")
+            .add_query_param("page", "2")
+            .add_query_param("page_size", "10")
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn expiring_touches_db_for_x509_ssh_and_all_types() {
+        let server = test_server();
+        for cert_type in ["x509", "ssh", "all", "unrecognized"] {
+            let res = server
+                .get("/api/v1/expiring")
+                .add_header(axum::http::header::AUTHORIZATION, bearer())
+                .add_query_param("days", "7")
+                .add_query_param("type", cert_type)
+                .await;
+            if cert_type == "unrecognized" {
+                // Neither x509 nor ssh branch runs a query -> no DB touch.
+                res.assert_status_ok();
+                let body: serde_json::Value = res.json();
+                assert_eq!(body["expiring_within_days"], 7);
+            } else {
+                res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cleanup_touches_db_and_500s() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/cleanup")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ===================== DB-backed success paths =====================
+
+    async fn db_server_and_state() -> (axum_test::TestServer, crate::state::AppState) {
+        let state = crate::routes::test_support::db_state().await;
+        (
+            axum_test::TestServer::new(crate::routes::router(state.clone())),
+            state,
+        )
+    }
+
+    #[tokio::test]
+    async fn statistics_reports_real_counts() {
+        let (server, state) = db_server_and_state().await;
+        state
+            .manager
+            .issue_x509(
+                crate::ca::x509::X509IssueParams {
+                    subject: "CN=common-stats.example.com".into(),
+                    key_algorithm: "RSA".into(),
+                    key_size: 2048,
+                    validity_days: 30,
+                    san_dns: vec![],
+                    san_ip: vec![],
+                    san_email: vec![],
+                    key_usage: vec![],
+                    extended_key_usage: vec![],
+                    is_ca: false,
+                    path_length: None,
+                    csr_pem: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let res = server
+            .get("/api/v1/statistics")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["x509"]["total"].as_i64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn all_ca_info_pairs_with_the_real_statistics_endpoint() {
+        // Already DB-free (tested above without a real pool); confirm it
+        // still succeeds when the state also carries a real, connected pool.
+        let (server, _state) = db_server_and_state().await;
+        let res = server
+            .get("/api/v1/ca/info")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn audit_lists_a_real_row_written_by_issuance() {
+        let (server, state) = db_server_and_state().await;
+        state
+            .manager
+            .issue_x509(
+                crate::ca::x509::X509IssueParams {
+                    subject: "CN=common-audit.example.com".into(),
+                    key_algorithm: "RSA".into(),
+                    key_size: 2048,
+                    validity_days: 30,
+                    san_dns: vec![],
+                    san_ip: vec![],
+                    san_email: vec![],
+                    key_usage: vec![],
+                    extended_key_usage: vec![],
+                    is_ca: false,
+                    path_length: None,
+                    csr_pem: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let res = server
+            .get("/api/v1/audit")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_query_param("event_type", "certificate_issued")
+            .add_query_param("certificate_type", "x509")
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["total"].as_i64().unwrap() >= 1);
+        let entries = body["audit_log"].as_array().unwrap();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e["event_type"] == "certificate_issued")
+        );
+    }
+
+    #[tokio::test]
+    async fn expiring_lists_real_x509_and_ssh_rows() {
+        let (server, state) = db_server_and_state().await;
+        state
+            .manager
+            .issue_x509(
+                crate::ca::x509::X509IssueParams {
+                    subject: "CN=common-expiring.example.com".into(),
+                    key_algorithm: "RSA".into(),
+                    key_size: 2048,
+                    validity_days: 30,
+                    san_dns: vec![],
+                    san_ip: vec![],
+                    san_email: vec![],
+                    key_usage: vec![],
+                    extended_key_usage: vec![],
+                    is_ca: false,
+                    path_length: None,
+                    csr_pem: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let x509_res = server
+            .get("/api/v1/expiring")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_query_param("days", "60")
+            .add_query_param("type", "x509")
+            .await;
+        x509_res.assert_status_ok();
+        let x509_body: serde_json::Value = x509_res.json();
+        assert!(!x509_body["x509"].as_array().unwrap().is_empty());
+        assert!(x509_body["ssh"].as_array().unwrap().is_empty());
+
+        // ssh_config's default validity is 86400s (1 day) — a 2-day window
+        // catches a freshly-issued cert without needing to seed a row.
+        let pubkey_path = std::env::temp_dir().join(format!(
+            "skauswatch-pki-expiring-subject-{}",
+            uuid::Uuid::new_v4()
+        ));
+        assert!(
+            std::process::Command::new("ssh-keygen")
+                .arg("-t")
+                .arg("ed25519")
+                .arg("-f")
+                .arg(&pubkey_path)
+                .arg("-N")
+                .arg("")
+                .arg("-q")
+                .status()
+                .unwrap()
+                .success()
+        );
+        let pubkey = std::fs::read_to_string(format!("{}.pub", pubkey_path.display())).unwrap();
+        state
+            .manager
+            .issue_ssh(
+                crate::ca::ssh::SshIssueParams {
+                    public_key: pubkey,
+                    certificate_type: "user".into(),
+                    key_id: None,
+                    principals: vec!["alice".into()],
+                    validity_seconds: 86_400,
+                    extensions: None,
+                    critical_options: None,
+                    source_addresses: vec![],
+                    force_command: None,
+                    hostname: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let all_res = server
+            .get("/api/v1/expiring")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_query_param("days", "2")
+            .add_query_param("type", "all")
+            .await;
+        all_res.assert_status_ok();
+        let all_body: serde_json::Value = all_res.json();
+        assert!(!all_body["ssh"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cleanup_marks_real_expired_rows() {
+        let (server, state) = db_server_and_state().await;
+        // Seed one already-expired row per CA directly — `issue_*` can only
+        // ever produce future dates, so a real "already past not_after /
+        // valid_before" row requires inserting past the API, exactly the
+        // FK-seed pattern docs/v2-port/testing-pattern.md recommends.
+        sqlx::query(
+            "INSERT INTO x509_certificates \
+             (id, serial_number, subject, issuer, not_before, not_after, key_algorithm, \
+              signature_algorithm, fingerprint_sha256, certificate_pem, san_dns, san_ip, \
+              san_email, key_usage, extended_key_usage, is_ca, status, metadata, \
+              created_at, updated_at) \
+             VALUES ($1,'expired-1','CN=expired','CN=expired', now() - interval '400 days', \
+              now() - interval '1 day', 'RSA','SHA256','deadbeef','PEM','{}','{}','{}','{}', \
+              '{}',false,'active','{}'::jsonb,now(),now())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .execute(state.manager.db())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ssh_certificates \
+             (id, serial_number, key_id, certificate_type, principals, valid_after, \
+              valid_before, key_type, public_key, certificate, status, metadata, \
+              created_at, updated_at) \
+             VALUES ($1,'expired-1','k','user','{alice}', now() - interval '2 days', \
+              now() - interval '1 day', 'ed25519','ssh-ed25519 AAAA','cert-data','active', \
+              '{}'::jsonb, now(), now())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .execute(state.manager.db())
+        .await
+        .unwrap();
+
+        let res = server
+            .post("/api/v1/cleanup")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["updated_count"].as_i64().unwrap() >= 2);
+    }
+}

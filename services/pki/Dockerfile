@@ -61,10 +61,14 @@ LABEL org.opencontainers.image.title="skauswatch-pki" \
       org.opencontainers.image.source="https://github.com/penguintechinc/skauswatch" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
-# ca-certificates: TLS roots for outbound reqwest/sqlx-tls/AWS SDK calls.
-# rustls only (workspace deny.toml bans openssl-sys) — nothing else needed.
+# ca-certificates: TLS roots for outbound reqwest/sqlx-tls/AWS SDK calls
+# (rustls only — workspace deny.toml bans openssl-sys).
+# openssh-client: pki's SSH CA (src/ca/ssh.rs) shells out to `ssh-keygen -s`
+# at RUNTIME to sign SSH certificates / build KRLs / verify — the service
+# cannot issue SSH certs without it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        openssh-client \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 appuser \
     && useradd --system --uid 10001 --gid appuser --no-create-home --shell /usr/sbin/nologin appuser

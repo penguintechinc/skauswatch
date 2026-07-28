@@ -16,6 +16,37 @@ pub mod common;
 pub mod ssh;
 pub mod x509;
 
+/// Shared DB-backed test wiring, per `docs/v2-port/testing-pattern.md`'s
+/// fan-out pattern — one `db_state()`/`bearer()` pair reused by every route
+/// module's (and `manager.rs`'/`grpc/pki_service.rs`'s) success-path tests,
+/// instead of each hand-rolling its own real-Postgres `AppState`.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::state::{AppState, AppStateInner};
+
+    /// Real X.509 + SSH CA engines (see `AppStateInner::for_tests_with_db`)
+    /// wired to a fresh, migrated Postgres schema — a genuine end-to-end
+    /// stack for DB-backed success-path tests (no `migrations/` directory
+    /// means this is the *only* way to exercise the "found"/list/CRL/KRL/
+    /// statistics/audit-log code paths at all).
+    pub(crate) async fn db_state() -> AppState {
+        let pool =
+            skauswatch_testkit::db::test_pool(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
+                .await;
+        AppStateInner::for_tests_with_db(pool)
+    }
+
+    /// Mints a bearer token for the fixed `for_tests`/`for_tests_with_db`
+    /// JWT secret (`"test-secret"`).
+    #[allow(clippy::panic)] // test-only helper fails loudly by design
+    pub(crate) fn bearer() -> String {
+        match skauswatch_auth::issue_service_token("tester", "admin", "test-secret", 300) {
+            Ok(t) => format!("Bearer {t}"),
+            Err(e) => panic!("issue test token: {e}"),
+        }
+    }
+}
+
 use std::collections::HashMap;
 
 use axum::Router;
@@ -88,11 +119,37 @@ pub fn router(state: AppState) -> Router {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)] // tests fail loudly by design
+#[allow(clippy::panic, clippy::unwrap_used)] // tests fail loudly by design
 mod tests {
     use axum::http::StatusCode;
 
     use crate::state::AppStateInner;
+
+    use super::{page_params, user_id};
+
+    #[test]
+    fn user_id_reads_x_user_id_header_case_insensitively() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert_eq!(user_id(&headers), None);
+        headers.insert("x-user-id", "abc-123".parse().unwrap());
+        assert_eq!(user_id(&headers), Some("abc-123".to_owned()));
+    }
+
+    #[test]
+    fn page_params_defaults_and_parses_overrides() {
+        let empty = std::collections::HashMap::new();
+        assert_eq!(page_params(&empty), (1, 50));
+
+        let mut q = std::collections::HashMap::new();
+        q.insert("page".to_owned(), "3".to_owned());
+        q.insert("page_size".to_owned(), "10".to_owned());
+        assert_eq!(page_params(&q), (3, 10));
+
+        // Unparseable values fall back to defaults.
+        let mut bad = std::collections::HashMap::new();
+        bad.insert("page".to_owned(), "not-a-number".to_owned());
+        assert_eq!(page_params(&bad), (1, 50));
+    }
 
     fn test_server() -> axum_test::TestServer {
         axum_test::TestServer::new(super::router(AppStateInner::for_tests()))

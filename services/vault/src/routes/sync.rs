@@ -301,10 +301,190 @@ async fn trigger_sync(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use axum_test::TestServer;
+    use skauswatch_testkit::license::dev_license;
+
     use super::*;
+    use crate::routes::test_support::{db_state, sign_token};
 
     #[test]
     fn sync_stream_name_matches_v1_key_shape() {
         assert_eq!(sync_stream_name("aws"), "vault:sync:aws");
+    }
+
+    fn test_server_with_state(state: crate::state::AppState) -> TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        TestServer::new(app)
+    }
+
+    #[tokio::test]
+    async fn list_requires_sync_read_scope() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let token = sign_token(&state, "u", "secrets:read");
+        let server = test_server_with_state(state);
+        server
+            .get("/api/v1/sync/integrations")
+            .authorization_bearer(&token)
+            .await
+            .assert_status(axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_is_empty_against_a_fresh_db() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let token = sign_token(&state, "u", "sync:read");
+        let server = test_server_with_state(state);
+        let resp = server
+            .get("/api/v1/sync/integrations")
+            .authorization_bearer(&token)
+            .await;
+        resp.assert_status_ok();
+        assert_eq!(resp.json::<Value>()["integrations"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn create_validates_provider_name_and_direction() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let token = sign_token(&state, "u", "sync:admin");
+        let server = test_server_with_state(state);
+
+        server
+            .post("/api/v1/sync/integrations")
+            .authorization_bearer(&token)
+            .json(&json!({"provider": "bogus", "name": "n"}))
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+        server
+            .post("/api/v1/sync/integrations")
+            .authorization_bearer(&token)
+            .json(&json!({"provider": "aws", "name": ""}))
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+        server
+            .post("/api/v1/sync/integrations")
+            .authorization_bearer(&token)
+            .json(&json!({"provider": "aws", "name": "n", "sync_direction": "bogus"}))
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_list_update_and_delete_round_trip() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let admin = sign_token(&state, "u", "sync:admin");
+        let reader = sign_token(&state, "u", "sync:read");
+        let server = test_server_with_state(state);
+
+        let created = server
+            .post("/api/v1/sync/integrations")
+            .authorization_bearer(&admin)
+            .json(&json!({
+                "provider": "AWS",
+                "name": "prod-secrets-manager",
+                "sync_direction": "bidirectional",
+                "credentials": {"access_key": "AKIA...", "secret_key": "shh"},
+                "config": {"region": "us-east-1"},
+            }))
+            .await;
+        created.assert_status(axum::http::StatusCode::CREATED);
+        let created_body: Value = created.json();
+        assert_eq!(created_body["provider"], "aws");
+        assert_eq!(created_body["enabled"], true);
+        assert!(created_body.get("encrypted_credentials").is_none());
+        let id = created_body["id"].as_str().unwrap_or_default().to_owned();
+
+        let listed = server
+            .get("/api/v1/sync/integrations")
+            .authorization_bearer(&reader)
+            .await;
+        assert_eq!(
+            listed.json::<Value>()["integrations"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let updated = server
+            .put(&format!("/api/v1/sync/integrations/{id}"))
+            .authorization_bearer(&admin)
+            .json(&json!({"name": "renamed", "enabled": false}))
+            .await;
+        updated.assert_status_ok();
+        let updated_body: Value = updated.json();
+        assert_eq!(updated_body["name"], "renamed");
+        assert_eq!(updated_body["enabled"], false);
+
+        let bad_direction = server
+            .put(&format!("/api/v1/sync/integrations/{id}"))
+            .authorization_bearer(&admin)
+            .json(&json!({"sync_direction": "bogus"}))
+            .await;
+        bad_direction.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+        let missing_update = server
+            .put("/api/v1/sync/integrations/does-not-exist")
+            .authorization_bearer(&admin)
+            .json(&json!({}))
+            .await;
+        missing_update.assert_status(axum::http::StatusCode::NOT_FOUND);
+
+        let deleted = server
+            .delete(&format!("/api/v1/sync/integrations/{id}"))
+            .authorization_bearer(&admin)
+            .await;
+        deleted.assert_status(axum::http::StatusCode::NO_CONTENT);
+
+        let missing_delete = server
+            .delete(&format!("/api/v1/sync/integrations/{id}"))
+            .authorization_bearer(&admin)
+            .await;
+        missing_delete.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn trigger_sync_requires_enabled_integration() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let admin = sign_token(&state, "u", "sync:admin");
+        let server = test_server_with_state(state);
+
+        let created = server
+            .post("/api/v1/sync/integrations")
+            .authorization_bearer(&admin)
+            .json(&json!({"provider": "gcp", "name": "n", "enabled": false}))
+            .await;
+        let id = created.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let disabled = server
+            .post(&format!("/api/v1/sync/integrations/{id}/trigger"))
+            .authorization_bearer(&admin)
+            .await;
+        disabled.assert_status(axum::http::StatusCode::CONFLICT);
+
+        let enabled = server
+            .put(&format!("/api/v1/sync/integrations/{id}"))
+            .authorization_bearer(&admin)
+            .json(&json!({"enabled": true}))
+            .await;
+        enabled.assert_status_ok();
+
+        let triggered = server
+            .post(&format!("/api/v1/sync/integrations/{id}/trigger"))
+            .authorization_bearer(&admin)
+            .await;
+        triggered.assert_status_ok();
+        assert_eq!(triggered.json::<Value>()["status"], "sync_queued");
+
+        let missing = server
+            .post("/api/v1/sync/integrations/does-not-exist/trigger")
+            .authorization_bearer(&admin)
+            .await;
+        missing.assert_status(axum::http::StatusCode::NOT_FOUND);
     }
 }

@@ -527,6 +527,10 @@ fn parse_cert_info(output: &str) -> serde_json::Value {
         } else if let Some(v) = line.strip_prefix("Valid:") {
             let valid_str = v.trim();
             if let Some((after, before)) = valid_str.split_once(" to ") {
+                // `ssh-keygen -L` renders this as `Valid: from <ts> to <ts>`
+                // — strip the leading "from " so `valid_after` is a bare
+                // timestamp like `valid_before`, not "from <timestamp>".
+                let after = after.trim().strip_prefix("from ").unwrap_or(after.trim());
                 valid_after = Some(after.trim().to_owned());
                 valid_before = Some(before.trim().to_owned());
             }
@@ -566,5 +570,390 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// `SshCa` intentionally does not derive `Debug` (it holds CA key
+    /// material references — never risk it reaching a `{:?}` log line), so
+    /// `Result<SshCa, _>::unwrap_err()` isn't available. This extracts the
+    /// error without requiring `Debug` on the `Ok` side.
+    fn expect_err<T, E>(result: Result<T, E>) -> E {
+        match result {
+            Ok(_) => panic!("expected Err, got Ok"),
+            Err(e) => e,
+        }
+    }
+
+    fn tmp_config() -> SshCaConfig {
+        let dir =
+            std::env::temp_dir().join(format!("skauswatch-ssh-test-{}", uuid::Uuid::new_v4()));
+        SshCaConfig {
+            ca_key_path: dir.join("sshca").to_string_lossy().into_owned(),
+            ca_public_key_path: dir.join("sshca.pub").to_string_lossy().into_owned(),
+            ca_key_password: None,
+            default_validity_seconds: 86_400,
+            max_validity_seconds: 604_800,
+            default_key_type: "ed25519".into(),
+            krl_path: dir.join("revoked_keys").to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Generates a fresh (non-CA) ed25519 keypair and returns the OpenSSH
+    /// public key line — the "subject" being certified, distinct from the CA
+    /// key itself.
+    fn gen_subject_pubkey() -> String {
+        let path =
+            std::env::temp_dir().join(format!("skauswatch-ssh-subject-{}", uuid::Uuid::new_v4()));
+        let status = Command::new("ssh-keygen")
+            .arg("-t")
+            .arg("ed25519")
+            .arg("-f")
+            .arg(&path)
+            .arg("-N")
+            .arg("")
+            .arg("-q")
+            .status()
+            .unwrap_or_else(|e| panic!("run ssh-keygen: {e}"));
+        assert!(status.success(), "ssh-keygen keygen failed");
+        std::fs::read_to_string(format!("{}.pub", path.display()))
+            .unwrap_or_else(|e| panic!("read generated pubkey: {e}"))
+            .trim()
+            .to_owned()
+    }
+
+    fn base_params(pubkey: &str) -> SshIssueParams {
+        SshIssueParams {
+            public_key: pubkey.to_owned(),
+            certificate_type: "user".into(),
+            key_id: None,
+            principals: vec!["alice".into()],
+            validity_seconds: 3600,
+            extensions: None,
+            critical_options: None,
+            source_addresses: vec![],
+            force_command: None,
+            hostname: None,
+        }
+    }
+
+    #[test]
+    fn load_or_generate_writes_then_reloads_and_regenerates_missing_pubkey() {
+        let config = tmp_config();
+        let ca = SshCa::load_or_generate(config.clone()).unwrap();
+        assert!(ca.ca_public_key().starts_with("ssh-ed25519"));
+        assert!(!ca.ca_fingerprint().is_empty());
+        assert_eq!(ca.ca_key_type(), "ed25519");
+        assert_eq!(ca.serial_counter(), 1);
+        assert_eq!(ca.krl_version(), 0);
+
+        // Reload: private key present, public key file present -> read path.
+        let ca2 = SshCa::load_or_generate(config.clone()).unwrap();
+        assert_eq!(ca2.ca_public_key(), ca.ca_public_key());
+
+        // Remove the .pub file: load_ca must regenerate it via `ssh-keygen -y`.
+        std::fs::remove_file(&config.ca_public_key_path).unwrap();
+        let ca3 = SshCa::load_or_generate(config.clone()).unwrap();
+        assert_eq!(ca3.ca_public_key(), ca.ca_public_key());
+        assert!(std::path::Path::new(&config.ca_public_key_path).exists());
+    }
+
+    #[test]
+    fn load_or_generate_fails_for_unsupported_key_type() {
+        let mut config = tmp_config();
+        config.default_key_type = "not-a-real-type".into();
+        let err = expect_err(SshCa::load_or_generate(config));
+        assert!(matches!(err, SshError::Internal(_)));
+    }
+
+    #[test]
+    fn load_ca_fails_when_key_file_absent() {
+        let config = tmp_config(); // paths never created
+        let err = load_ca(&config).unwrap_err();
+        assert!(matches!(err, SshError::Internal(_)));
+    }
+
+    #[test]
+    fn load_ca_fingerprint_falls_back_to_empty_string_when_lf_fails() {
+        // Public key file present (skips the `-y` regen branch) but the
+        // private key file is garbage, so `ssh-keygen -lf` fails and the
+        // fingerprint falls back to the empty-string branch.
+        let config = tmp_config();
+        std::fs::create_dir_all(std::path::Path::new(&config.ca_key_path).parent().unwrap())
+            .unwrap();
+        std::fs::write(&config.ca_key_path, "not a real key").unwrap();
+        std::fs::write(&config.ca_public_key_path, "ssh-ed25519 AAAAfake fake").unwrap();
+        let (pub_key, fingerprint) = load_ca(&config).unwrap();
+        assert_eq!(pub_key, "ssh-ed25519 AAAAfake fake");
+        assert_eq!(fingerprint, "");
+    }
+
+    #[test]
+    fn for_tests_ca_has_fixed_canned_material() {
+        let ca = SshCa::for_tests();
+        assert_eq!(ca.ca_public_key(), "ssh-ed25519 AAAAtest test-ca");
+        assert_eq!(ca.ca_key_type(), "ed25519");
+        assert_eq!(ca.serial_counter(), 1);
+        assert_eq!(ca.krl_version(), 0);
+    }
+
+    #[test]
+    fn issue_user_certificate_with_default_extensions() {
+        let ca = SshCa::load_or_generate(tmp_config()).unwrap();
+        let pubkey = gen_subject_pubkey();
+        let issued = ca.issue(&base_params(&pubkey)).unwrap();
+        assert_eq!(issued.certificate_type, "user");
+        assert_eq!(issued.principals, vec!["alice".to_owned()]);
+        assert_eq!(issued.key_id, "skauswatch-user-1");
+        assert_eq!(issued.key_type, "ed25519");
+        assert!(issued.certificate.contains("cert-v01@openssh.com"));
+        assert_eq!(issued.extensions.len(), default_user_extensions().len());
+        assert!(issued.valid_before > issued.valid_after);
+    }
+
+    #[test]
+    fn issue_user_certificate_with_custom_options_and_explicit_key_id() {
+        let ca = SshCa::load_or_generate(tmp_config()).unwrap();
+        let pubkey = gen_subject_pubkey();
+        let mut p = base_params(&pubkey);
+        p.key_id = Some("custom-id".into());
+        // One empty-value extension ("-O extension:<name>") and one with a
+        // value ("-O <name>=<value>", using a name ssh-keygen actually
+        // recognizes for this form — "source-address" — since this is the
+        // only place source_addresses is exercised via the `extensions`
+        // param rather than the dedicated `source_addresses` field).
+        p.extensions = Some(vec![
+            ("permit-pty".into(), String::new()),
+            ("source-address".into(), "10.0.0.0/8".into()),
+        ]);
+        p.critical_options = Some(vec![("force-command".into(), "/bin/true".into())]);
+        p.force_command = Some("/bin/echo hi".into());
+        let issued = ca.issue(&p).unwrap();
+        assert_eq!(issued.key_id, "custom-id");
+        assert_eq!(
+            issued.extensions,
+            vec![
+                ("permit-pty".into(), String::new()),
+                ("source-address".into(), "10.0.0.0/8".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn issue_host_certificate_ignores_extensions_and_sets_h_flag() {
+        let ca = SshCa::load_or_generate(tmp_config()).unwrap();
+        let pubkey = gen_subject_pubkey();
+        let mut p = base_params(&pubkey);
+        p.certificate_type = "host".into();
+        p.principals = vec!["host.example.com".into()];
+        p.hostname = Some("host.example.com".into());
+        p.extensions = Some(vec![("permit-pty".into(), String::new())]);
+        let issued = ca.issue(&p).unwrap();
+        assert_eq!(issued.certificate_type, "host");
+        assert!(issued.extensions.is_empty());
+    }
+
+    #[test]
+    fn issue_empty_key_id_falls_back_to_default() {
+        let ca = SshCa::load_or_generate(tmp_config()).unwrap();
+        let pubkey = gen_subject_pubkey();
+        let mut p = base_params(&pubkey);
+        p.key_id = Some(String::new());
+        let issued = ca.issue(&p).unwrap();
+        assert_eq!(issued.key_id, "skauswatch-user-1");
+    }
+
+    #[test]
+    fn issue_rejects_empty_principals() {
+        let ca = SshCa::load_or_generate(tmp_config()).unwrap();
+        let pubkey = gen_subject_pubkey();
+        let mut p = base_params(&pubkey);
+        p.principals = vec![];
+        let err = ca.issue(&p).unwrap_err();
+        assert!(matches!(err, SshError::BadRequest(_)));
+    }
+
+    #[test]
+    fn issue_rejects_invalid_certificate_type() {
+        let ca = SshCa::load_or_generate(tmp_config()).unwrap();
+        let pubkey = gen_subject_pubkey();
+        let mut p = base_params(&pubkey);
+        p.certificate_type = "bogus".into();
+        let err = ca.issue(&p).unwrap_err();
+        assert!(matches!(err, SshError::BadRequest(_)));
+    }
+
+    #[test]
+    fn issue_validity_seconds_capped_at_max() {
+        let mut config = tmp_config();
+        config.max_validity_seconds = 60;
+        let ca = SshCa::load_or_generate(config).unwrap();
+        let pubkey = gen_subject_pubkey();
+        let mut p = base_params(&pubkey);
+        p.validity_seconds = 999_999;
+        let issued = ca.issue(&p).unwrap();
+        let secs = (issued.valid_before - issued.valid_after).num_seconds();
+        assert!(secs <= 61, "expected capped validity, got {secs}s");
+    }
+
+    #[test]
+    fn issue_fails_when_ca_key_path_is_bogus() {
+        // Hand-construct an SshCa whose CA key path doesn't exist so
+        // `ssh-keygen -s` fails -> exercises the `run()` error branch.
+        let ca = SshCa {
+            config: SshCaConfig {
+                ca_key_path: "/nonexistent/path/to/sshca".into(),
+                ca_public_key_path: String::new(),
+                ca_key_password: None,
+                default_validity_seconds: 86_400,
+                max_validity_seconds: 604_800,
+                default_key_type: "ed25519".into(),
+                krl_path: std::env::temp_dir()
+                    .join(format!("skauswatch-ssh-krl-{}", uuid::Uuid::new_v4()))
+                    .to_string_lossy()
+                    .into_owned(),
+            },
+            ca_public_key: "ssh-ed25519 AAAAtest test-ca".into(),
+            ca_fingerprint: "SHA256:test".into(),
+            serial_counter: AtomicU64::new(1),
+            krl_version: AtomicU64::new(0),
+        };
+        let pubkey = gen_subject_pubkey();
+        let err = ca.issue(&base_params(&pubkey)).unwrap_err();
+        assert!(matches!(err, SshError::Internal(_)));
+    }
+
+    #[test]
+    fn generate_krl_covers_serial_and_public_key_entries_and_persists() {
+        let config = tmp_config();
+        let ca = SshCa::load_or_generate(config.clone()).unwrap();
+        let (bytes, version) = ca
+            .generate_krl(&[
+                KrlEntry::Serial("42".into()),
+                KrlEntry::PublicKey(ca.ca_public_key().to_owned()),
+            ])
+            .unwrap();
+        assert!(!bytes.is_empty());
+        assert_eq!(version, 1);
+        assert!(std::path::Path::new(&config.krl_path).exists());
+
+        let (_, version2) = ca.generate_krl(&[]).unwrap();
+        assert_eq!(version2, 2);
+    }
+
+    #[test]
+    fn check_certificate_parses_issued_cert_fields() {
+        let ca = SshCa::load_or_generate(tmp_config()).unwrap();
+        let pubkey = gen_subject_pubkey();
+        let mut p = base_params(&pubkey);
+        p.key_id = Some("check-me".into());
+        let issued = ca.issue(&p).unwrap();
+        let info = ca.check_certificate(&issued.certificate).unwrap();
+        assert_eq!(info["key_id"], serde_json::json!("check-me"));
+        assert_eq!(info["serial"], serde_json::json!(issued.serial));
+        assert!(info.get("verified").is_some());
+    }
+
+    #[test]
+    fn check_certificate_rejects_garbage() {
+        let ca = SshCa::load_or_generate(tmp_config()).unwrap();
+        let err = ca.check_certificate("not a certificate").unwrap_err();
+        assert!(matches!(err, SshError::BadRequest(_)));
+    }
+
+    #[test]
+    fn known_hosts_entry_with_and_without_cert_authority_prefix() {
+        let ca = SshCa::for_tests();
+        let entry = ca.known_hosts_entry(&["a.example.com".into(), "b.example.com".into()], true);
+        assert!(entry.starts_with("@cert-authority a.example.com,b.example.com "));
+        let entry2 = ca.known_hosts_entry(&["a.example.com".into()], false);
+        assert!(!entry2.starts_with('@'));
+    }
+
+    #[test]
+    fn authorized_keys_entry_with_and_without_options() {
+        let ca = SshCa::for_tests();
+        let entry = ca.authorized_keys_entry(&["alice".into(), "bob".into()], &[]);
+        assert!(entry.starts_with("cert-authority,principals=\"alice,bob\" "));
+
+        let entry2 = ca.authorized_keys_entry(
+            &["alice".into()],
+            &[
+                ("no-port-forwarding".into(), String::new()),
+                ("expiry-time".into(), "20300101".into()),
+            ],
+        );
+        assert!(entry2.starts_with("no-port-forwarding,expiry-time=\"20300101\" cert-authority"));
+    }
+
+    #[test]
+    fn ssh_config_snippet_with_and_without_optional_fields() {
+        let ca = SshCa::for_tests();
+        let minimal = ca.ssh_config("host.example.com", 22, None, None);
+        assert!(minimal.contains("Host host.example.com"));
+        assert!(!minimal.contains("User"));
+
+        let full = ca.ssh_config("host.example.com", 2222, Some("deploy"), Some("/keys/id"));
+        assert!(full.contains("User deploy"));
+        assert!(full.contains("IdentityFile /keys/id"));
+        assert!(full.contains("CertificateFile /keys/id-cert.pub"));
+        assert!(full.contains("Port 2222"));
+    }
+
+    #[test]
+    fn detect_key_type_covers_all_prefixes() {
+        assert_eq!(detect_key_type("ssh-rsa AAA"), "rsa");
+        assert_eq!(detect_key_type("ssh-ed25519 AAA"), "ed25519");
+        assert_eq!(detect_key_type("ecdsa-sha2-nistp256 AAA"), "ecdsa");
+        assert_eq!(detect_key_type("weird-type AAA"), "unknown");
+    }
+
+    #[test]
+    fn parse_cert_info_extracts_fields_from_ssh_keygen_l_output() {
+        let output = "key.pub:\n\
+            Type: ssh-ed25519-cert-v01@openssh.com user certificate\n\
+            Public key: ED25519-CERT SHA256:abc\n\
+            Signing CA: ED25519 SHA256:def (using ssh-ed25519)\n\
+            Key ID: \"my-key-id\"\n\
+            Serial: 7\n\
+            Valid: from 2026-01-01T00:00:00 to 2026-01-02T00:00:00\n\
+            Principals: \n\
+            \talice\n\
+            \tbob\n\
+            Critical Options: (none)\n\
+            Extensions: \n\
+            \tpermit-pty\n";
+        let info = parse_cert_info(output);
+        assert_eq!(info["key_id"], serde_json::json!("my-key-id"));
+        assert_eq!(info["serial"], serde_json::json!("7"));
+        assert_eq!(
+            info["valid_after"],
+            serde_json::json!("2026-01-01T00:00:00")
+        );
+        assert_eq!(
+            info["valid_before"],
+            serde_json::json!("2026-01-02T00:00:00")
+        );
+        assert_eq!(
+            info["type"],
+            serde_json::json!("ssh-ed25519-cert-v01@openssh.com user certificate")
+        );
+        let principals = info["principals"].as_array().unwrap();
+        assert!(principals.contains(&serde_json::json!("alice")));
+        assert!(principals.contains(&serde_json::json!("bob")));
+    }
+
+    #[test]
+    fn default_user_extensions_matches_v1_permit_set() {
+        let ext = default_user_extensions();
+        assert_eq!(ext.len(), 4);
+        assert!(ext.iter().any(|(k, _)| k == "permit-pty"));
+        assert!(ext.iter().any(|(k, _)| k == "permit-agent-forwarding"));
+        assert!(ext.iter().any(|(k, _)| k == "permit-port-forwarding"));
+        assert!(ext.iter().any(|(k, _)| k == "permit-user-rc"));
     }
 }

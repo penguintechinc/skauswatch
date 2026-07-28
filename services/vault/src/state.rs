@@ -116,6 +116,20 @@ impl AppStateInner {
         let db = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://test:test@127.0.0.1:1/test")
             .unwrap_or_else(|e| panic!("lazy test pool: {e}"));
+        Self::for_tests_with_db(license, envelope, db)
+    }
+
+    /// Test constructor for handler/DB-layer tests: identical fixed test
+    /// JWT secret to [`for_tests`], but backed by a real, connected pool —
+    /// typically one from `skauswatch_testkit::db::test_pool` — instead of
+    /// the lazy/unconnected one, so handlers that issue real queries
+    /// (secrets/JIT/one-time/sync/admin/audit CRUD) work under test.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn for_tests_with_db(
+        license: Arc<LicenseClient>,
+        envelope: EnvelopeEncryption,
+        db: PgPool,
+    ) -> AppState {
         Arc::new(Self {
             license,
             db,

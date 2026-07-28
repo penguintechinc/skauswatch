@@ -106,4 +106,40 @@ mod tests {
         assert_eq!(body["status"], "degraded");
         assert_eq!(body["licensed"], false);
     }
+
+    fn dev_state() -> AppState {
+        let cfg = LicenseConfig::new("skauswatch").expect("config");
+        let client = LicenseClient::new(cfg).expect("client");
+        AppStateInner::for_tests(client, EnvelopeEncryption::default())
+    }
+
+    #[tokio::test]
+    async fn readyz_reports_ready_when_licensed() {
+        let server = axum_test::TestServer::new(router(dev_state()));
+        let resp = server.get("/readyz").await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["licensed"], true);
+    }
+
+    #[tokio::test]
+    async fn status_returns_version_and_service_name() {
+        let server = axum_test::TestServer::new(router(dev_state()));
+        let resp = server.get("/api/v1/status").await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["service"], "vault");
+        assert!(body["version"].as_str().is_some());
+        assert!(body["timestamp"].as_str().is_some());
+    }
+
+    #[test]
+    fn get_version_falls_back_when_no_version_file_found() {
+        // Exercises the real filesystem-lookup path (not mocked) — either a
+        // `.version` file is actually found (repo root or crate dir) or the
+        // "0.0.0-dev" fallback is returned; either way the function must
+        // never panic and must return a non-empty string.
+        assert!(!get_version().is_empty());
+    }
 }
