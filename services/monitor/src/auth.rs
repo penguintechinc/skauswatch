@@ -208,4 +208,81 @@ mod tests {
             other => panic!("expected Forbidden, got {other:?}"),
         }
     }
+
+    // HTTP-level tests below exercise the `FromRequestParts<AppState>` impl
+    // itself (header presence/shape, dev bypass, real decode) rather than
+    // the pure `decode_bearer` function the tests above already cover.
+
+    async fn probe(user: AuthedUser) -> axum::http::StatusCode {
+        assert!(!user.claims.sub.is_empty());
+        axum::http::StatusCode::OK
+    }
+
+    fn probe_server(state: AppState) -> axum_test::TestServer {
+        let app = axum::Router::new()
+            .route("/probe", axum::routing::get(probe))
+            .with_state(state);
+        axum_test::TestServer::new(app)
+    }
+
+    #[tokio::test]
+    async fn missing_authorization_header_is_unauthorized() {
+        let server = probe_server(crate::routes::test_support::dev_state());
+        let res = server.get("/probe").await;
+        res.assert_status(axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn header_without_bearer_prefix_is_unauthorized() {
+        let server = probe_server(crate::routes::test_support::dev_state());
+        let res = server.get("/probe").authorization("Token abc").await;
+        res.assert_status(axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn dev_bypass_grants_access_when_auth_disabled() {
+        // The dev bypass only skips JWT *decoding* — a bearer-shaped header
+        // is still required to reach that branch (see the header/prefix
+        // checks ahead of the `auth_enabled` check above), so this still
+        // sends one, just not a valid/decodable one.
+        let server = probe_server(crate::routes::test_support::dev_bypass_state());
+        let res = server
+            .get("/probe")
+            .authorization_bearer("not-a-real-token")
+            .await;
+        res.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn valid_bearer_token_grants_access() {
+        // MONITOR_AUTH_ENABLED defaults true (unset in the test env), so
+        // dev_state() exercises the real decode path here.
+        let state = crate::routes::test_support::dev_state();
+        let token = crate::routes::test_support::sign_token(&state, "tenant-a", "events:read");
+        let server = probe_server(state);
+        let res = server.get("/probe").authorization_bearer(token).await;
+        res.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn expired_bearer_token_is_unauthorized_over_http() {
+        let state = crate::routes::test_support::dev_state();
+        let mut claims = base_claims();
+        claims.exp = 1;
+        let token = crate::routes::test_support::sign_claims(&state, &claims);
+        let server = probe_server(state);
+        let res = server.get("/probe").authorization_bearer(token).await;
+        res.assert_status(axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn missing_tenant_claim_is_forbidden_over_http() {
+        let state = crate::routes::test_support::dev_state();
+        let mut claims = base_claims();
+        claims.tenant = String::new();
+        let token = crate::routes::test_support::sign_claims(&state, &claims);
+        let server = probe_server(state);
+        let res = server.get("/probe").authorization_bearer(token).await;
+        res.assert_status(axum::http::StatusCode::FORBIDDEN);
+    }
 }

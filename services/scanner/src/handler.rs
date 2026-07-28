@@ -171,3 +171,285 @@ impl StreamHandler for ScannerHandler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)] // tests fail loudly by design
+mod tests {
+    use super::*;
+    use fred::interfaces::{ClientLike, StreamsInterface};
+    use fred::types::streams::XReadValue;
+    use skauswatch_streams::STREAM_SCANNER_RESULTS;
+    use sqlx::Row;
+    use std::collections::HashMap;
+
+    fn redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379/0".to_owned())
+    }
+
+    /// A fresh, uniquely-prefixed config per test so parallel test runs
+    /// never collide on the same Redis stream keys.
+    fn test_config(prefix: &str) -> WorkerConfig {
+        WorkerConfig {
+            health_port: 0,
+            redis_url: redis_url(),
+            redis_password: None,
+            redis_prefix: prefix.to_owned(),
+            consumer_group: "test-group".to_owned(),
+            consumer_name: "test-consumer".to_owned(),
+            max_concurrent_tasks: 1,
+            clamav_host: "127.0.0.1".to_owned(),
+            clamav_port: 1, // nothing listens here — exercises the degrade-to-clean path
+            clamav_timeout_sec: 1,
+            clamav_enabled: true,
+            yara_rules_path: concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/yara_rules")
+                .to_owned(),
+            yara_enabled: true,
+            asm_enabled: true,
+        }
+    }
+
+    async fn db_pool() -> sqlx::PgPool {
+        skauswatch_testkit::db::test_pool(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).await
+    }
+
+    async fn test_producer(prefix: &str) -> StreamProducer {
+        StreamProducer::connect(&redis_url(), None, prefix)
+            .await
+            .expect("connect test producer")
+    }
+
+    /// Reads back the most recently published entry on the scanner results
+    /// stream via a raw client — proves `handle` actually XADDed, not just
+    /// that `publish()` didn't return an error.
+    async fn latest_published_result(prefix: &str) -> HashMap<String, String> {
+        let config = fred::types::config::Config::from_url(&redis_url()).expect("parse redis url");
+        let client = fred::types::Builder::from_config(config)
+            .build()
+            .expect("build raw client");
+        let _connect_task = client.init().await.expect("connect raw client");
+        let key = format!("{prefix}:{STREAM_SCANNER_RESULTS}");
+        let entries: Vec<XReadValue<String, String, String>> = client
+            .xrevrange_values(key, "+", "-", Some(1))
+            .await
+            .expect("xrevrange");
+        entries
+            .into_iter()
+            .next()
+            .expect("a result was published")
+            .1
+    }
+
+    fn entry(fields: &[(&str, &str)]) -> StreamEntry {
+        StreamEntry {
+            id: "1-0".to_owned(),
+            fields: fields
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        }
+    }
+
+    fn unique_prefix() -> String {
+        format!("test-scanner-{}", uuid::Uuid::new_v4())
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_missing_job_id() {
+        let prefix = unique_prefix();
+        let handler = ScannerHandler::new(
+            db_pool().await,
+            test_producer(&prefix).await,
+            test_config(&prefix),
+        );
+        let e = entry(&[("scan_type", "yara"), ("target", "t")]);
+        let err = handler
+            .handle(&e)
+            .await
+            .expect_err("missing job_id must error");
+        assert!(err.to_string().contains("job_id"));
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_missing_scan_type() {
+        let prefix = unique_prefix();
+        let handler = ScannerHandler::new(
+            db_pool().await,
+            test_producer(&prefix).await,
+            test_config(&prefix),
+        );
+        let e = entry(&[("job_id", "job-1"), ("target", "t")]);
+        let err = handler
+            .handle(&e)
+            .await
+            .expect_err("missing scan_type must error");
+        assert!(err.to_string().contains("scan_type"));
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_missing_target() {
+        let prefix = unique_prefix();
+        let handler = ScannerHandler::new(
+            db_pool().await,
+            test_producer(&prefix).await,
+            test_config(&prefix),
+        );
+        let e = entry(&[("job_id", "job-1"), ("scan_type", "yara")]);
+        let err = handler
+            .handle(&e)
+            .await
+            .expect_err("missing target must error");
+        assert!(err.to_string().contains("target"));
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_empty_string_fields_same_as_missing() {
+        let prefix = unique_prefix();
+        let handler = ScannerHandler::new(
+            db_pool().await,
+            test_producer(&prefix).await,
+            test_config(&prefix),
+        );
+        let e = entry(&[("job_id", ""), ("scan_type", "yara"), ("target", "t")]);
+        let err = handler
+            .handle(&e)
+            .await
+            .expect_err("empty job_id must error same as absent");
+        assert!(err.to_string().contains("job_id"));
+    }
+
+    #[tokio::test]
+    async fn handle_yara_success_persists_row_and_publishes_result() {
+        let prefix = unique_prefix();
+        let db = db_pool().await;
+        let handler = ScannerHandler::new(
+            db.clone(),
+            test_producer(&prefix).await,
+            test_config(&prefix),
+        );
+
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        std::io::Write::write_all(&mut f, b"benign content, nothing malicious here")
+            .expect("write tempfile");
+        let path = f.path().to_str().expect("utf8 path").to_owned();
+
+        let e = entry(&[
+            ("job_id", "job-yara-1"),
+            ("scan_type", "yara"),
+            ("target", "benign.txt"),
+            ("file_path", &path),
+        ]);
+        handler.handle(&e).await.expect("handle succeeds");
+
+        let row = sqlx::query(
+            "SELECT status, findings_count, target FROM scanner_scan_results WHERE job_id = $1",
+        )
+        .bind("job-yara-1")
+        .fetch_one(&db)
+        .await
+        .expect("row written to db");
+        assert_eq!(row.get::<String, _>("status"), "success");
+        assert_eq!(row.get::<i32, _>("findings_count"), 0);
+        assert_eq!(row.get::<String, _>("target"), "benign.txt");
+
+        let published = latest_published_result(&prefix).await;
+        assert_eq!(published.get("job_id"), Some(&"job-yara-1".to_owned()));
+        assert_eq!(published.get("status"), Some(&"success".to_owned()));
+        assert_eq!(published.get("scan_type"), Some(&"yara".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn handle_unknown_scan_type_still_acks_persists_error_status() {
+        let prefix = unique_prefix();
+        let db = db_pool().await;
+        let mut cfg = test_config(&prefix);
+        cfg.yara_enabled = false; // this path never touches yara — keep the test light
+        let handler = ScannerHandler::new(db.clone(), test_producer(&prefix).await, cfg);
+
+        let e = entry(&[
+            ("job_id", "job-bad"),
+            ("scan_type", "bogus"),
+            ("target", "t"),
+        ]);
+        // Scan-level failures are not handler-level failures: the message
+        // is still acked (Ok) because a result — even an error result — was
+        // successfully computed and recorded.
+        handler
+            .handle(&e)
+            .await
+            .expect("handler acks scan-level errors");
+
+        let row =
+            sqlx::query("SELECT status, error_message FROM scanner_scan_results WHERE job_id = $1")
+                .bind("job-bad")
+                .fetch_one(&db)
+                .await
+                .expect("row written to db");
+        assert_eq!(row.get::<String, _>("status"), "error");
+        assert_eq!(
+            row.get::<Option<String>, _>("error_message"),
+            Some("unknown scan type: bogus".to_owned())
+        );
+
+        let published = latest_published_result(&prefix).await;
+        assert_eq!(published.get("status"), Some(&"error".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn handle_clamav_unreachable_daemon_persists_clean_success_row() {
+        let prefix = unique_prefix();
+        let db = db_pool().await;
+        let mut cfg = test_config(&prefix);
+        cfg.yara_enabled = false;
+        let handler = ScannerHandler::new(db.clone(), test_producer(&prefix).await, cfg);
+
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        std::io::Write::write_all(&mut f, b"whatever").expect("write tempfile");
+        let path = f.path().to_str().expect("utf8 path").to_owned();
+
+        let e = entry(&[
+            ("job_id", "job-clam-1"),
+            ("scan_type", "clamav"),
+            ("target", "t"),
+            ("file_path", &path),
+        ]);
+        handler.handle(&e).await.expect("handle succeeds");
+
+        let row =
+            sqlx::query("SELECT status, error_message FROM scanner_scan_results WHERE job_id = $1")
+                .bind("job-clam-1")
+                .fetch_one(&db)
+                .await
+                .expect("row written to db");
+        assert_eq!(row.get::<String, _>("status"), "success");
+        assert_eq!(row.get::<Option<String>, _>("error_message"), None);
+    }
+
+    #[tokio::test]
+    async fn new_disables_yara_scanner_when_config_flag_is_false() {
+        let prefix = unique_prefix();
+        let mut cfg = test_config(&prefix);
+        cfg.yara_enabled = false;
+        let handler = ScannerHandler::new(db_pool().await, test_producer(&prefix).await, cfg);
+        assert!(handler.yara_scanner.is_none());
+    }
+
+    #[tokio::test]
+    async fn new_yara_scanner_is_none_when_rules_path_is_invalid() {
+        let prefix = unique_prefix();
+        let mut cfg = test_config(&prefix);
+        cfg.yara_rules_path = "/nonexistent/rules/path".to_owned();
+        let handler = ScannerHandler::new(db_pool().await, test_producer(&prefix).await, cfg);
+        assert!(handler.yara_scanner.is_none());
+    }
+
+    #[tokio::test]
+    async fn new_loads_yara_scanner_when_enabled_and_path_is_valid() {
+        let prefix = unique_prefix();
+        let handler = ScannerHandler::new(
+            db_pool().await,
+            test_producer(&prefix).await,
+            test_config(&prefix),
+        );
+        assert!(handler.yara_scanner.is_some());
+    }
+}

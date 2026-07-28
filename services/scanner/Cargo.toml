@@ -38,6 +38,7 @@ skauswatch-telemetry.workspace = true
 
 [dev-dependencies]
 tempfile = "=3.27.0"
+skauswatch-testkit = { workspace = true }
 
 [lints]
 workspace = true

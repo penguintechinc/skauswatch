@@ -175,4 +175,74 @@ mod tests {
         );
         eprintln!("✓ Benign content did not match (no false positives)");
     }
+
+    #[tokio::test]
+    async fn load_single_file_path_uses_the_is_file_branch() {
+        // `load()` branches on `path.is_file()` vs `path.is_dir()`; the
+        // directory branch is covered above — this exercises the single-
+        // file branch by pointing directly at one `.yar` file.
+        let rules_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/yara_rules/corporate_threats.yar"
+        );
+        let scanner = YaraScanner::load(rules_path)
+            .await
+            .expect("single-file load must succeed");
+
+        const EICAR: &[u8] =
+            b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+        let matches = scanner.scan_bytes(EICAR).expect("scan succeeds");
+        assert!(
+            matches.iter().any(|m| m.rule_name == "EICAR_Test_File"),
+            "single-file load should compile the same rule as the directory load"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_empty_directory_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let result = YaraScanner::load(dir.path().to_str().expect("utf8 path")).await;
+        let err = result.expect_err("empty rules directory must fail loudly, not silently no-op");
+        assert!(err.to_string().contains("no YARA rule files found"));
+    }
+
+    #[tokio::test]
+    async fn load_directory_with_invalid_rule_syntax_fails_loudly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("broken.yar"),
+            b"this is not valid YARA syntax {{{",
+        )
+        .expect("write broken rule file");
+        let result = YaraScanner::load(dir.path().to_str().expect("utf8 path")).await;
+        let err = result.expect_err("invalid rule syntax must fail compilation, not be ignored");
+        assert!(err.to_string().contains("yara rule compile failed"));
+    }
+
+    #[tokio::test]
+    async fn scan_file_reads_from_disk_and_matches_eicar() {
+        let rules_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/yara_rules");
+        let scanner = YaraScanner::load(rules_path).await.expect("corpus loads");
+
+        const EICAR: &[u8] =
+            b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+        let mut f = tempfile::NamedTempFile::new().expect("tempfile");
+        std::io::Write::write_all(&mut f, EICAR).expect("write eicar to tempfile");
+
+        let matches = scanner
+            .scan_file(f.path().to_str().expect("utf8 path"))
+            .await
+            .expect("scan_file succeeds");
+        assert!(matches.iter().any(|m| m.rule_name == "EICAR_Test_File"));
+    }
+
+    #[tokio::test]
+    async fn scan_file_missing_path_errors() {
+        let rules_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/yara_rules");
+        let scanner = YaraScanner::load(rules_path).await.expect("corpus loads");
+
+        let result = scanner.scan_file("/nonexistent/path/to/file").await;
+        let err = result.expect_err("missing file must error");
+        assert!(err.to_string().contains("failed to read file"));
+    }
 }

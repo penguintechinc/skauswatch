@@ -89,29 +89,17 @@ async fn update_alert_status(
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::routes::test_support::{dev_bypass_state, dev_state, gated_state, sign_token};
     use axum::http::StatusCode;
-    use penguin_licensing::{LicenseClient, LicenseConfig};
 
-    fn dev_state() -> AppState {
-        let cfg = match LicenseConfig::new("skauswatch") {
-            Ok(c) => c,
-            Err(e) => panic!("license config: {e}"),
-        };
-        let client = match LicenseClient::new(cfg) {
-            Ok(c) => c,
-            Err(e) => panic!("license client: {e}"),
-        };
-        crate::state::AppStateInner::for_tests(client)
-    }
-
-    fn test_server() -> axum_test::TestServer {
-        let app = axum::Router::new().merge(router()).with_state(dev_state());
+    fn test_server(state: AppState) -> axum_test::TestServer {
+        let app = axum::Router::new().merge(router()).with_state(state);
         axum_test::TestServer::new(app)
     }
 
     #[tokio::test]
     async fn search_alerts_is_always_empty() {
-        let server = test_server();
+        let server = test_server(dev_state());
         let res = server
             .post("/alerts/search")
             .json(&serde_json::json!({"query": "anything", "limit": 10, "offset": 0}))
@@ -124,8 +112,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_alerts_flag_denied_is_forbidden() {
+        let server = test_server(gated_state());
+        let res = server
+            .post("/alerts/search")
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn get_alert_is_always_not_found() {
-        let server = test_server();
+        let server = test_server(dev_state());
         let res = server.get("/alerts/abc-123").await;
         res.assert_status(StatusCode::NOT_FOUND);
         let body: serde_json::Value = res.json();
@@ -133,8 +131,15 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_alert_flag_denied_is_forbidden() {
+        let server = test_server(gated_state());
+        let res = server.get("/alerts/abc-123").await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn update_alert_status_requires_auth() {
-        let server = test_server();
+        let server = test_server(dev_state());
         let res = server
             .put("/alerts/abc-123/status")
             .json(&serde_json::json!({"status": "resolved"}))
@@ -143,13 +148,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_alert_status_with_a_valid_bearer_token_over_http() {
+        // MONITOR_AUTH_ENABLED defaults true (unset in the test env), so
+        // dev_state() exercises the real JWT decode path here, not the dev
+        // bypass — see update_alert_status_dev_bypass_over_http below for
+        // that path.
+        let state = dev_state();
+        let token = sign_token(&state, "tenant-a", "alerts:write");
+        let server = test_server(state);
+        let res = server
+            .put("/alerts/abc-123/status")
+            .authorization_bearer(token)
+            .json(&serde_json::json!({"status": "resolved"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["status"], "updated");
+        assert_eq!(body["alert_id"], "abc-123");
+        assert_eq!(body["new_status"], "resolved");
+    }
+
+    #[tokio::test]
+    async fn update_alert_status_flag_denied_is_forbidden_even_with_a_valid_token() {
+        let state = gated_state();
+        let token = sign_token(&state, "tenant-a", "alerts:write");
+        let server = test_server(state);
+        let res = server
+            .put("/alerts/abc-123/status")
+            .authorization_bearer(token)
+            .json(&serde_json::json!({"status": "resolved"}))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn update_alert_status_dev_bypass_over_http() {
+        // The dev bypass only skips JWT *decoding* — a bearer-shaped header
+        // is still required to reach that branch, so this still sends one,
+        // just not a valid/decodable one.
+        let server = test_server(dev_bypass_state());
+        let res = server
+            .put("/alerts/abc-123/status")
+            .authorization_bearer("not-a-real-token")
+            .json(&serde_json::json!({"status": "resolved"}))
+            .await;
+        res.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn update_alert_status_missing_status_field_defaults_to_unknown() {
+        let state = dev_state();
+        let token = sign_token(&state, "tenant-a", "alerts:write");
+        let server = test_server(state);
+        let res = server
+            .put("/alerts/abc-123/status")
+            .authorization_bearer(token)
+            .json(&serde_json::json!({}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["new_status"], "unknown");
+    }
+
+    #[tokio::test]
     async fn update_alert_status_dev_bypass_acks_without_persisting() {
-        // MONITOR_AUTH_ENABLED defaults true; state built via for_tests() reads
-        // real env, so this exercises the dev-bypass path only when the
-        // suite runs with auth disabled. With auth enabled (the default),
-        // the request without a token still correctly 401s per the test
-        // above — this test instead verifies the response shape when auth
-        // has already succeeded, by calling the handler directly.
+        // Direct handler call (bypasses HTTP extraction entirely) — verifies
+        // the response shape once auth has already succeeded, independent of
+        // which extraction path (real token vs. dev bypass) got it there.
         let state = dev_state();
         let user = AuthedUser {
             claims: skauswatch_auth::Claims {

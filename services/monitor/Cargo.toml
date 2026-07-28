@@ -37,6 +37,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 axum-test = { workspace = true }
+skauswatch-testkit = { workspace = true }
 wiremock = { workspace = true }
 
 [lints]

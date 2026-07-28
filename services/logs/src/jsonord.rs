@@ -330,6 +330,9 @@ mod tests {
         assert_eq!(parse("1705312200.5").to_compact_string(), "1705312200.5");
         assert_eq!(parse("1705312200.0").to_compact_string(), "1705312200.0");
         assert_eq!(parse("0.1").to_compact_string(), "0.1");
+        // Negative integers route through serde_json's visit_i64 (positive
+        // integers route through visit_u64) — exercise that path for real.
+        assert_eq!(parse("-5").to_compact_string(), "-5");
     }
 
     #[test]
@@ -349,6 +352,9 @@ mod tests {
         assert!(parse(r#""x""#).py_truthy());
         assert!(!parse("[]").py_truthy());
         assert!(!parse("{}").py_truthy());
+        // Exceeds i64::MAX — only representable via serde_json's u64 slot,
+        // exercising the u64 (not i64) truthiness branch.
+        assert!(parse("18446744073709551615").py_truthy());
     }
 
     #[test]
@@ -356,6 +362,24 @@ mod tests {
         assert_eq!(parse(r#""HIGH""#).py_str_lower(), "high");
         assert_eq!(parse("3").py_str_lower(), "3");
         assert_eq!(parse("true").py_str_lower(), "true");
+        assert_eq!(parse("null").py_str_lower(), "none");
+        assert_eq!(parse("[1,2]").py_str_lower(), "[1, 2]");
+        assert_eq!(parse(r#"{"A":1}"#).py_str_lower(), "{'a': 1}");
+    }
+
+    #[test]
+    fn get_and_as_str_on_non_matching_variant_return_none() {
+        assert_eq!(parse("5").get("x"), None);
+        assert_eq!(parse("5").as_str(), None);
+        assert_eq!(parse(r#""s""#).get("x"), None);
+    }
+
+    #[test]
+    fn compact_output_renders_null_and_bool() {
+        assert_eq!(
+            parse("[null,true,false]").to_compact_string(),
+            "[null,true,false]"
+        );
     }
 
     #[test]
@@ -384,6 +408,38 @@ mod tests {
         assert_eq!(python_str_repr("a\"b"), "'a\"b'"); // double present
         assert_eq!(python_str_repr("a'\"b"), "'a\\'\"b'"); // both → single, escape '
         assert_eq!(python_str_repr("tab\tend"), "'tab\\tend'");
+    }
+
+    #[test]
+    fn python_str_repr_escapes_backslash_and_whitespace_controls() {
+        assert_eq!(python_str_repr("a\\b"), "'a\\\\b'");
+        assert_eq!(python_str_repr("line1\nline2"), "'line1\\nline2'");
+        assert_eq!(python_str_repr("cr\rhere"), "'cr\\rhere'");
+        // 0x01 (SOH) — below 0x20, not one of the named escapes → \xHH form.
+        assert_eq!(python_str_repr("\u{1}bell"), "'\\x01bell'");
+    }
+
+    #[test]
+    fn visitor_methods_unreached_by_serde_json_are_still_correct() {
+        // serde_json's Deserializer dispatches null/bool/int/str/seq/map for
+        // this self-describing format; `expecting`/`visit_none`/`visit_string`
+        // are part of the Visitor contract but never invoked on that path.
+        // Exercise them directly so the full trait impl stays correct.
+        struct Msg;
+        impl std::fmt::Display for Msg {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                JsonValVisitor.expecting(f)
+            }
+        }
+        assert_eq!(Msg.to_string(), "any JSON value");
+
+        let none: JsonVal = JsonValVisitor.visit_none::<serde_json::Error>().unwrap();
+        assert_eq!(none, JsonVal::Null);
+
+        let owned: JsonVal = JsonValVisitor
+            .visit_string::<serde_json::Error>("hi".to_owned())
+            .unwrap();
+        assert_eq!(owned, JsonVal::Str("hi".to_owned()));
     }
 
     #[test]

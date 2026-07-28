@@ -36,21 +36,9 @@ async fn get_dashboard_metrics(State(state): State<AppState>) -> Response {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::routes::test_support::{dev_state, gated_state};
     use axum::body::to_bytes;
     use axum::http::StatusCode;
-    use penguin_licensing::{LicenseClient, LicenseConfig};
-
-    fn dev_state() -> AppState {
-        let cfg = match LicenseConfig::new("skauswatch") {
-            Ok(c) => c,
-            Err(e) => panic!("license config: {e}"),
-        };
-        let client = match LicenseClient::new(cfg) {
-            Ok(c) => c,
-            Err(e) => panic!("license client: {e}"),
-        };
-        crate::state::AppStateInner::for_tests(client)
-    }
 
     #[tokio::test]
     async fn dashboard_metrics_are_all_zero() {
@@ -61,5 +49,21 @@ mod tests {
         assert_eq!(body.total_events, 0);
         assert_eq!(body.critical_alerts, 0);
         assert_eq!(body.ai_analyses, 0);
+    }
+
+    #[tokio::test]
+    async fn dashboard_metrics_flag_denied_is_forbidden() {
+        let resp = get_dashboard_metrics(State(gated_state())).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn dashboard_route_serves_metrics_over_http() {
+        let app = axum::Router::new().merge(router()).with_state(dev_state());
+        let server = axum_test::TestServer::new(app);
+        let res = server.get("/metrics/dashboard").await;
+        res.assert_status_ok();
+        let body: DashboardMetrics = res.json();
+        assert_eq!(body.total_events, 0);
     }
 }

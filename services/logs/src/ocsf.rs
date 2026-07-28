@@ -286,6 +286,11 @@ mod tests {
     }
 
     #[test]
+    fn class_name_defaults_to_unknown_for_unmapped_uid() {
+        assert_eq!(class_name(9999), "unknown");
+    }
+
+    #[test]
     fn class_detection_matches_v1_field_heuristics() {
         assert_eq!(detect_class(&parse(r#"{"event_type":"auth"}"#), "x"), 3002);
         assert_eq!(detect_class(&parse(r#"{"src_ip":"1.2.3.4"}"#), "x"), 4001);
@@ -349,6 +354,12 @@ mod tests {
             time_of(r#"{"timestamp":"2025-01-15"}"#),
             "2025-01-15T00:00:00"
         );
+        // Space-separated (not `T`-separated) naive datetime — the second
+        // NaiveDateTime::parse_from_str fallback format.
+        assert_eq!(
+            time_of(r#"{"timestamp":"2025-01-15 12:30:00"}"#),
+            "2025-01-15T12:30:00"
+        );
         assert_eq!(
             time_of(r#"{"time":1705312200}"#),
             "2024-01-15T09:50:00+00:00"
@@ -377,6 +388,36 @@ mod tests {
     fn non_object_record_is_an_error() {
         assert!(normalize(&parse(r#""a string""#), "x", fixed_now()).is_err());
         assert!(normalize(&parse("42"), "x", fixed_now()).is_err());
+    }
+
+    #[test]
+    fn detect_time_bool_true_timestamp_uses_epoch_one() {
+        // Python `bool` is an `int` subtype: `True` → `fromtimestamp(1)`.
+        assert_eq!(
+            time_of(r#"{"timestamp":true}"#),
+            "1970-01-01T00:00:01+00:00"
+        );
+    }
+
+    #[test]
+    fn numeric_timestamp_out_of_chrono_range_is_an_error() {
+        // i64::MAX seconds is far beyond chrono's representable date range —
+        // exercises the `LocalResult::None` arm of `Utc::timestamp_opt`.
+        assert!(detect_time(&parse(r#"{"time":9223372036854775807}"#), fixed_now()).is_err());
+    }
+
+    #[test]
+    fn numeric_timestamp_exceeding_i64_is_an_error() {
+        // Fits u64 but not i64 — exercises the u64-but-not-i64 branch in
+        // `from_unix`, which v1's plain `int` never hits but a huge JSON
+        // number can.
+        assert!(detect_time(&parse(r#"{"time":18446744073709551615}"#), fixed_now()).is_err());
+    }
+
+    #[test]
+    fn float_timestamp_overflowing_to_infinite_micros_is_an_error() {
+        // f * 1_000_000.0 overflows f64 range → non-finite micros.
+        assert!(detect_time(&parse(r#"{"time":1.8e303}"#), fixed_now()).is_err());
     }
 
     #[test]

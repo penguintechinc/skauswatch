@@ -204,6 +204,45 @@ mod tests {
         )))
     }
 
+    #[test]
+    fn system_clock_reflects_wall_clock_time() {
+        let before = Utc::now();
+        let now = Clock::System.now();
+        let after = Utc::now();
+        assert!(now >= before && now <= after);
+    }
+
+    #[tokio::test]
+    async fn non_object_record_in_batch_returns_internal_error() {
+        let server = test_server("http://unused");
+        let res = server
+            .post("/ingest")
+            .content_type("application/json")
+            .text("[42]")
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(res.text(), r#"{"error":"Internal Server Error"}"#);
+    }
+
+    #[tokio::test]
+    async fn opensearch_bulk_failure_returns_internal_error() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_bulk"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock)
+            .await;
+
+        let server = test_server(&mock.uri());
+        let res = server
+            .post("/ingest")
+            .content_type("application/json")
+            .text(r#"{"message":"x"}"#)
+            .await;
+        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(res.text(), r#"{"error":"Internal Server Error"}"#);
+    }
+
     #[tokio::test]
     async fn healthz_body_matches_v1_bytes() {
         let server = test_server("http://unused");
