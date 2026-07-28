@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-worker-vault-sync"
 description = "SkausWatch Vault cloud-vault sync worker — Redis Streams consumer syncing secrets to AWS/Azure/GCP/Oracle/Kubernetes (Rust port of the v1 sync-worker)"
 version.workspace = true

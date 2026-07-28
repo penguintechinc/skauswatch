@@ -93,9 +93,12 @@ yara-x = "=1.19.0"
 # with v1 Python cryptography AESGCM — see docs/v2-port/vault-crypto-gate.md)
 # + AWS Secrets Manager cloud-sync (other providers NotImplemented in v2.0).
 skauswatch-vault = { path = "crates/skauswatch-vault" }
-aes-gcm = "=0.10.3"
-# CSPRNG (codescan-backend AEAD nonces for git-credential tokens at rest)
-rand = "=0.8.5"
+# aes-gcm's `getrandom` feature re-exports `OsRng` so codescan-backend can draw
+# git-credential AEAD nonces via `Aes256Gcm::generate_nonce(&mut OsRng)` — the
+# idiomatic AEAD nonce source, which lets that crate drop its direct `rand` dep.
+# (rand 0.8.x remains transitively via fred/jsonwebtoken/rsa — this is a direct-
+# dependency cleanup, not removal from the lock.)
+aes-gcm = { version = "=0.10.3", features = ["getrandom"] }
 # aws-sdk-secretsmanager's default feature set includes `"rustls"`, which (unlike
 # aws-config's same-named feature above) maps directly to the legacy
 # `aws-smithy-runtime/tls-rustls` -> legacy-rustls-ring -> rustls 0.21 ->

@@ -1,0 +1,18 @@
+{{- if .Values.yaraRules.manage }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: skauswatch-scanner-yara-rules
+  labels:
+    {{- include "skauswatch-scanner.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+data:
+  {{- if .Values.yaraRules.rules }}
+  {{- toYaml .Values.yaraRules.rules | nindent 2 }}
+  {{- else }}
+  # No rules supplied — populate via yaraRules.rules or --set-file at
+  # install time. Scanner treats a missing/empty ruleset as "no YARA match"
+  # rather than failing startup.
+  placeholder.yar: ""
+  {{- end }}
+{{- end }}

@@ -7,6 +7,23 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# Documented, reviewed exceptions — each is transitive with NO fixed release
+# available; none is reachable in an exploitable way given how we use the dep.
+# Re-review on every dependency bump; drop the entry the moment a fix ships.
+ignore = [
+    # rsa 0.9.x Marvin timing side-channel. Pulled transitively by jsonwebtoken,
+    # ssh-key, and yara-x. No patched release exists (upstream-tracked). Marvin
+    # targets RSA PKCS#1 v1.5 *decryption* timing; we only ever do RSA signature
+    # *verification* (JWT is pinned to HS256; SSH CA signs with Ed25519), so the
+    # private-key decryption oracle the attack needs is never exercised.
+    "RUSTSEC-2023-0071",
+    # bincode 2.0.1 flagged unmaintained. Transitive via yara-x only; used for
+    # compiled-rule (de)serialization on trusted, in-process data. Not a CVE.
+    "RUSTSEC-2025-0141",
+    # paste 1.0.15 flagged unmaintained. Transitive via netstat2 (endpoint-agent
+    # socket enumeration); compile-time macro only, no runtime surface. Not a CVE.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 version = 2
@@ -22,11 +39,23 @@ allow = [
     "MPL-2.0",
     "CDLA-Permissive-2.0",
     "OpenSSL",
+    # Our own workspace license (root Cargo.toml `license = "AGPL-3.0-only"`) —
+    # every workspace member + internal crates/* inherit this via
+    # `license.workspace = true`, so it must be explicitly allowed.
+    "AGPL-3.0-only",
 ]
+# Unpublished internal workspace/path crates (crates/*, services/*) shouldn't
+# trip license checks even if one is ever missing a license field.
+private = { ignore = true }
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal path/workspace deps (skauswatch-*, penguin-licensing via
+# `{ workspace = true }`) carry no semver requirement by design — they're
+# resolved by path within this workspace, not a registry. Without this,
+# `wildcards = "deny"` flags every one of them as an unpinned dependency.
+allow-wildcard-paths = true
 # Forbidden: OpenSSL linkage (rustls only) — keeps runtime images slim and FIPS-path clean
 deny = [
     { crate = "openssl-sys", reason = "rustls only — no OpenSSL FFI in this workspace" },

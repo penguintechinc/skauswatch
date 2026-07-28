@@ -1,0 +1,54 @@
+# Production overrides — pinned by SHA256 digest.
+#
+# DEVIATION FROM THE STANDARD 3+ REPLICA / HPA TIER (flagged for review): pki
+# self-generates its CA private key to a local file on first boot
+# (CA_KEY_PATH/CA_CERT_PATH, services/pki/src/config.rs) rather than reading
+# it from a shared database. A ReadWriteOnce PVC — the only access mode
+# guaranteed available across clusters — can only be mounted by one pod at a
+# time, and running >1 replica without shared writable storage risks each
+# pod generating its OWN root CA independently (every issued cert would be
+# trusted by only one replica). Until CA material moves to a
+# database/KMS-backed store, pki stays single-replica everywhere, including
+# production. Revisit if/when an RWX-capable StorageClass or a
+# database-backed CA store is adopted.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/pki
+  # Pin to the released digest before deploying — see pinning-dependency-digests skill.
+  tag: "sha256:<digest>"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+persistence:
+  enabled: true
+  size: 5Gi
+
+ingress:
+  enabled: false
+
+httproute:
+  enabled: false
+
+configMapData:
+  log-level: "warn"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "20"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"

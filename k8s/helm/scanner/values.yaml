@@ -1,9 +1,11 @@
-replicaCount: 1
+# Default (prod-safe baseline) values for skauswatch-scanner.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
 
 image:
-  repository: ghcr.io/penguintechinc/skauswatch-scanner
+  repository: ghcr.io/penguintechinc/skauswatch/scanner
   pullPolicy: IfNotPresent
-  tag: latest
+  tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -26,30 +28,29 @@ securityContext:
   capabilities:
     drop:
       - ALL
-  readOnlyRootFilesystem: false
+  readOnlyRootFilesystem: true
+
+healthPort: 8080
+metricsPort: 9090
 
 service:
   enabled: true
-  type: ClusterIP
-  port: 5004
-  targetPort: 5004
 
-# No ingress - internal service only
 ingress:
   enabled: false
 
 resources:
   limits:
-    cpu: "2"
-    memory: 2Gi
+    cpu: 1000m
+    memory: 1Gi
   requests:
     cpu: 500m
     memory: 512Mi
 
 autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 3
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
   targetCPUUtilizationPercentage: 70
   targetMemoryUtilizationPercentage: 80
 
@@ -59,33 +60,67 @@ tolerations: []
 
 affinity: {}
 
+# services/scanner/src/config.rs: CONSUMER_NAME unique per pod (downward
+# API); ClamAV is a separate TCP service (CLAMAV_HOST/PORT, not a local
+# socket — contrast with s3scan's clamd UNIX socket); YARA rules load from a
+# local directory mounted read-only below.
 env:
-  - name: FLASK_ENV
-    value: "production"
-  - name: FLASK_APP
-    value: "app:create_app()"
-  - name: SCANNER_PORT
-    value: "5004"
-  - name: SECRET_KEY
+  - name: CONSUMER_NAME
     valueFrom:
-      secretKeyRef:
-        name: skauswatch-scanner-secret
-        key: secret-key
-  - name: DATABASE_URL
+      fieldRef:
+        fieldPath: metadata.name
+  - name: HEALTH_PORT
+    value: "8080"
+  - name: RUST_LOG
     valueFrom:
-      secretKeyRef:
-        name: skauswatch-scanner-secret
-        key: database-url
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: log-level
   - name: REDIS_URL
     valueFrom:
-      secretKeyRef:
-        name: skauswatch-scanner-secret
+      configMapKeyRef:
+        name: skauswatch-scanner-config
         key: redis-url
-  - name: CELERY_BROKER_URL
+  - name: REDIS_PREFIX
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: redis-key-prefix
+  - name: REDIS_PASSWORD
     valueFrom:
       secretKeyRef:
         name: skauswatch-scanner-secret
-        key: celery-broker-url
+        key: redis-password
+        optional: true
+  - name: CONSUMER_GROUP
+    value: "scanner-workers"
+  - name: CLAMAV_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: clamav-host
+  - name: CLAMAV_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: clamav-port
+  - name: CLAMAV_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: clamav-enabled
+  - name: YARA_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: yara-enabled
+  - name: YARA_RULES_PATH
+    value: "/etc/yara/rules"
+  - name: ASM_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: asm-enabled
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
@@ -104,33 +139,52 @@ env:
 
 livenessProbe:
   httpGet:
-    path: /health
-    port: 5004
-  initialDelaySeconds: 30
-  periodSeconds: 30
+    path: /healthz
+    port: health
+  initialDelaySeconds: 10
+  periodSeconds: 10
   timeoutSeconds: 5
   failureThreshold: 3
 
 readinessProbe:
   httpGet:
-    path: /health
-    port: 5004
-  initialDelaySeconds: 10
-  periodSeconds: 10
+    path: /readyz
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 5
   timeoutSeconds: 3
   failureThreshold: 2
 
-volumeMounts: []
+# yaraRules.manage=true creates an (initially empty) ConfigMap this chart
+# owns; set yaraRules.rules (filename -> rule text) or supply real rules
+# out-of-band and set yaraRules.manage=false to reference an
+# operator-managed ConfigMap instead.
+yaraRules:
+  manage: true
+  rules: {}
 
-volumes: []
+volumeMounts:
+  - name: yara-rules
+    mountPath: /etc/yara/rules
+    readOnly: true
+
+volumes:
+  - name: yara-rules
+    configMap:
+      name: skauswatch-scanner-yara-rules
 
 configMapData:
+  log-level: "info"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+  clamav-host: "clamav"
+  clamav-port: "3310"
+  clamav-enabled: "true"
+  yara-enabled: "true"
+  asm-enabled: "true"
   license-server-url: "https://license.penguintech.io"
-  release-mode: "false"
+  release-mode: "true"
 
 secretData:
-  secret-key: "changeme-in-production"
-  database-url: "postgresql://app_user:changeme@postgres:5432/skauswatch"
-  redis-url: "redis://:changeme@redis:6379/0"
-  celery-broker-url: "redis://:changeme@redis:6379/1"
+  redis-password: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

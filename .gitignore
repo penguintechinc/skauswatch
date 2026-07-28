@@ -160,7 +160,7 @@ docker-compose.override.yml
 *.sqlite3
 
 # Logs
-logs/
+/logs/
 *.log
 
 # Runtime data
@@ -211,6 +211,7 @@ config.local.yaml
 
 # Worktrees
 .worktrees/
+.claude/worktrees/
 
 # Node.js / Frontend
 node_modules/

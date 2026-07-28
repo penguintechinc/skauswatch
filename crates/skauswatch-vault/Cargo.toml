@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-vault"
 description = "Vault envelope encryption (AES-256-GCM DEK/MEK) and shared row types, used by services/vault and services/worker-vault-sync"
 version.workspace = true

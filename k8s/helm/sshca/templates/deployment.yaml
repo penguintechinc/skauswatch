@@ -34,11 +34,14 @@ spec:
       - name: skauswatch-sshca
         securityContext:
           {{- toYaml .Values.securityContext | nindent 12 }}
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        image: {{ include "skauswatch-sshca.image" . | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         ports:
         - name: http
-          containerPort: {{ .Values.containerPort }}
+          containerPort: {{ .Values.httpPort }}
+          protocol: TCP
+        - name: metrics
+          containerPort: {{ .Values.metricsPort }}
           protocol: TCP
         {{- with .Values.livenessProbe }}
         livenessProbe:

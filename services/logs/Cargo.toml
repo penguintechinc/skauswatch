@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-logs"
 description = "SkausWatch SIEM logs service — HTTP ingest + OCSF normalization + OpenSearch bulk writer (Rust port of the v1 logs)"
 version.workspace = true

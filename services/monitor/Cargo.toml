@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-monitor"
 description = "SkausWatch monitor service — REST event/alert API over Elasticsearch/OpenSearch + MongoDB (Rust port)"
 version.workspace = true

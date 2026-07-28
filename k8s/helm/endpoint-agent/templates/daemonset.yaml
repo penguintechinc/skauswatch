@@ -36,8 +36,12 @@ spec:
       - name: skauswatch-endpoint-agent
         securityContext:
           {{- toYaml .Values.securityContext | nindent 12 }}
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        image: {{ include "skauswatch-endpoint-agent.image" . | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        {{- with .Values.args }}
+        args:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         {{- with .Values.livenessProbe }}
         livenessProbe:
           {{- toYaml . | nindent 12 }}

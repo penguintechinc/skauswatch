@@ -1,0 +1,31 @@
+# Gamma overrides — dal2-gamma cluster, namespace: skauswatch.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/logs
+  tag: "gamma-0000000000"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+ingress:
+  enabled: false
+
+httproute:
+  enabled: false
+
+configMapData:
+  opensearch-url: "http://opensearch:9200"
+  log-retention-days: "30"

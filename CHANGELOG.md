@@ -24,6 +24,16 @@ feature-frozen (security fixes only) until v2.0.0 ships.
 
 ### Changed
 - Migrations: Alembic replaced by `sqlx migrate`
+- Containers: per-service multi-stage Dockerfiles (`rust:1.97-slim-bookworm`
+  builder → `debian:bookworm-slim` runtime, non-root uid 10001, digest-pinned,
+  native `<binary> healthcheck` subcommand — no curl)
+- CI: single `build.yml` image matrix (12 services + webui, multi-arch,
+  env-aware `beta`/`gamma`/`v{semver}` tags + rolling `:beta-latest`); the
+  redundant `beta.yml`/`publish.yml` build workflows were consolidated into it
+- Build tooling: `Makefile` is now cargo/npm-based (Python `make` targets gone)
+- Supply chain: git-credential AEAD nonces use aes-gcm's `AeadCore` (dropping a
+  direct `rand` dependency); `cargo deny` policy allows the workspace's own
+  `AGPL-3.0-only` and documents three transitive advisory exceptions
 - **Modules renamed to descriptive names** — `edr`→`endpoint`, `icebox`→`vault`,
   `darwin`→`codescan`, `worker-scanner`→`scanner`, `aaa-monitor`→`monitor`,
   `pki-server`→`pki`, `ssh-ca`→`sshca`, `log-receiver`→`logs`. Full mapping and

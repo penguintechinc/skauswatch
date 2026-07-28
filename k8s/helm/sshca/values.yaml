@@ -1,9 +1,11 @@
+# Default (prod-safe baseline) values for skauswatch-sshca.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
 replicaCount: 3
 
 image:
-  repository: ghcr.io/penguintechinc/skauswatch-sshca
+  repository: ghcr.io/penguintechinc/skauswatch/sshca
   pullPolicy: IfNotPresent
-  tag: latest
+  tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -28,12 +30,14 @@ securityContext:
       - ALL
   readOnlyRootFilesystem: true
 
-containerPort: 5000
+httpPort: 8002
+metricsPort: 9090
 
+# Internal service only — consumed by manager, never exposed externally.
 service:
   type: ClusterIP
-  port: 5002
-  targetPort: 5000
+  port: 8002
+  metricsPort: 9090
   annotations: {}
 
 ingress:
@@ -47,16 +51,16 @@ httproute:
   enabled: false
   gatewayName: shared
   gatewayNamespace: gateway
-  host: skauswatch.example.com
+  host: skauswatch.app
   rules: []
 
 resources:
   limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
     cpu: 500m
     memory: 512Mi
-  requests:
-    cpu: 125m
-    memory: 256Mi
 
 autoscaling:
   enabled: true
@@ -72,20 +76,20 @@ tolerations: []
 affinity: {}
 
 env:
-  - name: FLASK_ENV
-    value: "production"
-  - name: FLASK_APP
-    value: "app:create_app()"
-  - name: SECRET_KEY
+  - name: SERVICE_PORT
+    value: "8002"
+  # SshCa::load_or_generate (services/sshca/src/ca.rs) falls back to an
+  # EPHEMERAL in-memory CA key if this path is missing — safe for
+  # alpha/beta/gamma, but production mounts a pre-provisioned CA key via a
+  # Secret (see production.yml) so certs stay verifiable across restarts
+  # and across all replicas.
+  - name: SSHCA_KEY_PATH
+    value: "/etc/pki/sshca"
+  - name: RUST_LOG
     valueFrom:
-      secretKeyRef:
-        name: skauswatch-sshca-secret
-        key: secret-key
-  - name: SECURITY_PASSWORD_SALT
-    valueFrom:
-      secretKeyRef:
-        name: skauswatch-sshca-secret
-        key: password-salt
+      configMapKeyRef:
+        name: skauswatch-sshca-config
+        key: log-level
   - name: DB_TYPE
     valueFrom:
       configMapKeyRef:
@@ -106,6 +110,11 @@ env:
       configMapKeyRef:
         name: skauswatch-sshca-config
         key: db-name
+  - name: DB_POOL_SIZE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-sshca-config
+        key: db-pool-size
   - name: DB_USER
     valueFrom:
       secretKeyRef:
@@ -116,11 +125,6 @@ env:
       secretKeyRef:
         name: skauswatch-sshca-secret
         key: db-pass
-  - name: DB_POOL_SIZE
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-sshca-config
-        key: db-pool-size
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
@@ -140,17 +144,17 @@ env:
 livenessProbe:
   httpGet:
     path: /healthz
-    port: 5000
-  initialDelaySeconds: 30
+    port: http
+  initialDelaySeconds: 10
   periodSeconds: 10
   timeoutSeconds: 5
   failureThreshold: 3
 
 readinessProbe:
   httpGet:
-    path: /healthz
-    port: 5000
-  initialDelaySeconds: 10
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
   periodSeconds: 5
   timeoutSeconds: 3
   failureThreshold: 2
@@ -160,17 +164,16 @@ volumeMounts: []
 volumes: []
 
 configMapData:
-  db-type: "postgres"
+  log-level: "info"
+  db-type: "postgresql"
   db-host: "postgres"
   db-port: "5432"
   db-name: "skauswatch"
-  db-pool-size: "10"
+  db-pool-size: "20"
   license-server-url: "https://license.penguintech.io"
-  release-mode: "false"
+  release-mode: "true"
 
 secretData:
-  secret-key: "changeme-in-production"
-  password-salt: "changeme-in-production"
-  db-user: "app_user"
+  db-user: "changeme-in-production"
   db-pass: "changeme-in-production"
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

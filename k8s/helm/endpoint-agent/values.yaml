@@ -1,7 +1,9 @@
+# Default (prod-safe baseline) values for skauswatch-endpoint-agent.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
 image:
-  repository: ghcr.io/penguintechinc/skauswatch-endpoint-agent
+  repository: ghcr.io/penguintechinc/skauswatch/endpoint-agent
   pullPolicy: IfNotPresent
-  tag: latest
+  tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -17,7 +19,11 @@ podAnnotations: {}
 podSecurityContext:
   runAsNonRoot: false
 
-# ENDPOINT agent requires elevated privileges to monitor host processes
+# ROOT EXCEPTION (approved): endpoint-agent is a host process/network
+# monitor — it needs SYS_PTRACE to inspect other processes and NET_ADMIN
+# for connection enumeration, plus hostPID/hostNetwork (see daemonset.yaml).
+# This mirrors the XDP/NET_ADMIN exception pattern in devops-containers.md;
+# pre-existing in this chart, carried forward and flagged for the record.
 securityContext:
   privileged: true
   capabilities:
@@ -25,23 +31,21 @@ securityContext:
       - SYS_PTRACE
       - NET_ADMIN
 
-# No service - agent reports to manager
+# No service - agent reports to manager, never receives inbound traffic
 service:
   enabled: false
 
-# No ingress - agent only
 ingress:
   enabled: false
 
 resources:
   limits:
-    cpu: "500m"
+    cpu: 500m
     memory: 256Mi
   requests:
     cpu: 100m
     memory: 64Mi
 
-# DaemonSet update strategy
 updateStrategy:
   type: RollingUpdate
   rollingUpdate:
@@ -56,22 +60,22 @@ tolerations:
 
 affinity: {}
 
+# services/endpoint-agent/src/config.rs reads NO env vars directly — config
+# comes from a YAML file (--config) and CLI flags only (--manager-url,
+# --api-key, --agent-id, --debug). env: below exists solely so Kubernetes
+# can interpolate secret/downward-API values into args via $(VAR) syntax.
 env:
   - name: MANAGER_URL
     valueFrom:
       configMapKeyRef:
         name: skauswatch-endpoint-agent-config
         key: manager-url
-  - name: LOG_LEVEL
+  - name: API_KEY
     valueFrom:
-      configMapKeyRef:
-        name: skauswatch-endpoint-agent-config
-        key: log-level
-  - name: NODE_NAME
-    valueFrom:
-      fieldRef:
-        fieldPath: spec.nodeName
-  - name: POD_NAME
+      secretKeyRef:
+        name: skauswatch-endpoint-agent-secret
+        key: api-key
+  - name: AGENT_ID
     valueFrom:
       fieldRef:
         fieldPath: metadata.name
@@ -91,12 +95,19 @@ env:
         name: skauswatch-endpoint-agent-config
         key: release-mode
 
+args:
+  - "--manager-url=$(MANAGER_URL)"
+  - "--api-key=$(API_KEY)"
+  - "--agent-id=$(AGENT_ID)"
+
+# The agent has no HTTP listener (see services/endpoint-agent/src/main.rs) —
+# `--healthcheck` runs a one-shot config-load check and exits, which is the
+# binary's own documented container-native probe.
 livenessProbe:
   exec:
     command:
-      - /bin/sh
-      - -c
-      - "pgrep -f endpoint-agent"
+      - endpoint-agent
+      - --healthcheck
   initialDelaySeconds: 30
   periodSeconds: 30
   timeoutSeconds: 5
@@ -105,9 +116,8 @@ livenessProbe:
 readinessProbe:
   exec:
     command:
-      - /bin/sh
-      - -c
-      - "pgrep -f endpoint-agent"
+      - endpoint-agent
+      - --healthcheck
   initialDelaySeconds: 10
   periodSeconds: 10
   timeoutSeconds: 3
@@ -130,10 +140,10 @@ volumes:
       path: /sys
 
 configMapData:
-  manager-url: "http://skauswatch-manager:5000"
-  log-level: "INFO"
+  manager-url: "https://skauswatch-manager:5000"
   license-server-url: "https://license.penguintech.io"
-  release-mode: "false"
+  release-mode: "true"
 
 secretData:
+  api-key: "changeme-in-production"
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

@@ -1,0 +1,218 @@
+# Default (prod-safe baseline) values for skauswatch-vault.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/vault
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+httpPort: 8080
+metricsPort: 9090
+
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 9090
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: skauswatch.app
+      paths:
+        - path: /api/vault
+          pathType: Prefix
+  tls: []
+
+httproute:
+  enabled: false
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.app
+  rules:
+    - path: /api/vault
+      service: skauswatch-vault
+      port: 8080
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# services/vault/src/state.rs: PORT, JWT_SECRET_KEY, DB_* (skauswatch_db),
+# REDIS_*, plus the envelope-encryption master key (VAULT_MEK*, see
+# crates/skauswatch-vault/src/crypto.rs) — VAULT_MEK_CURRENT_VERSION selects
+# how many VAULT_MEK_V{n} secrets are loaded (falls back to bare VAULT_MEK).
+env:
+  - name: PORT
+    value: "8080"
+  - name: RUST_LOG
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-vault-config
+        key: log-level
+  - name: DB_TYPE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-vault-config
+        key: db-type
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-vault-config
+        key: db-host
+  - name: DB_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-vault-config
+        key: db-port
+  - name: DB_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-vault-config
+        key: db-name
+  - name: DB_POOL_SIZE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-vault-config
+        key: db-pool-size
+  - name: DB_USER
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-vault-secret
+        key: db-user
+  - name: DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-vault-secret
+        key: db-pass
+  - name: REDIS_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-vault-config
+        key: redis-url
+  - name: REDIS_KEY_PREFIX
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-vault-config
+        key: redis-key-prefix
+  - name: REDIS_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-vault-secret
+        key: redis-password
+        optional: true
+  - name: JWT_SECRET_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-vault-secret
+        key: jwt-secret-key
+  - name: VAULT_MEK_CURRENT_VERSION
+    value: "1"
+  - name: VAULT_MEK_V1
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-vault-secret
+        key: vault-mek-v1
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-vault-secret
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-vault-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-vault-config
+        key: release-mode
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts: []
+
+volumes: []
+
+configMapData:
+  log-level: "info"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "20"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+
+secretData:
+  db-user: "changeme-in-production"
+  db-pass: "changeme-in-production"
+  redis-password: ""
+  jwt-secret-key: "changeme-in-production"
+  # REQUIRED: 32-byte key, base64-encoded (`openssl rand -base64 32`) —
+  # placeholder here means data cannot be decrypted after redeploy. Rotate
+  # by bumping VAULT_MEK_CURRENT_VERSION and adding VAULT_MEK_V{n}.
+  vault-mek-v1: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

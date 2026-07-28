@@ -1,0 +1,176 @@
+# Default (prod-safe baseline) values for skauswatch-worker-vault-sync.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/worker-vault-sync
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+healthPort: 8080
+metricsPort: 9090
+
+service:
+  enabled: true
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# services/worker-vault-sync/src/main.rs: Redis Streams consumer that
+# decrypts/re-encrypts vault-format secrets directly (skauswatch_vault
+# EnvelopeEncryption) — shares the SAME VAULT_MEK* material as the vault
+# service (see k8s/helm/vault/values.yaml); DB access via skauswatch_db.
+env:
+  - name: WORKER_ID
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: HEALTH_PORT
+    value: "8080"
+  - name: RUST_LOG
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-vault-sync-config
+        key: log-level
+  - name: DB_TYPE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-vault-sync-config
+        key: db-type
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-vault-sync-config
+        key: db-host
+  - name: DB_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-vault-sync-config
+        key: db-port
+  - name: DB_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-vault-sync-config
+        key: db-name
+  - name: DB_POOL_SIZE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-vault-sync-config
+        key: db-pool-size
+  - name: DB_USER
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-vault-sync-secret
+        key: db-user
+  - name: DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-vault-sync-secret
+        key: db-pass
+  - name: REDIS_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-vault-sync-config
+        key: redis-url
+  - name: REDIS_KEY_PREFIX
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-vault-sync-config
+        key: redis-key-prefix
+  - name: REDIS_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-vault-sync-secret
+        key: redis-password
+        optional: true
+  - name: CONSUMER_GROUP
+    value: "sync-worker"
+  - name: VAULT_MEK_CURRENT_VERSION
+    value: "1"
+  - name: VAULT_MEK_V1
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-vault-sync-secret
+        key: vault-mek-v1
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts: []
+
+volumes: []
+
+configMapData:
+  log-level: "info"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "20"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+
+secretData:
+  db-user: "changeme-in-production"
+  db-pass: "changeme-in-production"
+  redis-password: ""
+  # MUST match vault's secretData.vault-mek-v1 exactly — this worker
+  # decrypts/re-encrypts the same envelope-encrypted secrets vault owns.
+  vault-mek-v1: ""

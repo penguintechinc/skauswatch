@@ -1,0 +1,32 @@
+# Alpha overrides — local MicroK8s (local-alpha context), namespace: skauswatch.
+replicaCount: 1
+
+image:
+  repository: localhost:32000/skauswatch/scanner
+  tag: "alpha-latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+configMapData:
+  log-level: "debug"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+  clamav-host: "clamav"
+  clamav-port: "3310"
+  clamav-enabled: "true"
+  yara-enabled: "true"
+  asm-enabled: "false"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"

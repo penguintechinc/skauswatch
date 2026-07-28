@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "skauswatch-vault.fullname" . }}-config
+  labels:
+    {{- include "skauswatch-vault.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+data:
+  {{- toYaml .Values.configMapData | nindent 2 }}

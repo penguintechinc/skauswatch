@@ -1,0 +1,124 @@
+# Default (prod-safe baseline) values for skauswatch-logs.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/logs
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+httpPort: 5010
+metricsPort: 9090
+
+service:
+  type: ClusterIP
+  port: 5010
+  metricsPort: 9090
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: skauswatch.app
+      paths:
+        - path: /api/logs
+          pathType: Prefix
+  tls: []
+
+httproute:
+  enabled: false
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.app
+  rules:
+    - path: /api/logs
+      service: skauswatch-logs
+      port: 5010
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# services/logs/src/config.rs only reads OPENSEARCH_URL/LOG_RETENTION_DAYS/
+# HTTP_PORT — no DB/license/auth vars are wired up in this ingest path yet.
+env:
+  - name: HTTP_PORT
+    value: "5010"
+  - name: OPENSEARCH_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-logs-config
+        key: opensearch-url
+  - name: LOG_RETENTION_DAYS
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-logs-config
+        key: log-retention-days
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts: []
+
+volumes: []
+
+configMapData:
+  opensearch-url: "http://opensearch:9200"
+  log-retention-days: "90"

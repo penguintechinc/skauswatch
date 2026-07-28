@@ -8,8 +8,7 @@ keywords:
   - skauswatch
   - worker
   - s3
-  - flask
-  - python
+  - rust
 maintainers:
   - name: Penguin Tech Inc
     email: support@penguintech.io

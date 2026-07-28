@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-telemetry"
 description = "Structured logging, Prometheus metrics (:9090), and health/readiness endpoints"
 version.workspace = true

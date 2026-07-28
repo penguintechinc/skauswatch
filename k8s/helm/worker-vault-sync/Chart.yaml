@@ -1,0 +1,14 @@
+apiVersion: v2
+name: skauswatch-worker-vault-sync
+description: SkausWatch vault sync worker (Redis Streams consumer)
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skauswatch
+  - worker
+  - vault
+  - rust
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io

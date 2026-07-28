@@ -34,8 +34,15 @@ spec:
       - name: skauswatch-s3scan
         securityContext:
           {{- toYaml .Values.securityContext | nindent 12 }}
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+        image: {{ include "skauswatch-s3scan.image" . | quote }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: health
+          containerPort: {{ .Values.healthPort }}
+          protocol: TCP
+        - name: metrics
+          containerPort: {{ .Values.metricsPort }}
+          protocol: TCP
         {{- with .Values.livenessProbe }}
         livenessProbe:
           {{- toYaml . | nindent 12 }}

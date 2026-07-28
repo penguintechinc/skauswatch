@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-proto"
 description = "tonic/prost codegen for the skauswatch gRPC contracts (manager, s3scan, pki)"
 version.workspace = true

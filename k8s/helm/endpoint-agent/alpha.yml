@@ -1,0 +1,27 @@
+# Alpha overrides — local MicroK8s (local-alpha context), namespace: skauswatch.
+# No public surface (agent-initiated outbound only) — no NodePort needed.
+image:
+  repository: localhost:32000/skauswatch/endpoint-agent
+  tag: "alpha-latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+args:
+  - "--manager-url=$(MANAGER_URL)"
+  - "--api-key=$(API_KEY)"
+  - "--agent-id=$(AGENT_ID)"
+  - "--debug"
+
+configMapData:
+  manager-url: "http://skauswatch-manager:5000"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"

@@ -58,3 +58,17 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Full image reference. Production pins by SHA256 digest (tag starts with
+"sha256:") -> "repo@sha256:...". Alpha/beta/gamma use a mutable tag ->
+"repo:tag".
+*/}}
+{{- define "skauswatch-s3scan.image" -}}
+{{- $tag := .Values.image.tag | default .Chart.AppVersion }}
+{{- if hasPrefix "sha256:" $tag }}
+{{- printf "%s@%s" .Values.image.repository $tag }}
+{{- else }}
+{{- printf "%s:%s" .Values.image.repository $tag }}
+{{- end }}
+{{- end }}

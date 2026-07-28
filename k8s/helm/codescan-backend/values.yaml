@@ -1,0 +1,229 @@
+# Default (prod-safe baseline) values for skauswatch-codescan-backend.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/codescan-backend
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+httpPort: 5005
+metricsPort: 9090
+
+service:
+  type: ClusterIP
+  port: 5005
+  metricsPort: 9090
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: skauswatch.app
+      paths:
+        - path: /api/codescan
+          pathType: Prefix
+  tls: []
+
+httproute:
+  enabled: false
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.app
+  rules:
+    - path: /api/codescan
+      service: skauswatch-codescan-backend
+      port: 5005
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+env:
+  - name: API_PORT
+    value: "5005"
+  - name: ENVIRONMENT
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-codescan-backend-config
+        key: environment
+  - name: RUST_LOG
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-codescan-backend-config
+        key: log-level
+  - name: DB_TYPE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-codescan-backend-config
+        key: db-type
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-codescan-backend-config
+        key: db-host
+  - name: DB_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-codescan-backend-config
+        key: db-port
+  - name: DB_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-codescan-backend-config
+        key: db-name
+  - name: DB_POOL_SIZE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-codescan-backend-config
+        key: db-pool-size
+  - name: DB_USER
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-codescan-backend-secret
+        key: db-user
+  - name: DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-codescan-backend-secret
+        key: db-pass
+  - name: REDIS_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-codescan-backend-config
+        key: redis-url
+  - name: REDIS_KEY_PREFIX
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-codescan-backend-config
+        key: redis-key-prefix
+  - name: REDIS_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-codescan-backend-secret
+        key: redis-password
+        optional: true
+  - name: JWT_SECRET_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-codescan-backend-secret
+        key: jwt-secret-key
+  - name: CREDENTIAL_ENCRYPTION_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-codescan-backend-secret
+        key: credential-encryption-key
+  - name: ANTHROPIC_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-codescan-backend-secret
+        key: anthropic-api-key
+        optional: true
+  - name: OPENAI_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-codescan-backend-secret
+        key: openai-api-key
+        optional: true
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-codescan-backend-secret
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-codescan-backend-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-codescan-backend-config
+        key: release-mode
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts: []
+
+volumes: []
+
+configMapData:
+  environment: "production"
+  log-level: "info"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "20"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+
+secretData:
+  db-user: "changeme-in-production"
+  db-pass: "changeme-in-production"
+  redis-password: ""
+  jwt-secret-key: "changeme-in-production"
+  credential-encryption-key: "changeme-in-production"
+  anthropic-api-key: ""
+  openai-api-key: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

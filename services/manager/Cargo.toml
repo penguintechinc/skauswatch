@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-manager"
 description = "SkausWatch manager service — REST /api/v1 + gRPC control plane (Rust port)"
 version.workspace = true

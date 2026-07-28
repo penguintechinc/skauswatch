@@ -1,6 +1,0 @@
-apiVersion: v2
-name: icebox-ssh-ca
-description: IceBox SSH CA — SSH certificate authority and key management
-type: application
-version: 0.1.0
-appVersion: "1.0.0"

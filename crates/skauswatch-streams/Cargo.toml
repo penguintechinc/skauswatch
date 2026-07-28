@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-streams"
 description = "Valkey/Redis Streams job envelope, topics, and consumer-group worker harness (Celery replacement)"
 version.workspace = true

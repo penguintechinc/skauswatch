@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-db"
 description = "Database connection configuration and pool factory (DB_TYPE dispatch, per-service accounts)"
 version.workspace = true

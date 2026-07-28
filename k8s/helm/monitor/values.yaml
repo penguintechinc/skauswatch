@@ -1,9 +1,11 @@
+# Default (prod-safe baseline) values for skauswatch-monitor.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
 replicaCount: 3
 
 image:
-  repository: ghcr.io/penguintechinc/skauswatch-monitor
+  repository: ghcr.io/penguintechinc/skauswatch/monitor
   pullPolicy: IfNotPresent
-  tag: latest
+  tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -28,12 +30,14 @@ securityContext:
       - ALL
   readOnlyRootFilesystem: true
 
-containerPort: 5000
+httpPort: 8003
+metricsPort: 9090
 
+# Internal service only — consumed by manager/webui, never exposed externally.
 service:
   type: ClusterIP
-  port: 5003
-  targetPort: 5000
+  port: 8003
+  metricsPort: 9090
   annotations: {}
 
 ingress:
@@ -47,16 +51,16 @@ httproute:
   enabled: false
   gatewayName: shared
   gatewayNamespace: gateway
-  host: skauswatch.example.com
+  host: skauswatch.app
   rules: []
 
 resources:
   limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
     cpu: 500m
     memory: 512Mi
-  requests:
-    cpu: 125m
-    memory: 256Mi
 
 autoscaling:
   enabled: true
@@ -71,56 +75,51 @@ tolerations: []
 
 affinity: {}
 
+# services/monitor/src/config.rs only wires MONITOR_API_*/MONITOR_SECRET_KEY/
+# MONITOR_AUTH_ENABLED/MONITOR_ES_* — no DB_*/REDIS_* vars are read at
+# runtime (event store is OpenSearch, reached via the ES-compatible API).
 env:
-  - name: FLASK_ENV
-    value: "production"
-  - name: FLASK_APP
-    value: "app:create_app()"
-  - name: SECRET_KEY
+  - name: MONITOR_API_HOST
+    value: "0.0.0.0"
+  - name: MONITOR_API_PORT
+    value: "8003"
+  - name: MONITOR_AUTH_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: auth-enabled
+  - name: MONITOR_ES_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: es-enabled
+  - name: MONITOR_ES_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: es-url
+  - name: MONITOR_ES_INDEX_PATTERN
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: es-index-pattern
+  - name: MONITOR_SECRET_KEY
     valueFrom:
       secretKeyRef:
         name: skauswatch-monitor-secret
         key: secret-key
-  - name: SECURITY_PASSWORD_SALT
+  - name: MONITOR_ES_USERNAME
     valueFrom:
       secretKeyRef:
         name: skauswatch-monitor-secret
-        key: password-salt
-  - name: DB_TYPE
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-monitor-config
-        key: db-type
-  - name: DB_HOST
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-monitor-config
-        key: db-host
-  - name: DB_PORT
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-monitor-config
-        key: db-port
-  - name: DB_NAME
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-monitor-config
-        key: db-name
-  - name: DB_USER
+        key: es-username
+        optional: true
+  - name: MONITOR_ES_PASSWORD
     valueFrom:
       secretKeyRef:
         name: skauswatch-monitor-secret
-        key: db-user
-  - name: DB_PASS
-    valueFrom:
-      secretKeyRef:
-        name: skauswatch-monitor-secret
-        key: db-pass
-  - name: DB_POOL_SIZE
-    valueFrom:
-      configMapKeyRef:
-        name: skauswatch-monitor-config
-        key: db-pool-size
+        key: es-password
+        optional: true
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
@@ -137,20 +136,22 @@ env:
         name: skauswatch-monitor-config
         key: release-mode
 
+# monitor only exposes GET /health (no separate /ready) — see
+# services/monitor/src/routes/health.rs — so liveness and readiness share it.
 livenessProbe:
   httpGet:
-    path: /healthz
-    port: 5000
-  initialDelaySeconds: 30
+    path: /health
+    port: http
+  initialDelaySeconds: 10
   periodSeconds: 10
   timeoutSeconds: 5
   failureThreshold: 3
 
 readinessProbe:
   httpGet:
-    path: /healthz
-    port: 5000
-  initialDelaySeconds: 10
+    path: /health
+    port: http
+  initialDelaySeconds: 5
   periodSeconds: 5
   timeoutSeconds: 3
   failureThreshold: 2
@@ -160,17 +161,15 @@ volumeMounts: []
 volumes: []
 
 configMapData:
-  db-type: "postgres"
-  db-host: "postgres"
-  db-port: "5432"
-  db-name: "skauswatch"
-  db-pool-size: "10"
+  auth-enabled: "true"
+  es-enabled: "true"
+  es-url: "http://opensearch:9200"
+  es-index-pattern: "skauswatch-events-*"
   license-server-url: "https://license.penguintech.io"
-  release-mode: "false"
+  release-mode: "true"
 
 secretData:
   secret-key: "changeme-in-production"
-  password-salt: "changeme-in-production"
-  db-user: "app_user"
-  db-pass: "changeme-in-production"
+  es-username: ""
+  es-password: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-vault-service"
 description = "SkausWatch Vault secrets REST backend — Rust port of the v1 Quart flask-backend (envelope-encrypted secrets, JIT access, one-time secrets, cloud sync management, audit log)"
 version.workspace = true

@@ -5185,7 +5185,6 @@ dependencies = [
  "clap",
  "jsonwebtoken",
  "penguin-licensing",
- "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",

@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "skauswatch-pki"
 description = "SkausWatch PKI service — X.509 + SSH certificate authority (REST /api/v1 + gRPC PKIService, Rust port)"
 version.workspace = true
