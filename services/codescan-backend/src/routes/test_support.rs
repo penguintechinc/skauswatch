@@ -1,9 +1,12 @@
 //! Shared test helpers for the /api/v1 route test modules.
 
+use std::sync::Arc;
+
 use jsonwebtoken::{EncodingKey, Header};
+use penguin_licensing::LicenseClient;
 use serde::Serialize;
 
-use crate::state::AppState;
+use crate::state::{AppState, AppStateInner};
 
 #[derive(Serialize)]
 struct TestClaims<'a> {
@@ -35,4 +38,16 @@ pub(crate) fn sign_token(state: &AppState, sub: &str, role: &str) -> String {
         Ok(t) => t,
         Err(e) => panic!("sign test token: {e}"),
     }
+}
+
+/// Builds an `AppState` backed by a real, migrated Postgres pool (a fresh
+/// isolated schema per call, via `skauswatch_testkit::db::test_pool`) —
+/// for handler tests that issue real queries rather than only exercising
+/// the pre-DB auth/license/validation gates. Requires a reachable Postgres
+/// (see `docs/v2-port/testing-pattern.md`); panics loudly if none is
+/// available rather than silently skipping DB coverage.
+pub(crate) async fn db_state(license: Arc<LicenseClient>) -> AppState {
+    let pool =
+        skauswatch_testkit::db::test_pool(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).await;
+    AppStateInner::for_tests_with_db(license, pool)
 }

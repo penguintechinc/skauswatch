@@ -3,9 +3,10 @@
 # Docker Compose is deprecated for all environments; deployment is Helm v4 -> Kubernetes only.
 
 .PHONY: help build lint format test test-unit test-integration test-e2e test-security \
-	test-functional smoke-test coverage test-coverage seed-mock-data docker-build docker-push \
-	dev deploy-alpha deploy-beta clean version-update version-update-minor version-update-major \
-	version-show license-validate license-check-features pre-commit info env
+	test-functional smoke-test coverage test-coverage db-test-up db-test-down seed-mock-data \
+	docker-build docker-push dev deploy-alpha deploy-beta clean version-update \
+	version-update-minor version-update-major version-show license-validate \
+	license-check-features pre-commit info env
 
 .DEFAULT_GOAL := help
 
@@ -57,6 +58,10 @@ dev: ## Development - Deploy the workspace to local alpha (MicroK8s/Docker Deskt
 	@$(MAKE) deploy-alpha
 
 # === Testing Commands ===
+# DB-backed handler/repo tests (skauswatch-testkit) need a real reachable
+# Postgres — see `db-test-up` below and docs/v2-port/testing-pattern.md.
+# CI provides this via `services:` containers in .github/workflows/rust.yml;
+# locally, run `make db-test-up` once before `test`/`smoke-test`/`coverage`.
 test: ## Testing - Run all tests (cargo workspace + webui)
 	@echo "$(BLUE)Running all tests...$(RESET)"
 	cargo test --workspace --locked
@@ -83,9 +88,27 @@ smoke-test: ## Testing - Build + quick workspace test pass (run before every com
 
 test-coverage: coverage ## Testing - Alias for coverage
 
-coverage: ## Testing - Generate coverage report (fails below 90% lines)
+coverage: ## Testing - Generate coverage report (fails below 90% lines; requires `make db-test-up`)
 	@echo "$(BLUE)Running coverage (>=90% lines required)...$(RESET)"
-	cargo llvm-cov --workspace --locked --fail-under-lines 90
+	cargo llvm-cov --workspace --locked --fail-under-lines 90 \
+		--ignore-filename-regex '(^|/)src/main\.rs$$|(^|/)src/bin/'
+
+db-test-up: ## Testing - Start throwaway Postgres + Valkey containers for local DB-backed tests
+	@echo "$(BLUE)Starting test Postgres + Valkey...$(RESET)"
+	docker network create skauswatch-test-net 2>/dev/null || true
+	docker run --rm -d --name skauswatch-test-postgres --network skauswatch-test-net \
+		-e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
+		-p 5432:5432 postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+	docker run --rm -d --name skauswatch-test-valkey --network skauswatch-test-net \
+		-p 6379:6379 valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+	@echo "$(YELLOW)Waiting for Postgres to accept connections...$(RESET)"
+	@until docker exec skauswatch-test-postgres pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
+	@echo "$(GREEN)Test DB ready — export DB_HOST=localhost DB_PORT=5432 DB_USER=postgres DB_PASS=postgres DB_NAME=postgres$(RESET)"
+
+db-test-down: ## Testing - Stop the local test Postgres + Valkey containers
+	@echo "$(BLUE)Stopping test Postgres + Valkey...$(RESET)"
+	-docker stop skauswatch-test-postgres skauswatch-test-valkey
+	-docker network rm skauswatch-test-net
 
 test-security: ## Testing - Run security scans (cargo-deny, npm audit, gitleaks)
 	@echo "$(BLUE)Running security scans...$(RESET)"

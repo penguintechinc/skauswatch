@@ -109,6 +109,18 @@ impl AppStateInner {
         let db = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://test:test@127.0.0.1:1/test")
             .unwrap_or_else(|e| panic!("lazy test pool: {e}"));
+        Self::for_tests_with_db(license, db)
+    }
+
+    /// Test constructor for handler/DB-layer tests: identical fixed test
+    /// JWT secret and credential key to [`for_tests`], but backed by a real,
+    /// connected pool — typically one from
+    /// `skauswatch_testkit::db::test_pool` — instead of the lazy/unconnected
+    /// one, so handlers that issue real queries (list/create/update/delete)
+    /// work under test.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::panic)] // test-only constructor fails loudly by design
+    pub fn for_tests_with_db(license: Arc<LicenseClient>, db: PgPool) -> AppState {
         let test_key =
             base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [3u8; 32]);
         let crypto = CredentialCipher::from_base64_key(&test_key)

@@ -49,6 +49,45 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    # Real Postgres + Valkey for DB/handler tests (skauswatch-testkit provisions
+    # an isolated schema per test against this instance — see
+    # docs/v2-port/testing-pattern.md). No trait-abstracted/mocked DB layer:
+    # AppState.db is a concrete sqlx::PgPool in every service, so DB-layer
+    # coverage requires a real database in CI, not a double.
+    services:
+      postgres:
+        image: postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      valkey:
+        image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # skauswatch-testkit::db::test_pool defaults (see crates/skauswatch-testkit/src/db.rs)
+      # already match these, but set explicitly so `skauswatch_db::DbConfig::from_env()`
+      # based tests/binaries also resolve the same instance.
+      DB_TYPE: postgresql
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_NAME: postgres
+      DB_USER: postgres
+      DB_PASS: postgres
+      REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: Install pinned toolchain
@@ -76,6 +115,39 @@ jobs:
   coverage:
     name: Coverage (>=90%)
     runs-on: ubuntu-latest
+    # Same real Postgres + Valkey as the `test` job — coverage must exercise
+    # the same DB-backed handler/repo tests, not a reduced subset.
+    services:
+      postgres:
+        image: postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      valkey:
+        image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DB_TYPE: postgresql
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_NAME: postgres
+      DB_USER: postgres
+      DB_PASS: postgres
+      REDIS_URL: redis://localhost:6379/0
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: Install pinned toolchain
@@ -85,4 +157,11 @@ jobs:
       - name: Install cargo-llvm-cov (pinned)
         run: cargo install cargo-llvm-cov --version 0.8.7 --locked
       - name: cargo llvm-cov
-        run: cargo llvm-cov --workspace --locked --fail-under-lines 90
+        # main.rs/bin entry points are exercised by the `healthcheck` subcommand
+        # / smoke path, not unit tests — excluded from the denominator so the
+        # gate measures unit-testable code (handlers, DB layer, crypto,
+        # services). No other file category is excluded: every handler/route/
+        # db/service/crypto file must be covered.
+        run: |
+          cargo llvm-cov --workspace --locked --fail-under-lines 90 \
+            --ignore-filename-regex '(^|/)src/main\.rs$|(^|/)src/bin/'

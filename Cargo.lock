@@ -5191,6 +5191,7 @@ dependencies = [
  "skauswatch-db",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
@@ -5499,6 +5500,18 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "skauswatch-testkit"
+version = "2.0.0"
+dependencies = [
+ "penguin-licensing",
+ "skauswatch-auth",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

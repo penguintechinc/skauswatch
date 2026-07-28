@@ -71,14 +71,14 @@ struct ReviewRow {
     files_reviewed: i32,
     comments_count: i32,
     summary: Option<String>,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    started_at: Option<chrono::NaiveDateTime>,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    completed_at: Option<chrono::NaiveDateTime>,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    created_at: Option<chrono::NaiveDateTime>,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    updated_at: Option<chrono::NaiveDateTime>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    started_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 const REVIEW_COLUMNS: &str = "id, external_id, tenant_id, team_id, triggered_by, repo_config_id, \
@@ -324,8 +324,8 @@ struct ReviewComment {
     comment: Option<String>,
     category: Option<String>,
     severity: Option<String>,
-    #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
-    created_at: Option<chrono::NaiveDateTime>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// GET /codescan/reviews/{review_id} — review detail enriched with comments.
@@ -511,5 +511,133 @@ mod tests {
                 .await;
             resp.assert_status(StatusCode::FORBIDDEN);
         }
+    }
+
+    /// Inserts a `codescan_repo_configs` row directly (bypassing the REST
+    /// surface) so review tests have a valid `repo_config_id` to reference —
+    /// keeps each review test focused on the reviews table itself.
+    async fn seed_repo_config(state: &crate::state::AppState, repo_name: &str) -> i64 {
+        let row: (i64,) = match sqlx::query_as(
+            "INSERT INTO codescan_repo_configs (provider, repo_url, repo_name) \
+             VALUES ('github', $1, $2) RETURNING id",
+        )
+        .bind(format!("https://github.com/a/{repo_name}"))
+        .bind(repo_name)
+        .fetch_one(&state.db)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => panic!("seed repo config: {e}"),
+        };
+        row.0
+    }
+
+    #[tokio::test]
+    async fn list_is_empty_against_a_fresh_db() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = sign_token(&state, "1", "viewer");
+        let server = test_server(state);
+        let resp = server
+            .get("/api/v1/codescan/reviews")
+            .authorization_bearer(token)
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["pagination"]["total"], 0);
+        assert_eq!(body["data"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_unknown_repo_config() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = sign_token(&state, "1", "maintainer");
+        let server = test_server(state);
+        let resp = server
+            .post("/api/v1/codescan/reviews")
+            .authorization_bearer(token)
+            .json(&serde_json::json!({
+                "repo_config_id": 999999,
+                "pr_url": "https://github.com/a/b/pull/1",
+            }))
+            .await;
+        resp.assert_status(StatusCode::NOT_FOUND);
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["error"], "Repository configuration not found");
+    }
+
+    #[tokio::test]
+    async fn create_list_and_get_round_trip_with_comments() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let repo_config_id = seed_repo_config(&state, "reviewed-repo").await;
+        let maintainer = sign_token(&state, "1", "maintainer");
+        let server = test_server(state.clone());
+
+        let created = server
+            .post("/api/v1/codescan/reviews")
+            .authorization_bearer(&maintainer)
+            .json(&serde_json::json!({
+                "repo_config_id": repo_config_id,
+                "pr_url": "https://github.com/a/reviewed-repo/pull/1",
+                "external_id": "ext-1",
+            }))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let created_body: serde_json::Value = created.json();
+        let review_id = created_body["id"].as_i64().unwrap_or_default();
+        assert!(review_id > 0);
+        assert_eq!(created_body["status"], "queued");
+
+        let dup = server
+            .post("/api/v1/codescan/reviews")
+            .authorization_bearer(&maintainer)
+            .json(&serde_json::json!({
+                "repo_config_id": repo_config_id,
+                "pr_url": "https://github.com/a/reviewed-repo/pull/1",
+                "external_id": "ext-1",
+            }))
+            .await;
+        dup.assert_status(StatusCode::CONFLICT);
+
+        if let Err(e) = sqlx::query(
+            "INSERT INTO codescan_review_comments (review_id, file_path, comment) \
+             VALUES ($1, 'src/lib.rs', 'looks good')",
+        )
+        .bind(review_id)
+        .execute(&state.db)
+        .await
+        {
+            panic!("seed comment: {e}");
+        }
+
+        let fetched = server
+            .get(&format!("/api/v1/codescan/reviews/{review_id}"))
+            .authorization_bearer(&maintainer)
+            .await;
+        fetched.assert_status_ok();
+        let fetched_body: serde_json::Value = fetched.json();
+        assert_eq!(fetched_body["comments"].as_array().map(Vec::len), Some(1));
+        assert_eq!(fetched_body["comments"][0]["comment"], "looks good");
+
+        let listed = server
+            .get(&format!(
+                "/api/v1/codescan/reviews?repo_config_id={repo_config_id}"
+            ))
+            .authorization_bearer(&maintainer)
+            .await;
+        listed.assert_status_ok();
+        let listed_body: serde_json::Value = listed.json();
+        assert_eq!(listed_body["pagination"]["total"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_review_404_on_unknown_id() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = sign_token(&state, "1", "viewer");
+        let server = test_server(state);
+        server
+            .get("/api/v1/codescan/reviews/999999")
+            .authorization_bearer(token)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
     }
 }

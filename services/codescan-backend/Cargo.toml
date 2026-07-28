@@ -35,6 +35,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 axum-test = { workspace = true }
+skauswatch-testkit = { workspace = true }
 
 [lints]
 workspace = true
