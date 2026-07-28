@@ -87,9 +87,8 @@ coverage: ## Testing - Generate coverage report (fails below 90% lines)
 	@echo "$(BLUE)Running coverage (>=90% lines required)...$(RESET)"
 	cargo llvm-cov --workspace --locked --fail-under-lines 90
 
-test-security: ## Testing - Run security scans (cargo audit/deny, npm audit, gitleaks)
+test-security: ## Testing - Run security scans (cargo-deny, npm audit, gitleaks)
 	@echo "$(BLUE)Running security scans...$(RESET)"
-	cargo audit
 	cargo deny check
 	@cd services/webui && npm audit --omit=dev || true
 	@if command -v gitleaks >/dev/null 2>&1; then echo "-- gitleaks --"; gitleaks detect --source . --no-git; fi

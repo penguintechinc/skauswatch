@@ -78,7 +78,7 @@ COPY --from=builder --chown=appuser:appuser /tmp/endpoint-agent /usr/local/bin/e
 # ConfigMap at the same path in every real deployment (see
 # deployments/kubernetes/daemonset.yaml); kept here so a standalone
 # `docker run` still starts with sane defaults.
-COPY --chown=appuser:appuser config/endpoint-agent.yaml /etc/skauswatch/endpoint-agent.yaml
+COPY --chown=appuser:appuser services/endpoint-agent/config/endpoint-agent.yaml /etc/skauswatch/endpoint-agent.yaml
 
 # Default is non-root. The DaemonSet deployment adds host-level Linux
 # capabilities (NET_ADMIN/SYS_ADMIN/SYS_PTRACE) for process/network

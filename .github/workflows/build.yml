@@ -133,7 +133,10 @@ jobs:
       - name: Build ${{ matrix.service }} (${{ matrix.platform }})
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
         with:
-          context: .
+          # webui is a self-contained Node build (its Dockerfile COPYs
+          # package.json/.npmrc/src relative to its own dir); every Rust service
+          # is a Cargo workspace build that needs the repo root as context.
+          context: ${{ matrix.service == 'webui' && 'services/webui' || '.' }}
           file: services/${{ matrix.service }}/Dockerfile
           platforms: ${{ matrix.platform }}
           push: ${{ needs.determine-tag.outputs.push == 'true' }}

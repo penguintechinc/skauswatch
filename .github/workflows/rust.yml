@@ -57,18 +57,19 @@ jobs:
         run: cargo test --workspace --locked
 
   supply-chain:
-    name: Audit + Deny
+    name: Supply chain (cargo-deny)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       - name: Install pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - name: Install cargo-audit and cargo-deny (pinned)
-        run: |
-          cargo install cargo-audit --version 0.22.2 --locked
-          cargo install cargo-deny --version 0.20.2 --locked
-      - name: cargo audit
-        run: cargo audit
+      - name: Install cargo-deny (pinned)
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      # cargo-deny's `advisories` check reads the same RustSec DB as cargo-audit
+      # and is a strict superset (it also enforces licenses/bans/sources) — and,
+      # unlike cargo-audit, it honors the documented `[advisories] ignore` list
+      # in deny.toml. Running both meant maintaining two ignore configs, so
+      # cargo-deny is the single supply-chain gate.
       - name: cargo deny
         run: cargo deny check
 
