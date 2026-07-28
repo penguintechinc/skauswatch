@@ -1121,4 +1121,272 @@ mod tests {
         assert_eq!(v["critical"], 0);
         assert_eq!(v.get("bogus"), None);
     }
+
+    use crate::routes::test_support::{authed_user, db_state};
+
+    fn dev_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
+        skauswatch_testkit::license::dev_license("skauswatch")
+    }
+
+    async fn server_for(state: AppState) -> axum_test::TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        axum_test::TestServer::new(app)
+    }
+
+    async fn seed_alert(state: &AppState, title: &str, severity: &str, source: &str) -> i32 {
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO alerts (title, description, severity, status, source, indicators, \
+             created_at, updated_at) VALUES ($1, 'd', $2, 'pending', $3, '[]', now(), now()) \
+             RETURNING id",
+        )
+        .bind(title)
+        .bind(severity)
+        .bind(source)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed_alert: {e}"));
+        id
+    }
+
+    #[tokio::test]
+    async fn list_and_get_alerts_round_trip_against_real_db() {
+        let state = db_state(dev_license()).await;
+        let id = seed_alert(&state, "C2 beacon", "critical", "endpoint").await;
+        let (_, token) = authed_user(&state, "alerts-viewer@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let list = server
+            .get("/api/v1/alerts")
+            .authorization_bearer(&token)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+        assert!(body["items"].as_array().is_some_and(|a| !a.is_empty()));
+
+        let get = server
+            .get(&format!("/api/v1/alerts/{id}"))
+            .authorization_bearer(&token)
+            .await;
+        get.assert_status_ok();
+        let body: serde_json::Value = get.json();
+        assert_eq!(body["title"], "C2 beacon");
+        assert_eq!(body["indicators"], serde_json::json!([]));
+
+        let missing = server
+            .get("/api/v1/alerts/999999")
+            .authorization_bearer(&token)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_alerts_filters_by_severity_and_status() {
+        let state = db_state(dev_license()).await;
+        seed_alert(&state, "Alpha", "critical", "endpoint").await;
+        seed_alert(&state, "Bravo", "low", "siem").await;
+        let (_, token) = authed_user(&state, "alerts-filter@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let res = server
+            .get("/api/v1/alerts?severity=critical")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        let items = body["items"].as_array().cloned().unwrap_or_default();
+        assert!(items.iter().all(|i| i["severity"] == "critical"));
+    }
+
+    #[tokio::test]
+    async fn create_alert_requires_role_and_validates_then_succeeds() {
+        let state = db_state(dev_license()).await;
+        let (_, viewer_tok) = authed_user(&state, "ca-viewer@example.com", "viewer").await;
+        let (_, maint_tok) = authed_user(&state, "ca-maint@example.com", "maintainer").await;
+        let server = server_for(state).await;
+
+        let res = server
+            .post("/api/v1/alerts")
+            .authorization_bearer(&viewer_tok)
+            .json(&serde_json::json!({
+                "title": "t", "description": "d", "severity": "high", "source": "s"
+            }))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+
+        let res = server
+            .post("/api/v1/alerts")
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({
+                "title": "", "description": "d", "severity": "high", "source": "s"
+            }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+
+        let res = server
+            .post("/api/v1/alerts")
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({
+                "title": "New alert", "description": "d", "severity": "medium",
+                "source": "endpoint", "indicators": ["1.2.3.4"]
+            }))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["alert"]["title"], "New alert");
+        assert_eq!(body["alert"]["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn update_alert_validates_and_persists_changes() {
+        let state = db_state(dev_license()).await;
+        let id = seed_alert(&state, "Orig", "low", "manual").await;
+        let (_, maint_tok) = authed_user(&state, "ua-maint@example.com", "maintainer").await;
+        let server = server_for(state).await;
+
+        let missing = server
+            .put("/api/v1/alerts/999999")
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({"title": "x"}))
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        let bad = server
+            .put(&format!("/api/v1/alerts/{id}"))
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({"severity": "apocalyptic"}))
+            .await;
+        bad.assert_status(StatusCode::BAD_REQUEST);
+
+        let res = server
+            .put(&format!("/api/v1/alerts/{id}"))
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({"status": "resolved", "resolution_notes": "fixed"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["alert"]["status"], "resolved");
+    }
+
+    #[tokio::test]
+    async fn update_alert_status_endpoint_gates_role_and_validates() {
+        let state = db_state(dev_license()).await;
+        let id = seed_alert(&state, "S", "low", "manual").await;
+        let (_, viewer_tok) = authed_user(&state, "uas-viewer@example.com", "viewer").await;
+        let (_, admin_tok) = authed_user(&state, "uas-admin@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let res = server
+            .put(&format!("/api/v1/alerts/{id}/status"))
+            .authorization_bearer(&viewer_tok)
+            .json(&serde_json::json!({"status": "resolved"}))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+
+        let bad = server
+            .put(&format!("/api/v1/alerts/{id}/status"))
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"status": "bogus"}))
+            .await;
+        bad.assert_status(StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = bad.json();
+        assert_eq!(body["error"], "Invalid status");
+
+        let missing = server
+            .put("/api/v1/alerts/999999/status")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"status": "resolved"}))
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        let res = server
+            .put(&format!("/api/v1/alerts/{id}/status"))
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"status": "resolved"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["new_status"], "resolved");
+    }
+
+    // Note: the AI_ENABLED=false 503 branch is exercised at the pure-function
+    // level only (`ai_enabled_matches_python_env_semantics` above) — the
+    // workspace forbids `unsafe`, so this crate cannot mutate a process-global
+    // env var from a test to drive that branch through the HTTP surface.
+
+    #[tokio::test]
+    async fn request_ai_review_requires_role_404s_missing_then_accepts() {
+        let state = db_state(dev_license()).await;
+        let id = seed_alert(&state, "R", "high", "endpoint").await;
+        let (_, viewer_tok) = authed_user(&state, "air-viewer@example.com", "viewer").await;
+        let (_, maint_tok) = authed_user(&state, "air-maint@example.com", "maintainer").await;
+        let server = server_for(state).await;
+
+        let res = server
+            .post(&format!("/api/v1/alerts/{id}/ai-review"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+
+        let missing = server
+            .post("/api/v1/alerts/999999/ai-review")
+            .authorization_bearer(&maint_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        let res = server
+            .post(&format!("/api/v1/alerts/{id}/ai-review"))
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({"provider": "ollama", "priority": 2}))
+            .await;
+        res.assert_status(StatusCode::ACCEPTED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["provider"], "ollama");
+        assert_eq!(body["priority"], 2);
+        assert!(body["job_id"].as_str().is_some_and(|s| !s.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn search_alerts_validates_and_filters() {
+        let state = db_state(dev_license()).await;
+        seed_alert(&state, "Ransomware hit", "critical", "endpoint").await;
+        let (_, token) = authed_user(&state, "search@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let bad = server
+            .post("/api/v1/alerts/search")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"per_page": 0}))
+            .await;
+        bad.assert_status(StatusCode::BAD_REQUEST);
+
+        let res = server
+            .post("/api/v1/alerts/search")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"query": "Ransomware"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+    }
+
+    #[tokio::test]
+    async fn alert_statistics_returns_zero_filled_buckets() {
+        let state = db_state(dev_license()).await;
+        seed_alert(&state, "S1", "high", "endpoint").await;
+        let (_, token) = authed_user(&state, "stats@example.com", "viewer").await;
+        let server = server_for(state).await;
+        let res = server
+            .get("/api/v1/alerts/statistics")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+        assert!(body["by_severity"]["high"].as_i64().unwrap_or(0) >= 1);
+        assert_eq!(body["by_status"]["resolved"], 0);
+        assert!(body["last_24_hours"].as_i64().unwrap_or(0) >= 1);
+    }
 }

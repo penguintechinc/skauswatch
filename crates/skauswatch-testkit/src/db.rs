@@ -118,6 +118,80 @@ pub async fn test_pool(migrations_dir: impl AsRef<Path>) -> PgPool {
     pool
 }
 
+/// Like [`test_pool`] but applies SEVERAL migration directories into one
+/// isolated schema. For services whose handlers query tables OWNED by another
+/// service — the manager reads s3scan's `s3_scan_*`/`adhoc_scan_results`, and
+/// the workers read their backend's tables — this co-locates the borrowed
+/// tables for tests WITHOUT duplicating any `CREATE TABLE` across services'
+/// production migrations (each service still ships only the migration for the
+/// tables it owns). Each dir's `*.sql` files are executed raw (simple query
+/// protocol) in filename order, so two services' `0001_*` files never collide
+/// on sqlx migration version numbers the way [`sqlx::migrate::Migrator`] would.
+#[allow(clippy::panic)] // test-infra bootstrap: fail loudly, not silently skip DB coverage
+pub async fn test_pool_multi(migration_dirs: &[&Path]) -> PgPool {
+    let url = connection_url();
+    let schema = format!("test_{}", uuid::Uuid::new_v4().simple());
+
+    let bootstrap = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("skauswatch-testkit: connect to Postgres at {url}: {e}"));
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{schema}\"")))
+        .execute(&bootstrap)
+        .await
+        .unwrap_or_else(|e| panic!("skauswatch-testkit: create schema {schema}: {e}"));
+    bootstrap.close().await;
+
+    let schema_for_hook = schema.clone();
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .after_connect(move |conn, _meta| {
+            let schema = schema_for_hook.clone();
+            Box::pin(async move {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "SET search_path TO \"{schema}\""
+                )))
+                .execute(&mut *conn)
+                .await?;
+                Ok(())
+            })
+        })
+        .connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("skauswatch-testkit: connect scoped pool for {schema}: {e}"));
+
+    for dir in migration_dirs {
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "skauswatch-testkit: read migration dir {}: {e}",
+                    dir.display()
+                )
+            })
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "sql"))
+            .collect();
+        files.sort();
+        for f in files {
+            let sql = std::fs::read_to_string(&f)
+                .unwrap_or_else(|e| panic!("skauswatch-testkit: read {}: {e}", f.display()));
+            // Trusted, in-repo schema files (never user input) — assert safe so
+            // sqlx's simple-query protocol runs the file's multiple statements.
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "skauswatch-testkit: apply {} into {schema}: {e}",
+                        f.display()
+                    )
+                });
+        }
+    }
+    pool
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

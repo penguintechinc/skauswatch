@@ -101,4 +101,32 @@ mod tests {
         let body: serde_json::Value = res.json();
         assert_eq!(body["error"], "Invalid token");
     }
+
+    #[tokio::test]
+    async fn features_endpoint_returns_tier_flags_and_features_when_authed() {
+        let license = skauswatch_testkit::license::dev_license("skauswatch");
+        let state = crate::routes::test_support::db_state(license).await;
+        let (_, token) =
+            crate::routes::test_support::authed_user(&state, "flags@example.com", "viewer").await;
+        let app = crate::routes::router(state);
+        let server = axum_test::TestServer::new(app);
+
+        let res = server
+            .get("/api/v1/license/features")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["status"], "success");
+        assert_eq!(body["data"]["valid"], true);
+        assert!(body["data"]["flags"].is_object());
+        assert!(
+            body["data"]["flags"]
+                .as_object()
+                .is_some_and(|m| m.contains_key("skauswatch.s3-scan"))
+        );
+        assert!(body["data"]["features"].is_object());
+        assert_eq!(body["meta"]["version"], 1);
+        assert!(body["meta"]["timestamp"].is_string());
+    }
 }

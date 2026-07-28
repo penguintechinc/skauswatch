@@ -5292,6 +5292,7 @@ dependencies = [
  "skauswatch-proto",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
@@ -5575,6 +5576,7 @@ dependencies = [
  "skauswatch-db",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
@@ -5599,11 +5601,13 @@ dependencies = [
  "skauswatch-db",
  "skauswatch-streams",
  "skauswatch-telemetry",
+ "skauswatch-testkit",
  "skauswatch-vault",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]

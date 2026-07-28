@@ -32,5 +32,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+skauswatch-testkit = { workspace = true }
+wiremock = { workspace = true }
+
 [lints]
 workspace = true

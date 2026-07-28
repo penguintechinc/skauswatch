@@ -2936,4 +2936,640 @@ mod tests {
         assert_eq!(normalize_file_type(" .Zip "), ".zip");
         assert_eq!(normalize_file_type(""), "."); // v1 quirk: empty → "."
     }
+
+    use axum_test::multipart::{MultipartForm, Part};
+
+    use crate::routes::test_support::{authed_user, db_state_with_s3scan};
+
+    fn dev_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
+        skauswatch_testkit::license::dev_license("skauswatch")
+    }
+
+    async fn server_for(state: AppState) -> axum_test::TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        axum_test::TestServer::new(app)
+    }
+
+    async fn seed_bucket(state: &AppState, name: &str, created_by: i32) -> i32 {
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO s3_bucket_configs \
+             (name, endpoint_url, bucket_name, access_key_id, secret_access_key, region, \
+              use_ssl, path_style, scan_enabled, yara_enabled, created_by, created_at, updated_at) \
+             VALUES ($1, 'http://parity-stub:9999', 'bucket', 'AKIATESTKEY123456', \
+                     'supersecretvalue1234', 'us-east-1', false, true, true, false, $2, \
+                     now(), now()) RETURNING id",
+        )
+        .bind(name)
+        .bind(created_by)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed_bucket: {e}"));
+        id
+    }
+
+    async fn seed_job(state: &AppState, bucket_id: i32, status: &str) -> (i32, String) {
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO s3_scan_jobs (job_id, bucket_config_id, job_type, status, \
+             triggered_by, created_at) VALUES ($1, $2, 'full_scan', $3, 1, now()) RETURNING id",
+        )
+        .bind(&job_uuid)
+        .bind(bucket_id)
+        .bind(status)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed_job: {e}"));
+        (id, job_uuid)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_result(
+        state: &AppState,
+        job_id: i32,
+        bucket_id: i32,
+        object_key: &str,
+        is_threat: bool,
+        sha256: Option<&str>,
+    ) -> i32 {
+        let (id,): (i32,) = sqlx::query_as(
+            "INSERT INTO s3_scan_results \
+             (job_id, bucket_config_id, object_key, scan_status, is_malware, is_pup, \
+              is_threat, threat_names, file_sha256, scanned_at) \
+             VALUES ($1, $2, $3, 'completed', $4, false, $4, '[\"Eicar\"]', $5, now()) \
+             RETURNING id",
+        )
+        .bind(job_id)
+        .bind(bucket_id)
+        .bind(object_key)
+        .bind(is_threat)
+        .bind(sha256)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed_result: {e}"));
+        id
+    }
+
+    #[tokio::test]
+    async fn bucket_crud_round_trips_against_real_db() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let (admin_id, admin_tok) = authed_user(&state, "s3-admin@example.com", "admin").await;
+        let (_, viewer_tok) = authed_user(&state, "s3-viewer@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let forbidden = server
+            .post("/api/v1/s3-scan/buckets")
+            .authorization_bearer(&viewer_tok)
+            .json(&serde_json::json!({"name": "b"}))
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let bad = server
+            .post("/api/v1/s3-scan/buckets")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"name": "b", "endpoint_url": "ftp://x"}))
+            .await;
+        bad.assert_status(StatusCode::BAD_REQUEST);
+
+        let create = server
+            .post("/api/v1/s3-scan/buckets")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({
+                "name": "New Bucket",
+                "endpoint_url": "http://parity-stub:9999",
+                "bucket_name": "newbucket",
+                "access_key_id": "AKIANEWKEY000000000",
+                "secret_access_key": "newsecretvalueabcdef",
+            }))
+            .await;
+        create.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = create.json();
+        let bucket_id = body["bucket"]["id"].as_i64().unwrap_or_default();
+        assert!(
+            body["bucket"]["access_key_id"]
+                .as_str()
+                .is_some_and(|s| s.contains('*'))
+        );
+
+        let dup = server
+            .post("/api/v1/s3-scan/buckets")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({
+                "name": "Dup",
+                "endpoint_url": "http://parity-stub:9999",
+                "bucket_name": "newbucket",
+                "access_key_id": "AKIANEWKEY000000000",
+                "secret_access_key": "newsecretvalueabcdef",
+            }))
+            .await;
+        dup.assert_status(StatusCode::CONFLICT);
+
+        let list = server
+            .get("/api/v1/s3-scan/buckets")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+
+        let get = server
+            .get(&format!("/api/v1/s3-scan/buckets/{bucket_id}"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        get.assert_status_ok();
+
+        let missing = server
+            .get("/api/v1/s3-scan/buckets/999999")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        let update = server
+            .put(&format!("/api/v1/s3-scan/buckets/{bucket_id}"))
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"scan_enabled": false}))
+            .await;
+        update.assert_status_ok();
+
+        let missing_update = server
+            .put("/api/v1/s3-scan/buckets/999999")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"scan_enabled": false}))
+            .await;
+        missing_update.assert_status(StatusCode::NOT_FOUND);
+
+        let forbidden_delete = server
+            .delete(&format!("/api/v1/s3-scan/buckets/{bucket_id}"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        forbidden_delete.assert_status(StatusCode::FORBIDDEN);
+
+        let delete = server
+            .delete(&format!("/api/v1/s3-scan/buckets/{bucket_id}"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        delete.assert_status_ok();
+
+        let _ = admin_id;
+    }
+
+    #[tokio::test]
+    async fn test_bucket_connection_reports_transport_failure_or_gate() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let (admin_id, admin_tok) = authed_user(&state, "conn-admin@example.com", "admin").await;
+        let (_, viewer_tok) = authed_user(&state, "conn-viewer@example.com", "viewer").await;
+        let bucket_id = seed_bucket(&state, "conn-bucket", admin_id).await;
+        let server = server_for(state).await;
+
+        let missing = server
+            .post("/api/v1/s3-scan/buckets/999999/test")
+            .authorization_bearer(&admin_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        let forbidden = server
+            .post(&format!("/api/v1/s3-scan/buckets/{bucket_id}/test"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        // The seeded endpoint_url is unreachable — either a service error
+        // (400) or a generic transport failure (500), never a panic/2xx.
+        let res = server
+            .post(&format!("/api/v1/s3-scan/buckets/{bucket_id}/test"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        assert!(res.status_code().is_client_error() || res.status_code().is_server_error());
+    }
+
+    #[tokio::test]
+    async fn trigger_scan_gates_role_disabled_bucket_and_missing_bucket() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let (admin_id, admin_tok) = authed_user(&state, "trig-admin@example.com", "admin").await;
+        let (_, viewer_tok) = authed_user(&state, "trig-viewer@example.com", "viewer").await;
+        let bucket_id = seed_bucket(&state, "trig-bucket", admin_id).await;
+        let server = server_for(state).await;
+
+        let forbidden = server
+            .post(&format!("/api/v1/s3-scan/buckets/{bucket_id}/scan"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let missing = server
+            .post("/api/v1/s3-scan/buckets/999999/scan")
+            .authorization_bearer(&admin_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        let res = server
+            .post(&format!("/api/v1/s3-scan/buckets/{bucket_id}/scan"))
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"prefix_filter": "logs/"}))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["job"]["job_type"], "full_scan");
+        assert_eq!(body["job"]["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn jobs_list_get_and_cancel_round_trip() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let (admin_id, admin_tok) = authed_user(&state, "job-admin@example.com", "admin").await;
+        let (_, viewer_tok) = authed_user(&state, "job-viewer@example.com", "viewer").await;
+        let bucket_id = seed_bucket(&state, "job-bucket", admin_id).await;
+        let (job_id, _) = seed_job(&state, bucket_id, "pending").await;
+        let server = server_for(state).await;
+
+        let list = server
+            .get("/api/v1/s3-scan/jobs")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+
+        let get = server
+            .get(&format!("/api/v1/s3-scan/jobs/{job_id}"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        get.assert_status_ok();
+        let body: serde_json::Value = get.json();
+        assert_eq!(body["job_type"], "full_scan");
+        assert!(body["metadata"].is_object());
+
+        let missing = server
+            .get("/api/v1/s3-scan/jobs/999999")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        let forbidden_cancel = server
+            .post(&format!("/api/v1/s3-scan/jobs/{job_id}/cancel"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        forbidden_cancel.assert_status(StatusCode::FORBIDDEN);
+
+        let cancel = server
+            .post(&format!("/api/v1/s3-scan/jobs/{job_id}/cancel"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        cancel.assert_status_ok();
+
+        // Already cancelled — not pending/running anymore.
+        let again = server
+            .post(&format!("/api/v1/s3-scan/jobs/{job_id}/cancel"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        again.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn results_list_get_and_ti_indicator_round_trip() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let (admin_id, admin_tok) = authed_user(&state, "res-admin@example.com", "admin").await;
+        let (_, viewer_tok) = authed_user(&state, "res-viewer@example.com", "viewer").await;
+        let bucket_id = seed_bucket(&state, "res-bucket", admin_id).await;
+        let (job_id, _) = seed_job(&state, bucket_id, "completed").await;
+        let threat_hash = "a".repeat(64);
+        let result_id = seed_result(
+            &state,
+            job_id,
+            bucket_id,
+            "bad.exe",
+            true,
+            Some(&threat_hash),
+        )
+        .await;
+        let clean_id = seed_result(&state, job_id, bucket_id, "ok.pdf", false, None).await;
+        let server = server_for(state).await;
+
+        let list = server
+            .get("/api/v1/s3-scan/results")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 2);
+
+        let bad_date = server
+            .get("/api/v1/s3-scan/results?date_from=not-a-date")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        bad_date.assert_status(StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = bad_date.json();
+        assert_eq!(body["error"], "Invalid date format");
+
+        let get = server
+            .get(&format!("/api/v1/s3-scan/results/{result_id}"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        get.assert_status_ok();
+        let body: serde_json::Value = get.json();
+        assert_eq!(body["file_key"], "bad.exe");
+
+        // Enrichment: no matching indicator yet.
+        let enrich = server
+            .get(&format!(
+                "/api/v1/s3-scan/results/{result_id}/ti-enrichment"
+            ))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        enrich.assert_status_ok();
+        let body: serde_json::Value = enrich.json();
+        assert_eq!(body["found"], false);
+
+        // create-indicator: role gate, non-threat rejection, then success.
+        let forbidden = server
+            .post(&format!(
+                "/api/v1/s3-scan/results/{result_id}/create-indicator"
+            ))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let not_threat = server
+            .post(&format!(
+                "/api/v1/s3-scan/results/{clean_id}/create-indicator"
+            ))
+            .authorization_bearer(&admin_tok)
+            .await;
+        not_threat.assert_status(StatusCode::BAD_REQUEST);
+
+        let created = server
+            .post(&format!(
+                "/api/v1/s3-scan/results/{result_id}/create-indicator"
+            ))
+            .authorization_bearer(&admin_tok)
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = created.json();
+        assert_eq!(body["indicator"]["value"], threat_hash);
+
+        // Duplicate promotion just points at the existing indicator.
+        let dup = server
+            .post(&format!(
+                "/api/v1/s3-scan/results/{result_id}/create-indicator"
+            ))
+            .authorization_bearer(&admin_tok)
+            .await;
+        dup.assert_status_ok();
+        let body: serde_json::Value = dup.json();
+        assert_eq!(body["message"], "Threat indicator already exists");
+
+        // Enrichment now finds the promoted indicator.
+        let enrich2 = server
+            .get(&format!(
+                "/api/v1/s3-scan/results/{result_id}/ti-enrichment"
+            ))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        enrich2.assert_status_ok();
+        let body: serde_json::Value = enrich2.json();
+        assert_eq!(body["found"], true);
+
+        let missing = server
+            .get("/api/v1/s3-scan/results/999999")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn statistics_endpoint_reports_aggregates() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let (admin_id, _) = authed_user(&state, "stat-admin@example.com", "admin").await;
+        let (_, viewer_tok) = authed_user(&state, "stat-viewer@example.com", "viewer").await;
+        let bucket_id = seed_bucket(&state, "stat-bucket", admin_id).await;
+        let (job_id, _) = seed_job(&state, bucket_id, "completed").await;
+        seed_result(
+            &state,
+            job_id,
+            bucket_id,
+            "a.exe",
+            true,
+            Some(&"b".repeat(64)),
+        )
+        .await;
+        let server = server_for(state).await;
+
+        let res = server
+            .get("/api/v1/s3-scan/statistics")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["total_scanned"].as_i64().unwrap_or(0) >= 1);
+        assert!(body["total_infected"].as_i64().unwrap_or(0) >= 1);
+        assert!(body["by_bucket"].is_object());
+    }
+
+    #[tokio::test]
+    async fn schedule_get_set_delete_round_trip() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let (admin_id, admin_tok) = authed_user(&state, "sched-admin@example.com", "admin").await;
+        let (_, viewer_tok) = authed_user(&state, "sched-viewer@example.com", "viewer").await;
+        let bucket_id = seed_bucket(&state, "sched-bucket", admin_id).await;
+        let server = server_for(state).await;
+
+        let missing_bucket = server
+            .get("/api/v1/s3-scan/buckets/999999/schedule")
+            .authorization_bearer(&viewer_tok)
+            .await;
+        missing_bucket.assert_status(StatusCode::NOT_FOUND);
+
+        let no_schedule = server
+            .get(&format!("/api/v1/s3-scan/buckets/{bucket_id}/schedule"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        no_schedule.assert_status(StatusCode::NOT_FOUND);
+
+        let forbidden = server
+            .put(&format!("/api/v1/s3-scan/buckets/{bucket_id}/schedule"))
+            .authorization_bearer(&viewer_tok)
+            .json(&serde_json::json!({"cron_expression": "0 2 * * *"}))
+            .await;
+        forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let bad_cron = server
+            .put(&format!("/api/v1/s3-scan/buckets/{bucket_id}/schedule"))
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"cron_expression": "not a cron"}))
+            .await;
+        bad_cron.assert_status(StatusCode::BAD_REQUEST);
+
+        let set = server
+            .put(&format!("/api/v1/s3-scan/buckets/{bucket_id}/schedule"))
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"cron_expression": "0 2 * * *"}))
+            .await;
+        set.assert_status_ok();
+        let body: serde_json::Value = set.json();
+        assert_eq!(body["schedule"]["cron_expression"], "0 2 * * *");
+        assert_eq!(body["schedule"]["timezone"], "UTC");
+
+        // Upsert on the unique bucket_config_id.
+        let reset = server
+            .put(&format!("/api/v1/s3-scan/buckets/{bucket_id}/schedule"))
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"cron_expression": "0 3 * * *", "enabled": false}))
+            .await;
+        reset.assert_status_ok();
+
+        let get = server
+            .get(&format!("/api/v1/s3-scan/buckets/{bucket_id}/schedule"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        get.assert_status_ok();
+        let body: serde_json::Value = get.json();
+        assert_eq!(body["cron_expression"], "0 3 * * *");
+        assert_eq!(body["enabled"], false);
+
+        let del_forbidden = server
+            .delete(&format!("/api/v1/s3-scan/buckets/{bucket_id}/schedule"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        del_forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let del = server
+            .delete(&format!("/api/v1/s3-scan/buckets/{bucket_id}/schedule"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        del.assert_status_ok();
+
+        let del_again = server
+            .delete(&format!("/api/v1/s3-scan/buckets/{bucket_id}/schedule"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        del_again.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn upload_history_result_and_delete_round_trip() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let (uploader_id, uploader_tok) =
+            authed_user(&state, "up-owner@example.com", "viewer").await;
+        let (_, other_tok) = authed_user(&state, "up-other@example.com", "viewer").await;
+        let (_, admin_tok) = authed_user(&state, "up-admin@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let no_file = server
+            .post("/api/v1/s3-scan/upload")
+            .authorization_bearer(&uploader_tok)
+            .await;
+        no_file.assert_status(StatusCode::BAD_REQUEST);
+
+        let form = MultipartForm::new().add_part(
+            "file",
+            Part::bytes(b"hello world".as_slice())
+                .file_name("sample.bin")
+                .mime_type("application/octet-stream"),
+        );
+        let res = server
+            .post("/api/v1/s3-scan/upload")
+            .authorization_bearer(&uploader_tok)
+            .multipart(form)
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = res.json();
+        let scan_id = body["scan"]["id"].as_i64().unwrap_or_default();
+        assert_eq!(body["scan"]["filename"], "sample.bin");
+        assert_eq!(body["scan"]["scan_status"], "pending");
+
+        let history = server
+            .get("/api/v1/s3-scan/upload/history")
+            .authorization_bearer(&uploader_tok)
+            .await;
+        history.assert_status_ok();
+        let body: serde_json::Value = history.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 1);
+
+        let get_forbidden = server
+            .get(&format!("/api/v1/s3-scan/upload/{scan_id}"))
+            .authorization_bearer(&other_tok)
+            .await;
+        get_forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let get_ok = server
+            .get(&format!("/api/v1/s3-scan/upload/{scan_id}"))
+            .authorization_bearer(&uploader_tok)
+            .await;
+        get_ok.assert_status_ok();
+
+        let get_admin = server
+            .get(&format!("/api/v1/s3-scan/upload/{scan_id}"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        get_admin.assert_status_ok();
+
+        let missing = server
+            .get("/api/v1/s3-scan/upload/999999")
+            .authorization_bearer(&uploader_tok)
+            .await;
+        missing.assert_status(StatusCode::NOT_FOUND);
+
+        let del_forbidden = server
+            .delete(&format!("/api/v1/s3-scan/upload/{scan_id}"))
+            .authorization_bearer(&other_tok)
+            .await;
+        del_forbidden.assert_status(StatusCode::FORBIDDEN);
+
+        let del = server
+            .delete(&format!("/api/v1/s3-scan/upload/{scan_id}"))
+            .authorization_bearer(&uploader_tok)
+            .await;
+        del.assert_status_ok();
+
+        let _ = uploader_id;
+    }
+
+    #[tokio::test]
+    async fn hash_lookup_validates_and_finds_live_indicator() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let (_, token) = authed_user(&state, "hl@example.com", "viewer").await;
+        // `validate_hash_value` uppercases before querying (documented v1
+        // quirk: case-sensitive lookup) — the stored value must already be
+        // uppercase for an exact match, regardless of the case the caller
+        // submits it in.
+        let hash = "C".repeat(64);
+        sqlx::query(
+            "INSERT INTO threat_indicators \
+             (indicator_type, value, threat_level, confidence, source, tags, metadata, \
+              created_at, updated_at) \
+             VALUES ('hash', $1, 'high', 0.9, 's3-scan-result-1', '[]', '{}', now(), now())",
+        )
+        .bind(&hash)
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed indicator: {e}"));
+        let server = server_for(state).await;
+
+        let bad = server
+            .post("/api/v1/s3-scan/hash-lookup")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"hash_value": "not-hex"}))
+            .await;
+        bad.assert_status(StatusCode::BAD_REQUEST);
+
+        let found = server
+            .post("/api/v1/s3-scan/hash-lookup")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"hash_value": hash.to_lowercase()}))
+            .await;
+        found.assert_status_ok();
+        let body: serde_json::Value = found.json();
+        assert_eq!(body["found"], true);
+        assert_eq!(body["hash"], hash.to_uppercase());
+
+        let not_found = server
+            .post("/api/v1/s3-scan/hash-lookup")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"hash_value": "d".repeat(64)}))
+            .await;
+        not_found.assert_status_ok();
+        let body: serde_json::Value = not_found.json();
+        assert_eq!(body["found"], false);
+    }
 }

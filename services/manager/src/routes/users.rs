@@ -613,4 +613,282 @@ mod tests {
         assert_eq!(int_param(Some("abc"), 7), 7);
         assert_eq!(int_param(Some("12"), 7), 12);
     }
+
+    use crate::routes::test_support::{authed_user, db_state};
+
+    fn dev_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
+        skauswatch_testkit::license::dev_license("skauswatch")
+    }
+
+    async fn server_for(state: AppState) -> axum_test::TestServer {
+        let app = axum::Router::new()
+            .nest("/api/v1", router())
+            .with_state(state);
+        axum_test::TestServer::new(app)
+    }
+
+    #[tokio::test]
+    async fn list_users_requires_admin_or_maintainer() {
+        let state = db_state(dev_license()).await;
+        let (_, viewer) = authed_user(&state, "v@example.com", "viewer").await;
+        let (_, admin) = authed_user(&state, "a@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let res = server
+            .get("/api/v1/users")
+            .authorization_bearer(&viewer)
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+
+        let res = server
+            .get("/api/v1/users")
+            .authorization_bearer(&admin)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert!(body["total"].as_i64().unwrap_or(0) >= 2);
+        assert_eq!(body["page"], 1);
+        assert_eq!(body["per_page"], 20);
+    }
+
+    #[tokio::test]
+    async fn get_user_self_or_privileged_only() {
+        let state = db_state(dev_license()).await;
+        let (viewer_id, viewer_tok) = authed_user(&state, "self@example.com", "viewer").await;
+        let (other_id, _) = authed_user(&state, "other@example.com", "viewer").await;
+        let (_, admin_tok) = authed_user(&state, "admin2@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        // Self view — ok.
+        let res = server
+            .get(&format!("/api/v1/users/{viewer_id}"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["email"], "self@example.com");
+        assert!(body["updated_at"].is_null() || body["updated_at"].is_string());
+
+        // Viewer viewing another user — forbidden.
+        let res = server
+            .get(&format!("/api/v1/users/{other_id}"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+
+        // Admin viewing another user — ok.
+        let res = server
+            .get(&format!("/api/v1/users/{other_id}"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        res.assert_status_ok();
+
+        // Missing id — 404.
+        let res = server
+            .get("/api/v1/users/999999")
+            .authorization_bearer(&admin_tok)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_user_requires_admin_and_validates() {
+        let state = db_state(dev_license()).await;
+        let (_, viewer_tok) = authed_user(&state, "cv@example.com", "viewer").await;
+        let (_, admin_tok) = authed_user(&state, "ca@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let res = server
+            .post("/api/v1/users")
+            .authorization_bearer(&viewer_tok)
+            .json(&serde_json::json!({"email": "x@example.com", "password": "longenough1"}))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+
+        let res = server
+            .post("/api/v1/users")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"email": "not-an-email", "password": "longenough1"}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+
+        let res = server
+            .post("/api/v1/users")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"email": "nu@example.com", "password": "short"}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+
+        let res = server
+            .post("/api/v1/users")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({
+                "email": "nu@example.com", "password": "longenough1", "role": "root"
+            }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_user_succeeds_then_rejects_duplicate() {
+        let state = db_state(dev_license()).await;
+        let (_, admin_tok) = authed_user(&state, "cu-admin@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let res = server
+            .post("/api/v1/users")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({
+                "email": "Created@Example.com",
+                "password": "longenough1",
+                "full_name": "Created",
+                "role": "maintainer",
+                "is_active": true,
+            }))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["user"]["email"], "created@example.com");
+        assert_eq!(body["user"]["role"], "maintainer");
+
+        let dup = server
+            .post("/api/v1/users")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({
+                "email": "created@example.com", "password": "longenough1"
+            }))
+            .await;
+        dup.assert_status(StatusCode::CONFLICT);
+        let body: serde_json::Value = dup.json();
+        assert_eq!(body["error"], "Email already registered");
+    }
+
+    #[tokio::test]
+    async fn update_user_self_can_only_change_name_and_password() {
+        let state = db_state(dev_license()).await;
+        let (id, token) = authed_user(&state, "upd-self@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let res = server
+            .put(&format!("/api/v1/users/{id}"))
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({
+                "full_name": "New Name",
+                "role": "admin",
+                "is_active": false,
+            }))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["user"]["full_name"], "New Name");
+        // Admin-only fields silently dropped for a self-update.
+        assert_eq!(body["user"]["role"], "viewer");
+        assert_eq!(body["user"]["is_active"], true);
+    }
+
+    #[tokio::test]
+    async fn update_user_forbidden_for_other_non_admin() {
+        let state = db_state(dev_license()).await;
+        let (_, actor_tok) = authed_user(&state, "actor@example.com", "viewer").await;
+        let (target_id, _) = authed_user(&state, "target@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let res = server
+            .put(&format!("/api/v1/users/{target_id}"))
+            .authorization_bearer(&actor_tok)
+            .json(&serde_json::json!({"full_name": "hax"}))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn update_user_missing_returns_404() {
+        let state = db_state(dev_license()).await;
+        let (_, admin_tok) = authed_user(&state, "upd-admin@example.com", "admin").await;
+        let server = server_for(state).await;
+        let res = server
+            .put("/api/v1/users/999999")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"full_name": "ghost"}))
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn update_user_admin_can_change_email_role_and_hits_conflict() {
+        let state = db_state(dev_license()).await;
+        let (_, admin_tok) = authed_user(&state, "conflict-admin@example.com", "admin").await;
+        let (id_a, _) = authed_user(&state, "conflict-a@example.com", "viewer").await;
+        let (_id_b, _) = authed_user(&state, "conflict-b@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        // Changing A's email to B's existing email → 409.
+        let res = server
+            .put(&format!("/api/v1/users/{id_a}"))
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"email": "conflict-b@example.com"}))
+            .await;
+        res.assert_status(StatusCode::CONFLICT);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Email already in use");
+
+        // A legitimate admin update succeeds and reflects role/is_active.
+        let res = server
+            .put(&format!("/api/v1/users/{id_a}"))
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({"role": "admin", "is_active": false}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["user"]["role"], "admin");
+        assert_eq!(body["user"]["is_active"], false);
+    }
+
+    #[tokio::test]
+    async fn delete_user_requires_admin_rejects_self_and_cascades() {
+        let state = db_state(dev_license()).await;
+        let (admin_id, admin_tok) = authed_user(&state, "del-admin@example.com", "admin").await;
+        let (viewer_id, viewer_tok) = authed_user(&state, "del-viewer@example.com", "viewer").await;
+        sqlx::query(
+            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked) \
+             VALUES ($1, 'del-h1', now() + interval '7 days', false)",
+        )
+        .bind(viewer_id)
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("seed refresh token: {e}"));
+        let server = server_for(state).await;
+
+        // Non-admin forbidden.
+        let res = server
+            .delete(&format!("/api/v1/users/{admin_id}"))
+            .authorization_bearer(&viewer_tok)
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+
+        // Self-delete rejected.
+        let res = server
+            .delete(&format!("/api/v1/users/{admin_id}"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "Cannot delete your own account");
+
+        // Missing target.
+        let res = server
+            .delete("/api/v1/users/999999")
+            .authorization_bearer(&admin_tok)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+
+        // Successful delete.
+        let res = server
+            .delete(&format!("/api/v1/users/{viewer_id}"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["message"], "User deleted successfully");
+    }
 }

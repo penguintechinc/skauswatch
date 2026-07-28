@@ -895,6 +895,169 @@ mod tests {
         assert_eq!(lookup_confidence(Some(0.9)), 0.9_f32);
     }
 
+    #[tokio::test]
+    async fn create_get_and_update_alert_round_trip_against_real_db() {
+        let state = crate::grpc::test_util::db_state().await;
+        let svc = ManagerGrpc::new(state);
+
+        let created = match svc
+            .create_alert(authed(AlertRequest {
+                title: "gRPC alert".to_owned(),
+                description: "d".to_owned(),
+                severity: AlertSeverity::SeverityHigh as i32,
+                source: "grpc".to_owned(),
+                indicators: vec!["1.2.3.4".to_owned()],
+                api_version: "v1".to_owned(),
+                ..Default::default()
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("create_alert: {e:?}"),
+        };
+        assert_eq!(created.title, "gRPC alert");
+        assert_eq!(created.status, AlertStatus::StatusPending as i32);
+        assert!(created.created_at.is_some());
+
+        let fetched = match svc
+            .get_alert(authed(AlertQuery {
+                alert_id: created.id,
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("get_alert: {e:?}"),
+        };
+        assert_eq!(fetched.id, created.id);
+        assert_eq!(fetched.severity, AlertSeverity::SeverityHigh as i32);
+        assert_eq!(fetched.indicators, vec!["1.2.3.4".to_owned()]);
+
+        let updated = match svc
+            .update_alert_status(authed(AlertStatusUpdate {
+                alert_id: created.id,
+                new_status: AlertStatus::StatusResolved as i32,
+                resolution_notes: "handled".to_owned(),
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("update_alert_status: {e:?}"),
+        };
+        assert_eq!(updated.status, AlertStatus::StatusResolved as i32);
+        assert!(updated.updated_at.is_some());
+
+        let not_found = match svc
+            .get_alert(authed(AlertQuery {
+                alert_id: 999_999_999,
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("expected not found"),
+        };
+        assert_eq!(not_found.code(), Code::NotFound);
+
+        let update_missing = match svc
+            .update_alert_status(authed(AlertStatusUpdate {
+                alert_id: 999_999_999,
+                new_status: AlertStatus::StatusResolved as i32,
+                resolution_notes: String::new(),
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("expected not found"),
+        };
+        assert_eq!(update_missing.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn create_ioc_and_lookup_indicator_round_trip_against_real_db() {
+        let state = crate::grpc::test_util::db_state().await;
+        let svc = ManagerGrpc::new(state);
+
+        let created = match svc
+            .create_ioc(authed(IocRequest {
+                indicator_type: IndicatorType::IndicatorDomain as i32,
+                value: "grpc-evil.example.com".to_owned(),
+                threat_level: ThreatLevel::ThreatCritical as i32,
+                confidence: 0.9,
+                source: "grpc-test".to_owned(),
+                tags: vec!["c2".to_owned()],
+                metadata: std::collections::HashMap::from([("k".to_owned(), "v".to_owned())]),
+                api_version: "v1".to_owned(),
+                ..Default::default()
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("create_ioc: {e:?}"),
+        };
+        assert_eq!(created.value, "grpc-evil.example.com");
+        assert_eq!(created.threat_level, ThreatLevel::ThreatCritical as i32);
+
+        let found = match svc
+            .lookup_indicator(authed(IndicatorLookup {
+                r#type: IndicatorType::IndicatorDomain as i32,
+                value: "grpc-evil.example.com".to_owned(),
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("lookup_indicator: {e:?}"),
+        };
+        assert!(found.found);
+        let ioc = found.ioc.unwrap_or_else(|| panic!("expected ioc in match"));
+        assert_eq!(ioc.value, "grpc-evil.example.com");
+        assert_eq!(ioc.threat_level, ThreatLevel::ThreatCritical as i32);
+
+        let not_found = match svc
+            .lookup_indicator(authed(IndicatorLookup {
+                r#type: IndicatorType::IndicatorIp as i32,
+                value: "203.0.113.250".to_owned(),
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("lookup_indicator: {e:?}"),
+        };
+        assert!(!not_found.found);
+        assert!(not_found.ioc.is_none());
+    }
+
+    #[tokio::test]
+    async fn log_audit_event_inserts_a_row_against_real_db() {
+        let state = crate::grpc::test_util::db_state().await;
+        let svc = ManagerGrpc::new(state);
+        let resp = match svc
+            .log_audit_event(authed(AuditEvent {
+                event_type: "endpoint".to_owned(),
+                action: "agent_registered".to_owned(),
+                resource_type: "agent".to_owned(),
+                resource_id: "agent-1".to_owned(),
+                user_id: 0,
+                ip_address: "10.0.0.5".to_owned(),
+                success: true,
+                details: std::collections::HashMap::new(),
+                severity: String::new(),
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("log_audit_event: {e:?}"),
+        };
+        assert!(resp.success);
+        assert!(resp.event_id.starts_with("audit-"));
+        assert!(resp.timestamp.is_some());
+    }
+
     #[test]
     fn json_string_vec_skips_nulls_and_non_strings() {
         assert_eq!(
