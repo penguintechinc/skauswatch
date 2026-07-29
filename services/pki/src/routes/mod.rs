@@ -13,6 +13,7 @@
 //! are not covered by this layer.
 
 pub mod common;
+pub mod openapi;
 pub mod ssh;
 pub mod x509;
 
@@ -110,6 +111,8 @@ pub fn router(state: AppState) -> Router {
         .route("/audit", get(common::audit))
         .route("/expiring", get(common::expiring))
         .route("/cleanup", post(common::cleanup))
+        // ---- OpenAPI (/api/v1/openapi.json) ----
+        .merge(openapi::router())
         .layer(axum::middleware::from_extractor_with_state::<
             skauswatch_auth::AuthenticatedCaller,
             AppState,
@@ -192,6 +195,7 @@ mod tests {
             ("GET", "/api/v1/audit"),
             ("GET", "/api/v1/expiring"),
             ("POST", "/api/v1/cleanup"),
+            ("GET", "/api/v1/openapi.json"),
         ] {
             let res = match method {
                 "GET" => server.get(path).await,

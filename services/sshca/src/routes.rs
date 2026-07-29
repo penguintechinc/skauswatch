@@ -19,6 +19,8 @@
 //! introduces no breakage; a future caller must present a machine JWT minted
 //! with `skauswatch_auth::issue_service_token`.
 
+pub(crate) mod openapi;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -28,13 +30,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use penguin_licensing::LicenseClient;
 
 use crate::ca::{SignError, SignParams, SshCa};
-use crate::error::ApiError;
 use crate::error::ApiJson;
+use crate::error::{ApiError, ErrorResponse, ValidationErrorResponse};
 use crate::model::{
-    CertificateType, DEFAULT_VALIDITY_SECONDS, IssueCertificateRequest, IssueCertificateResponse,
-    RevokeCertificateRequest,
+    CaPublicKeyResponse, CertificateListResponse, CertificateRecord, CertificateType,
+    DEFAULT_VALIDITY_SECONDS, IssueCertificateRequest, IssueCertificateResponse, KrlResponse,
+    RevokeCertificateRequest, RevokeCertificateResponse,
 };
 use crate::store::{CertStore, StoredCert};
 
@@ -48,6 +52,10 @@ pub struct AppState {
     /// Shared HS256 signing secret (`JWT_SECRET_KEY`) — every route below
     /// requires a valid bearer token verified against this (finding #2).
     pub jwt_secret: Arc<str>,
+    /// License entitlement + PostHog flag client (fail-safe) — gates the
+    /// live `/api/v1/ssh/openapi.json` route (see `openapi::OPENAPI_FLAG`).
+    /// Not otherwise consulted: certificate issuance itself is unlicensed.
+    pub license: Arc<LicenseClient>,
 }
 
 impl skauswatch_auth::JwtSecretSource for AppState {
@@ -72,6 +80,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/ssh/krl", get(get_krl))
         .route("/api/v1/ssh/ca/public-key", get(get_ca_public_key))
+        // Merged *before* the auth layer below so the router-wide
+        // AuthenticatedCaller layer covers this route the same as every
+        // other one (see openapi.rs module docs and
+        // docs/v2-port/openapi-pattern.md's "router-wide auth" row).
+        .merge(openapi::router())
         .layer(axum::middleware::from_extractor_with_state::<
             skauswatch_auth::AuthenticatedCaller,
             AppState,
@@ -98,7 +111,19 @@ fn to_naive(secs: i64) -> chrono::NaiveDateTime {
 }
 
 /// `POST /api/v1/ssh/certificates` — issue and store a certificate.
-async fn issue_certificate(
+#[utoipa::path(
+    post,
+    path = "/api/v1/ssh/certificates",
+    tag = "sshca",
+    security(("bearer_jwt" = [])),
+    request_body = IssueCertificateRequest,
+    responses(
+        (status = 201, description = "Certificate issued", body = IssueCertificateResponse),
+        (status = 400, description = "Empty public key, non-positive validity_duration, or an unparseable subject key", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn issue_certificate(
     State(state): State<AppState>,
     ApiJson(req): ApiJson<IssueCertificateRequest>,
 ) -> Result<Response, ApiError> {
@@ -228,17 +253,32 @@ fn stored_to_json(c: &StoredCert) -> serde_json::Value {
 }
 
 /// Query parameters for `GET /api/v1/ssh/certificates`.
-#[derive(serde::Deserialize)]
-struct ListQuery {
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+pub(crate) struct ListQuery {
+    /// Filter by certificate type (`user`/`host`) — utoipa derives the
+    /// `type` query param name from the `#[serde(rename)]` below.
     #[serde(rename = "type")]
     certificate_type: Option<CertificateType>,
+    /// Filter by status (`active`/`revoked`/`expired`).
     status: Option<String>,
+    /// Maximum results to return (clamped to 1..=1000, default 100).
     #[serde(default)]
     limit: Option<usize>,
 }
 
 /// `GET /api/v1/ssh/certificates` — list certificates with filters.
-async fn list_certificates(
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssh/certificates",
+    tag = "sshca",
+    security(("bearer_jwt" = [])),
+    params(ListQuery),
+    responses(
+        (status = 200, description = "Matching certificates", body = CertificateListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_certificates(
     State(state): State<AppState>,
     Query(q): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
@@ -252,7 +292,19 @@ async fn list_certificates(
 }
 
 /// `GET /api/v1/ssh/certificates/{id}` — fetch one certificate.
-async fn get_certificate(
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssh/certificates/{id}",
+    tag = "sshca",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Certificate id")),
+    responses(
+        (status = 200, description = "Certificate record", body = CertificateRecord),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_certificate(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
@@ -263,7 +315,21 @@ async fn get_certificate(
 }
 
 /// `POST /api/v1/ssh/certificates/{id}/revoke` — revoke a certificate.
-async fn revoke_certificate(
+#[utoipa::path(
+    post,
+    path = "/api/v1/ssh/certificates/{id}/revoke",
+    tag = "sshca",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Certificate id")),
+    request_body = RevokeCertificateRequest,
+    responses(
+        (status = 200, description = "Certificate revoked", body = RevokeCertificateResponse),
+        (status = 400, description = "Malformed request body", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn revoke_certificate(
     State(state): State<AppState>,
     Path(id): Path<String>,
     ApiJson(req): ApiJson<RevokeCertificateRequest>,
@@ -281,7 +347,17 @@ async fn revoke_certificate(
 }
 
 /// `GET /api/v1/ssh/krl` — current Key Revocation List (v1 `_generate_krl_sync`).
-async fn get_krl(State(state): State<AppState>) -> Result<Response, ApiError> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssh/krl",
+    tag = "sshca",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Current Key Revocation List", body = KrlResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_krl(State(state): State<AppState>) -> Result<Response, ApiError> {
     let revoked: Vec<serde_json::Value> = state
         .store
         .krl_entries()
@@ -306,7 +382,20 @@ async fn get_krl(State(state): State<AppState>) -> Result<Response, ApiError> {
 
 /// `GET /api/v1/ssh/ca/public-key` — CA public key (JSON, or text/plain when
 /// requested via `Accept`).
-async fn get_ca_public_key(State(state): State<AppState>, headers: HeaderMap) -> Response {
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssh/ca/public-key",
+    tag = "sshca",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "CA public key and fingerprint (JSON by default; plain OpenSSH key line when the caller sends `Accept: text/plain`)", body = CaPublicKeyResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_ca_public_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     let line = state.ca.public_key_openssh();
     let wants_text = headers
         .get(header::ACCEPT)
@@ -332,6 +421,21 @@ mod tests {
 
     const TEST_JWT_SECRET: &str = "test-secret";
 
+    /// Dev-mode license client (flags default enabled) — none of the
+    /// business routes in this file consult it; only `openapi.rs`'s own
+    /// tests exercise the flag-gated path (see that module's `dev_license`/
+    /// `gated_license` helpers).
+    fn dev_license() -> Arc<penguin_licensing::LicenseClient> {
+        let cfg = match penguin_licensing::LicenseConfig::new("skauswatch") {
+            Ok(c) => c,
+            Err(e) => panic!("license config: {e}"),
+        };
+        match penguin_licensing::LicenseClient::new(cfg) {
+            Ok(c) => c,
+            Err(e) => panic!("license client: {e}"),
+        }
+    }
+
     fn test_state() -> AppState {
         // Missing path → ephemeral CA key (fine for tests).
         let ca = SshCa::load_or_generate(Path::new("/nonexistent-skauswatch-sshca-key"))
@@ -340,6 +444,7 @@ mod tests {
             ca: Arc::new(ca),
             store: Arc::new(CertStore::new()),
             jwt_secret: TEST_JWT_SECRET.into(),
+            license: dev_license(),
         }
     }
 

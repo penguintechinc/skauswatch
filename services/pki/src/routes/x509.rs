@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::models::{RevokeRequest, X509CertificateRequest};
 use crate::state::AppState;
 
@@ -32,6 +32,20 @@ fn paginated(items: Vec<Value>, total: i64, page: i64, page_size: i64) -> Json<V
 }
 
 /// POST /api/v1/certificates — issue an X.509 certificate.
+#[utoipa::path(
+    post,
+    path = "/api/v1/certificates",
+    tag = "x509",
+    operation_id = "x509_issue",
+    security(("bearer_jwt" = [])),
+    request_body = X509CertificateRequest,
+    responses(
+        (status = 201, description = "Issued X.509 certificate", body = serde_json::Value),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn issue(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -48,6 +62,23 @@ pub async fn issue(
 }
 
 /// GET /api/v1/certificates/{cert_id}
+#[utoipa::path(
+    get,
+    path = "/api/v1/certificates/{cert_id}",
+    tag = "x509",
+    operation_id = "x509_get_cert",
+    security(("bearer_jwt" = [])),
+    params(
+        ("cert_id" = String, Path, description = "Certificate id (UUID)"),
+        ("include_private_key" = Option<bool>, Query, description = "Include private_key_pem in the response (default false)"),
+    ),
+    responses(
+        (status = 200, description = "Certificate", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn get_cert(
     State(st): State<AppState>,
     Path(cert_id): Path<String>,
@@ -72,6 +103,20 @@ pub async fn get_cert(
 }
 
 /// GET /api/v1/certificates/serial/{serial}
+#[utoipa::path(
+    get,
+    path = "/api/v1/certificates/serial/{serial}",
+    tag = "x509",
+    operation_id = "x509_get_by_serial",
+    security(("bearer_jwt" = [])),
+    params(("serial" = String, Path, description = "Certificate serial number")),
+    responses(
+        (status = 200, description = "Certificate (private key always stripped)", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn get_by_serial(
     State(st): State<AppState>,
     Path(serial): Path<String>,
@@ -88,6 +133,21 @@ pub async fn get_by_serial(
 }
 
 /// POST /api/v1/certificates/{cert_id}/revoke
+#[utoipa::path(
+    post,
+    path = "/api/v1/certificates/{cert_id}/revoke",
+    tag = "x509",
+    operation_id = "x509_revoke_cert",
+    security(("bearer_jwt" = [])),
+    params(("cert_id" = String, Path, description = "Certificate id (UUID)")),
+    request_body = RevokeRequest,
+    responses(
+        (status = 200, description = "Certificate revoked", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn revoke_cert(
     State(st): State<AppState>,
     Path(cert_id): Path<String>,
@@ -113,6 +173,21 @@ pub async fn revoke_cert(
 }
 
 /// POST /api/v1/certificates/serial/{serial}/revoke
+#[utoipa::path(
+    post,
+    path = "/api/v1/certificates/serial/{serial}/revoke",
+    tag = "x509",
+    operation_id = "x509_revoke_by_serial",
+    security(("bearer_jwt" = [])),
+    params(("serial" = String, Path, description = "Certificate serial number")),
+    request_body = RevokeRequest,
+    responses(
+        (status = 200, description = "Certificate revoked", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn revoke_by_serial(
     State(st): State<AppState>,
     Path(serial): Path<String>,
@@ -138,6 +213,25 @@ pub async fn revoke_by_serial(
 }
 
 /// GET /api/v1/certificates — list with filters.
+#[utoipa::path(
+    get,
+    path = "/api/v1/certificates",
+    tag = "x509",
+    operation_id = "x509_list",
+    security(("bearer_jwt" = [])),
+    params(
+        ("status" = Option<String>, Query, description = "Filter by certificate status"),
+        ("subject" = Option<String>, Query, description = "Filter by subject substring"),
+        ("expires_before" = Option<String>, Query, description = "ISO-ish `%Y-%m-%dT%H:%M:%S` cutoff"),
+        ("page" = Option<i64>, Query, description = "Page number (default 1)"),
+        ("page_size" = Option<i64>, Query, description = "Page size (default 50)"),
+    ),
+    responses(
+        (status = 200, description = "Paginated certificate list", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn list(
     State(st): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
@@ -160,7 +254,7 @@ pub async fn list(
 }
 
 /// Body for POST /api/v1/certificates/search (v1 `CertificateSearchRequest`).
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, utoipa::ToSchema)]
 pub struct SearchBody {
     #[serde(default)]
     subject: Option<String>,
@@ -181,6 +275,20 @@ fn fifty() -> i64 {
 }
 
 /// POST /api/v1/certificates/search
+#[utoipa::path(
+    post,
+    path = "/api/v1/certificates/search",
+    tag = "x509",
+    operation_id = "x509_search",
+    security(("bearer_jwt" = [])),
+    request_body = SearchBody,
+    responses(
+        (status = 200, description = "Paginated certificate list", body = serde_json::Value),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn search(
     State(st): State<AppState>,
     body: ApiJson<SearchBody>,
@@ -203,7 +311,22 @@ pub async fn search(
     Ok(paginated(items, total, b.page, b.page_size))
 }
 
-/// GET /api/v1/certificates/crl
+/// GET /api/v1/certificates/crl — JSON by default; `Accept:
+/// application/pkix-crl` returns the raw PEM instead (not separately
+/// modeled here — see `docs/v2-port/openapi-pattern.md` on documenting one
+/// representative shape per status code).
+#[utoipa::path(
+    get,
+    path = "/api/v1/certificates/crl",
+    tag = "x509",
+    operation_id = "x509_get_crl",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Certificate Revocation List (JSON; PEM if Accept: application/pkix-crl)", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn get_crl(State(st): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
     let crl = st.manager.generate_x509_crl().await?;
     if headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()) == Some("application/pkix-crl") {
@@ -226,6 +349,21 @@ pub async fn get_crl(State(st): State<AppState>, headers: HeaderMap) -> Result<R
 }
 
 /// POST /api/v1/certificates/ocsp — JSON OCSP status (binary → 501, per v1).
+#[utoipa::path(
+    post,
+    path = "/api/v1/certificates/ocsp",
+    tag = "x509",
+    operation_id = "x509_ocsp",
+    security(("bearer_jwt" = [])),
+    request_body(content = serde_json::Value, description = "`{\"serial_number\": \"<serial>\"}`"),
+    responses(
+        (status = 200, description = "OCSP status (good/unknown/revoked)", body = serde_json::Value),
+        (status = 400, description = "Missing serial_number", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 501, description = "Binary application/ocsp-request not implemented", body = ErrorResponse),
+    ),
+)]
 pub async fn ocsp(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -280,6 +418,17 @@ pub async fn ocsp(
 }
 
 /// GET /api/v1/certificates/ca — CA info + PEM.
+#[utoipa::path(
+    get,
+    path = "/api/v1/certificates/ca",
+    tag = "x509",
+    operation_id = "x509_ca_info",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "X.509 CA info", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
 pub async fn ca_info(State(st): State<AppState>) -> Json<Value> {
     let info = st.manager.x509.info();
     Json(serde_json::json!({
@@ -295,6 +444,17 @@ pub async fn ca_info(State(st): State<AppState>) -> Json<Value> {
 }
 
 /// GET /api/v1/certificates/ca/certificate — download CA cert PEM.
+#[utoipa::path(
+    get,
+    path = "/api/v1/certificates/ca/certificate",
+    tag = "x509",
+    operation_id = "x509_download_ca_cert",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "CA certificate (application/x-pem-file)", body = String),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
 pub async fn download_ca_cert(State(st): State<AppState>) -> Response {
     (
         StatusCode::OK,
@@ -308,6 +468,20 @@ pub async fn download_ca_cert(State(st): State<AppState>) -> Response {
 }
 
 /// GET /api/v1/certificates/{cert_id}/status
+#[utoipa::path(
+    get,
+    path = "/api/v1/certificates/{cert_id}/status",
+    tag = "x509",
+    operation_id = "x509_cert_status",
+    security(("bearer_jwt" = [])),
+    params(("cert_id" = String, Path, description = "Certificate id (UUID)")),
+    responses(
+        (status = 200, description = "Certificate status summary", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn cert_status(
     State(st): State<AppState>,
     Path(cert_id): Path<String>,

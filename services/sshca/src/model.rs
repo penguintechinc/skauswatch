@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_VALIDITY_SECONDS: u64 = 3600;
 
 /// SSH certificate type — user (login) or host certificate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum CertificateType {
     /// User certificate (`ssh-keygen` cert type 1).
@@ -35,7 +35,7 @@ impl CertificateType {
 }
 
 /// Body for `POST /api/v1/ssh/certificates`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct IssueCertificateRequest {
     /// `user` or `host`.
     pub certificate_type: CertificateType,
@@ -75,7 +75,7 @@ pub struct IssueCertificateRequest {
 }
 
 /// Response for a successful certificate issuance (201).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct IssueCertificateResponse {
     /// Certificate id (equals the request id).
     pub certificate_id: String,
@@ -102,9 +102,101 @@ pub struct IssueCertificateResponse {
 }
 
 /// Body for `POST /api/v1/ssh/certificates/{id}/revoke`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct RevokeCertificateRequest {
     /// Human-readable revocation reason (defaults to `unspecified`).
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+/// Documentation-only mirror of `routes::stored_to_json`'s wire shape,
+/// returned by `GET /api/v1/ssh/certificates/{id}` and nested inside
+/// [`CertificateListResponse`]. See `docs/v2-port/openapi-pattern.md`.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct CertificateRecord {
+    /// Certificate id.
+    certificate_id: String,
+    /// `user` or `host`.
+    certificate_type: CertificateType,
+    /// Certificate serial number.
+    serial_number: u64,
+    /// Certificate key id.
+    key_id: String,
+    /// Effective principals.
+    principals: Vec<String>,
+    /// `active` / `revoked` / `expired`.
+    status: String,
+    /// Signed OpenSSH certificate line.
+    signed_certificate: String,
+    /// Subject key OpenSSH SHA256 fingerprint.
+    public_key_fingerprint: String,
+    /// CA key OpenSSH SHA256 fingerprint.
+    ca_fingerprint: String,
+    /// Valid-after timestamp (Python-isoformat, second precision).
+    valid_after: String,
+    /// Valid-before timestamp (Python-isoformat, second precision).
+    valid_before: String,
+    /// Revocation timestamp, if revoked.
+    revoked_at: Option<String>,
+    /// Revocation reason, if revoked.
+    revocation_reason: Option<String>,
+    /// Echoed request metadata.
+    metadata: serde_json::Value,
+}
+
+/// Documentation-only mirror of `list_certificates`'s `serde_json::json!`
+/// body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct CertificateListResponse {
+    /// Matching certificates (capped at the request's `limit`).
+    certificates: Vec<CertificateRecord>,
+    /// Number of certificates returned.
+    total: usize,
+}
+
+/// Documentation-only mirror of `revoke_certificate`'s `serde_json::json!`
+/// body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct RevokeCertificateResponse {
+    /// Always `"Certificate revoked"`.
+    message: String,
+    /// The revoked certificate's id.
+    certificate_id: String,
+}
+
+/// Documentation-only mirror of one `get_krl` revocation entry.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct KrlEntryResponse {
+    /// Revoked serial number.
+    serial_number: u64,
+    /// Revocation timestamp (Python-isoformat, second precision).
+    revocation_time: String,
+    /// Revocation reason.
+    reason: String,
+    /// Revoked certificate's subject fingerprint, if recorded.
+    fingerprint: Option<String>,
+}
+
+/// Documentation-only mirror of `get_krl`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct KrlResponse {
+    /// KRL format version (always `1`).
+    version: u32,
+    /// KRL generation timestamp (Python-isoformat, second precision).
+    generated_at: String,
+    /// CA key OpenSSH SHA256 fingerprint.
+    ca_fingerprint: String,
+    /// Revoked certificate entries.
+    revoked_certificates: Vec<KrlEntryResponse>,
+}
+
+/// Documentation-only mirror of `get_ca_public_key`'s JSON response body
+/// (the `Accept: text/plain` variant returns the bare OpenSSH key line
+/// instead — see the handler doc comment).
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct CaPublicKeyResponse {
+    /// CA public key, OpenSSH line format.
+    ca_public_key: String,
+    /// CA key OpenSSH SHA256 fingerprint.
+    ca_fingerprint: String,
 }

@@ -5,6 +5,7 @@
 //! (darwin/services/flask-backend/app/api/v1/credentials.py).
 
 mod credentials;
+pub(crate) mod openapi;
 mod plans;
 mod repos;
 mod reviews;
@@ -34,7 +35,8 @@ pub fn router(state: AppState) -> Router {
                 .merge(repos::router())
                 .merge(reviews::router())
                 .merge(plans::router())
-                .merge(credentials::router()),
+                .merge(credentials::router())
+                .merge(openapi::router()),
         )
         .with_state(state)
 }

@@ -7,13 +7,13 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{get, patch};
 use axum::{Json, Router};
 use chrono::{NaiveDateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorResponse, InsufficientScopeResponse};
 use crate::state::AppState;
 
 /// Router for `/api/v1/jit`.
@@ -123,6 +123,28 @@ impl RequestRow {
     }
 }
 
+/// Documentation-only mirror of `RequestRow::to_json`'s wire shape.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct JitRequestResponse {
+    id: String,
+    secret_id: String,
+    requestor_id: String,
+    reason: String,
+    requested_duration_seconds: i32,
+    approved_duration_seconds: Option<i32>,
+    status: String,
+    approved_by: Option<String>,
+    approved_at: Option<String>,
+    access_expires_at: Option<String>,
+    created_at: String,
+}
+
+/// Documentation-only mirror of `list_jit_requests`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct JitRequestListResponse {
+    requests: Vec<JitRequestResponse>,
+}
+
 async fn is_secret_owner(
     state: &AppState,
     secret_id: &str,
@@ -139,7 +161,21 @@ async fn is_secret_owner(
     Ok(count > 0)
 }
 
-async fn list_jit_requests(
+#[utoipa::path(
+    get,
+    path = "/api/v1/jit/requests",
+    tag = "jit",
+    security(("bearer_jwt" = [])),
+    params(
+        ("status" = Option<Vec<String>>, Query, description = "Filter by request status; repeatable (?status=pending&status=approved). Manually declared (not an IntoParams struct) because the handler extracts raw query pairs — see the comment on the `raw_query` parameter below."),
+    ),
+    responses(
+        (status = 200, description = "Requestor's own requests, plus (for jit:approve callers) requests against secrets they own", body = JitRequestListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Missing both jit:request and jit:approve scopes", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_jit_requests(
     State(state): State<AppState>,
     user: CurrentUser,
     // `status` is a repeated-key filter (`?status=a&status=b`), matching v1's
@@ -198,14 +234,28 @@ async fn list_jit_requests(
     })))
 }
 
-#[derive(Deserialize)]
-struct CreateJitRequestBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreateJitRequestBody {
     secret_id: Option<String>,
     reason: Option<String>,
     requested_duration_seconds: Option<i32>,
 }
 
-async fn create_jit_request(
+#[utoipa::path(
+    post,
+    path = "/api/v1/jit/requests",
+    tag = "jit",
+    security(("bearer_jwt" = [])),
+    request_body = CreateJitRequestBody,
+    responses(
+        (status = 201, description = "JIT request created (status: pending)", body = JitRequestResponse),
+        (status = 400, description = "Missing secret_id/reason or duration exceeds the configured maximum", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires jit:request)", body = InsufficientScopeResponse),
+        (status = 404, description = "Secret not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_jit_request(
     State(state): State<AppState>,
     user: CurrentUser,
     body: Option<Json<CreateJitRequestBody>>,
@@ -272,12 +322,40 @@ async fn create_jit_request(
     Ok((axum::http::StatusCode::CREATED, Json(row.to_json())))
 }
 
-#[derive(Deserialize, Default)]
-struct ApproveBody {
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+pub(crate) struct ApproveBody {
     approved_duration_seconds: Option<i32>,
 }
 
-async fn approve_jit_request(
+/// Documentation-only mirror of `approve_jit_request`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct JitApproveResponse {
+    request_id: String,
+    grant_id: String,
+    /// The bearer-style JIT access token (`jit:{grant_id}:{grantee_id}:
+    /// {expires_epoch}`) granted to the requestor — sensitive, never
+    /// populated with example data in the generated schema.
+    access_token: String,
+    expires_at: String,
+    secret_id: String,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/jit/requests/{id}/approve",
+    tag = "jit",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "JIT request id")),
+    request_body = ApproveBody,
+    responses(
+        (status = 200, description = "Request approved; a JIT access token is minted", body = JitApproveResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires jit:approve, richer {required,missing} body) or not an owner of the target secret (bare body, shown here — simplified rather than modeled as oneOf)", body = ErrorResponse),
+        (status = 404, description = "Request not found", body = ErrorResponse),
+        (status = 409, description = "Request is no longer pending", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn approve_jit_request(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(request_id): Path<String>,
@@ -357,7 +435,28 @@ async fn approve_jit_request(
     })))
 }
 
-async fn reject_jit_request(
+/// Documentation-only mirror of `reject_jit_request`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct JitRejectResponse {
+    request_id: String,
+    status: String,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/jit/requests/{id}/reject",
+    tag = "jit",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "JIT request id")),
+    responses(
+        (status = 200, description = "Request rejected", body = JitRejectResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires jit:approve) or not an owner of the target secret", body = ErrorResponse),
+        (status = 404, description = "Request not found", body = ErrorResponse),
+        (status = 409, description = "Request is no longer pending", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn reject_jit_request(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(request_id): Path<String>,

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use skauswatch_streams::STREAM_CODESCAN_TASKS;
 
 use crate::auth::{CurrentUser, MaintainerOnly};
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::routes::license_denied;
 use crate::state::AppState;
 
@@ -49,8 +49,8 @@ fn pagination(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
     )
 }
 
-#[derive(sqlx::FromRow, Serialize)]
-struct ReviewRow {
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct ReviewRow {
     id: i64,
     external_id: Option<String>,
     tenant_id: Option<i64>,
@@ -86,17 +86,45 @@ const REVIEW_COLUMNS: &str = "id, external_id, tenant_id, team_id, triggered_by,
      ai_model, status, error_message, files_reviewed, comments_count, summary, started_at, \
      completed_at, created_at, updated_at";
 
-#[derive(Deserialize)]
-struct ListQuery {
+#[derive(Deserialize, utoipa::IntoParams)]
+pub(crate) struct ListQuery {
     repo_config_id: Option<i64>,
     status: Option<String>,
     page: Option<i64>,
     per_page: Option<i64>,
 }
 
+/// Pagination metadata shared by the `reviews` and `plans` list responses.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct PaginationMeta {
+    page: i64,
+    per_page: i64,
+    total: i64,
+    pages: i64,
+}
+
+/// Documentation-only mirror of `list_reviews`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct ReviewListResponse {
+    data: Vec<ReviewRow>,
+    pagination: PaginationMeta,
+}
+
 /// GET /codescan/reviews — paginated, optionally filtered by `repo_config_id`
 /// and `status`.
-async fn list_reviews(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/reviews",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(ListQuery),
+    responses(
+        (status = 200, description = "Paginated review list", body = ReviewListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_reviews(
     State(state): State<AppState>,
     _user: CurrentUser,
     Query(q): Query<ListQuery>,
@@ -154,8 +182,8 @@ async fn list_reviews(
         .into_response())
 }
 
-#[derive(Deserialize)]
-struct CreateReviewRequest {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreateReviewRequest {
     repo_config_id: i64,
     #[serde(default)]
     external_id: Option<String>,
@@ -236,7 +264,22 @@ fn build_review_task_fields(
 
 /// POST /codescan/reviews — maintainer only (see module docs); enqueues onto
 /// `codescan:tasks` after the row is committed.
-async fn create_review(
+#[utoipa::path(
+    post,
+    path = "/api/v1/codescan/reviews",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    request_body = CreateReviewRequest,
+    responses(
+        (status = 201, description = "Review created and enqueued", body = ReviewRow),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed, or insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Repository configuration not found", body = ErrorResponse),
+        (status = 409, description = "Review with this external_id already exists", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_review(
     State(state): State<AppState>,
     MaintainerOnly(user): MaintainerOnly,
     ApiJson(body): ApiJson<CreateReviewRequest>,
@@ -316,8 +359,8 @@ async fn create_review(
     Ok((StatusCode::CREATED, Json(created)).into_response())
 }
 
-#[derive(sqlx::FromRow, Serialize)]
-struct ReviewComment {
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct ReviewComment {
     id: i64,
     file_path: Option<String>,
     line_number: Option<i32>,
@@ -328,8 +371,33 @@ struct ReviewComment {
     created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Documentation-only mirror of `get_review`'s merged JSON body — the
+/// handler builds this shape by hand (`ReviewRow` fields flattened, plus a
+/// `comments` array) via `serde_json::Value` manipulation rather than
+/// deriving `Serialize` on a single struct, so this type exists solely to
+/// describe the wire shape to `utoipa`.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct ReviewDetailResponse {
+    #[serde(flatten)]
+    review: ReviewRow,
+    comments: Vec<ReviewComment>,
+}
+
 /// GET /codescan/reviews/{review_id} — review detail enriched with comments.
-async fn get_review(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/reviews/{review_id}",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(("review_id" = i64, Path, description = "Review id")),
+    responses(
+        (status = 200, description = "Review detail with comments", body = ReviewDetailResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 404, description = "Review not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_review(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(review_id): Path<i64>,

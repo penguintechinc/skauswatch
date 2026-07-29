@@ -8,6 +8,7 @@ mod auth;
 mod codescan;
 mod endpoint;
 mod license;
+pub(crate) mod openapi;
 mod research;
 mod s3_scan;
 mod siem;
@@ -36,7 +37,8 @@ pub fn router(state: AppState) -> Router {
                 .merge(siem::router())
                 .merge(asm::router())
                 .merge(codescan::router())
-                .merge(research::router()),
+                .merge(research::router())
+                .merge(openapi::router()),
         )
         .with_state(state)
 }

@@ -18,7 +18,7 @@ use serde::Deserialize;
 use sqlx::{Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
 
 /// v1 `ApprovalStatus` enum values (statistics buckets).
@@ -219,9 +219,51 @@ fn list_item_json(r: &ApprovalListRow) -> serde_json::Value {
     })
 }
 
+/// Documentation-only mirror of `list_item_json`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ApprovalListItem {
+    id: i32,
+    request_type: String,
+    resource_id: Option<String>,
+    resource_type: Option<String>,
+    requester_id: i32,
+    status: Option<String>,
+    required_approvals: Option<i32>,
+    current_approvals: Option<i32>,
+    expires_at: Option<String>,
+    created_at: Option<String>,
+}
+
+/// Documentation-only mirror of `list_approvals`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ApprovalListResponse {
+    items: Vec<ApprovalListItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
 /// GET /approvals — any authenticated user; paginated with status[]/type[]
 /// (repeated) and requester_id filters, newest first.
-async fn list_approvals(
+#[utoipa::path(
+    get,
+    path = "/api/v1/approvals",
+    tag = "approvals",
+    security(("bearer_jwt" = [])),
+    params(
+        ("page" = Option<i64>, Query, description = "1-based page number (default 1)"),
+        ("per_page" = Option<i64>, Query, description = "Page size, capped at 100 (default 20)"),
+        ("status" = Option<Vec<String>>, Query, description = "Repeatable status filter"),
+        ("type" = Option<Vec<String>>, Query, description = "Repeatable request_type filter"),
+        ("requester_id" = Option<i32>, Query, description = "Exact requester filter (0 = no filter)"),
+    ),
+    responses(
+        (status = 200, description = "Paginated approval list", body = ApprovalListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_approvals(
     State(state): State<AppState>,
     _user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
@@ -277,10 +319,45 @@ struct PendingRow {
     created_at: Option<NaiveDateTime>,
 }
 
+/// Documentation-only mirror of one `list_pending_approvals` item.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ApprovalPendingItem {
+    id: i32,
+    request_type: String,
+    resource_id: Option<String>,
+    resource_type: Option<String>,
+    requester_id: i32,
+    status: Option<String>,
+    required_approvals: Option<i32>,
+    current_approvals: Option<i32>,
+    metadata: serde_json::Value,
+    expires_at: Option<String>,
+    created_at: Option<String>,
+}
+
+/// Documentation-only mirror of `list_pending_approvals`'s
+/// `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ApprovalPendingResponse {
+    count: usize,
+    items: Vec<ApprovalPendingItem>,
+}
+
 /// GET /approvals/pending — admin/maintainer; non-expired pending requests
 /// excluding those the current user has already decided (derived from
 /// `approval_history` user_id entries). Returns `{items, count}`.
-async fn list_pending_approvals(
+#[utoipa::path(
+    get,
+    path = "/api/v1/approvals/pending",
+    tag = "approvals",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Non-expired pending approvals awaiting the caller's decision", body = ApprovalPendingResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_pending_approvals(
     State(state): State<AppState>,
     user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -346,8 +423,40 @@ struct ApprovalFullRow {
     updated_at: Option<NaiveDateTime>,
 }
 
+/// Documentation-only mirror of `get_approval`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ApprovalDetail {
+    id: i32,
+    request_type: String,
+    resource_id: Option<String>,
+    resource_type: Option<String>,
+    requester_id: i32,
+    status: Option<String>,
+    required_approvals: Option<i32>,
+    current_approvals: Option<i32>,
+    approvers: serde_json::Value,
+    approval_history: serde_json::Value,
+    metadata: serde_json::Value,
+    expires_at: Option<String>,
+    completed_at: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
 /// GET /approvals/{approval_id} — any authenticated user; full object.
-async fn get_approval(
+#[utoipa::path(
+    get,
+    path = "/api/v1/approvals/{approval_id}",
+    tag = "approvals",
+    security(("bearer_jwt" = [])),
+    params(("approval_id" = i32, Path, description = "Approval request id")),
+    responses(
+        (status = 200, description = "Approval request detail", body = ApprovalDetail),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Approval request not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_approval(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(approval_id): Path<i32>,
@@ -385,8 +494,8 @@ async fn get_approval(
 
 /// ApprovalCreateRequest — fields optional here so missing ones map to the
 /// validation envelope instead of an axum extractor rejection.
-#[derive(Deserialize)]
-struct CreateBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreateBody {
     request_type: Option<String>,
     resource_id: Option<String>,
     resource_type: Option<String>,
@@ -447,9 +556,39 @@ struct CreatedRow {
     created_at: Option<NaiveDateTime>,
 }
 
+/// Summary embedded in [`ApprovalCreateResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ApprovalCreateSummary {
+    id: i32,
+    request_type: String,
+    resource_id: String,
+    status: String,
+    expires_at: Option<String>,
+    created_at: Option<String>,
+}
+
+/// Documentation-only mirror of `create_approval`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ApprovalCreateResponse {
+    message: String,
+    approval: ApprovalCreateSummary,
+}
+
 /// POST /approvals — any authenticated user; requester_id = current user,
 /// expires_at = now + expires_hours; 201 `{message, approval}`.
-async fn create_approval(
+#[utoipa::path(
+    post,
+    path = "/api/v1/approvals",
+    tag = "approvals",
+    security(("bearer_jwt" = [])),
+    request_body = CreateBody,
+    responses(
+        (status = 201, description = "Approval request created", body = ApprovalCreateResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_approval(
     State(state): State<AppState>,
     user: CurrentUser,
     ApiJson(body): ApiJson<CreateBody>,
@@ -494,8 +633,8 @@ async fn create_approval(
 }
 
 /// ApprovalDecisionRequest — `approved` required, `reason` optional <=1000.
-#[derive(Deserialize)]
-struct DecideBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct DecideBody {
     approved: Option<bool>,
     reason: Option<String>,
 }
@@ -630,10 +769,42 @@ struct DecidedRow {
     completed_at: Option<NaiveDateTime>,
 }
 
+/// Summary embedded in [`ApprovalDecisionResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ApprovalDecisionSummary {
+    id: i32,
+    status: Option<String>,
+    current_approvals: Option<i32>,
+    required_approvals: Option<i32>,
+    completed_at: Option<String>,
+}
+
+/// Documentation-only mirror of `decide_approval`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ApprovalDecisionResponse {
+    message: String,
+    approval: ApprovalDecisionSummary,
+}
+
 /// POST /approvals/{approval_id}/decide — admin/maintainer; records an
 /// approve/reject, enforcing the v1 guard order, and returns the updated
 /// counters. Read-modify-write runs in one transaction (v1 race semantics).
-async fn decide_approval(
+#[utoipa::path(
+    post,
+    path = "/api/v1/approvals/{approval_id}/decide",
+    tag = "approvals",
+    security(("bearer_jwt" = [])),
+    params(("approval_id" = i32, Path, description = "Approval request id")),
+    request_body = DecideBody,
+    responses(
+        (status = 200, description = "Decision recorded", body = ApprovalDecisionResponse),
+        (status = 400, description = "Validation error, already completed/decided, or expired", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions, or caller is the requester", body = ErrorResponse),
+        (status = 404, description = "Approval request not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn decide_approval(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(approval_id): Path<i32>,
@@ -759,10 +930,30 @@ async fn decide_approval(
     })))
 }
 
+/// Documentation-only mirror of `cancel_approval`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ApprovalCancelResponse {
+    message: String,
+}
+
 /// POST /approvals/{approval_id}/cancel — requester or admin; only pending
 /// requests can be cancelled. v1 semantics: cancellation sets
 /// status=rejected (there is no "cancelled" status) + completed_at.
-async fn cancel_approval(
+#[utoipa::path(
+    post,
+    path = "/api/v1/approvals/{approval_id}/cancel",
+    tag = "approvals",
+    security(("bearer_jwt" = [])),
+    params(("approval_id" = i32, Path, description = "Approval request id")),
+    responses(
+        (status = 200, description = "Approval request cancelled", body = ApprovalCancelResponse),
+        (status = 400, description = "Request is not pending", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Caller is neither the requester nor an admin", body = ErrorResponse),
+        (status = 404, description = "Approval request not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn cancel_approval(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(approval_id): Path<i32>,
@@ -819,9 +1010,33 @@ fn bucket_counts(keys: &[&str], rows: &[(Option<String>, i64)]) -> serde_json::V
     serde_json::Value::Object(map)
 }
 
+/// Documentation-only mirror of `get_statistics`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ApprovalStatisticsResponse {
+    total: i64,
+    /// Zero-filled per-status counts, keyed by the four canonical values.
+    by_status: std::collections::BTreeMap<String, i64>,
+    /// Zero-filled per-type counts, keyed by the four canonical values.
+    by_type: std::collections::BTreeMap<String, i64>,
+    expired_pending: i64,
+    last_7_days: i64,
+}
+
 /// GET /approvals/statistics — admin/maintainer;
 /// `{total, by_status, by_type, expired_pending, last_7_days}`.
-async fn get_statistics(
+#[utoipa::path(
+    get,
+    path = "/api/v1/approvals/statistics",
+    operation_id = "approvals_get_statistics",
+    tag = "approvals",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Approval statistics", body = ApprovalStatisticsResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_statistics(
     State(state): State<AppState>,
     user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {

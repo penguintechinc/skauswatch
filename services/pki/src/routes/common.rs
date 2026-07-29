@@ -11,15 +11,38 @@ use skauswatch_streams::{py_isoformat, py_isoformat_opt};
 use sqlx::{QueryBuilder, Row};
 use uuid::Uuid;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorResponse};
 use crate::state::AppState;
 
 /// GET /api/v1/statistics — combined X.509 + SSH counts.
+#[utoipa::path(
+    get,
+    path = "/api/v1/statistics",
+    tag = "common",
+    operation_id = "common_statistics",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Combined X.509 + SSH counts", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn statistics(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(st.manager.statistics().await?))
 }
 
 /// GET /api/v1/ca/info — info for both certificate authorities.
+#[utoipa::path(
+    get,
+    path = "/api/v1/ca/info",
+    tag = "common",
+    operation_id = "common_all_ca_info",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Combined X.509 + SSH CA info", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
 pub async fn all_ca_info(State(st): State<AppState>) -> Json<Value> {
     let info = st.manager.x509.info();
     Json(serde_json::json!({
@@ -43,6 +66,24 @@ pub async fn all_ca_info(State(st): State<AppState>) -> Json<Value> {
 }
 
 /// GET /api/v1/audit — paginated PKI audit log with filters.
+#[utoipa::path(
+    get,
+    path = "/api/v1/audit",
+    tag = "common",
+    operation_id = "common_audit",
+    security(("bearer_jwt" = [])),
+    params(
+        ("page" = Option<i64>, Query, description = "Page number (default 1)"),
+        ("page_size" = Option<i64>, Query, description = "Page size (default 50)"),
+        ("event_type" = Option<String>, Query, description = "Filter by audit event_type"),
+        ("certificate_type" = Option<String>, Query, description = "Filter by certificate_type (x509/ssh)"),
+    ),
+    responses(
+        (status = 200, description = "Paginated audit log", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn audit(
     State(st): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
@@ -103,6 +144,22 @@ pub async fn audit(
 }
 
 /// GET /api/v1/expiring — certificates expiring within N days.
+#[utoipa::path(
+    get,
+    path = "/api/v1/expiring",
+    tag = "common",
+    operation_id = "common_expiring",
+    security(("bearer_jwt" = [])),
+    params(
+        ("days" = Option<i64>, Query, description = "Expiry window in days (default 30)"),
+        ("type" = Option<String>, Query, description = "x509 | ssh | all (default all)"),
+    ),
+    responses(
+        (status = 200, description = "Certificates expiring within the window", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn expiring(
     State(st): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
@@ -168,6 +225,18 @@ pub async fn expiring(
 }
 
 /// POST /api/v1/cleanup — mark expired certificates as `expired`.
+#[utoipa::path(
+    post,
+    path = "/api/v1/cleanup",
+    tag = "common",
+    operation_id = "common_cleanup",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Cleanup result", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn cleanup(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
     let now = Utc::now().naive_utc();
     let x = sqlx::query(

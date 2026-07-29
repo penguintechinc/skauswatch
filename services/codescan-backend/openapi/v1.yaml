@@ -1,0 +1,1596 @@
+openapi: 3.1.0
+info:
+  title: SkausWatch CodeScan Backend API
+  description: AI code review (repos/reviews/issue-plans) and git credential management for the CodeScan worker pipeline.
+  contact:
+    name: Penguin Tech Inc
+    email: support@penguintech.io
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+  version: '1'
+paths:
+  /api/v1/codescan/plans:
+    get:
+      tags:
+      - codescan
+      summary: GET /codescan/plans — paginated, optionally filtered.
+      operationId: list_plans
+      parameters:
+      - name: platform
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: repository
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: status
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: per_page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      responses:
+        '200':
+          description: Paginated issue-plan list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanListResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - codescan
+      summary: POST /codescan/plans — any authenticated role (see module docs).
+      operationId: create_plan
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePlanRequest'
+        required: true
+      responses:
+        '201':
+          description: Issue plan created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanRow'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Issue plan with this external_id already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/codescan/plans/{plan_id}:
+    get:
+      tags:
+      - codescan
+      summary: GET /codescan/plans/{plan_id}.
+      operationId: get_plan
+      parameters:
+      - name: plan_id
+        in: path
+        description: Issue plan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Issue plan detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanRow'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Issue plan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/codescan/repos:
+    get:
+      tags:
+      - codescan
+      summary: GET /codescan/repos — list repository configurations.
+      operationId: list_repos
+      responses:
+        '200':
+          description: Repository configurations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepoListResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - codescan
+      summary: POST /codescan/repos — admin only.
+      operationId: create_repo
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRepoRequest'
+        required: true
+      responses:
+        '201':
+          description: Repository configuration created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepoCreateResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed, or insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Repository already configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/codescan/repos/{repo_id}:
+    get:
+      tags:
+      - codescan
+      summary: GET /codescan/repos/{repo_id}.
+      operationId: get_repo
+      parameters:
+      - name: repo_id
+        in: path
+        description: Repository configuration id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Repository configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepoConfig'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Configuration not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    put:
+      tags:
+      - codescan
+      summary: PUT /codescan/repos/{repo_id} — admin only.
+      operationId: update_repo
+      parameters:
+      - name: repo_id
+        in: path
+        description: Repository configuration id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRepoRequest'
+        required: true
+      responses:
+        '200':
+          description: Repository configuration updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepoUpdateResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed, or insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Configuration not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    delete:
+      tags:
+      - codescan
+      summary: DELETE /codescan/repos/{repo_id} — admin only.
+      operationId: delete_repo
+      parameters:
+      - name: repo_id
+        in: path
+        description: Repository configuration id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Repository configuration deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepoDeleteResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed, or insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Configuration not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/codescan/reviews:
+    get:
+      tags:
+      - codescan
+      summary: |-
+        GET /codescan/reviews — paginated, optionally filtered by `repo_config_id`
+        and `status`.
+      operationId: list_reviews
+      parameters:
+      - name: repo_config_id
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: status
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: per_page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      responses:
+        '200':
+          description: Paginated review list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewListResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - codescan
+      summary: |-
+        POST /codescan/reviews — maintainer only (see module docs); enqueues onto
+        `codescan:tasks` after the row is committed.
+      operationId: create_review
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReviewRequest'
+        required: true
+      responses:
+        '201':
+          description: Review created and enqueued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewRow'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed, or insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Repository configuration not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Review with this external_id already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/codescan/reviews/{review_id}:
+    get:
+      tags:
+      - codescan
+      summary: GET /codescan/reviews/{review_id} — review detail enriched with comments.
+      operationId: get_review
+      parameters:
+      - name: review_id
+        in: path
+        description: Review id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Review detail with comments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewDetailResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Review not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/codescan/status:
+    get:
+      tags:
+      - codescan
+      summary: |-
+        GET /codescan/status — `{status, queue_depth}`, where `queue_depth` is the
+        count of reviews not yet completed/failed/cancelled.
+      operationId: codescan_status
+      responses:
+        '200':
+          description: Service status and review queue depth
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan feature not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/credentials:
+    get:
+      tags:
+      - credentials
+      summary: GET /credentials — admin only; never includes token material.
+      operationId: list_credentials
+      parameters:
+      - name: platform
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      responses:
+        '200':
+          description: Git credential summaries (no token material)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialListResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - credentials
+      summary: |-
+        POST /credentials — admin only. `token` is encrypted before storage and
+        never echoed back.
+      operationId: create_credential
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCredentialRequest'
+        required: true
+      responses:
+        '201':
+          description: Credential created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialCreateResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/credentials/test:
+    post:
+      tags:
+      - credentials
+      summary: |-
+        POST /credentials/test — admin only; validates *format* only (no
+        connectivity check, no persistence), matching v1.
+      operationId: test_credential
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TestCredentialRequest'
+        required: true
+      responses:
+        '200':
+          description: Credential format looks valid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestCredentialResponse'
+        '400':
+          description: Credential format is invalid, or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TestCredentialResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/credentials/{credential_id}:
+    get:
+      tags:
+      - credentials
+      summary: GET /credentials/{id} — admin only.
+      operationId: get_credential
+      parameters:
+      - name: credential_id
+        in: path
+        description: Credential id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Credential summary (no token material)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialSummary'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Credential not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    delete:
+      tags:
+      - credentials
+      summary: DELETE /credentials/{id} — admin only.
+      operationId: delete_credential
+      parameters:
+      - name: credential_id
+        in: path
+        description: Credential id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Credential deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialDeleteResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Credential not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    patch:
+      tags:
+      - credentials
+      summary: |-
+        PATCH /credentials/{id} — admin only. A `token` field re-encrypts and
+        replaces the stored value; the plaintext is never echoed back.
+      operationId: update_credential
+      parameters:
+      - name: credential_id
+        in: path
+        description: Credential id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCredentialRequest'
+        required: true
+      responses:
+        '200':
+          description: Credential updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialUpdateResponse'
+        '400':
+          description: Validation error (e.g. blank token)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Credential not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+components:
+  schemas:
+    CreateCredentialRequest:
+      type: object
+      required:
+      - platform
+      - token
+      properties:
+        credential_type:
+          type: string
+        name:
+          type:
+          - string
+          - 'null'
+        platform:
+          type: string
+        token:
+          type: string
+        token_expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    CreatePlanRequest:
+      type: object
+      required:
+      - platform
+      - repository
+      - issue_number
+      properties:
+        ai_model:
+          type:
+          - string
+          - 'null'
+        ai_provider:
+          type:
+          - string
+          - 'null'
+        external_id:
+          type:
+          - string
+          - 'null'
+        issue_body:
+          type:
+          - string
+          - 'null'
+        issue_number:
+          type: integer
+          format: int32
+        issue_title:
+          type:
+          - string
+          - 'null'
+        issue_url:
+          type:
+          - string
+          - 'null'
+        platform:
+          type: string
+        repository:
+          type: string
+    CreateRepoRequest:
+      type: object
+      description: POST /codescan/repos body.
+      required:
+      - provider
+      - repo_url
+      - repo_name
+      properties:
+        auto_review:
+          type:
+          - boolean
+          - 'null'
+        credential_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        custom_rules: {}
+        default_ai_provider:
+          type:
+          - string
+          - 'null'
+        default_categories: {}
+        description:
+          type:
+          - string
+          - 'null'
+        display_name:
+          type:
+          - string
+          - 'null'
+        enabled:
+          type:
+          - boolean
+          - 'null'
+        ignored_paths: {}
+        provider:
+          type: string
+        repo_name:
+          type: string
+        repo_url:
+          type: string
+        review_on_open:
+          type:
+          - boolean
+          - 'null'
+        review_on_sync:
+          type:
+          - boolean
+          - 'null'
+        team_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        tenant_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+    CreateReviewRequest:
+      type: object
+      required:
+      - repo_config_id
+      - pr_url
+      properties:
+        ai_model:
+          type:
+          - string
+          - 'null'
+        ai_provider:
+          type:
+          - string
+          - 'null'
+        base_sha:
+          type:
+          - string
+          - 'null'
+        categories:
+          type: array
+          items:
+            type: string
+        external_id:
+          type:
+          - string
+          - 'null'
+        head_sha:
+          type:
+          - string
+          - 'null'
+        pr_number:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        pr_title:
+          type:
+          - string
+          - 'null'
+        pr_url:
+          type: string
+        repo_config_id:
+          type: integer
+          format: int64
+        review_type:
+          type: string
+    CredentialCreateResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `create_credential`'s `serde_json::json!`
+        body — never includes token material.
+      required:
+      - message
+      - credential
+      properties:
+        credential:
+          $ref: '#/components/schemas/CredentialSummary'
+        message:
+          type: string
+    CredentialDeleteResponse:
+      type: object
+      description: Documentation-only mirror of `delete_credential`'s `serde_json::json!` body.
+      required:
+      - message
+      - deleted
+      properties:
+        deleted:
+          type: boolean
+        message:
+          type: string
+    CredentialListResponse:
+      type: object
+      description: Documentation-only mirror of `list_credentials`'s `serde_json::json!` body.
+      required:
+      - data
+      - total
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/CredentialSummary'
+        total:
+          type: integer
+          minimum: 0
+    CredentialSummary:
+      type: object
+      description: Response shape — deliberately excludes `encrypted_token`.
+      required:
+      - id
+      - user_id
+      - platform
+      - credential_type
+      - is_active
+      properties:
+        created_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        credential_type:
+          type: string
+        id:
+          type: integer
+          format: int64
+        is_active:
+          type: boolean
+        name:
+          type:
+          - string
+          - 'null'
+        platform:
+          type: string
+        token_expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        updated_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        user_id:
+          type: integer
+          format: int64
+    CredentialUpdateResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `update_credential`'s `serde_json::json!`
+        body — never includes token material.
+      required:
+      - message
+      - credential
+      properties:
+        credential:
+          $ref: '#/components/schemas/CredentialSummary'
+        message:
+          type: string
+    ErrorResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `ApiError`'s bare `{"error": msg}` wire shape
+        (`BadRequest`/`Unauthorized`/`Forbidden`/`NotFound`/`Conflict` in this
+        service all use it) — `ApiError` itself builds its body with
+        `serde_json::json!` rather than a typed struct, so this type exists
+        solely to give `utoipa` something to reference in `#[utoipa::path]`
+        `responses(...)` clauses.
+      required:
+      - error
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+    PaginationMeta:
+      type: object
+      description: Pagination metadata shared by the `reviews` and `plans` list responses.
+      required:
+      - page
+      - per_page
+      - total
+      - pages
+      properties:
+        page:
+          type: integer
+          format: int64
+        pages:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
+    PlanListResponse:
+      type: object
+      description: Documentation-only mirror of `list_plans`'s `serde_json::json!` body.
+      required:
+      - plans
+      - total
+      - page
+      - per_page
+      properties:
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        plans:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlanRow'
+        total:
+          type: integer
+          format: int64
+    PlanRow:
+      type: object
+      required:
+      - id
+      - external_id
+      - platform
+      - repository
+      - issue_number
+      - status
+      - comment_posted
+      properties:
+        ai_model:
+          type:
+          - string
+          - 'null'
+        ai_provider:
+          type:
+          - string
+          - 'null'
+        comment_posted:
+          type: boolean
+        created_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        error_message:
+          type:
+          - string
+          - 'null'
+        external_id:
+          type: string
+        id:
+          type: integer
+          format: int64
+        issue_number:
+          type: integer
+          format: int32
+        issue_title:
+          type:
+          - string
+          - 'null'
+        issue_url:
+          type:
+          - string
+          - 'null'
+        plan_content:
+          type:
+          - string
+          - 'null'
+        plan_steps: {}
+        platform:
+          type: string
+        repository:
+          type: string
+        status:
+          type: string
+        updated_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    RepoConfig:
+      type: object
+      description: Repo-config row shape returned by list/get/create/update.
+      required:
+      - id
+      - provider
+      - repo_url
+      - repo_name
+      - enabled
+      - auto_review
+      - review_on_open
+      - review_on_sync
+      - is_active
+      properties:
+        auto_review:
+          type: boolean
+        created_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        credential_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        custom_rules: {}
+        default_ai_provider:
+          type:
+          - string
+          - 'null'
+        default_categories: {}
+        description:
+          type:
+          - string
+          - 'null'
+        display_name:
+          type:
+          - string
+          - 'null'
+        enabled:
+          type: boolean
+        id:
+          type: integer
+          format: int64
+        ignored_paths: {}
+        is_active:
+          type: boolean
+        owner_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        provider:
+          type: string
+        repo_name:
+          type: string
+        repo_url:
+          type: string
+        review_on_open:
+          type: boolean
+        review_on_sync:
+          type: boolean
+        team_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        tenant_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        updated_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    RepoCreateResponse:
+      type: object
+      description: Documentation-only mirror of `create_repo`'s `serde_json::json!` body.
+      required:
+      - message
+      - config
+      properties:
+        config:
+          $ref: '#/components/schemas/RepoConfig'
+        message:
+          type: string
+    RepoDeleteResponse:
+      type: object
+      description: Documentation-only mirror of `delete_repo`'s `serde_json::json!` body.
+      required:
+      - message
+      - deleted
+      properties:
+        deleted:
+          type: boolean
+        message:
+          type: string
+    RepoListResponse:
+      type: object
+      description: Documentation-only mirror of `list_repos`'s `serde_json::json!` body.
+      required:
+      - data
+      - total
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepoConfig'
+        total:
+          type: integer
+          minimum: 0
+    RepoUpdateResponse:
+      type: object
+      description: Documentation-only mirror of `update_repo`'s `serde_json::json!` body.
+      required:
+      - message
+      - config
+      properties:
+        config:
+          $ref: '#/components/schemas/RepoConfig'
+        message:
+          type: string
+    ReviewComment:
+      type: object
+      required:
+      - id
+      properties:
+        category:
+          type:
+          - string
+          - 'null'
+        comment:
+          type:
+          - string
+          - 'null'
+        created_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        file_path:
+          type:
+          - string
+          - 'null'
+        id:
+          type: integer
+          format: int64
+        line_number:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        severity:
+          type:
+          - string
+          - 'null'
+    ReviewDetailResponse:
+      allOf:
+      - $ref: '#/components/schemas/ReviewRow'
+      - type: object
+        required:
+        - comments
+        properties:
+          comments:
+            type: array
+            items:
+              $ref: '#/components/schemas/ReviewComment'
+      description: |-
+        Documentation-only mirror of `get_review`'s merged JSON body — the
+        handler builds this shape by hand (`ReviewRow` fields flattened, plus a
+        `comments` array) via `serde_json::Value` manipulation rather than
+        deriving `Serialize` on a single struct, so this type exists solely to
+        describe the wire shape to `utoipa`.
+    ReviewListResponse:
+      type: object
+      description: Documentation-only mirror of `list_reviews`'s `serde_json::json!` body.
+      required:
+      - data
+      - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewRow'
+        pagination:
+          $ref: '#/components/schemas/PaginationMeta'
+    ReviewRow:
+      type: object
+      required:
+      - id
+      - repo_config_id
+      - review_type
+      - status
+      - files_reviewed
+      - comments_count
+      properties:
+        ai_model:
+          type:
+          - string
+          - 'null'
+        ai_provider:
+          type:
+          - string
+          - 'null'
+        base_sha:
+          type:
+          - string
+          - 'null'
+        categories: {}
+        comments_count:
+          type: integer
+          format: int32
+        completed_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        created_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        error_message:
+          type:
+          - string
+          - 'null'
+        external_id:
+          type:
+          - string
+          - 'null'
+        files_reviewed:
+          type: integer
+          format: int32
+        head_sha:
+          type:
+          - string
+          - 'null'
+        id:
+          type: integer
+          format: int64
+        pr_number:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        pr_title:
+          type:
+          - string
+          - 'null'
+        pr_url:
+          type:
+          - string
+          - 'null'
+        repo_config_id:
+          type: integer
+          format: int64
+        review_type:
+          type: string
+        started_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        status:
+          type: string
+        summary:
+          type:
+          - string
+          - 'null'
+        team_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        tenant_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        triggered_by:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        updated_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    StatusResponse:
+      type: object
+      description: Documentation-only mirror of `codescan_status`'s `serde_json::json!` body.
+      required:
+      - status
+      - queue_depth
+      properties:
+        queue_depth:
+          type: integer
+          format: int64
+          description: Count of reviews not yet completed/failed/cancelled.
+        status:
+          type: string
+          description: Always `"ok"`.
+    TestCredentialRequest:
+      type: object
+      required:
+      - credential_type
+      - credential
+      properties:
+        credential:
+          type: string
+        credential_type:
+          type: string
+    TestCredentialResponse:
+      type: object
+      description: Documentation-only mirror of `test_credential`'s `serde_json::json!` body.
+      required:
+      - valid
+      - message
+      - type
+      properties:
+        message:
+          type: string
+        type:
+          type: string
+        valid:
+          type: boolean
+    UpdateCredentialRequest:
+      type: object
+      properties:
+        is_active:
+          type:
+          - boolean
+          - 'null'
+        name:
+          type:
+          - string
+          - 'null'
+        token:
+          type:
+          - string
+          - 'null'
+        token_expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    UpdateRepoRequest:
+      type: object
+      description: PUT /codescan/repos/{repo_id} body — all fields optional (partial update).
+      properties:
+        auto_review:
+          type:
+          - boolean
+          - 'null'
+        credential_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        custom_rules: {}
+        default_ai_provider:
+          type:
+          - string
+          - 'null'
+        default_categories: {}
+        description:
+          type:
+          - string
+          - 'null'
+        display_name:
+          type:
+          - string
+          - 'null'
+        enabled:
+          type:
+          - boolean
+          - 'null'
+        ignored_paths: {}
+        review_on_open:
+          type:
+          - boolean
+          - 'null'
+        review_on_sync:
+          type:
+          - boolean
+          - 'null'
+    ValidationErrorResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `ApiError::Validation`'s wire shape — a
+        bare error message plus a list of per-field validation failure objects
+        (`{loc, msg, type}`, matching the `ApiJson` rejection shape below).
+      required:
+      - error
+      - details
+      properties:
+        details:
+          type: array
+          items: {}
+          description: 'Per-field failure details, each `{loc: [...], msg: ..., type: ...}`.'
+        error:
+          type: string
+          description: Always `"Validation error"`.
+  securitySchemes:
+    bearer_jwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+tags:
+- name: codescan
+  description: Repo configs, AI code reviews, and issue plans
+- name: credentials
+  description: Git credential storage for private repo access

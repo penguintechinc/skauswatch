@@ -7,6 +7,41 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use serde::Serialize;
+
+/// Documentation-only mirror of `ApiError`'s bare `{"error": msg}` wire
+/// shape (`BadRequest`/`Unauthorized`/`Forbidden`/`NotFound`/`Conflict`/
+/// `Gone` all use it) — `ApiError` itself builds its body with
+/// `serde_json::json!` rather than a typed struct, so this type exists
+/// solely to give `utoipa` something to reference in `#[utoipa::path]`
+/// `responses(...)` clauses.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct ErrorResponse {
+    /// Human-readable error message.
+    pub error: String,
+}
+
+/// Documentation-only mirror of `ApiError::InsufficientScope`'s wire shape.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct InsufficientScopeResponse {
+    /// Always `"Insufficient scope"`.
+    pub error: String,
+    /// Scopes the endpoint required.
+    pub required: Vec<String>,
+    /// Subset of `required` the caller's token was missing.
+    pub missing: Vec<String>,
+}
+
+/// Documentation-only mirror of `ApiError::LicenseRequired`'s wire shape.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct LicenseRequiredResponse {
+    /// Always `"Vault license required"`.
+    pub error: String,
+    /// Operator-facing remediation hint.
+    pub detail: String,
+    /// License server URL, echoed for operator convenience.
+    pub license_server: String,
+}
 
 /// API-level errors carrying the v1 wire shapes.
 #[derive(Debug)]

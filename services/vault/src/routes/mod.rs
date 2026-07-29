@@ -4,6 +4,7 @@ pub mod admin;
 pub mod audit;
 pub mod jit;
 pub mod one_time;
+pub(crate) mod openapi;
 pub mod secrets;
 pub mod sync;
 #[cfg(test)]
@@ -25,7 +26,8 @@ pub fn router(state: AppState) -> Router {
                 .merge(one_time::router())
                 .merge(sync::router())
                 .merge(admin::router())
-                .merge(audit::router()),
+                .merge(audit::router())
+                .merge(openapi::router()),
         )
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(

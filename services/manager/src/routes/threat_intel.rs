@@ -19,7 +19,7 @@ use serde::Deserialize;
 use sqlx::{Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
 
 /// v1 `IndicatorType` enum values.
@@ -146,6 +146,51 @@ fn search_json(row: &IocRow) -> serde_json::Value {
         "tags": tags_json(&row.tags),
         "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
     })
+}
+
+/// Documentation-only mirror of `ioc_json`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct IocItem {
+    id: i32,
+    indicator_type: String,
+    value: String,
+    threat_level: Option<String>,
+    confidence: Option<f64>,
+    source: Option<String>,
+    tags: serde_json::Value,
+    metadata: serde_json::Value,
+    expires_at: Option<String>,
+    created_at: Option<String>,
+}
+
+/// Documentation-only mirror of `ioc_detail_json`'s wire shape (`ioc_json`
+/// plus `updated_at`).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct IocDetail {
+    id: i32,
+    indicator_type: String,
+    value: String,
+    threat_level: Option<String>,
+    confidence: Option<f64>,
+    source: Option<String>,
+    tags: serde_json::Value,
+    metadata: serde_json::Value,
+    expires_at: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+/// Documentation-only mirror of `search_json`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct IocSearchItem {
+    id: i32,
+    indicator_type: String,
+    value: String,
+    threat_level: Option<String>,
+    confidence: Option<f64>,
+    source: Option<String>,
+    tags: serde_json::Value,
+    created_at: Option<String>,
 }
 
 /// v1 lookup match shape (POST /iocs/lookup) — no timestamps/metadata.
@@ -313,7 +358,37 @@ fn parse_list_params(pairs: &[(String, String)]) -> ListQuery {
     }
 }
 
-async fn list_iocs(
+/// Documentation-only mirror of `list_iocs`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct IocListResponse {
+    items: Vec<IocItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
+/// GET /threat-intel/iocs — paginated IOC list, filterable by type/threat
+/// level/source/expiry.
+#[utoipa::path(
+    get,
+    path = "/api/v1/threat-intel/iocs",
+    tag = "threat-intel",
+    security(("bearer_jwt" = [])),
+    params(
+        ("page" = Option<i64>, Query, description = "1-based page number (default 1)"),
+        ("per_page" = Option<i64>, Query, description = "Page size, capped at 500 (default 50)"),
+        ("type" = Option<Vec<String>>, Query, description = "Repeatable indicator_type filter"),
+        ("threat_level" = Option<Vec<String>>, Query, description = "Repeatable threat_level filter"),
+        ("source" = Option<String>, Query, description = "Exact source filter"),
+        ("include_expired" = Option<bool>, Query, description = "Include expired indicators (default false)"),
+    ),
+    responses(
+        (status = 200, description = "Paginated IOC list", body = IocListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_iocs(
     State(state): State<AppState>,
     _user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
@@ -337,7 +412,20 @@ async fn list_iocs(
     })))
 }
 
-async fn get_ioc(
+/// GET /threat-intel/iocs/{ioc_id} — single IOC detail.
+#[utoipa::path(
+    get,
+    path = "/api/v1/threat-intel/iocs/{ioc_id}",
+    tag = "threat-intel",
+    security(("bearer_jwt" = [])),
+    params(("ioc_id" = i32, Path, description = "IOC id")),
+    responses(
+        (status = 200, description = "IOC detail", body = IocDetail),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "IOC not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_ioc(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(ioc_id): Path<i32>,
@@ -354,14 +442,15 @@ async fn get_ioc(
 
 /// IOCCreateRequest — fields optional here so missing ones map to the
 /// validation envelope instead of an axum extractor rejection.
-#[derive(Deserialize)]
-struct IocBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct IocBody {
     indicator_type: Option<String>,
     value: Option<String>,
     threat_level: Option<String>,
     confidence: Option<f64>,
     source: Option<String>,
     tags: Option<Vec<String>>,
+    #[schema(value_type = Object)]
     metadata: Option<serde_json::Map<String, serde_json::Value>>,
     expires_at: Option<String>,
 }
@@ -520,7 +609,40 @@ struct CreatedRow {
     created_at: Option<NaiveDateTime>,
 }
 
-async fn create_ioc(
+/// Summary embedded in [`IocCreateResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct IocCreateSummary {
+    id: i32,
+    indicator_type: String,
+    value: String,
+    threat_level: Option<String>,
+    created_at: Option<String>,
+}
+
+/// Documentation-only mirror of `create_ioc`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct IocCreateResponse {
+    message: String,
+    ioc: IocCreateSummary,
+}
+
+/// POST /threat-intel/iocs — admin/maintainer only; 409 on
+/// (indicator_type, value) duplicate.
+#[utoipa::path(
+    post,
+    path = "/api/v1/threat-intel/iocs",
+    tag = "threat-intel",
+    security(("bearer_jwt" = [])),
+    request_body = IocBody,
+    responses(
+        (status = 201, description = "IOC created", body = IocCreateResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 409, description = "IOC already exists", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_ioc(
     State(state): State<AppState>,
     user: CurrentUser,
     ApiJson(body): ApiJson<IocBody>,
@@ -576,8 +698,8 @@ async fn create_ioc(
 
 /// IOCBulkCreateRequest — `indicators` optional so a missing field maps to
 /// the validation envelope.
-#[derive(Deserialize)]
-struct BulkBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct BulkBody {
     indicators: Option<Vec<IocBody>>,
 }
 
@@ -632,10 +754,35 @@ async fn upsert_ioc(db: &sqlx::PgPool, v: &ValidIoc) -> Result<bool, sqlx::Error
     }
 }
 
+/// Documentation-only mirror of `bulk_create_iocs`'s `serde_json::json!`
+/// body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct BulkCreateResponse {
+    success: bool,
+    created_count: i64,
+    updated_count: i64,
+    error_count: usize,
+    /// `{index, error}` entries, capped at 10.
+    errors: Vec<serde_json::Value>,
+}
+
 /// POST /iocs/bulk — v1 validates the entire batch up front (any invalid
 /// item 400s the whole request); the per-item error list only collects DB
 /// failures during the upsert loop. Always 201, first 10 errors returned.
-async fn bulk_create_iocs(
+#[utoipa::path(
+    post,
+    path = "/api/v1/threat-intel/iocs/bulk",
+    tag = "threat-intel",
+    security(("bearer_jwt" = [])),
+    request_body = BulkBody,
+    responses(
+        (status = 201, description = "Batch processed (per-item DB failures reported in `errors`, never fail the request)", body = BulkCreateResponse),
+        (status = 400, description = "Validation error (missing indicators, batch too large, or an invalid item)", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn bulk_create_iocs(
     State(state): State<AppState>,
     user: CurrentUser,
     ApiJson(body): ApiJson<BulkBody>,
@@ -686,7 +833,27 @@ async fn bulk_create_iocs(
     ))
 }
 
-async fn delete_ioc(
+/// Documentation-only mirror of `delete_ioc`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct IocDeleteResponse {
+    message: String,
+}
+
+/// DELETE /threat-intel/iocs/{ioc_id} — admin only.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/threat-intel/iocs/{ioc_id}",
+    tag = "threat-intel",
+    security(("bearer_jwt" = [])),
+    params(("ioc_id" = i32, Path, description = "IOC id")),
+    responses(
+        (status = 200, description = "IOC deleted", body = IocDeleteResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "IOC not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn delete_ioc(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(ioc_id): Path<i32>,
@@ -713,8 +880,8 @@ async fn delete_ioc(
 
 /// IOCSearchRequest — `tags` is accepted for schema parity but v1 never
 /// filters on it, and neither do we.
-#[derive(Deserialize)]
-struct SearchBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct SearchBody {
     query: Option<String>,
     indicator_type: Option<Vec<String>>,
     threat_level: Option<Vec<String>>,
@@ -796,7 +963,32 @@ fn validate_search(b: &SearchBody) -> Result<(IocFilters, i64, i64), ApiError> {
     Ok((filters, page, per_page))
 }
 
-async fn search_iocs(
+/// Documentation-only mirror of `search_iocs`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct IocSearchResponse {
+    items: Vec<IocSearchItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
+/// POST /threat-intel/iocs/search — richer filtering than GET /iocs
+/// (free-text query, confidence floor). Note: `tags` is accepted in the body
+/// for schema parity with v1 but never applied as a filter.
+#[utoipa::path(
+    post,
+    path = "/api/v1/threat-intel/iocs/search",
+    tag = "threat-intel",
+    security(("bearer_jwt" = [])),
+    request_body = SearchBody,
+    responses(
+        (status = 200, description = "Paginated search results", body = IocSearchResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn search_iocs(
     State(state): State<AppState>,
     _user: CurrentUser,
     ApiJson(body): ApiJson<SearchBody>,
@@ -815,14 +1007,30 @@ async fn search_iocs(
 
 /// POST /iocs/lookup body — `type` + `value`, both required (truthy in v1,
 /// so empty strings also 400).
-#[derive(Deserialize)]
-struct LookupBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct LookupBody {
     #[serde(rename = "type")]
     indicator_type: Option<String>,
     value: Option<String>,
 }
 
-async fn lookup_ioc(
+/// POST /threat-intel/iocs/lookup — exact (indicator_type, value) match
+/// among non-expired IOCs. Response shape varies by outcome:
+/// `{found: true, ioc: {...}}` or `{found: false, indicator_type, value}`,
+/// so it is documented generically rather than as two response codes.
+#[utoipa::path(
+    post,
+    path = "/api/v1/threat-intel/iocs/lookup",
+    tag = "threat-intel",
+    security(("bearer_jwt" = [])),
+    request_body = LookupBody,
+    responses(
+        (status = 200, description = "Lookup result — `{found, ioc}` or `{found: false, indicator_type, value}`", body = serde_json::Value),
+        (status = 400, description = "Both 'type' and 'value' are required", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn lookup_ioc(
     State(state): State<AppState>,
     _user: CurrentUser,
     ApiJson(body): ApiJson<LookupBody>,
@@ -879,7 +1087,33 @@ fn bucket_counts(keys: &[&str], rows: &[(Option<String>, i64)]) -> serde_json::V
 /// sources, and expired count. v1 computed top_sources with N+1 client-side
 /// counts over distinct sources, skipping falsy (NULL/empty) values; one
 /// GROUP BY query yields the same map.
-async fn get_statistics(
+/// Documentation-only mirror of `get_statistics`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ThreatIntelStatisticsResponse {
+    total: i64,
+    /// Zero-filled per-type counts, keyed by the seven canonical values.
+    by_type: std::collections::BTreeMap<String, i64>,
+    /// Zero-filled per-level counts, keyed by the five canonical values.
+    by_threat_level: std::collections::BTreeMap<String, i64>,
+    /// Top 10 non-empty sources by IOC count.
+    top_sources: std::collections::BTreeMap<String, i64>,
+    expired: i64,
+}
+
+/// GET /threat-intel/statistics — totals, zero-filled per-type/per-level
+/// buckets, top 10 sources, and expired count.
+#[utoipa::path(
+    get,
+    path = "/api/v1/threat-intel/statistics",
+    operation_id = "threat_intel_get_statistics",
+    tag = "threat-intel",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "IOC statistics", body = ThreatIntelStatisticsResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_statistics(
     State(state): State<AppState>,
     _user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -975,9 +1209,27 @@ fn feeds_json(otx_key: Option<&str>, virustotal_key: Option<&str>) -> serde_json
     })
 }
 
+/// Documentation-only mirror of `feeds_json`'s wire shape. Individual feed
+/// entries have heterogeneous fields (`configured` for API feeds, `servers`
+/// for TAXII), so they are documented generically.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct FeedsResponse {
+    feeds: Vec<serde_json::Value>,
+}
+
 /// GET /feeds — env is read at request time (`OTX_API_KEY`,
 /// `VIRUSTOTAL_API_KEY`), same pattern as alerts.rs `AI_ENABLED`.
-async fn list_feeds(_user: CurrentUser) -> Result<Json<serde_json::Value>, ApiError> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/threat-intel/feeds",
+    tag = "threat-intel",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Static threat-intel feed catalog", body = FeedsResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_feeds(_user: CurrentUser) -> Result<Json<serde_json::Value>, ApiError> {
     let otx = std::env::var("OTX_API_KEY").ok();
     let virustotal = std::env::var("VIRUSTOTAL_API_KEY").ok();
     Ok(Json(feeds_json(otx.as_deref(), virustotal.as_deref())))

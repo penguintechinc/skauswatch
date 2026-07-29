@@ -153,9 +153,9 @@ lint: ## Code Quality - Run all linters (cargo, webui, Docker, shell, OpenAPI)
 		echo "-- shellcheck --"; \
 		find scripts -name "*.sh" -print0 | xargs -0 -r shellcheck; \
 	fi
-	@if [ -f openapi/v1.yaml ]; then \
-		if command -v spectral >/dev/null 2>&1; then echo "-- spectral --"; spectral lint openapi/v1.yaml; \
-		else echo "$(YELLOW)spectral not installed, skipping openapi/v1.yaml lint$(RESET)"; fi; \
+	@if ls services/*/openapi/v1.yaml >/dev/null 2>&1; then \
+		if command -v spectral >/dev/null 2>&1; then echo "-- spectral --"; spectral lint --ruleset .spectral.yaml --fail-severity=error services/*/openapi/v1.yaml; \
+		else echo "$(YELLOW)spectral not installed, skipping OpenAPI lint$(RESET)"; fi; \
 	fi
 
 format: ## Code Quality - Format Rust + webui code

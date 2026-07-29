@@ -13,6 +13,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 
 use crate::auth::CurrentUser;
+use crate::error::ErrorResponse;
 use crate::flags;
 use crate::state::AppState;
 
@@ -21,7 +22,47 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/license/features", get(license_features))
 }
 
-async fn license_features(
+/// Documentation-only mirror of `license_features`'s `serde_json::json!`
+/// body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct LicenseFeaturesResponse {
+    status: String,
+    data: LicenseFeaturesData,
+    meta: LicenseFeaturesMeta,
+}
+
+/// `data` payload of [`LicenseFeaturesResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct LicenseFeaturesData {
+    valid: bool,
+    tier: String,
+    /// Every known PostHog flag key mapped to its current decision.
+    flags: BTreeMap<String, bool>,
+    /// License-server feature entitlements by name.
+    features: BTreeMap<String, bool>,
+}
+
+/// `meta` payload of [`LicenseFeaturesResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct LicenseFeaturesMeta {
+    version: i32,
+    /// RFC3339 timestamp.
+    timestamp: String,
+}
+
+/// GET /license/features — tier, flag decisions, and feature entitlements
+/// for the authenticated caller's tenant; the frontend nav-gating contract.
+#[utoipa::path(
+    get,
+    path = "/api/v1/license/features",
+    tag = "license",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "License tier, flags, and features", body = LicenseFeaturesResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn license_features(
     State(state): State<AppState>,
     _user: CurrentUser,
 ) -> Json<serde_json::Value> {

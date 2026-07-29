@@ -22,9 +22,11 @@ use serde::Deserialize;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse};
 use crate::flags::flag_denied;
-use crate::models::{BaseEvent, EventSearchRequest, EventType, LogSource, Severity};
+use crate::models::{
+    BaseEvent, EventSearchRequest, EventSearchResponse, EventType, LogSource, Severity,
+};
 use crate::state::AppState;
 
 /// Router for `/events/*`.
@@ -40,7 +42,19 @@ pub fn router() -> Router<AppState> {
 /// `Exception("No search backend available")`, caught by the generic
 /// handler and turned into a 500 — 503 is the correct status for "no
 /// backend configured", not a request bug).
-async fn search_events(
+#[utoipa::path(
+    post,
+    path = "/api/v1/events/search",
+    tag = "monitor",
+    request_body = EventSearchRequest,
+    responses(
+        (status = 200, description = "Matching events", body = EventSearchResponse),
+        (status = 400, description = "Malformed request body", body = ErrorResponse),
+        (status = 403, description = "monitor feature not enabled for this deployment", body = ErrorResponse),
+        (status = 503, description = "No search backend (Elasticsearch/OpenSearch) configured", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn search_events(
     State(state): State<AppState>,
     ApiJson(req): ApiJson<EventSearchRequest>,
 ) -> Result<Response, ApiError> {
@@ -56,7 +70,19 @@ async fn search_events(
 }
 
 /// v1 `log_processor.get_event_by_id`.
-async fn get_event(
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/{event_id}",
+    tag = "monitor",
+    params(("event_id" = String, Path, description = "Event id")),
+    responses(
+        (status = 200, description = "The stored event", body = BaseEvent),
+        (status = 403, description = "monitor feature not enabled for this deployment", body = ErrorResponse),
+        (status = 404, description = "Event not found", body = ErrorResponse),
+        (status = 503, description = "No search backend (Elasticsearch/OpenSearch) configured", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_event(
     State(state): State<AppState>,
     Path(event_id): Path<String>,
 ) -> Result<Response, ApiError> {
@@ -75,8 +101,8 @@ async fn get_event(
 
 /// Query params for `GET /events/stream` — v1 accepted repeated
 /// `sources`/`event_types`/`severities` query params.
-#[derive(Debug, Deserialize)]
-struct StreamParams {
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub(crate) struct StreamParams {
     #[serde(default)]
     sources: Vec<LogSource>,
     #[serde(default)]
@@ -102,7 +128,17 @@ fn event_matches(event: &BaseEvent, filters: &StreamParams) -> bool {
 
 /// GET /events/stream — real SSE infrastructure; see module docs for why it
 /// has no producers yet.
-async fn stream_events(
+#[utoipa::path(
+    get,
+    path = "/api/v1/events/stream",
+    tag = "monitor",
+    params(StreamParams),
+    responses(
+        (status = 200, description = "Live event stream (Server-Sent Events; no producer wired up yet, see module docs)", body = BaseEvent, content_type = "text/event-stream"),
+        (status = 403, description = "monitor feature not enabled for this deployment", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn stream_events(
     State(state): State<AppState>,
     Query(filters): Query<StreamParams>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>>, Response> {

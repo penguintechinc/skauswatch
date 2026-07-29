@@ -6,13 +6,13 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{NaiveDateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorResponse, InsufficientScopeResponse};
 use crate::state::AppState;
 
 const VALID_PROVIDERS: &[&str] = &["aws", "azure", "gcp", "oracle", "kubernetes"];
@@ -93,7 +93,40 @@ impl IntegrationRow {
     }
 }
 
-async fn list_integrations(
+/// Documentation-only mirror of `IntegrationRow::to_json`'s wire shape —
+/// never includes `encrypted_credentials`.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct SyncIntegrationResponse {
+    id: String,
+    provider: String,
+    name: String,
+    description: Option<String>,
+    sync_direction: String,
+    sync_scopes: Option<Value>,
+    enabled: bool,
+    config: Option<Value>,
+    last_sync_at: Option<String>,
+    created_at: String,
+}
+
+/// Documentation-only mirror of `list_integrations`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct SyncIntegrationListResponse {
+    integrations: Vec<SyncIntegrationResponse>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/sync/integrations",
+    tag = "sync",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Configured cloud vault integrations (credentials never included)", body = SyncIntegrationListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires sync:read)", body = InsufficientScopeResponse),
+    ),
+)]
+pub(crate) async fn list_integrations(
     State(state): State<AppState>,
     user: CurrentUser,
 ) -> Result<Json<Value>, ApiError> {
@@ -109,19 +142,34 @@ async fn list_integrations(
     })))
 }
 
-#[derive(Deserialize)]
-struct CreateIntegrationBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreateIntegrationBody {
     provider: Option<String>,
     name: Option<String>,
     description: Option<String>,
     sync_direction: Option<String>,
     sync_scopes: Option<Value>,
+    /// Provider credentials — encrypted at rest immediately, never
+    /// returned by any response.
     credentials: Option<Value>,
     enabled: Option<bool>,
     config: Option<Value>,
 }
 
-async fn create_integration(
+#[utoipa::path(
+    post,
+    path = "/api/v1/sync/integrations",
+    tag = "sync",
+    security(("bearer_jwt" = [])),
+    request_body = CreateIntegrationBody,
+    responses(
+        (status = 201, description = "Integration created", body = SyncIntegrationResponse),
+        (status = 400, description = "Invalid provider, missing name, or invalid sync_direction", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires sync:admin)", body = InsufficientScopeResponse),
+    ),
+)]
+pub(crate) async fn create_integration(
     State(state): State<AppState>,
     user: CurrentUser,
     Json(body): Json<CreateIntegrationBody>,
@@ -206,8 +254,8 @@ async fn fetch_integration(state: &AppState, id: &str) -> Result<Option<Integrat
     .await?)
 }
 
-#[derive(Deserialize, Default)]
-struct UpdateIntegrationBody {
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+pub(crate) struct UpdateIntegrationBody {
     name: Option<String>,
     description: Option<String>,
     sync_direction: Option<String>,
@@ -216,7 +264,22 @@ struct UpdateIntegrationBody {
     enabled: Option<bool>,
 }
 
-async fn update_integration(
+#[utoipa::path(
+    put,
+    path = "/api/v1/sync/integrations/{id}",
+    tag = "sync",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Integration id")),
+    request_body = UpdateIntegrationBody,
+    responses(
+        (status = 200, description = "Updated integration", body = SyncIntegrationResponse),
+        (status = 400, description = "Invalid sync_direction", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires sync:admin)", body = InsufficientScopeResponse),
+        (status = 404, description = "Integration not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_integration(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<String>,
@@ -259,7 +322,20 @@ async fn update_integration(
     Ok(Json(row.to_json()))
 }
 
-async fn delete_integration(
+#[utoipa::path(
+    delete,
+    path = "/api/v1/sync/integrations/{id}",
+    tag = "sync",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Integration id")),
+    responses(
+        (status = 204, description = "Integration deleted"),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires sync:admin)", body = InsufficientScopeResponse),
+        (status = 404, description = "Integration not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn delete_integration(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<String>,
@@ -275,7 +351,31 @@ async fn delete_integration(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-async fn trigger_sync(
+/// Documentation-only mirror of `trigger_sync`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct TriggerSyncResponse {
+    integration_id: String,
+    provider: String,
+    /// Always `"sync_queued"`.
+    status: String,
+    queued_at: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/sync/integrations/{id}/trigger",
+    tag = "sync",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Integration id")),
+    responses(
+        (status = 200, description = "Sync event published to worker-vault-sync", body = TriggerSyncResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires sync:admin)", body = InsufficientScopeResponse),
+        (status = 404, description = "Integration not found", body = ErrorResponse),
+        (status = 409, description = "Integration is disabled", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn trigger_sync(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<String>,

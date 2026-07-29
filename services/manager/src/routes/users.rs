@@ -16,7 +16,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{self, CurrentUser};
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
 
 /// Free-tier user cap (v1 `SIEMConfig.free_tier_user_cap`).
@@ -119,8 +119,8 @@ fn can_view_user(current_id: i32, role: &str, target_id: i32) -> bool {
 
 /// List-item shape: `{id,email,full_name,role,is_active,mfa_enabled,created_at}`.
 /// Timestamps render as Python `datetime.isoformat()` (v1 wire parity).
-#[derive(sqlx::FromRow, Serialize)]
-struct UserItem {
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct UserItem {
     id: i32,
     email: String,
     full_name: String,
@@ -128,12 +128,13 @@ struct UserItem {
     is_active: bool,
     mfa_enabled: bool,
     #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
+    #[schema(value_type = Option<String>)]
     created_at: Option<chrono::NaiveDateTime>,
 }
 
 /// Detail shape (GET by id): list-item fields plus `updated_at`.
-#[derive(sqlx::FromRow, Serialize)]
-struct UserDetail {
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct UserDetail {
     id: i32,
     email: String,
     full_name: String,
@@ -141,15 +142,17 @@ struct UserDetail {
     is_active: bool,
     mfa_enabled: bool,
     #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
+    #[schema(value_type = Option<String>)]
     created_at: Option<chrono::NaiveDateTime>,
     #[serde(serialize_with = "skauswatch_streams::serde_py_isoformat_opt")]
+    #[schema(value_type = Option<String>)]
     updated_at: Option<chrono::NaiveDateTime>,
 }
 
 /// Summary shape used inside create/update responses:
 /// `{id,email,full_name,role,is_active}`.
-#[derive(sqlx::FromRow, Serialize)]
-struct UserSummary {
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct UserSummary {
     id: i32,
     email: String,
     full_name: String,
@@ -158,14 +161,36 @@ struct UserSummary {
 }
 
 /// Raw pagination query params, parsed leniently (see `int_param`).
-#[derive(Deserialize)]
-struct ListQuery {
+#[derive(Deserialize, utoipa::IntoParams)]
+pub(crate) struct ListQuery {
     page: Option<String>,
     per_page: Option<String>,
 }
 
+/// Documentation-only mirror of `list_users`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct UserListResponse {
+    items: Vec<UserItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
 /// GET /users — admin/maintainer only; paginated `{items,total,page,per_page,pages}`.
-async fn list_users(
+#[utoipa::path(
+    get,
+    path = "/api/v1/users",
+    tag = "users",
+    security(("bearer_jwt" = [])),
+    params(ListQuery),
+    responses(
+        (status = 200, description = "Paginated user list", body = UserListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_users(
     State(state): State<AppState>,
     user: CurrentUser,
     Query(q): Query<ListQuery>,
@@ -198,7 +223,20 @@ async fn list_users(
 }
 
 /// GET /users/{user_id} — self or admin/maintainer; 404 if missing.
-async fn get_user(
+#[utoipa::path(
+    get,
+    path = "/api/v1/users/{user_id}",
+    tag = "users",
+    security(("bearer_jwt" = [])),
+    params(("user_id" = i32, Path, description = "User id")),
+    responses(
+        (status = 200, description = "User detail", body = UserDetail),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Forbidden — not self and not admin/maintainer", body = ErrorResponse),
+        (status = 404, description = "User not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_user(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(user_id): Path<i32>,
@@ -230,8 +268,8 @@ fn default_true() -> bool {
 }
 
 /// POST /users body — mirrors v1 `UserCreateRequest` defaults.
-#[derive(Deserialize)]
-struct CreateRequest {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreateRequest {
     email: String,
     password: String,
     #[serde(default)]
@@ -242,9 +280,30 @@ struct CreateRequest {
     is_active: bool,
 }
 
+/// Documentation-only mirror of `create_user`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct UserCreateResponse {
+    message: String,
+    user: UserSummary,
+}
+
 /// POST /users — admin only; 403 free-tier cap, 409 duplicate email,
 /// 201 `{message,user}` on success.
-async fn create_user(
+#[utoipa::path(
+    post,
+    path = "/api/v1/users",
+    tag = "users",
+    security(("bearer_jwt" = [])),
+    request_body = CreateRequest,
+    responses(
+        (status = 201, description = "User created", body = UserCreateResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions, or free-tier user cap reached", body = ErrorResponse),
+        (status = 409, description = "Email already registered", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_user(
     State(state): State<AppState>,
     user: CurrentUser,
     ApiJson(body): ApiJson<CreateRequest>,
@@ -311,8 +370,8 @@ async fn create_user(
 }
 
 /// PUT /users/{user_id} body — mirrors v1 `UserUpdateRequest` (all optional).
-#[derive(Deserialize, Default)]
-struct UpdateRequest {
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+pub(crate) struct UpdateRequest {
     email: Option<String>,
     full_name: Option<String>,
     role: Option<String>,
@@ -358,9 +417,32 @@ fn allowed_updates(body: UpdateRequest, is_admin: bool) -> AllowedUpdates {
     }
 }
 
+/// Documentation-only mirror of `update_user`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct UserUpdateResponse {
+    message: String,
+    user: UserSummary,
+}
+
 /// PUT /users/{user_id} — self (full_name/password only) or admin (all
 /// fields); 409 email in use, 404 missing, 200 `{message,user}`.
-async fn update_user(
+#[utoipa::path(
+    put,
+    path = "/api/v1/users/{user_id}",
+    tag = "users",
+    security(("bearer_jwt" = [])),
+    params(("user_id" = i32, Path, description = "User id")),
+    request_body = UpdateRequest,
+    responses(
+        (status = 200, description = "User updated", body = UserUpdateResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Forbidden — not self and not admin", body = ErrorResponse),
+        (status = 404, description = "User not found", body = ErrorResponse),
+        (status = 409, description = "Email already in use", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_user(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(user_id): Path<i32>,
@@ -466,9 +548,29 @@ async fn update_user(
     })))
 }
 
+/// Documentation-only mirror of `delete_user`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct UserDeleteResponse {
+    message: String,
+}
+
 /// DELETE /users/{user_id} — admin only; 400 self-delete, 404 missing; also
 /// removes the user's refresh tokens (transactionally, unlike v1).
-async fn delete_user(
+#[utoipa::path(
+    delete,
+    path = "/api/v1/users/{user_id}",
+    tag = "users",
+    security(("bearer_jwt" = [])),
+    params(("user_id" = i32, Path, description = "User id")),
+    responses(
+        (status = 200, description = "User deleted", body = UserDeleteResponse),
+        (status = 400, description = "Cannot delete your own account", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "User not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn delete_user(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(user_id): Path<i32>,

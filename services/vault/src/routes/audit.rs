@@ -7,12 +7,12 @@ use axum::http::HeaderMap;
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{NaiveDateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorResponse, InsufficientScopeResponse};
 use crate::state::AppState;
 
 /// Router for `/api/v1/audit`.
@@ -84,8 +84,8 @@ struct AuditRow {
     created_at: NaiveDateTime,
 }
 
-#[derive(Deserialize)]
-struct AuditQuery {
+#[derive(Deserialize, utoipa::IntoParams)]
+pub(crate) struct AuditQuery {
     page: Option<i64>,
     per_page: Option<i64>,
     actor_id: Option<String>,
@@ -94,7 +94,41 @@ struct AuditQuery {
     action: Option<String>,
 }
 
-async fn get_audit_log(
+/// Documentation-only mirror of one entry in `get_audit_log`'s `entries`
+/// array.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct AuditEntryResponse {
+    id: String,
+    actor_id: String,
+    action: String,
+    resource_type: String,
+    resource_id: Option<String>,
+    ip_address: Option<String>,
+    created_at: String,
+}
+
+/// Documentation-only mirror of `get_audit_log`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct AuditLogResponse {
+    entries: Vec<AuditEntryResponse>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/audit/log",
+    tag = "audit",
+    security(("bearer_jwt" = [])),
+    params(AuditQuery),
+    responses(
+        (status = 200, description = "Paginated, filterable audit trail", body = AuditLogResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires audit:read)", body = InsufficientScopeResponse),
+    ),
+)]
+pub(crate) async fn get_audit_log(
     State(state): State<AppState>,
     user: CurrentUser,
     Query(q): Query<AuditQuery>,

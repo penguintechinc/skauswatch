@@ -37,6 +37,8 @@ enum Command {
     Serve,
     /// Probe the local /healthz endpoint and exit 0/1 (container HEALTHCHECK).
     Healthcheck,
+    /// Print the generated OpenAPI 3.x spec (YAML) to stdout and exit.
+    Openapi,
 }
 
 #[tokio::main]
@@ -44,7 +46,21 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command.unwrap_or(Command::Serve) {
         Command::Serve => serve().await,
         Command::Healthcheck => healthcheck().await,
+        Command::Openapi => print_openapi(),
     }
+}
+
+/// Prints the generated OpenAPI 3.x spec (YAML) for the `/api/v1/ssh/*`
+/// surface to stdout — see `docs/v2-port/openapi-pattern.md`. Regenerate
+/// and commit via `cargo run -p skauswatch-sshca -- openapi > \
+/// services/sshca/openapi/v1.yaml`.
+fn print_openapi() -> anyhow::Result<()> {
+    use utoipa::OpenApi;
+    let yaml = routes::openapi::ApiDoc::openapi()
+        .to_yaml()
+        .map_err(|e| anyhow::anyhow!("serialize openapi spec: {e}"))?;
+    print!("{yaml}");
+    Ok(())
 }
 
 async fn serve() -> anyhow::Result<()> {
@@ -56,6 +72,16 @@ async fn serve() -> anyhow::Result<()> {
     // is missing in production — see skauswatch_auth::load_jwt_secret and
     // finding #2 (this service previously had no authentication at all).
     let jwt_secret: Arc<str> = skauswatch_auth::load_jwt_secret()?.into();
+
+    // License entitlement + PostHog flag client (fail-safe) — gates the
+    // live /api/v1/ssh/openapi.json route only; certificate issuance
+    // itself is unlicensed.
+    let license_cfg = penguin_licensing::LicenseConfig::from_env("skauswatch")
+        .map_err(|e| anyhow::anyhow!("license config: {e}"))?
+        .with_bypass_domain("skauswatch.app");
+    let license = penguin_licensing::LicenseClient::new(license_cfg)
+        .map_err(|e| anyhow::anyhow!("license client: {e}"))?;
+    let _ = license.refresh().await;
 
     let cfg = SshCaConfig::from_env();
     tracing::info!(
@@ -73,6 +99,7 @@ async fn serve() -> anyhow::Result<()> {
         ca,
         store,
         jwt_secret,
+        license,
     };
 
     let readiness = skauswatch_telemetry::Readiness::new();

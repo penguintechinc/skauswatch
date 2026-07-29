@@ -7,6 +7,7 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
+use serde::Serialize;
 
 use crate::state::AppState;
 
@@ -16,6 +17,28 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health_check))
         .route("/version", get(version_info))
+}
+
+/// Documentation-only mirror of `health_check`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct HealthResponse {
+    /// `"healthy"` or `"degraded"`.
+    status: String,
+    /// Service version string.
+    version: String,
+    /// `"connected"` or `"not configured"`.
+    event_store: String,
+}
+
+/// Documentation-only mirror of `version_info`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct VersionResponse {
+    /// Always `"SkausWatch Monitor Service"`.
+    name: String,
+    /// Service version string.
+    version: String,
+    /// Always `"running"`.
+    status: String,
 }
 
 /// v1's `get_version()`: read the repo-root `.version` file, else fall back.
@@ -33,7 +56,15 @@ fn get_version() -> String {
 }
 
 /// GET /version — v1 `{name, version, status}`.
-async fn version_info() -> Json<serde_json::Value> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/version",
+    tag = "monitor",
+    responses(
+        (status = 200, description = "Service name, version, and status", body = VersionResponse),
+    ),
+)]
+pub(crate) async fn version_info() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "name": "SkausWatch Monitor Service",
         "version": get_version(),
@@ -69,7 +100,18 @@ fn health_body(store_configured: bool, version: &str) -> (StatusCode, serde_json
 }
 
 /// GET /health.
-async fn health_check(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+#[utoipa::path(
+    get,
+    path = "/api/v1/health",
+    tag = "monitor",
+    responses(
+        (status = 200, description = "Event store configured and reachable", body = HealthResponse),
+        (status = 503, description = "No event store backend configured", body = HealthResponse),
+    ),
+)]
+pub(crate) async fn health_check(
+    State(state): State<AppState>,
+) -> (StatusCode, Json<serde_json::Value>) {
     let (code, body) = health_body(state.event_store.is_some(), &get_version());
     (code, Json(body))
 }

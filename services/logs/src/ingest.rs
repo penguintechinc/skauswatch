@@ -92,7 +92,29 @@ fn internal_error() -> Response {
 /// and answers `202 {"ingested": <count>}`. Ported verbatim from v1
 /// `HTTPIngestHandler.handle_ingest` (the S3/Parquet mirror-write is a
 /// documented deferral — see the port contract).
-async fn handle_ingest(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+#[utoipa::path(
+    post,
+    path = "/ingest",
+    tag = "logs",
+    request_body(
+        content = serde_json::Value,
+        content_type = "application/json",
+        description = "A single JSON log record object, or a JSON array of \
+            up to 10,000 record objects. Each record is normalized to OCSF \
+            and bulk-indexed into the daily OpenSearch index."
+    ),
+    responses(
+        (status = 202, description = "Records accepted for indexing", body = crate::openapi::IngestAcceptedResponse),
+        (status = 400, description = "Request body is not valid JSON", body = String, content_type = "text/plain"),
+        (status = 413, description = "Batch exceeds the 10,000 record cap", body = String, content_type = "text/plain"),
+        (status = 500, description = "OCSF normalization failed or the OpenSearch bulk write errored", body = crate::openapi::IngestErrorResponse),
+    ),
+)]
+pub(crate) async fn handle_ingest(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let parsed = match jsonro_parse(&body) {
         Ok(v) => v,
         // v1: `await request.json()` failure → 400 plain-text "Invalid JSON".
@@ -149,7 +171,15 @@ async fn handle_ingest(State(state): State<AppState>, headers: HeaderMap, body: 
 }
 
 /// `GET /healthz` — v1 liveness body `{"status":"ok","service":"logs"}`.
-async fn handle_health() -> Response {
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    tag = "logs",
+    responses(
+        (status = 200, description = "Service liveness", body = crate::openapi::HealthResponse),
+    ),
+)]
+pub(crate) async fn handle_health() -> Response {
     ordered_json(
         StatusCode::OK,
         &JsonVal::Obj(vec![

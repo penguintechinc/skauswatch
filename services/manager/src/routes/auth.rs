@@ -14,7 +14,7 @@ use serde::Deserialize;
 use crate::auth::{
     self, CurrentUser, create_access_token, create_refresh_token, decode_refresh, token_hash,
 };
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
 
 /// Bcrypt hash of an arbitrary fixed string — never a real credential, used
@@ -48,10 +48,31 @@ fn valid_email(email: &str) -> bool {
     email.parse::<email_address::EmailAddress>().is_ok()
 }
 
-#[derive(Deserialize)]
-struct LoginRequest {
+/// POST /auth/login body.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct LoginRequest {
     email: String,
     password: String,
+}
+
+/// User summary embedded in [`LoginResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct LoginUser {
+    id: i32,
+    email: String,
+    full_name: String,
+    role: String,
+}
+
+/// Documentation-only mirror of `login`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct LoginResponse {
+    access_token: String,
+    refresh_token: String,
+    token_type: String,
+    /// Access-token lifetime in seconds.
+    expires_in: i64,
+    user: LoginUser,
 }
 
 #[derive(sqlx::FromRow)]
@@ -67,7 +88,21 @@ struct LoginRow {
     locked: bool,
 }
 
-async fn login(
+/// POST /auth/login — the sole unauthenticated endpoint in this service;
+/// see `PublicApiDoc` in `routes/openapi.rs` for the standalone public spec
+/// this path is exported into.
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/login",
+    tag = "auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Authenticated — access/refresh token pair", body = LoginResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Invalid credentials, deactivated, or locked account", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn login(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -203,9 +238,20 @@ async fn issue_token_pair(
     Ok((access, refresh))
 }
 
-#[derive(Deserialize)]
-struct RefreshRequest {
+/// POST /auth/refresh body.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct RefreshRequest {
     refresh_token: String,
+}
+
+/// Documentation-only mirror of `refresh`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct RefreshResponse {
+    access_token: String,
+    refresh_token: String,
+    token_type: String,
+    /// Access-token lifetime in seconds.
+    expires_in: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -214,7 +260,19 @@ struct RefreshRow {
     user_id: i32,
 }
 
-async fn refresh(
+/// POST /auth/refresh — unauthenticated (the refresh token in the body is
+/// the credential; no bearer header is required or checked).
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/refresh",
+    tag = "auth",
+    request_body = RefreshRequest,
+    responses(
+        (status = 200, description = "Rotated access/refresh token pair", body = RefreshResponse),
+        (status = 401, description = "Invalid, revoked, or expired refresh token", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn refresh(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<RefreshRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -269,7 +327,25 @@ async fn refresh(
     })))
 }
 
-async fn logout(
+/// Documentation-only mirror of `logout`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct LogoutResponse {
+    message: String,
+    tokens_revoked: u64,
+}
+
+/// POST /auth/logout — revokes every refresh token belonging to the caller.
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/logout",
+    tag = "auth",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "All refresh tokens revoked", body = LogoutResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn logout(
     State(state): State<AppState>,
     user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -298,7 +374,30 @@ fn created_at_isoformat(raw: Option<&str>) -> Option<String> {
     }
 }
 
-async fn me(user: CurrentUser) -> Json<serde_json::Value> {
+/// Documentation-only mirror of `me`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct MeResponse {
+    id: i32,
+    email: String,
+    full_name: Option<String>,
+    role: String,
+    is_active: bool,
+    mfa_enabled: bool,
+    created_at: Option<String>,
+}
+
+/// GET /auth/me — the caller's own profile (mirrors `g.current_user`).
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/me",
+    tag = "auth",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Current authenticated user", body = MeResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn me(user: CurrentUser) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "id": user.id,
         "email": user.email,
@@ -310,15 +409,47 @@ async fn me(user: CurrentUser) -> Json<serde_json::Value> {
     }))
 }
 
-#[derive(Deserialize)]
-struct RegisterRequest {
+/// POST /auth/register body.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct RegisterRequest {
     email: String,
     password: String,
     #[serde(default)]
     full_name: String,
 }
 
-async fn register(
+/// User summary embedded in [`RegisterResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct RegisterUser {
+    id: i32,
+    email: String,
+    full_name: String,
+    role: String,
+}
+
+/// Documentation-only mirror of `register`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct RegisterResponse {
+    message: String,
+    user: RegisterUser,
+}
+
+/// POST /auth/register — unauthenticated self-service signup; always
+/// creates a `viewer`-role account (see `PublicApiDoc` note on `login`
+/// above — `register` itself is NOT part of the public doc, only `login`
+/// is, per `docs/v2-port/openapi-pattern.md` §6).
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/register",
+    tag = "auth",
+    request_body = RegisterRequest,
+    responses(
+        (status = 201, description = "Account created", body = RegisterResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 409, description = "Email already registered", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn register(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<RegisterRequest>,
 ) -> Result<(axum::http::StatusCode, Json<serde_json::Value>), ApiError> {

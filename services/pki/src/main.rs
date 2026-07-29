@@ -21,6 +21,9 @@ enum Command {
     Serve,
     /// Probe the local /healthz endpoint and exit 0/1 (container HEALTHCHECK).
     Healthcheck,
+    /// Print the generated OpenAPI 3.x spec (YAML) to stdout and exit.
+    /// Regenerates `openapi/v1.yaml`: `skauswatch-pki openapi > openapi/v1.yaml`.
+    Openapi,
 }
 
 #[tokio::main]
@@ -28,7 +31,20 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command.unwrap_or(Command::Serve) {
         Command::Serve => serve().await,
         Command::Healthcheck => healthcheck().await,
+        Command::Openapi => print_openapi(),
     }
+}
+
+/// Emits the aggregated OpenAPI document as YAML — the source of truth for
+/// `openapi/v1.yaml` (see `routes::openapi::ApiDoc` and
+/// `docs/v2-port/openapi-pattern.md`). Generated, never hand-edited.
+fn print_openapi() -> anyhow::Result<()> {
+    use utoipa::OpenApi;
+    let yaml = routes::openapi::ApiDoc::openapi()
+        .to_yaml()
+        .map_err(|e| anyhow::anyhow!("serialize openapi spec: {e}"))?;
+    print!("{yaml}");
+    Ok(())
 }
 
 /// Default REST port — parity with the v1 PKI service (env `API_PORT`).
@@ -48,6 +64,10 @@ async fn serve() -> anyhow::Result<()> {
 
     let readiness = skauswatch_telemetry::Readiness::new();
     let state = state::AppStateInner::from_env().await?;
+
+    // License/flag refresh loop — fail-safe by design; startup never blocks
+    // on the license server.
+    let _license_bg = state.license.spawn_refresh();
 
     let app = routes::router(state.clone())
         .merge(health::router(state.clone(), readiness.clone()))

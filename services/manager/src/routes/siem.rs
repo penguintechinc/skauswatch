@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse};
 use crate::state::AppState;
 
 /// Free-tier user cap (v1 `SIEMConfig.free_tier_user_cap` — default 5, never
@@ -106,9 +106,26 @@ async fn probe_logs(base_url: &str) -> bool {
     matches!(resp, Ok(r) if r.status().as_u16() == 200)
 }
 
+/// Documentation-only mirror of `health_json`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct SiemHealthResponse {
+    /// `"ok"` or `"unavailable"`.
+    logs: String,
+    /// `"ok"` or `"degraded"`.
+    status: String,
+}
+
 /// GET /siem/health — unauthenticated logs liveness probe. Always
 /// 200; the body carries ok/degraded, matching the v1 route.
-async fn siem_health() -> Json<serde_json::Value> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/siem/health",
+    tag = "siem",
+    responses(
+        (status = 200, description = "Log-pipeline liveness", body = SiemHealthResponse),
+    ),
+)]
+pub(crate) async fn siem_health() -> Json<serde_json::Value> {
     let settings = SiemSettings::from_env();
     let receiver_ok = probe_logs(&settings.logs_url).await;
     Json(health_json(receiver_ok))
@@ -117,7 +134,19 @@ async fn siem_health() -> Json<serde_json::Value> {
 /// POST /siem/ingest — authenticated proxy to `{LOGS_URL}/ingest`
 /// with the v1 10s timeout. The upstream status code and JSON body pass
 /// through verbatim; transport/parse failures are 500 (v1 uncaught httpx).
-async fn proxy_ingest(
+#[utoipa::path(
+    post,
+    path = "/api/v1/siem/ingest",
+    tag = "siem",
+    security(("bearer_jwt" = [])),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Proxied log-receiver response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Log receiver unreachable or errored", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn proxy_ingest(
     _user: CurrentUser,
     ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -245,10 +274,39 @@ fn shape_search_response(resp: &serde_json::Value) -> Result<serde_json::Value, 
     Ok(serde_json::json!({"total": total, "logs": logs}))
 }
 
+/// Documentation-only mirror of `shape_search_response`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct SiemSearchResponse {
+    /// Total matching log count.
+    total: i64,
+    /// Matching `_source` documents.
+    logs: Vec<serde_json::Value>,
+}
+
 /// GET /siem/search — authenticated OpenSearch log search over
 /// `skauswatch-logs-*`. Query params: q, from_date, to_date, class_name,
 /// severity, page, page_size (v1 caps page_size at 500).
-async fn search_logs(
+#[utoipa::path(
+    get,
+    path = "/api/v1/siem/search",
+    tag = "siem",
+    security(("bearer_jwt" = [])),
+    params(
+        ("q" = Option<String>, Query, description = "Full-text match against the log message"),
+        ("class_name" = Option<String>, Query, description = "Exact class_name filter"),
+        ("severity" = Option<String>, Query, description = "Exact severity_id filter"),
+        ("from_date" = Option<String>, Query, description = "Inclusive lower bound on time"),
+        ("to_date" = Option<String>, Query, description = "Inclusive upper bound on time"),
+        ("page" = Option<i64>, Query, description = "1-based page number (default 1)"),
+        ("page_size" = Option<i64>, Query, description = "Page size, capped at 500 (default 50)"),
+    ),
+    responses(
+        (status = 200, description = "Matching log entries", body = SiemSearchResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "OpenSearch unreachable, errored, or bad query params", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn search_logs(
     _user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -292,9 +350,30 @@ fn shape_stats_response(resp: &serde_json::Value) -> Result<serde_json::Value, A
     }))
 }
 
+/// Documentation-only mirror of `shape_stats_response`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct SiemStatsResponse {
+    total_indexed: i64,
+    /// `{key, doc_count}` terms buckets, keyed by `class_name`.
+    by_class: Vec<serde_json::Value>,
+    /// `{key, doc_count}` terms buckets, keyed by `severity_id`.
+    by_severity: Vec<serde_json::Value>,
+}
+
 /// GET /siem/stats — authenticated ingest statistics: total indexed events
 /// plus per-class and per-severity terms buckets.
-async fn siem_stats(_user: CurrentUser) -> Result<Json<serde_json::Value>, ApiError> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/siem/stats",
+    tag = "siem",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Ingest statistics", body = SiemStatsResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "OpenSearch unreachable or errored", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn siem_stats(_user: CurrentUser) -> Result<Json<serde_json::Value>, ApiError> {
     let settings = SiemSettings::from_env();
     let resp = os_search(&settings.opensearch_url, &stats_agg_body()).await?;
     Ok(Json(shape_stats_response(&resp)?))
@@ -311,9 +390,29 @@ fn config_json(settings: &SiemSettings) -> serde_json::Value {
     })
 }
 
+/// Documentation-only mirror of `config_json`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct SiemConfigResponse {
+    enabled: bool,
+    retention_days: i64,
+    opensearch_url: String,
+    logs_url: String,
+    free_tier_user_cap: i64,
+}
+
 /// GET /siem/config — authenticated view of the current SIEM configuration
 /// (any role, matching v1's bare `@auth_required`).
-async fn get_siem_config(_user: CurrentUser) -> Json<serde_json::Value> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/siem/config",
+    tag = "siem",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Current SIEM configuration", body = SiemConfigResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_siem_config(_user: CurrentUser) -> Json<serde_json::Value> {
     Json(config_json(&SiemSettings::from_env()))
 }
 
@@ -341,10 +440,32 @@ fn check_retention(body: &serde_json::Map<String, serde_json::Value>) -> Retenti
     }
 }
 
+/// Documentation-only mirror of `update_siem_config`'s success body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct SiemConfigUpdateResponse {
+    message: String,
+    /// Echoes the validated input; `null` when `retention_days` was absent.
+    retention_days: Option<i64>,
+}
+
 /// PUT /siem/config — admin-only retention update. Contract defect #5:
 /// v1 validates but never persists — replicated as a validate-only no-op.
 /// Invalid values return the bare v1 400 body, not the shared envelope.
-async fn update_siem_config(
+#[utoipa::path(
+    put,
+    path = "/api/v1/siem/config",
+    tag = "siem",
+    security(("bearer_jwt" = [])),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Validated (not persisted — see contract defect #5)", body = SiemConfigUpdateResponse),
+        (status = 400, description = "retention_days must be an integer 1-400", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 500, description = "Non-object JSON body", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_siem_config(
     user: CurrentUser,
     ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<Response, ApiError> {

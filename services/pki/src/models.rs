@@ -37,7 +37,7 @@ fn default_port() -> i64 {
 }
 
 /// X.509 certificate issuance request (v1 `X509CertificateRequest`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct X509CertificateRequest {
     /// Subject DN string.
     pub subject: String,
@@ -174,7 +174,7 @@ fn valid_dns(d: &str) -> bool {
 }
 
 /// SSH certificate issuance request (v1 `SSHCertificateRequest`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct SshCertificateRequest {
     /// Subject SSH public key line.
     pub public_key: String,
@@ -248,7 +248,7 @@ impl SshCertificateRequest {
 }
 
 /// Certificate revocation request (v1 `RevokeRequest`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct RevokeRequest {
     /// Revocation reason name (default `unspecified`).
     #[serde(default = "default_reason")]
@@ -263,7 +263,7 @@ fn default_reason() -> String {
 }
 
 /// SSH client config generation request (v1 `SSHConfigRequest`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct SshConfigRequest {
     /// Target hostname.
     pub hostname: String,
@@ -279,7 +279,7 @@ pub struct SshConfigRequest {
 }
 
 /// authorized_keys generation request (v1 `AuthorizedKeysRequest`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct AuthorizedKeysRequest {
     /// Principals to authorize.
     pub principals: Vec<String>,
