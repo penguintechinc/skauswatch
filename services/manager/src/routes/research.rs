@@ -27,7 +27,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
 
 /// v1 `ResearchIndicatorType` enum values, in declaration order.
@@ -284,8 +284,8 @@ fn dns_empty() -> Value {
 
 /// POST /research/lookup body — every field optional so a missing one maps to
 /// the validation envelope rather than an extractor rejection.
-#[derive(Deserialize)]
-struct LookupBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct LookupBody {
     query: Option<String>,
     indicator_type: Option<String>,
     include_whois: Option<bool>,
@@ -299,8 +299,23 @@ struct LookupBody {
 /// Composite research lookup. Validates the request, classifies the indicator
 /// when omitted, then walks v1's control flow — including the shodan/maltego
 /// "not enabled" 503 short-circuits — emitting empty per-source envelopes since
-/// no external source is queried in this port.
-async fn lookup(
+/// no external source is queried in this port. The response shape varies with
+/// which `include_*` sources were requested, so it is documented generically
+/// (`serde_json::Value`) rather than a fixed schema.
+#[utoipa::path(
+    post,
+    path = "/api/v1/research/lookup",
+    tag = "research",
+    security(("bearer_jwt" = [])),
+    request_body = LookupBody,
+    responses(
+        (status = 200, description = "Composite lookup result (shape varies by requested sources)", body = serde_json::Value),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Shodan or Maltego requested but not enabled", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn lookup(
     _user: CurrentUser,
     ApiJson(body): ApiJson<LookupBody>,
 ) -> Result<Response, ApiError> {
@@ -376,15 +391,27 @@ async fn lookup(
 }
 
 /// POST /research/whois + /research/asn body — `query` and `indicator_type`.
-#[derive(Deserialize)]
-struct QueryTypeBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct QueryTypeBody {
     query: Option<String>,
     indicator_type: Option<String>,
 }
 
 /// WHOIS-only lookup. `indicator_type` is required (v1 `WhoisLookupRequest`);
 /// returns the empty WHOIS envelope since no external lookup is performed.
-async fn whois_lookup(
+#[utoipa::path(
+    post,
+    path = "/api/v1/research/whois",
+    tag = "research",
+    security(("bearer_jwt" = [])),
+    request_body = QueryTypeBody,
+    responses(
+        (status = 200, description = "WHOIS envelope — `{success, data, error}`", body = serde_json::Value),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn whois_lookup(
     _user: CurrentUser,
     ApiJson(body): ApiJson<QueryTypeBody>,
 ) -> Result<Json<Value>, ApiError> {
@@ -395,15 +422,27 @@ async fn whois_lookup(
 
 /// POST /research/dns body — `query` plus optional `indicator_type`
 /// (defaults to domain in v1).
-#[derive(Deserialize)]
-struct DnsBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct DnsBody {
     query: Option<String>,
     indicator_type: Option<String>,
 }
 
 /// DNS-only lookup. Returns v1's `DnsResult.to_dict()` shape with empty records
 /// since no resolver is queried in this port.
-async fn dns_lookup(
+#[utoipa::path(
+    post,
+    path = "/api/v1/research/dns",
+    tag = "research",
+    security(("bearer_jwt" = [])),
+    request_body = DnsBody,
+    responses(
+        (status = 200, description = "DNS record envelope (A/AAAA/MX/NS/TXT/CNAME/SOA)", body = serde_json::Value),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn dns_lookup(
     _user: CurrentUser,
     ApiJson(body): ApiJson<DnsBody>,
 ) -> Result<Json<Value>, ApiError> {
@@ -414,7 +453,19 @@ async fn dns_lookup(
 
 /// ASN-only lookup. `indicator_type` is required (v1 `AsnLookupRequest`);
 /// returns v1's no-data body since Team Cymru is not queried in this port.
-async fn asn_lookup(
+#[utoipa::path(
+    post,
+    path = "/api/v1/research/asn",
+    tag = "research",
+    security(("bearer_jwt" = [])),
+    request_body = QueryTypeBody,
+    responses(
+        (status = 200, description = "ASN lookup result — always `{error: \"No ASN data found\"}` in this port", body = serde_json::Value),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn asn_lookup(
     _user: CurrentUser,
     ApiJson(body): ApiJson<QueryTypeBody>,
 ) -> Result<Json<Value>, ApiError> {
@@ -453,7 +504,20 @@ fn bad_query(msg: &str) -> Response {
 /// Shodan-only lookup. The "not enabled" 503 gate is checked before the body,
 /// exactly as v1 does; when enabled it returns v1's no-data body (no live
 /// Shodan call in this port).
-async fn shodan_lookup(_user: CurrentUser, body: axum::body::Bytes) -> Response {
+#[utoipa::path(
+    post,
+    path = "/api/v1/research/shodan",
+    tag = "research",
+    security(("bearer_jwt" = [])),
+    request_body(content = serde_json::Value, description = "`{query: string}`"),
+    responses(
+        (status = 200, description = "Shodan lookup result (no live call performed in this port)", body = serde_json::Value),
+        (status = 400, description = "Invalid request format, or missing query field", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Shodan integration not enabled", body = serde_json::Value),
+    ),
+)]
+pub(crate) async fn shodan_lookup(_user: CurrentUser, body: axum::body::Bytes) -> Response {
     let cfg = ResearchConfig::from_env();
     if !cfg.shodan_effective() {
         return (
@@ -475,7 +539,20 @@ async fn shodan_lookup(_user: CurrentUser, body: axum::body::Bytes) -> Response 
 /// v1; when enabled it returns v1's no-data body (no live transform in this
 /// port). `indicator_type` defaults to "domain" like v1 but does not change the
 /// empty response.
-async fn maltego_lookup(_user: CurrentUser, body: axum::body::Bytes) -> Response {
+#[utoipa::path(
+    post,
+    path = "/api/v1/research/maltego",
+    tag = "research",
+    security(("bearer_jwt" = [])),
+    request_body(content = serde_json::Value, description = "`{query: string, indicator_type?: string}`"),
+    responses(
+        (status = 200, description = "Maltego transform result (no live call performed in this port)", body = serde_json::Value),
+        (status = 400, description = "Invalid request format, or missing query field", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Maltego integration not enabled", body = serde_json::Value),
+    ),
+)]
+pub(crate) async fn maltego_lookup(_user: CurrentUser, body: axum::body::Bytes) -> Response {
     let cfg = ResearchConfig::from_env();
     if !cfg.maltego_effective() {
         return (
@@ -493,10 +570,37 @@ async fn maltego_lookup(_user: CurrentUser, body: axum::body::Bytes) -> Response
     }
 }
 
+/// Documentation-only mirror of `config_json`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ResearchConfigResponse {
+    research_enabled: bool,
+    whois_enabled: bool,
+    dns_enabled: bool,
+    asn_enabled: bool,
+    shodan_enabled: bool,
+    maltego_enabled: bool,
+    default_timeout: i64,
+    whois_timeout: i64,
+    dns_timeout: i64,
+    asn_timeout: i64,
+    shodan_timeout: i64,
+    maltego_timeout: i64,
+}
+
 /// GET /research/config — research source status and timeouts. Config is read
 /// from the environment at request time (same pattern as alerts.rs `AI_ENABLED`
 /// and threat_intel.rs feed keys).
-async fn get_config(_user: CurrentUser) -> Result<Json<Value>, ApiError> {
+#[utoipa::path(
+    get,
+    path = "/api/v1/research/config",
+    tag = "research",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Research source status and timeouts", body = ResearchConfigResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_config(_user: CurrentUser) -> Result<Json<Value>, ApiError> {
     let cfg = ResearchConfig::from_env();
     Ok(Json(config_json(&cfg)))
 }

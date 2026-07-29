@@ -12,7 +12,8 @@
 //! see that module's docs), the dashboard metrics stub
 //! (`src/routes/dashboard.rs` — same story), health/version
 //! (`src/routes/health.rs`), house-standard bearer-JWT + tenant-claim auth
-//! (`src/auth.rs`), and the data model layer (`src/models.rs`).
+//! (`src/auth.rs`), the data model layer (`src/models.rs`), and OpenAPI 3.x
+//! publication (`src/routes/openapi.rs`, `openapi/v1.yaml`).
 //!
 //! ## Tracked follow-ups (deferred, not stubbed-and-claimed-done)
 //!
@@ -46,10 +47,10 @@
 //!    `analysis_engine.py`, `prompt_templates.py`, `response_processor.py`,
 //!    the OpenAI/Anthropic/Ollama clients — ~3,957 lines) plus the
 //!    `/ai/*` routes (~9 routes).
-//! 4. OpenAPI publication (`openapi/v1.yaml` + `utoipa`) — not yet adopted
-//!    by any Rust service in this repo (`services/manager` doesn't have one
-//!    either); left as a repo-wide follow-up rather than introduced
-//!    inconsistently for just this service.
+//!
+//! OpenAPI publication (`openapi/v1.yaml` via `utoipa`, see
+//! `src/routes/openapi.rs`) *is* in place for this service, following
+//! `docs/v2-port/openapi-pattern.md` (established on `codescan-backend`).
 //!
 //! `docs/APP_STANDARDS.md`/an issue tracker entry should record these
 //! groups; see the PR description for this port for the full breakdown.
@@ -82,6 +83,8 @@ enum Command {
     Serve,
     /// Probe the local /health endpoint and exit 0/1 (container HEALTHCHECK).
     Healthcheck,
+    /// Print the generated OpenAPI 3.x spec (YAML) to stdout and exit.
+    Openapi,
 }
 
 #[tokio::main]
@@ -89,7 +92,20 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command.unwrap_or(Command::Serve) {
         Command::Serve => serve().await,
         Command::Healthcheck => healthcheck().await,
+        Command::Openapi => print_openapi(),
     }
+}
+
+/// Regenerates `openapi/v1.yaml`: `skauswatch-monitor openapi >
+/// openapi/v1.yaml` (see `routes::openapi::ApiDoc` and
+/// `docs/v2-port/openapi-pattern.md`). Generated, never hand-edited.
+fn print_openapi() -> anyhow::Result<()> {
+    use utoipa::OpenApi;
+    let yaml = routes::openapi::ApiDoc::openapi()
+        .to_yaml()
+        .map_err(|e| anyhow::anyhow!("serialize openapi spec: {e}"))?;
+    print!("{yaml}");
+    Ok(())
 }
 
 async fn serve() -> anyhow::Result<()> {
@@ -104,7 +120,10 @@ async fn serve() -> anyhow::Result<()> {
     let api = routes::router();
     let app: Router<()> = Router::new()
         .merge(api.clone())
-        .nest("/api/v1", api)
+        // The openapi doc route is nested only, not double-mounted flat —
+        // `docs/v2-port/openapi-pattern.md` documents the canonical
+        // `/api/v1/*` paths only.
+        .nest("/api/v1", api.merge(routes::openapi::router()))
         .with_state(state.clone())
         .merge(skauswatch_telemetry::health_router(readiness.clone()));
 

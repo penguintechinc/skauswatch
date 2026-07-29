@@ -12,9 +12,25 @@ use axum::response::Response;
 use crate::error::ApiError;
 use crate::state::{AppState, VAULT_FLAG};
 
-/// Paths served regardless of license state — v1 `BYPASS_PATHS`
-/// (`/healthz`, `/readyz`, `/api/v1/admin/license`).
-const BYPASS_PATHS: &[&str] = &["/healthz", "/readyz", "/api/v1/admin/license"];
+/// Paths served regardless of `VAULT_FLAG` state. `/healthz`, `/readyz`,
+/// and `/api/v1/admin/license` are v1 `BYPASS_PATHS` parity.
+/// `/api/v1/openapi.json` is a v2-only addition: it has its own kill switch
+/// (`routes::openapi::OPENAPI_FLAG`, checked in-handler), not `VAULT_FLAG` —
+/// serving API documentation is a distinct concern from the Vault feature
+/// itself, matching how `services/codescan-backend`'s own `/openapi.json`
+/// (the reference implementation, see `docs/v2-port/openapi-pattern.md`) is
+/// independent of that service's feature flag. It's *also* required here
+/// because `penguin_licensing::LicenseClient::flag_enabled` is all-or-
+/// nothing under dev-bypass (every flag reads `true` together) — there is
+/// no test double that has `VAULT_FLAG` enabled and `OPENAPI_FLAG` disabled
+/// at the same time, so an openapi route still behind this gate could never
+/// exercise its own 404-when-disabled path in tests.
+const BYPASS_PATHS: &[&str] = &[
+    "/healthz",
+    "/readyz",
+    "/api/v1/admin/license",
+    "/api/v1/openapi.json",
+];
 
 /// Axum middleware: 402 `Vault license required` unless
 /// `skauswatch.vault` evaluates enabled for this deployment.

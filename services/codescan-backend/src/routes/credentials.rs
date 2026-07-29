@@ -24,7 +24,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AdminOnly;
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
 
 const VALID_PLATFORMS: [&str; 2] = ["github", "gitlab"];
@@ -53,8 +53,8 @@ fn validation(field: &str, msg: &str) -> ApiError {
 }
 
 /// Response shape — deliberately excludes `encrypted_token`.
-#[derive(sqlx::FromRow, Serialize)]
-struct CredentialSummary {
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct CredentialSummary {
     id: i64,
     user_id: i64,
     name: Option<String>,
@@ -72,13 +72,32 @@ struct CredentialSummary {
 const SUMMARY_COLUMNS: &str = "id, user_id, name, platform, credential_type, token_expires_at, \
      is_active, created_at, updated_at";
 
-#[derive(Deserialize)]
-struct ListQuery {
+#[derive(Deserialize, utoipa::IntoParams)]
+pub(crate) struct ListQuery {
     platform: Option<String>,
 }
 
+/// Documentation-only mirror of `list_credentials`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct CredentialListResponse {
+    data: Vec<CredentialSummary>,
+    total: usize,
+}
+
 /// GET /credentials — admin only; never includes token material.
-async fn list_credentials(
+#[utoipa::path(
+    get,
+    path = "/api/v1/credentials",
+    tag = "credentials",
+    security(("bearer_jwt" = [])),
+    params(ListQuery),
+    responses(
+        (status = 200, description = "Git credential summaries (no token material)", body = CredentialListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_credentials(
     State(state): State<AppState>,
     _admin: AdminOnly,
     Query(q): Query<ListQuery>,
@@ -101,8 +120,8 @@ async fn list_credentials(
         .into_response())
 }
 
-#[derive(Deserialize)]
-struct CreateCredentialRequest {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreateCredentialRequest {
     platform: String,
     #[serde(default)]
     name: Option<String>,
@@ -136,9 +155,30 @@ fn validate_create(body: &CreateCredentialRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Documentation-only mirror of `create_credential`'s `serde_json::json!`
+/// body — never includes token material.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct CredentialCreateResponse {
+    message: String,
+    credential: CredentialSummary,
+}
+
 /// POST /credentials — admin only. `token` is encrypted before storage and
 /// never echoed back.
-async fn create_credential(
+#[utoipa::path(
+    post,
+    path = "/api/v1/credentials",
+    tag = "credentials",
+    security(("bearer_jwt" = [])),
+    request_body = CreateCredentialRequest,
+    responses(
+        (status = 201, description = "Credential created", body = CredentialCreateResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_credential(
     State(state): State<AppState>,
     AdminOnly(user): AdminOnly,
     ApiJson(body): ApiJson<CreateCredentialRequest>,
@@ -176,7 +216,20 @@ async fn create_credential(
 }
 
 /// GET /credentials/{id} — admin only.
-async fn get_credential(
+#[utoipa::path(
+    get,
+    path = "/api/v1/credentials/{credential_id}",
+    tag = "credentials",
+    security(("bearer_jwt" = [])),
+    params(("credential_id" = i64, Path, description = "Credential id")),
+    responses(
+        (status = 200, description = "Credential summary (no token material)", body = CredentialSummary),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Credential not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_credential(
     State(state): State<AppState>,
     _admin: AdminOnly,
     Path(credential_id): Path<i64>,
@@ -190,17 +243,40 @@ async fn get_credential(
     Ok((StatusCode::OK, Json(row)).into_response())
 }
 
-#[derive(Deserialize, Default)]
-struct UpdateCredentialRequest {
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+pub(crate) struct UpdateCredentialRequest {
     name: Option<String>,
     token: Option<String>,
     is_active: Option<bool>,
     token_expires_at: Option<chrono::NaiveDateTime>,
 }
 
+/// Documentation-only mirror of `update_credential`'s `serde_json::json!`
+/// body — never includes token material.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct CredentialUpdateResponse {
+    message: String,
+    credential: CredentialSummary,
+}
+
 /// PATCH /credentials/{id} — admin only. A `token` field re-encrypts and
 /// replaces the stored value; the plaintext is never echoed back.
-async fn update_credential(
+#[utoipa::path(
+    patch,
+    path = "/api/v1/credentials/{credential_id}",
+    tag = "credentials",
+    security(("bearer_jwt" = [])),
+    params(("credential_id" = i64, Path, description = "Credential id")),
+    request_body = UpdateCredentialRequest,
+    responses(
+        (status = 200, description = "Credential updated", body = CredentialUpdateResponse),
+        (status = 400, description = "Validation error (e.g. blank token)", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Credential not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_credential(
     State(state): State<AppState>,
     _admin: AdminOnly,
     Path(credential_id): Path<i64>,
@@ -267,8 +343,28 @@ async fn update_credential(
         .into_response())
 }
 
+/// Documentation-only mirror of `delete_credential`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct CredentialDeleteResponse {
+    message: String,
+    deleted: bool,
+}
+
 /// DELETE /credentials/{id} — admin only.
-async fn delete_credential(
+#[utoipa::path(
+    delete,
+    path = "/api/v1/credentials/{credential_id}",
+    tag = "credentials",
+    security(("bearer_jwt" = [])),
+    params(("credential_id" = i64, Path, description = "Credential id")),
+    responses(
+        (status = 200, description = "Credential deleted", body = CredentialDeleteResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Credential not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn delete_credential(
     State(state): State<AppState>,
     _admin: AdminOnly,
     Path(credential_id): Path<i64>,
@@ -290,15 +386,37 @@ async fn delete_credential(
         .into_response())
 }
 
-#[derive(Deserialize)]
-struct TestCredentialRequest {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct TestCredentialRequest {
     credential_type: String,
     credential: String,
 }
 
+/// Documentation-only mirror of `test_credential`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct TestCredentialResponse {
+    valid: bool,
+    message: String,
+    #[serde(rename = "type")]
+    credential_type: String,
+}
+
 /// POST /credentials/test — admin only; validates *format* only (no
 /// connectivity check, no persistence), matching v1.
-async fn test_credential(
+#[utoipa::path(
+    post,
+    path = "/api/v1/credentials/test",
+    tag = "credentials",
+    security(("bearer_jwt" = [])),
+    request_body = TestCredentialRequest,
+    responses(
+        (status = 200, description = "Credential format looks valid", body = TestCredentialResponse),
+        (status = 400, description = "Credential format is invalid, or validation error", body = TestCredentialResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn test_credential(
     _admin: AdminOnly,
     ApiJson(body): ApiJson<TestCredentialRequest>,
 ) -> Result<Response, ApiError> {

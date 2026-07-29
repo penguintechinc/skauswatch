@@ -12,6 +12,29 @@ use axum::extract::FromRequest;
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use serde::Serialize;
+
+/// Documentation-only mirror of `ApiError`'s bare `{"error": msg}` wire shape
+/// (`BadRequest`/`NotFound` both use it) — `ApiError` builds its body with
+/// `serde_json::json!` rather than a typed struct, so this type exists
+/// solely to give `utoipa` something to reference in `#[utoipa::path]`
+/// `responses(...)` clauses. See `docs/v2-port/openapi-pattern.md`.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct ErrorResponse {
+    /// Human-readable error message.
+    pub error: String,
+}
+
+/// Documentation-only mirror of `ApiError::Validation`'s wire shape — a
+/// bare error message plus a list of per-field validation failure objects
+/// (`{loc, msg, type}`, matching `ApiJson`'s rejection shape below).
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct ValidationErrorResponse {
+    /// Always `"Validation error"`.
+    pub error: String,
+    /// Per-field failure details, each `{loc: [...], msg: ..., type: ...}`.
+    pub details: Vec<serde_json::Value>,
+}
 
 /// API-level errors carrying the house wire shapes.
 #[derive(Debug)]

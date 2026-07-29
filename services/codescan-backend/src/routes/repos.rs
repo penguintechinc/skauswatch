@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{AdminOnly, CurrentUser};
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::routes::license_denied;
 use crate::state::AppState;
 
@@ -41,8 +41,8 @@ fn validation(field: &str, msg: &str) -> ApiError {
 }
 
 /// Repo-config row shape returned by list/get/create/update.
-#[derive(sqlx::FromRow, Serialize)]
-struct RepoConfig {
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct RepoConfig {
     id: i64,
     tenant_id: Option<i64>,
     team_id: Option<i64>,
@@ -73,8 +73,26 @@ const REPO_CONFIG_COLUMNS: &str = "id, tenant_id, team_id, owner_id, provider, r
      default_ai_provider, ignored_paths, custom_rules, display_name, description, is_active, \
      credential_id, created_at, updated_at";
 
+/// Documentation-only mirror of `list_repos`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct RepoListResponse {
+    data: Vec<RepoConfig>,
+    total: usize,
+}
+
 /// GET /codescan/repos — list repository configurations.
-async fn list_repos(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/repos",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Repository configurations", body = RepoListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_repos(
     State(state): State<AppState>,
     _user: CurrentUser,
 ) -> Result<Response, ApiError> {
@@ -96,8 +114,8 @@ async fn list_repos(
 }
 
 /// POST /codescan/repos body.
-#[derive(Deserialize)]
-struct CreateRepoRequest {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreateRepoRequest {
     provider: String,
     repo_url: String,
     repo_name: String,
@@ -145,8 +163,29 @@ fn validate_create(body: &CreateRepoRequest) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Documentation-only mirror of `create_repo`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct RepoCreateResponse {
+    message: String,
+    config: RepoConfig,
+}
+
 /// POST /codescan/repos — admin only.
-async fn create_repo(
+#[utoipa::path(
+    post,
+    path = "/api/v1/codescan/repos",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    request_body = CreateRepoRequest,
+    responses(
+        (status = 201, description = "Repository configuration created", body = RepoCreateResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed, or insufficient permissions", body = ErrorResponse),
+        (status = 409, description = "Repository already configured", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_repo(
     State(state): State<AppState>,
     AdminOnly(user): AdminOnly,
     ApiJson(body): ApiJson<CreateRepoRequest>,
@@ -209,7 +248,20 @@ async fn create_repo(
 }
 
 /// GET /codescan/repos/{repo_id}.
-async fn get_repo(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/repos/{repo_id}",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(("repo_id" = i64, Path, description = "Repository configuration id")),
+    responses(
+        (status = 200, description = "Repository configuration", body = RepoConfig),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 404, description = "Configuration not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_repo(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(repo_id): Path<i64>,
@@ -227,8 +279,8 @@ async fn get_repo(
 }
 
 /// PUT /codescan/repos/{repo_id} body — all fields optional (partial update).
-#[derive(Deserialize, Default)]
-struct UpdateRepoRequest {
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+pub(crate) struct UpdateRepoRequest {
     enabled: Option<bool>,
     auto_review: Option<bool>,
     review_on_open: Option<bool>,
@@ -242,8 +294,30 @@ struct UpdateRepoRequest {
     credential_id: Option<i64>,
 }
 
+/// Documentation-only mirror of `update_repo`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct RepoUpdateResponse {
+    message: String,
+    config: RepoConfig,
+}
+
 /// PUT /codescan/repos/{repo_id} — admin only.
-async fn update_repo(
+#[utoipa::path(
+    put,
+    path = "/api/v1/codescan/repos/{repo_id}",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(("repo_id" = i64, Path, description = "Repository configuration id")),
+    request_body = UpdateRepoRequest,
+    responses(
+        (status = 200, description = "Repository configuration updated", body = RepoUpdateResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed, or insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Configuration not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_repo(
     State(state): State<AppState>,
     _admin: AdminOnly,
     Path(repo_id): Path<i64>,
@@ -332,8 +406,28 @@ async fn update_repo(
         .into_response())
 }
 
+/// Documentation-only mirror of `delete_repo`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct RepoDeleteResponse {
+    message: String,
+    deleted: bool,
+}
+
 /// DELETE /codescan/repos/{repo_id} — admin only.
-async fn delete_repo(
+#[utoipa::path(
+    delete,
+    path = "/api/v1/codescan/repos/{repo_id}",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(("repo_id" = i64, Path, description = "Repository configuration id")),
+    responses(
+        (status = 200, description = "Repository configuration deleted", body = RepoDeleteResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed, or insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Configuration not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn delete_repo(
     State(state): State<AppState>,
     _admin: AdminOnly,
     Path(repo_id): Path<i64>,

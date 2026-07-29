@@ -32,6 +32,10 @@ sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+# "yaml" adds serde_yaml so `codescan-backend openapi` can emit true YAML for
+# openapi/v1.yaml (workspace default features are json-only) — see
+# docs/v2-port/openapi-pattern.md.
+utoipa = { workspace = true, features = ["yaml"] }
 
 [dev-dependencies]
 axum-test = { workspace = true }

@@ -14,6 +14,7 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
+use crate::error::ErrorResponse;
 use crate::flags::flag_denied;
 use crate::models::DashboardMetrics;
 use crate::state::AppState;
@@ -25,7 +26,16 @@ pub fn router() -> Router<AppState> {
 
 /// v1 `AnalysisEngine.get_dashboard_metrics`: always all-zero. No auth
 /// required, matching v1 (the route had no `Depends(security)`).
-async fn get_dashboard_metrics(State(state): State<AppState>) -> Response {
+#[utoipa::path(
+    get,
+    path = "/api/v1/metrics/dashboard",
+    tag = "monitor",
+    responses(
+        (status = 200, description = "Dashboard summary metrics (v1 stub: always all-zero, see module docs)", body = DashboardMetrics),
+        (status = 403, description = "monitor feature not enabled for this deployment", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_dashboard_metrics(State(state): State<AppState>) -> Response {
     if let Some(denied) = flag_denied(&state).await {
         return denied;
     }

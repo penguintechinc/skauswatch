@@ -11,11 +11,11 @@
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorResponse, InsufficientScopeResponse};
 use crate::state::{AppState, VAULT_FLAG};
 
 /// Router for `/api/v1/admin`.
@@ -25,7 +25,29 @@ pub fn router() -> Router<AppState> {
         .route("/admin/mek/rotate", post(rotate_mek))
 }
 
-async fn get_license_status(
+/// Documentation-only mirror of `get_license_status`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct LicenseStatusResponse {
+    licensed: bool,
+    bypassed: bool,
+    /// One of `free`, `professional`, `enterprise`.
+    tier: String,
+    validated_at: Option<String>,
+    license_server_url: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/license",
+    tag = "admin",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Current license/flag state", body = LicenseStatusResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires secrets:admin)", body = InsufficientScopeResponse),
+    ),
+)]
+pub(crate) async fn get_license_status(
     State(state): State<AppState>,
     user: CurrentUser,
 ) -> Result<Json<Value>, ApiError> {
@@ -42,9 +64,19 @@ async fn get_license_status(
     })))
 }
 
-#[derive(Deserialize)]
-struct RotateMekBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct RotateMekBody {
+    /// Target MEK version — must already be loaded via
+    /// `VAULT_MEK_V{new_mek_version}`.
     new_mek_version: Option<u32>,
+}
+
+/// Documentation-only mirror of `rotate_mek`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct RotateMekResponse {
+    rows_updated: usize,
+    new_version: u32,
+    rotated_at: String,
 }
 
 /// One rotatable table's fixed (compile-time-literal) select/update SQL —
@@ -73,7 +105,20 @@ const ROTATABLE_TABLES: &[RotatableTable] = &[
     },
 ];
 
-async fn rotate_mek(
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/mek/rotate",
+    tag = "admin",
+    security(("bearer_jwt" = [])),
+    request_body = RotateMekBody,
+    responses(
+        (status = 200, description = "DEKs re-wrapped under the new MEK version across every rotatable table", body = RotateMekResponse),
+        (status = 400, description = "Missing new_mek_version or the requested version is not loaded", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires secrets:admin)", body = InsufficientScopeResponse),
+    ),
+)]
+pub(crate) async fn rotate_mek(
     State(state): State<AppState>,
     user: CurrentUser,
     body: Option<Json<RotateMekBody>>,

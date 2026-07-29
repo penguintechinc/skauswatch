@@ -5,9 +5,10 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use serde::Serialize;
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorResponse};
 use crate::state::AppState;
 
 /// Router for GET /codescan/status.
@@ -15,9 +16,29 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/codescan/status", get(codescan_status))
 }
 
+/// Documentation-only mirror of `codescan_status`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct StatusResponse {
+    /// Always `"ok"`.
+    status: String,
+    /// Count of reviews not yet completed/failed/cancelled.
+    queue_depth: i64,
+}
+
 /// GET /codescan/status — `{status, queue_depth}`, where `queue_depth` is the
 /// count of reviews not yet completed/failed/cancelled.
-async fn codescan_status(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/status",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Service status and review queue depth", body = StatusResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn codescan_status(
     State(state): State<AppState>,
     _user: CurrentUser,
 ) -> Result<Response, ApiError> {

@@ -3,6 +3,8 @@
 
 use std::sync::Arc;
 
+use penguin_licensing::LicenseClient;
+
 use crate::ca::ssh::SshCa;
 use crate::ca::x509::X509Ca;
 use crate::config::{ServerConfig, SshCaConfig, X509CaConfig};
@@ -21,6 +23,9 @@ pub struct AppStateInner {
     /// #1): this service mints CA certificates and private keys, and had no
     /// authentication at all before this hardening pass.
     pub jwt_secret: String,
+    /// License entitlement + PostHog flag client (fail-safe) — currently
+    /// only used to gate the live `/api/v1/openapi.json` route.
+    pub license: Arc<LicenseClient>,
 }
 
 /// Cheap-to-clone handle used as axum/gRPC state.
@@ -39,6 +44,13 @@ impl AppStateInner {
     /// is missing in production — see `skauswatch_auth::load_jwt_secret`.
     pub async fn from_env() -> anyhow::Result<AppState> {
         let jwt_secret = skauswatch_auth::load_jwt_secret().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let license_cfg = penguin_licensing::LicenseConfig::from_env("skauswatch")
+            .map_err(|e| anyhow::anyhow!("license config: {e}"))?
+            .with_bypass_domain("skauswatch.app");
+        let license =
+            LicenseClient::new(license_cfg).map_err(|e| anyhow::anyhow!("license client: {e}"))?;
+        let _ = license.refresh().await;
 
         let x509_config = X509CaConfig::from_env();
         let ssh_config = SshCaConfig::from_env();
@@ -64,7 +76,20 @@ impl AppStateInner {
             x509_config,
             server,
             jwt_secret,
+            license,
         }))
+    }
+
+    /// Dev-mode (unreleased) license client shared by every test constructor
+    /// below that doesn't take an explicit one — `release_mode` defaults to
+    /// `false`, so [`penguin_licensing::LicenseClient::flag_enabled`] always
+    /// returns `true` (bypass). Fully offline/synchronous: no network calls.
+    #[cfg(test)]
+    #[allow(clippy::panic)] // test-only helper fails loudly by design
+    fn dev_license() -> Arc<LicenseClient> {
+        let cfg = penguin_licensing::LicenseConfig::new("skauswatch")
+            .unwrap_or_else(|e| panic!("license config: {e}"));
+        LicenseClient::new(cfg).unwrap_or_else(|e| panic!("license client: {e}"))
     }
 
     /// Self-contained test constructor mirroring the manager's
@@ -76,8 +101,17 @@ impl AppStateInner {
     /// route/gRPC auth-gate tests can mint valid bearer tokens without
     /// touching the real environment or a live DB.
     #[cfg(test)]
-    #[allow(clippy::panic)] // test-only constructor fails loudly by design
     pub fn for_tests() -> AppState {
+        Self::for_tests_with_license(Self::dev_license())
+    }
+
+    /// Like [`Self::for_tests`], but with a caller-supplied license client —
+    /// used by `routes::openapi`'s tests to exercise the gated
+    /// (`release_mode = true`) `/api/v1/openapi.json` path without touching
+    /// every other zero-arg `for_tests()` call site in this crate.
+    #[cfg(test)]
+    #[allow(clippy::panic)] // test-only constructor fails loudly by design
+    pub fn for_tests_with_license(license: Arc<LicenseClient>) -> AppState {
         let dir =
             std::env::temp_dir().join(format!("skauswatch-pki-test-{}", uuid::Uuid::new_v4()));
         let x509_config = X509CaConfig {
@@ -109,6 +143,7 @@ impl AppStateInner {
                 grpc_port: 50_052,
             },
             jwt_secret: "test-secret".to_owned(),
+            license,
         })
     }
 
@@ -177,6 +212,7 @@ impl AppStateInner {
                 grpc_port: 50_052,
             },
             jwt_secret: "test-secret".to_owned(),
+            license: Self::dev_license(),
         })
     }
 
@@ -196,6 +232,7 @@ impl AppStateInner {
                 grpc_port: 50_052,
             },
             jwt_secret: "test-secret".to_owned(),
+            license: Self::dev_license(),
         })
     }
 }

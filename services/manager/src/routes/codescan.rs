@@ -14,7 +14,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorResponse};
 use crate::state::AppState;
 
 /// PostHog module flag gating every codescan route (see `crate::flags`
@@ -245,7 +245,26 @@ async fn proxy(
 }
 
 /// GET /darwin/status — CodeScan service status, proxied verbatim.
-async fn codescan_status(
+///
+/// This whole router is a thin authenticated proxy to worker-codescan — only
+/// the canonical `/codescan/*` paths are documented here (the deprecated
+/// `/darwin/*` aliases mount the same handlers, see `legacy_router`).
+/// Response bodies are generic JSON objects (`serde_json::Value`) since the
+/// wire shape is whatever worker-codescan returns.
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/status",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn codescan_status(
     State(state): State<AppState>,
     _user: CurrentUser,
     headers: HeaderMap,
@@ -258,7 +277,20 @@ async fn codescan_status(
 
 /// GET /darwin/repos — list repository configurations; query params forward
 /// upstream (first value per key, matching v1 `dict(request.args)`).
-async fn list_repos(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/repos",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_repos(
     State(state): State<AppState>,
     _user: CurrentUser,
     headers: HeaderMap,
@@ -273,7 +305,22 @@ async fn list_repos(
 
 /// POST /darwin/repos — add a repository configuration (admin only); the
 /// JSON body forwards upstream.
-async fn create_repo(
+#[utoipa::path(
+    post,
+    path = "/api/v1/codescan/repos",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    request_body = serde_json::Value,
+    responses(
+        (status = 201, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 400, description = "Invalid JSON body", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed, or insufficient permissions", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_repo(
     State(state): State<AppState>,
     user: CurrentUser,
     headers: HeaderMap,
@@ -295,7 +342,21 @@ async fn create_repo(
 }
 
 /// GET /darwin/repos/{repo_id} — fetch one repository configuration.
-async fn get_repo(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/repos/{repo_id}",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(("repo_id" = i32, Path, description = "worker-codescan repository configuration id")),
+    responses(
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_repo(
     State(state): State<AppState>,
     _user: CurrentUser,
     headers: HeaderMap,
@@ -316,7 +377,23 @@ async fn get_repo(
 
 /// PUT /darwin/repos/{repo_id} — update a repository configuration (admin
 /// only); the JSON body forwards upstream.
-async fn update_repo(
+#[utoipa::path(
+    put,
+    path = "/api/v1/codescan/repos/{repo_id}",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(("repo_id" = i32, Path, description = "worker-codescan repository configuration id")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 400, description = "Invalid JSON body", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed, or insufficient permissions", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_repo(
     State(state): State<AppState>,
     user: CurrentUser,
     headers: HeaderMap,
@@ -340,7 +417,21 @@ async fn update_repo(
 
 /// DELETE /darwin/repos/{repo_id} — delete a repository configuration
 /// (admin only).
-async fn delete_repo(
+#[utoipa::path(
+    delete,
+    path = "/api/v1/codescan/repos/{repo_id}",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(("repo_id" = i32, Path, description = "worker-codescan repository configuration id")),
+    responses(
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed, or insufficient permissions", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn delete_repo(
     State(state): State<AppState>,
     user: CurrentUser,
     headers: HeaderMap,
@@ -361,7 +452,20 @@ async fn delete_repo(
 }
 
 /// GET /darwin/reviews — list code reviews; query params forward upstream.
-async fn list_reviews(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/reviews",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_reviews(
     State(state): State<AppState>,
     _user: CurrentUser,
     headers: HeaderMap,
@@ -377,7 +481,22 @@ async fn list_reviews(
 /// POST /darwin/reviews — queue a code review. v1 quirk replicated: the gate
 /// is `role_required("maintainer")`, so ONLY the maintainer role passes —
 /// admins get 403 (contract §codescan: "reviews (POST maintainer)").
-async fn create_review(
+#[utoipa::path(
+    post,
+    path = "/api/v1/codescan/reviews",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    request_body = serde_json::Value,
+    responses(
+        (status = 201, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 400, description = "Invalid JSON body", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed, or caller is not the maintainer role", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_review(
     State(state): State<AppState>,
     user: CurrentUser,
     headers: HeaderMap,
@@ -399,7 +518,21 @@ async fn create_review(
 }
 
 /// GET /darwin/reviews/{review_id} — fetch a code review with comments.
-async fn get_review(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/reviews/{review_id}",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(("review_id" = i32, Path, description = "worker-codescan review id")),
+    responses(
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_review(
     State(state): State<AppState>,
     _user: CurrentUser,
     headers: HeaderMap,
@@ -419,7 +552,20 @@ async fn get_review(
 }
 
 /// GET /darwin/plans — list issue plans; query params forward upstream.
-async fn list_plans(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/plans",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_plans(
     State(state): State<AppState>,
     _user: CurrentUser,
     headers: HeaderMap,
@@ -434,7 +580,22 @@ async fn list_plans(
 
 /// POST /darwin/plans — queue an issue-plan generation (any authenticated
 /// role, matching v1's bare `@auth_required`).
-async fn create_plan(
+#[utoipa::path(
+    post,
+    path = "/api/v1/codescan/plans",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    request_body = serde_json::Value,
+    responses(
+        (status = 201, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 400, description = "Invalid JSON body", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_plan(
     State(state): State<AppState>,
     _user: CurrentUser,
     headers: HeaderMap,
@@ -455,7 +616,21 @@ async fn create_plan(
 }
 
 /// GET /darwin/plans/{plan_id} — fetch one issue plan.
-async fn get_plan(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/plans/{plan_id}",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(("plan_id" = i32, Path, description = "worker-codescan issue plan id")),
+    responses(
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
+        (status = 504, description = "worker-codescan request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_plan(
     State(state): State<AppState>,
     _user: CurrentUser,
     headers: HeaderMap,

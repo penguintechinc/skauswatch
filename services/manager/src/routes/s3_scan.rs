@@ -44,7 +44,7 @@ use serde::Deserialize;
 use sqlx::{Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
 
 /// v1 `S3ScanStatus` enum values (results/statistics filter surface).
@@ -283,6 +283,28 @@ struct BucketRow {
     updated_at: Option<NaiveDateTime>,
 }
 
+/// Documentation-only mirror of `bucket_json`'s wire shape (list items and
+/// GET detail share this shape) — credentials are masked, never raw.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct BucketItem {
+    id: i32,
+    name: String,
+    endpoint_url: String,
+    bucket_name: String,
+    access_key_id: String,
+    secret_access_key: String,
+    region: Option<String>,
+    use_ssl: Option<bool>,
+    path_style: Option<bool>,
+    prefix_filter: Option<String>,
+    file_types_filter: serde_json::Value,
+    max_file_size_mb: Option<i32>,
+    scan_enabled: Option<bool>,
+    yara_enabled: Option<bool>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
 /// v1 full bucket shape (list items + GET detail) with masked credentials.
 fn bucket_json(b: &BucketRow) -> serde_json::Value {
     serde_json::json!({
@@ -321,8 +343,32 @@ async fn bucket_exists(db: &sqlx::PgPool, bucket_id: i32) -> Result<bool, ApiErr
     Ok(row.is_some())
 }
 
+/// Documentation-only mirror of `list_buckets`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct BucketListResponse {
+    items: Vec<BucketItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
 /// GET /buckets — paginated bucket configs, newest first, creds masked.
-async fn list_buckets(
+#[utoipa::path(
+    get,
+    path = "/api/v1/s3-scan/buckets",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(
+        ("page" = Option<i64>, Query, description = "1-based page number (default 1)"),
+        ("per_page" = Option<i64>, Query, description = "Page size, capped at 500 (default 50)"),
+    ),
+    responses(
+        (status = 200, description = "Paginated bucket configuration list (credentials masked)", body = BucketListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_buckets(
     State(state): State<AppState>,
     _user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
@@ -355,8 +401,8 @@ async fn list_buckets(
 
 /// BucketConfigCreateRequest — fields optional so missing ones map to the
 /// validation envelope instead of an axum extractor rejection.
-#[derive(Deserialize)]
-struct BucketCreateBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct BucketCreateBody {
     name: Option<String>,
     endpoint_url: Option<String>,
     bucket_name: Option<String>,
@@ -489,9 +535,40 @@ struct CreatedBucketRow {
     created_at: Option<NaiveDateTime>,
 }
 
+/// Summary embedded in [`BucketCreateResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct BucketCreateSummary {
+    id: i32,
+    name: String,
+    bucket_name: String,
+    access_key_id: String,
+    created_at: Option<String>,
+}
+
+/// Documentation-only mirror of `create_bucket`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct BucketCreateResponse {
+    message: String,
+    bucket: BucketCreateSummary,
+}
+
 /// POST /buckets — admin/maintainer. 409 on duplicate endpoint+bucket pair.
 /// Defect #1: populates the NOT NULL created_by column v1 omitted.
-async fn create_bucket(
+#[utoipa::path(
+    post,
+    path = "/api/v1/s3-scan/buckets",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    request_body = BucketCreateBody,
+    responses(
+        (status = 201, description = "Bucket configuration created", body = BucketCreateResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 409, description = "Bucket configuration already exists", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_bucket(
     State(state): State<AppState>,
     user: CurrentUser,
     ApiJson(body): ApiJson<BucketCreateBody>,
@@ -553,7 +630,19 @@ async fn create_bucket(
 }
 
 /// GET /buckets/{id} — full config with masked credentials.
-async fn get_bucket(
+#[utoipa::path(
+    get,
+    path = "/api/v1/s3-scan/buckets/{bucket_id}",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("bucket_id" = i32, Path, description = "Bucket configuration id")),
+    responses(
+        (status = 200, description = "Bucket configuration (credentials masked)", body = BucketItem),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Bucket configuration not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_bucket(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(bucket_id): Path<i32>,
@@ -565,8 +654,8 @@ async fn get_bucket(
 }
 
 /// BucketConfigUpdateRequest — every field optional; absent fields untouched.
-#[derive(Deserialize)]
-struct BucketUpdateBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct BucketUpdateBody {
     name: Option<String>,
     endpoint_url: Option<String>,
     bucket_name: Option<String>,
@@ -673,9 +762,40 @@ struct UpdatedBucketRow {
     updated_at: Option<NaiveDateTime>,
 }
 
+/// Summary embedded in [`BucketUpdateResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct BucketUpdateSummary {
+    id: i32,
+    name: String,
+    access_key_id: String,
+    updated_at: Option<String>,
+}
+
+/// Documentation-only mirror of `update_bucket`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct BucketUpdateResponse {
+    message: String,
+    bucket: BucketUpdateSummary,
+}
+
 /// PUT /buckets/{id} — admin/maintainer partial update; pyDAL parity sets
 /// updated_at whenever any field changes.
-async fn update_bucket(
+#[utoipa::path(
+    put,
+    path = "/api/v1/s3-scan/buckets/{bucket_id}",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("bucket_id" = i32, Path, description = "Bucket configuration id")),
+    request_body = BucketUpdateBody,
+    responses(
+        (status = 200, description = "Bucket configuration updated", body = BucketUpdateResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Bucket configuration not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_bucket(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(bucket_id): Path<i32>,
@@ -756,8 +876,27 @@ async fn update_bucket(
     })))
 }
 
+/// Documentation-only mirror of `delete_bucket`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct BucketDeleteResponse {
+    message: String,
+}
+
 /// DELETE /buckets/{id} — admin only.
-async fn delete_bucket(
+#[utoipa::path(
+    delete,
+    path = "/api/v1/s3-scan/buckets/{bucket_id}",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("bucket_id" = i32, Path, description = "Bucket configuration id")),
+    responses(
+        (status = 200, description = "Bucket configuration deleted", body = BucketDeleteResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Bucket configuration not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn delete_bucket(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(bucket_id): Path<i32>,
@@ -777,10 +916,41 @@ async fn delete_bucket(
     })))
 }
 
+/// Documentation-only mirror of `run_head_bucket`'s success body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct BucketTestSuccess {
+    success: bool,
+    message: String,
+}
+
+/// Documentation-only mirror of `run_head_bucket`'s failure bodies (shared
+/// by both the 400 service-error and 500 transport-error paths).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct BucketTestFailure {
+    success: bool,
+    error: String,
+    details: String,
+}
+
 /// POST /buckets/{id}/test — admin/maintainer; performs a real head_bucket
 /// (v1 used boto3). Bodies are v1's custom `{success, ...}` shapes, not the
 /// error envelope: 200 ok, 400 service error (code+message), 500 transport.
-async fn test_bucket_connection(
+#[utoipa::path(
+    post,
+    path = "/api/v1/s3-scan/buckets/{bucket_id}/test",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("bucket_id" = i32, Path, description = "Bucket configuration id")),
+    responses(
+        (status = 200, description = "Connection succeeded", body = BucketTestSuccess),
+        (status = 400, description = "S3 service rejected the connection (bad credentials, missing bucket, ...)", body = BucketTestFailure),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Bucket configuration not found", body = ErrorResponse),
+        (status = 500, description = "Transport-level failure reaching the S3 endpoint", body = BucketTestFailure),
+    ),
+)]
+pub(crate) async fn test_bucket_connection(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(bucket_id): Path<i32>,
@@ -899,8 +1069,8 @@ fn scan_task_fields(msg: &ScanTaskMsg<'_>) -> skauswatch_streams::EntryFields {
 }
 
 /// TriggerScanRequest — v1 tolerates a missing body entirely.
-#[derive(Default, Deserialize)]
-struct TriggerBody {
+#[derive(Default, Deserialize, utoipa::ToSchema)]
+pub(crate) struct TriggerBody {
     prefix_filter: Option<String>,
     force_rescan: Option<bool>,
 }
@@ -914,11 +1084,43 @@ struct CreatedJobRow {
     created_at: Option<NaiveDateTime>,
 }
 
+/// Summary embedded in [`TriggerScanResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct TriggerScanSummary {
+    id: i32,
+    bucket_config_id: i32,
+    job_type: String,
+    status: Option<String>,
+    created_at: Option<String>,
+}
+
+/// Documentation-only mirror of `trigger_scan`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct TriggerScanResponse {
+    message: String,
+    job: TriggerScanSummary,
+}
+
 /// POST /buckets/{id}/scan — admin/maintainer. Defect #4: writes job_type
 /// `full_scan` (DB-allowed) instead of v1's `manual`; defect #1: generates
 /// the NOT NULL job_id, sets triggered_by, and stows
 /// prefix_filter/force_rescan in metadata (no such job columns exist).
-async fn trigger_scan(
+#[utoipa::path(
+    post,
+    path = "/api/v1/s3-scan/buckets/{bucket_id}/scan",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("bucket_id" = i32, Path, description = "Bucket configuration id")),
+    request_body(content = TriggerBody, description = "Optional — a missing/empty body is accepted"),
+    responses(
+        (status = 201, description = "Scan job created", body = TriggerScanResponse),
+        (status = 400, description = "Invalid JSON body, or scanning is disabled for this bucket", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Bucket configuration not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn trigger_scan(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(bucket_id): Path<i32>,
@@ -1043,6 +1245,27 @@ fn meta_force_rescan(m: &Option<serde_json::Value>) -> bool {
         .unwrap_or(false)
 }
 
+/// Documentation-only mirror of `job_json`'s wire shape (defect #1 column
+/// mapping — see module docs).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct JobItem {
+    id: i32,
+    bucket_config_id: i32,
+    job_type: String,
+    status: Option<String>,
+    files_scanned: i32,
+    files_infected: i32,
+    files_pup: i32,
+    files_error: i32,
+    files_skipped: i32,
+    prefix_filter: serde_json::Value,
+    force_rescan: bool,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    error_message: Option<String>,
+    created_at: Option<String>,
+}
+
 /// v1 job list-item shape with schema→wire column mapping (defect #1).
 fn job_json(j: &JobRow) -> serde_json::Value {
     serde_json::json!({
@@ -1121,9 +1344,36 @@ fn push_job_filters(qb: &mut QueryBuilder<Postgres>, q: &JobsQuery) {
     }
 }
 
+/// Documentation-only mirror of `list_jobs`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct JobListResponse {
+    items: Vec<JobItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
 /// GET /jobs — paginated scan jobs, newest first, with optional
 /// bucket/job_type/status filters.
-async fn list_jobs(
+#[utoipa::path(
+    get,
+    path = "/api/v1/s3-scan/jobs",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(
+        ("page" = Option<i64>, Query, description = "1-based page number (default 1)"),
+        ("per_page" = Option<i64>, Query, description = "Page size, capped at 500 (default 50)"),
+        ("bucket_config_id" = Option<i32>, Query, description = "Exact bucket filter (0 = no filter)"),
+        ("job_type" = Option<Vec<String>>, Query, description = "Repeatable job_type filter"),
+        ("status" = Option<Vec<String>>, Query, description = "Repeatable status filter"),
+    ),
+    responses(
+        (status = 200, description = "Paginated scan job list", body = JobListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_jobs(
     State(state): State<AppState>,
     _user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
@@ -1153,9 +1403,46 @@ async fn list_jobs(
     })))
 }
 
+/// Documentation-only mirror of `get_job`'s wire shape (`JobItem` plus
+/// metadata/updated_at/progress_percent).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct JobDetail {
+    id: i32,
+    bucket_config_id: i32,
+    job_type: String,
+    status: Option<String>,
+    files_scanned: i32,
+    files_infected: i32,
+    files_pup: i32,
+    files_error: i32,
+    files_skipped: i32,
+    prefix_filter: serde_json::Value,
+    force_rescan: bool,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    error_message: Option<String>,
+    created_at: Option<String>,
+    metadata: serde_json::Value,
+    /// Always `null` — no backing column (defect #1).
+    updated_at: Option<String>,
+    progress_percent: f64,
+}
+
 /// GET /jobs/{id} — list shape plus metadata, updated_at (null — no such
 /// column, defect #1), and computed progress_percent.
-async fn get_job(
+#[utoipa::path(
+    get,
+    path = "/api/v1/s3-scan/jobs/{job_id}",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("job_id" = i32, Path, description = "Scan job id")),
+    responses(
+        (status = 200, description = "Scan job detail", body = JobDetail),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Scan job not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_job(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(job_id): Path<i32>,
@@ -1180,8 +1467,28 @@ async fn get_job(
     Ok(Json(v))
 }
 
+/// Documentation-only mirror of `cancel_job`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct CancelJobResponse {
+    message: String,
+}
+
 /// POST /jobs/{id}/cancel — admin/maintainer; only pending/running jobs.
-async fn cancel_job(
+#[utoipa::path(
+    post,
+    path = "/api/v1/s3-scan/jobs/{job_id}/cancel",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("job_id" = i32, Path, description = "Scan job id")),
+    responses(
+        (status = 200, description = "Scan job cancelled", body = CancelJobResponse),
+        (status = 400, description = "Job is not pending/running", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Scan job not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn cancel_job(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(job_id): Path<i32>,
@@ -1233,6 +1540,56 @@ struct ResultRow {
     sandbox_status: Option<String>,
     sandbox_result: Option<serde_json::Value>,
     scanned_at: Option<NaiveDateTime>,
+}
+
+/// Documentation-only mirror of `result_json`'s wire shape. `scan_engine`/
+/// `confidence_score` have no backing column (defect #1) and are always
+/// null.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ResultItem {
+    id: i32,
+    scan_job_id: i32,
+    bucket_config_id: i32,
+    file_key: String,
+    file_size: Option<i32>,
+    file_type: Option<String>,
+    scan_status: Option<String>,
+    is_malware: Option<bool>,
+    is_pup: Option<bool>,
+    is_threat: Option<bool>,
+    threat_names: serde_json::Value,
+    yara_matches: serde_json::Value,
+    scan_engine: Option<String>,
+    confidence_score: Option<f64>,
+    scanned_at: Option<String>,
+}
+
+/// Documentation-only mirror of `result_detail_json`'s wire shape
+/// (`ResultItem` plus sandbox fields and the column-less error_message/
+/// metadata/created_at/updated_at — defect #1).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ResultDetail {
+    id: i32,
+    scan_job_id: i32,
+    bucket_config_id: i32,
+    file_key: String,
+    file_size: Option<i32>,
+    file_type: Option<String>,
+    scan_status: Option<String>,
+    is_malware: Option<bool>,
+    is_pup: Option<bool>,
+    is_threat: Option<bool>,
+    threat_names: serde_json::Value,
+    yara_matches: serde_json::Value,
+    scan_engine: Option<String>,
+    confidence_score: Option<f64>,
+    scanned_at: Option<String>,
+    sandbox_status: Option<String>,
+    sandbox_report: serde_json::Value,
+    error_message: Option<String>,
+    metadata: serde_json::Value,
+    created_at: Option<String>,
+    updated_at: Option<String>,
 }
 
 /// v1 result list-item shape. scan_engine/confidence_score have no backing
@@ -1415,8 +1772,42 @@ fn parse_results_params(pairs: &[(String, String)]) -> Result<ResultsQuery, Resu
     })
 }
 
+/// Documentation-only mirror of `query_results`'s success `serde_json::json!`
+/// body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ResultsListResponse {
+    items: Vec<ResultItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
 /// GET /results — filtered, paginated scan results, newest scan first.
-async fn query_results(
+#[utoipa::path(
+    get,
+    path = "/api/v1/s3-scan/results",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(
+        ("page" = Option<i64>, Query, description = "1-based page number (default 1)"),
+        ("per_page" = Option<i64>, Query, description = "Page size, capped at 500 (default 50)"),
+        ("bucket_config_id" = Option<i32>, Query, description = "Exact bucket filter (0 = no filter)"),
+        ("scan_status" = Option<Vec<String>>, Query, description = "Repeatable scan_status filter"),
+        ("is_malware" = Option<bool>, Query, description = "Exact is_malware filter"),
+        ("is_pup" = Option<bool>, Query, description = "Exact is_pup filter"),
+        ("is_threat" = Option<bool>, Query, description = "Exact is_threat filter"),
+        ("file_type" = Option<String>, Query, description = "Exact detected file type filter (dot-normalized)"),
+        ("date_from" = Option<String>, Query, description = "Inclusive lower bound on scanned_at"),
+        ("date_to" = Option<String>, Query, description = "Inclusive upper bound on scanned_at"),
+    ),
+    responses(
+        (status = 200, description = "Paginated scan result list", body = ResultsListResponse),
+        (status = 400, description = "Validation error, or an unparseable date_from/date_to", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn query_results(
     State(state): State<AppState>,
     _user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
@@ -1464,7 +1855,19 @@ async fn query_results(
 }
 
 /// GET /results/{id} — single scan result detail.
-async fn get_result(
+#[utoipa::path(
+    get,
+    path = "/api/v1/s3-scan/results/{result_id}",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("result_id" = i32, Path, description = "Scan result id")),
+    responses(
+        (status = 200, description = "Scan result detail", body = ResultDetail),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Scan result not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_result(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(result_id): Path<i32>,
@@ -1479,9 +1882,42 @@ async fn get_result(
     Ok(Json(result_detail_json(&row)))
 }
 
+/// Documentation-only mirror of `get_statistics`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct S3ScanStatisticsResponse {
+    total_scanned: i64,
+    total_infected: i64,
+    total_pup: i64,
+    total_clean: i64,
+    total_error: i64,
+    total_skipped: i64,
+    /// Per non-empty file type, count within the window.
+    by_file_type: std::collections::BTreeMap<String, i64>,
+    /// Per bucket name, `{total, infected, pup}` — only populated when no
+    /// `bucket_config_id` filter is given.
+    by_bucket: std::collections::BTreeMap<String, serde_json::Value>,
+    last_scan_at: Option<String>,
+    scan_period_days: i64,
+}
+
 /// GET /statistics — aggregate counts over the last `period_days`
 /// (default 30), optionally scoped to one bucket config.
-async fn get_statistics(
+#[utoipa::path(
+    get,
+    path = "/api/v1/s3-scan/statistics",
+    operation_id = "s3_scan_get_statistics",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(
+        ("period_days" = Option<i64>, Query, description = "Aggregation window in days (default 30)"),
+        ("bucket_config_id" = Option<i32>, Query, description = "Scope to one bucket (0 = no filter)"),
+    ),
+    responses(
+        (status = 200, description = "Aggregate scan statistics", body = S3ScanStatisticsResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_statistics(
     State(state): State<AppState>,
     _user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
@@ -1590,9 +2026,39 @@ struct ScheduleRow {
     updated_at: Option<NaiveDateTime>,
 }
 
+/// Documentation-only mirror of `get_schedule`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ScheduleDetail {
+    id: i32,
+    bucket_config_id: i32,
+    cron_expression: String,
+    timezone: Option<String>,
+    enabled: Option<bool>,
+    last_triggered_at: Option<String>,
+    next_trigger_at: Option<String>,
+    /// Always `0` — no backing column (defect #1).
+    error_count: i32,
+    /// Always `null` — no backing column (defect #1).
+    last_error_message: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
 /// GET /buckets/{id}/schedule — 404s for missing bucket, then missing
 /// schedule. error_count/last_error_message have no columns → 0/null.
-async fn get_schedule(
+#[utoipa::path(
+    get,
+    path = "/api/v1/s3-scan/buckets/{bucket_id}/schedule",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("bucket_id" = i32, Path, description = "Bucket configuration id")),
+    responses(
+        (status = 200, description = "Scan schedule for the bucket", body = ScheduleDetail),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Bucket configuration not found, or no schedule configured", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_schedule(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(bucket_id): Path<i32>,
@@ -1628,8 +2094,8 @@ async fn get_schedule(
 }
 
 /// ScheduleSetRequest body.
-#[derive(Deserialize)]
-struct ScheduleBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct ScheduleBody {
     cron_expression: Option<String>,
     timezone: Option<String>,
     enabled: Option<bool>,
@@ -1673,9 +2139,43 @@ struct UpsertedScheduleRow {
     updated_at: Option<NaiveDateTime>,
 }
 
+/// Summary embedded in [`ScheduleSetResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ScheduleSummary {
+    id: i32,
+    bucket_config_id: i32,
+    cron_expression: String,
+    timezone: Option<String>,
+    enabled: Option<bool>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+/// Documentation-only mirror of `set_schedule`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ScheduleSetResponse {
+    message: String,
+    schedule: ScheduleSummary,
+}
+
 /// PUT /buckets/{id}/schedule — admin/maintainer upsert keyed on the unique
 /// bucket_config_id; updated_at set only on the update path (pyDAL parity).
-async fn set_schedule(
+#[utoipa::path(
+    put,
+    path = "/api/v1/s3-scan/buckets/{bucket_id}/schedule",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("bucket_id" = i32, Path, description = "Bucket configuration id")),
+    request_body = ScheduleBody,
+    responses(
+        (status = 200, description = "Schedule configured (created or updated)", body = ScheduleSetResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Bucket configuration not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn set_schedule(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(bucket_id): Path<i32>,
@@ -1720,8 +2220,27 @@ async fn set_schedule(
     })))
 }
 
+/// Documentation-only mirror of `delete_schedule`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ScheduleDeleteResponse {
+    message: String,
+}
+
 /// DELETE /buckets/{id}/schedule — admin/maintainer.
-async fn delete_schedule(
+#[utoipa::path(
+    delete,
+    path = "/api/v1/s3-scan/buckets/{bucket_id}/schedule",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("bucket_id" = i32, Path, description = "Bucket configuration id")),
+    responses(
+        (status = 200, description = "Schedule removed", body = ScheduleDeleteResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Bucket configuration not found, or no schedule configured", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn delete_schedule(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(bucket_id): Path<i32>,
@@ -1776,10 +2295,48 @@ struct CreatedAdhocRow {
     scanned_at: Option<NaiveDateTime>,
 }
 
+/// Documentation-only mirror of the `multipart/form-data` body `upload_file`
+/// expects — a single `file` field, binary content, up to 100MB.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct UploadFileRequest {
+    #[schema(value_type = String, format = Binary)]
+    file: String,
+}
+
+/// Summary embedded in [`UploadCreateResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct UploadCreateSummary {
+    id: i32,
+    filename: String,
+    file_size: Option<i32>,
+    scan_status: Option<String>,
+    file_hash_sha256: Option<String>,
+    scanned_at: Option<String>,
+}
+
+/// Documentation-only mirror of `upload_file`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct UploadCreateResponse {
+    message: String,
+    scan: UploadCreateSummary,
+}
+
 /// POST /upload — multipart `file` field, <=100MB, md5+sha256 recorded.
 /// Defect #1: rows land in adhoc_scan_results with a generated scan_id and
 /// status `pending` (schema set) instead of v1's fake instant-"clean".
-async fn upload_file(
+#[utoipa::path(
+    post,
+    path = "/api/v1/s3-scan/upload",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    request_body(content = UploadFileRequest, content_type = "multipart/form-data"),
+    responses(
+        (status = 201, description = "File uploaded and scan initiated", body = UploadCreateResponse),
+        (status = 400, description = "No file provided, empty filename, or file exceeds 100MB", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn upload_file(
     State(state): State<AppState>,
     user: CurrentUser,
     multipart: Result<Multipart, MultipartRejection>,
@@ -1927,10 +2484,53 @@ async fn fetch_adhoc(db: &sqlx::PgPool, scan_id: i32) -> Result<Option<AdhocRow>
     Ok(qb.build_query_as::<AdhocRow>().fetch_optional(db).await?)
 }
 
+/// Documentation-only mirror of `get_upload_result`'s `serde_json::json!`
+/// body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct UploadDetail {
+    id: i32,
+    filename: String,
+    file_size: Option<i32>,
+    scan_status: Option<String>,
+    is_malware: Option<bool>,
+    is_pup: Option<bool>,
+    is_threat: Option<bool>,
+    threat_names: serde_json::Value,
+    yara_matches: serde_json::Value,
+    /// Always `null` — no backing column (defect #1).
+    sandbox_status: Option<String>,
+    sandbox_report: serde_json::Value,
+    /// Always `null` — no backing column (defect #1).
+    scan_engine: Option<String>,
+    /// Always `null` — no backing column (defect #1).
+    confidence_score: Option<f64>,
+    file_hash_md5: Option<String>,
+    file_hash_sha256: Option<String>,
+    /// Always `null` — no backing column (defect #1).
+    error_message: Option<String>,
+    /// Always `{}` — no backing column (defect #1).
+    metadata: serde_json::Value,
+    scanned_at: Option<String>,
+    created_at: Option<String>,
+}
+
 /// GET /upload/{id} — full ad-hoc result, owner or admin. Column-less
 /// sandbox_status/scan_engine/confidence_score/error_message/metadata are
 /// null/{} (defect #1).
-async fn get_upload_result(
+#[utoipa::path(
+    get,
+    path = "/api/v1/s3-scan/upload/{scan_id}",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("scan_id" = i32, Path, description = "Ad-hoc upload scan id")),
+    responses(
+        (status = 200, description = "Ad-hoc upload scan detail", body = UploadDetail),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Caller is neither the uploader nor an admin", body = ErrorResponse),
+        (status = 404, description = "Scan result not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_upload_result(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(scan_id): Path<i32>,
@@ -1963,9 +2563,48 @@ async fn get_upload_result(
     })))
 }
 
+/// Documentation-only mirror of one `list_upload_history` item.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct UploadHistoryItem {
+    id: i32,
+    filename: String,
+    file_size: Option<i32>,
+    scan_status: Option<String>,
+    is_malware: Option<bool>,
+    is_pup: Option<bool>,
+    is_threat: Option<bool>,
+    file_hash_sha256: Option<String>,
+    scanned_at: Option<String>,
+}
+
+/// Documentation-only mirror of `list_upload_history`'s `serde_json::json!`
+/// body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct UploadHistoryResponse {
+    items: Vec<UploadHistoryItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
 /// GET /upload/history — the caller's uploads (admins see everyone's),
 /// newest upload first.
-async fn list_upload_history(
+#[utoipa::path(
+    get,
+    path = "/api/v1/s3-scan/upload/history",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(
+        ("page" = Option<i64>, Query, description = "1-based page number (default 1)"),
+        ("per_page" = Option<i64>, Query, description = "Page size, capped at 500 (default 50)"),
+    ),
+    responses(
+        (status = 200, description = "Paginated ad-hoc upload history (own uploads, or all if admin)", body = UploadHistoryResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_upload_history(
     State(state): State<AppState>,
     user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
@@ -2015,8 +2654,28 @@ async fn list_upload_history(
     })))
 }
 
+/// Documentation-only mirror of `delete_upload_scan`'s `serde_json::json!`
+/// body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct UploadDeleteResponse {
+    message: String,
+}
+
 /// DELETE /upload/{id} — owner or admin.
-async fn delete_upload_scan(
+#[utoipa::path(
+    delete,
+    path = "/api/v1/s3-scan/upload/{scan_id}",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("scan_id" = i32, Path, description = "Ad-hoc upload scan id")),
+    responses(
+        (status = 200, description = "Ad-hoc scan deleted", body = UploadDeleteResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Caller is neither the uploader nor an admin", body = ErrorResponse),
+        (status = 404, description = "Scan result not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn delete_upload_scan(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(scan_id): Path<i32>,
@@ -2107,10 +2766,51 @@ async fn fetch_hash_indicator(
     .await?)
 }
 
+/// Documentation-only mirror of `create_ti_indicator`'s "already exists"
+/// (200) body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct TiIndicatorExistsResponse {
+    message: String,
+    indicator_id: i32,
+}
+
+/// Summary embedded in [`TiIndicatorCreateResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct TiIndicatorCreateSummary {
+    id: i32,
+    indicator_type: String,
+    value: String,
+    threat_level: Option<String>,
+    created_at: Option<String>,
+}
+
+/// Documentation-only mirror of `create_ti_indicator`'s "created" (201)
+/// body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct TiIndicatorCreateResponse {
+    message: String,
+    indicator: TiIndicatorCreateSummary,
+}
+
 /// POST /results/{id}/create-indicator — admin/maintainer; promotes a
 /// threat-flagged scan result's sha256 into threat_indicators (type `hash`
 /// per defect #3, confidence 50 since no confidence_score column exists).
-async fn create_ti_indicator(
+#[utoipa::path(
+    post,
+    path = "/api/v1/s3-scan/results/{result_id}/create-indicator",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("result_id" = i32, Path, description = "Scan result id")),
+    responses(
+        (status = 200, description = "A `hash` indicator for this value already existed", body = TiIndicatorExistsResponse),
+        (status = 201, description = "Threat indicator created", body = TiIndicatorCreateResponse),
+        (status = 400, description = "Result is not marked as threat, or has no file hash", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Scan result not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_ti_indicator(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(result_id): Path<i32>,
@@ -2198,7 +2898,20 @@ async fn create_ti_indicator(
 
 /// GET /results/{id}/ti-enrichment — live `hash` indicator for the result's
 /// sha256; `{enrichment: null, found: false}` when hashless or unmatched.
-async fn get_ti_enrichment(
+/// Response shape varies by outcome, so it is documented generically.
+#[utoipa::path(
+    get,
+    path = "/api/v1/s3-scan/results/{result_id}/ti-enrichment",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    params(("result_id" = i32, Path, description = "Scan result id")),
+    responses(
+        (status = 200, description = "`{found, enrichment}` — enrichment is null when unmatched or hashless", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Scan result not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_ti_enrichment(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(result_id): Path<i32>,
@@ -2233,8 +2946,8 @@ async fn get_ti_enrichment(
 }
 
 /// HashLookupRequest body.
-#[derive(Deserialize)]
-struct HashLookupBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct HashLookupBody {
     hash_value: Option<String>,
 }
 
@@ -2264,8 +2977,22 @@ fn validate_hash_value(b: &HashLookupBody) -> Result<String, ApiError> {
 }
 
 /// POST /hash-lookup — checks a normalized hash against live `hash`
-/// indicators (defect #3 type mapping).
-async fn hash_lookup(
+/// indicators (defect #3 type mapping). Response shape varies by outcome
+/// (`{found, hash}` or `{found, hash, indicator}`), so it is documented
+/// generically.
+#[utoipa::path(
+    post,
+    path = "/api/v1/s3-scan/hash-lookup",
+    tag = "s3-scan",
+    security(("bearer_jwt" = [])),
+    request_body = HashLookupBody,
+    responses(
+        (status = 200, description = "`{found, hash}` or `{found, hash, indicator}`", body = serde_json::Value),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn hash_lookup(
     State(state): State<AppState>,
     _user: CurrentUser,
     ApiJson(body): ApiJson<HashLookupBody>,

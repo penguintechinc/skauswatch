@@ -1,0 +1,1333 @@
+openapi: 3.1.0
+info:
+  title: SkausWatch PKI API
+  description: 'X.509 + SSH certificate authority: issuance, lookup, revocation, CRL/KRL, OCSP, SSH config helpers, statistics, and audit log.'
+  contact:
+    name: Penguin Tech Inc
+    email: support@penguintech.io
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+  version: '1'
+paths:
+  /api/v1/audit:
+    get:
+      tags:
+      - common
+      summary: GET /api/v1/audit — paginated PKI audit log with filters.
+      operationId: common_audit
+      parameters:
+      - name: page
+        in: query
+        description: Page number (default 1)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: page_size
+        in: query
+        description: Page size (default 50)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: event_type
+        in: query
+        description: Filter by audit event_type
+        required: false
+        schema:
+          type: string
+      - name: certificate_type
+        in: query
+        description: Filter by certificate_type (x509/ssh)
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Paginated audit log
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ca/info:
+    get:
+      tags:
+      - common
+      summary: GET /api/v1/ca/info — info for both certificate authorities.
+      operationId: common_all_ca_info
+      responses:
+        '200':
+          description: Combined X.509 + SSH CA info
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/certificates:
+    get:
+      tags:
+      - x509
+      summary: GET /api/v1/certificates — list with filters.
+      operationId: x509_list
+      parameters:
+      - name: status
+        in: query
+        description: Filter by certificate status
+        required: false
+        schema:
+          type: string
+      - name: subject
+        in: query
+        description: Filter by subject substring
+        required: false
+        schema:
+          type: string
+      - name: expires_before
+        in: query
+        description: ISO-ish `%Y-%m-%dT%H:%M:%S` cutoff
+        required: false
+        schema:
+          type: string
+      - name: page
+        in: query
+        description: Page number (default 1)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: page_size
+        in: query
+        description: Page size (default 50)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Paginated certificate list
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - x509
+      summary: POST /api/v1/certificates — issue an X.509 certificate.
+      operationId: x509_issue
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/X509CertificateRequest'
+        required: true
+      responses:
+        '201':
+          description: Issued X.509 certificate
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/certificates/ca:
+    get:
+      tags:
+      - x509
+      summary: GET /api/v1/certificates/ca — CA info + PEM.
+      operationId: x509_ca_info
+      responses:
+        '200':
+          description: X.509 CA info
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/certificates/ca/certificate:
+    get:
+      tags:
+      - x509
+      summary: GET /api/v1/certificates/ca/certificate — download CA cert PEM.
+      operationId: x509_download_ca_cert
+      responses:
+        '200':
+          description: CA certificate (application/x-pem-file)
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/certificates/crl:
+    get:
+      tags:
+      - x509
+      summary: |-
+        GET /api/v1/certificates/crl — JSON by default; `Accept:
+        application/pkix-crl` returns the raw PEM instead (not separately
+        modeled here — see `docs/v2-port/openapi-pattern.md` on documenting one
+        representative shape per status code).
+      operationId: x509_get_crl
+      responses:
+        '200':
+          description: 'Certificate Revocation List (JSON; PEM if Accept: application/pkix-crl)'
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/certificates/ocsp:
+    post:
+      tags:
+      - x509
+      summary: POST /api/v1/certificates/ocsp — JSON OCSP status (binary → 501, per v1).
+      operationId: x509_ocsp
+      requestBody:
+        description: '`{"serial_number": "<serial>"}`'
+        content:
+          application/json:
+            schema: {}
+        required: true
+      responses:
+        '200':
+          description: OCSP status (good/unknown/revoked)
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Missing serial_number
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '501':
+          description: Binary application/ocsp-request not implemented
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/certificates/search:
+    post:
+      tags:
+      - x509
+      summary: POST /api/v1/certificates/search
+      operationId: x509_search
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchBody'
+        required: true
+      responses:
+        '200':
+          description: Paginated certificate list
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/certificates/serial/{serial}:
+    get:
+      tags:
+      - x509
+      summary: GET /api/v1/certificates/serial/{serial}
+      operationId: x509_get_by_serial
+      parameters:
+      - name: serial
+        in: path
+        description: Certificate serial number
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Certificate (private key always stripped)
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/certificates/serial/{serial}/revoke:
+    post:
+      tags:
+      - x509
+      summary: POST /api/v1/certificates/serial/{serial}/revoke
+      operationId: x509_revoke_by_serial
+      parameters:
+      - name: serial
+        in: path
+        description: Certificate serial number
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeRequest'
+        required: true
+      responses:
+        '200':
+          description: Certificate revoked
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/certificates/{cert_id}:
+    get:
+      tags:
+      - x509
+      summary: GET /api/v1/certificates/{cert_id}
+      operationId: x509_get_cert
+      parameters:
+      - name: cert_id
+        in: path
+        description: Certificate id (UUID)
+        required: true
+        schema:
+          type: string
+      - name: include_private_key
+        in: query
+        description: Include private_key_pem in the response (default false)
+        required: false
+        schema:
+          type: boolean
+      responses:
+        '200':
+          description: Certificate
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/certificates/{cert_id}/revoke:
+    post:
+      tags:
+      - x509
+      summary: POST /api/v1/certificates/{cert_id}/revoke
+      operationId: x509_revoke_cert
+      parameters:
+      - name: cert_id
+        in: path
+        description: Certificate id (UUID)
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeRequest'
+        required: true
+      responses:
+        '200':
+          description: Certificate revoked
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/certificates/{cert_id}/status:
+    get:
+      tags:
+      - x509
+      summary: GET /api/v1/certificates/{cert_id}/status
+      operationId: x509_cert_status
+      parameters:
+      - name: cert_id
+        in: path
+        description: Certificate id (UUID)
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Certificate status summary
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/cleanup:
+    post:
+      tags:
+      - common
+      summary: POST /api/v1/cleanup — mark expired certificates as `expired`.
+      operationId: common_cleanup
+      responses:
+        '200':
+          description: Cleanup result
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/expiring:
+    get:
+      tags:
+      - common
+      summary: GET /api/v1/expiring — certificates expiring within N days.
+      operationId: common_expiring
+      parameters:
+      - name: days
+        in: query
+        description: Expiry window in days (default 30)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: type
+        in: query
+        description: x509 | ssh | all (default all)
+        required: false
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Certificates expiring within the window
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/ca:
+    get:
+      tags:
+      - ssh
+      summary: GET /api/v1/ssh/ca — SSH CA info.
+      operationId: ssh_ca_info
+      responses:
+        '200':
+          description: SSH CA info
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/ca/public-key:
+    get:
+      tags:
+      - ssh
+      summary: |-
+        GET /api/v1/ssh/ca/public-key — JSON by default; `Accept: text/plain`
+        returns the bare key text instead.
+      operationId: ssh_ca_public_key
+      responses:
+        '200':
+          description: 'SSH CA public key (JSON; plain text if Accept: text/plain)'
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/certificates:
+    get:
+      tags:
+      - ssh
+      summary: GET /api/v1/ssh/certificates — list with filters.
+      operationId: ssh_list
+      parameters:
+      - name: status
+        in: query
+        description: Filter by certificate status
+        required: false
+        schema:
+          type: string
+      - name: type
+        in: query
+        description: Filter by certificate_type (user/host)
+        required: false
+        schema:
+          type: string
+      - name: principal
+        in: query
+        description: Filter by principal
+        required: false
+        schema:
+          type: string
+      - name: page
+        in: query
+        description: Page number (default 1)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: page_size
+        in: query
+        description: Page size (default 50)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Paginated certificate list
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - ssh
+      summary: POST /api/v1/ssh/certificates — issue an SSH certificate.
+      operationId: ssh_issue
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SshCertificateRequest'
+        required: true
+      responses:
+        '201':
+          description: Issued SSH certificate
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/certificates/serial/{serial}:
+    get:
+      tags:
+      - ssh
+      summary: GET /api/v1/ssh/certificates/serial/{serial}
+      operationId: ssh_get_by_serial
+      parameters:
+      - name: serial
+        in: path
+        description: Certificate serial number
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Certificate
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/certificates/{cert_id}:
+    get:
+      tags:
+      - ssh
+      summary: GET /api/v1/ssh/certificates/{cert_id}
+      operationId: ssh_get_cert
+      parameters:
+      - name: cert_id
+        in: path
+        description: Certificate id (UUID)
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Certificate
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/certificates/{cert_id}/revoke:
+    post:
+      tags:
+      - ssh
+      summary: POST /api/v1/ssh/certificates/{cert_id}/revoke
+      operationId: ssh_revoke_cert
+      parameters:
+      - name: cert_id
+        in: path
+        description: Certificate id (UUID)
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeRequest'
+        required: true
+      responses:
+        '200':
+          description: Certificate revoked
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/certificates/{cert_id}/status:
+    get:
+      tags:
+      - ssh
+      summary: GET /api/v1/ssh/certificates/{cert_id}/status
+      operationId: ssh_cert_status
+      parameters:
+      - name: cert_id
+        in: path
+        description: Certificate id (UUID)
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Certificate status summary
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/config/authorized-keys:
+    post:
+      tags:
+      - ssh
+      summary: POST /api/v1/ssh/config/authorized-keys
+      operationId: ssh_authorized_keys
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizedKeysRequest'
+        required: true
+      responses:
+        '200':
+          description: authorized_keys entry
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/config/known-hosts:
+    post:
+      tags:
+      - ssh
+      summary: POST /api/v1/ssh/config/known-hosts
+      operationId: ssh_known_hosts
+      requestBody:
+        description: '`{"hostnames": ["host1", ...]}`'
+        content:
+          application/json:
+            schema: {}
+        required: true
+      responses:
+        '200':
+          description: known_hosts entry
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: hostnames required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/config/ssh-config:
+    post:
+      tags:
+      - ssh
+      summary: POST /api/v1/ssh/config/ssh-config
+      operationId: ssh_ssh_config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SshConfigRequest'
+        required: true
+      responses:
+        '200':
+          description: ssh_config + known_hosts entry
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/krl:
+    get:
+      tags:
+      - ssh
+      summary: |-
+        GET /api/v1/ssh/krl — JSON by default; `Accept: application/octet-stream`
+        returns the raw KRL binary instead (not separately modeled here — see
+        `docs/v2-port/openapi-pattern.md` on documenting one representative shape
+        per status code).
+      operationId: ssh_get_krl
+      responses:
+        '200':
+          description: 'Key Revocation List (JSON; binary if Accept: application/octet-stream)'
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/verify:
+    post:
+      tags:
+      - ssh
+      summary: POST /api/v1/ssh/verify — parse + verify an SSH certificate.
+      operationId: ssh_verify
+      requestBody:
+        description: '`{"certificate": "ssh-ed25519-cert-v01@openssh.com ..."}`'
+        content:
+          application/json:
+            schema: {}
+        required: true
+      responses:
+        '200':
+          description: Parsed certificate info, with DB-known revocation status overlaid
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Missing certificate field
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/statistics:
+    get:
+      tags:
+      - common
+      summary: GET /api/v1/statistics — combined X.509 + SSH counts.
+      operationId: common_statistics
+      responses:
+        '200':
+          description: Combined X.509 + SSH counts
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+components:
+  schemas:
+    AuthorizedKeysRequest:
+      type: object
+      description: authorized_keys generation request (v1 `AuthorizedKeysRequest`).
+      required:
+      - principals
+      properties:
+        options:
+          type: object
+          description: SSH options.
+          additionalProperties:
+            type: string
+          propertyNames:
+            type: string
+        principals:
+          type: array
+          items:
+            type: string
+          description: Principals to authorize.
+    ErrorResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `ApiError`'s bare `{"error": msg}` wire shape
+        (`BadRequest`/`NotFound`/`NotImplemented`/`ServiceUnavailable`/`Internal`
+        all use it) — `ApiError` itself builds its body with `serde_json::json!`
+        rather than a typed struct, so this type exists solely to give `utoipa`
+        something to reference in `#[utoipa::path]` `responses(...)` clauses. See
+        `docs/v2-port/openapi-pattern.md`.
+      required:
+      - error
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+    RevokeRequest:
+      type: object
+      description: Certificate revocation request (v1 `RevokeRequest`).
+      properties:
+        invalidity_date:
+          type:
+          - string
+          - 'null'
+          description: Optional invalidity date.
+        reason:
+          type: string
+          description: Revocation reason name (default `unspecified`).
+    SearchBody:
+      type: object
+      description: Body for POST /api/v1/certificates/search (v1 `CertificateSearchRequest`).
+      properties:
+        expires_before:
+          type:
+          - string
+          - 'null'
+        page:
+          type: integer
+          format: int64
+        page_size:
+          type: integer
+          format: int64
+        status:
+          type:
+          - string
+          - 'null'
+        subject:
+          type:
+          - string
+          - 'null'
+    SshCertificateRequest:
+      type: object
+      description: SSH certificate issuance request (v1 `SSHCertificateRequest`).
+      required:
+      - public_key
+      - key_id
+      - principals
+      properties:
+        certificate_type:
+          type: string
+          description: '`user` or `host`.'
+        critical_options:
+          type:
+          - object
+          - 'null'
+          description: Critical options.
+          additionalProperties:
+            type: string
+          propertyNames:
+            type: string
+        extensions:
+          type:
+          - object
+          - 'null'
+          description: Extensions (defaulted to the v1 permit-* set when omitted).
+          additionalProperties:
+            type: string
+          propertyNames:
+            type: string
+        force_command:
+          type:
+          - string
+          - 'null'
+          description: Forced command.
+        hostname:
+          type:
+          - string
+          - 'null'
+          description: Hostname (required for host certs).
+        key_id:
+          type: string
+          description: Key identifier.
+        principals:
+          type: array
+          items:
+            type: string
+          description: Certificate principals.
+        public_key:
+          type: string
+          description: Subject SSH public key line.
+        source_addresses:
+          type: array
+          items:
+            type: string
+          description: Allowed source addresses.
+        validity_seconds:
+          type: integer
+          format: int64
+          description: Validity in seconds.
+    SshConfigRequest:
+      type: object
+      description: SSH client config generation request (v1 `SSHConfigRequest`).
+      required:
+      - hostname
+      properties:
+        hostname:
+          type: string
+          description: Target hostname.
+        identity_file:
+          type:
+          - string
+          - 'null'
+          description: Optional identity file path.
+        port:
+          type: integer
+          format: int64
+          description: Target port (default 22).
+        user:
+          type:
+          - string
+          - 'null'
+          description: Optional login user.
+    ValidationErrorResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `ApiError::Validation`'s wire shape — a bare
+        error message plus a list of per-field validation failure objects
+        (`{loc, msg, type}`, matching `ApiJson`'s own rejection shape below).
+      required:
+      - error
+      - details
+      properties:
+        details:
+          type: array
+          items: {}
+          description: 'Per-field failure details, each `{loc: [...], msg: ..., type: ...}`.'
+        error:
+          type: string
+          description: Always `"Validation error"`.
+    X509CertificateRequest:
+      type: object
+      description: X.509 certificate issuance request (v1 `X509CertificateRequest`).
+      required:
+      - subject
+      properties:
+        csr_pem:
+          type:
+          - string
+          - 'null'
+          description: PEM CSR (public key taken from it; no private key generated).
+        extended_key_usage:
+          type: array
+          items:
+            type: string
+          description: ExtendedKeyUsage names (empty → CA engine default).
+        generate_key:
+          type: boolean
+          description: Present for wire compat; issuance path decided by `csr_pem`.
+        is_ca:
+          type: boolean
+          description: Issue as CA.
+        key_algorithm:
+          type: string
+          description: Key algorithm (`RSA`/`ECDSA`/`ED25519`).
+        key_size:
+          type: integer
+          format: int64
+          description: Key size in bits.
+        key_usage:
+          type: array
+          items:
+            type: string
+          description: KeyUsage names (empty → CA engine default).
+        path_length:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: pathLenConstraint for CA certs.
+        san_dns:
+          type: array
+          items:
+            type: string
+          description: SubjectAltName DNS entries.
+        san_email:
+          type: array
+          items:
+            type: string
+          description: SubjectAltName email entries.
+        san_ip:
+          type: array
+          items:
+            type: string
+          description: SubjectAltName IP entries.
+        subject:
+          type: string
+          description: Subject DN string.
+        validity_days:
+          type: integer
+          format: int64
+          description: Validity in days.
+  securitySchemes:
+    bearer_jwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+tags:
+- name: x509
+  description: X.509 certificate issuance, lookup, revocation, CRL, and OCSP
+- name: ssh
+  description: SSH certificate issuance, lookup, revocation, KRL, and client config helpers
+- name: common
+  description: Combined statistics, CA info, audit log, expiring certificates, and cleanup

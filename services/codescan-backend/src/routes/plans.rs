@@ -18,7 +18,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::routes::license_denied;
 use crate::state::AppState;
 
@@ -46,8 +46,8 @@ fn pagination(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
     )
 }
 
-#[derive(sqlx::FromRow, Serialize)]
-struct PlanRow {
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct PlanRow {
     id: i64,
     external_id: String,
     platform: String,
@@ -72,8 +72,8 @@ const PLAN_COLUMNS: &str = "id, external_id, platform, repository, issue_number,
      issue_title, plan_content, plan_steps, ai_provider, ai_model, status, error_message, \
      comment_posted, created_at, updated_at";
 
-#[derive(Deserialize)]
-struct ListQuery {
+#[derive(Deserialize, utoipa::IntoParams)]
+pub(crate) struct ListQuery {
     platform: Option<String>,
     repository: Option<String>,
     status: Option<String>,
@@ -81,8 +81,29 @@ struct ListQuery {
     per_page: Option<i64>,
 }
 
+/// Documentation-only mirror of `list_plans`'s `serde_json::json!` body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct PlanListResponse {
+    plans: Vec<PlanRow>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+}
+
 /// GET /codescan/plans — paginated, optionally filtered.
-async fn list_plans(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/plans",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(ListQuery),
+    responses(
+        (status = 200, description = "Paginated issue-plan list", body = PlanListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_plans(
     State(state): State<AppState>,
     _user: CurrentUser,
     Query(q): Query<ListQuery>,
@@ -141,8 +162,8 @@ async fn list_plans(
         .into_response())
 }
 
-#[derive(Deserialize)]
-struct CreatePlanRequest {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreatePlanRequest {
     platform: String,
     repository: String,
     issue_number: i32,
@@ -174,7 +195,21 @@ fn validate_create(body: &CreatePlanRequest) -> Result<(), ApiError> {
 }
 
 /// POST /codescan/plans — any authenticated role (see module docs).
-async fn create_plan(
+#[utoipa::path(
+    post,
+    path = "/api/v1/codescan/plans",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    request_body = CreatePlanRequest,
+    responses(
+        (status = 201, description = "Issue plan created", body = PlanRow),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 409, description = "Issue plan with this external_id already exists", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_plan(
     State(state): State<AppState>,
     _user: CurrentUser,
     ApiJson(body): ApiJson<CreatePlanRequest>,
@@ -228,7 +263,20 @@ async fn create_plan(
 }
 
 /// GET /codescan/plans/{plan_id}.
-async fn get_plan(
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/plans/{plan_id}",
+    tag = "codescan",
+    security(("bearer_jwt" = [])),
+    params(("plan_id" = i64, Path, description = "Issue plan id")),
+    responses(
+        (status = 200, description = "Issue plan detail", body = PlanRow),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
+        (status = 404, description = "Issue plan not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_plan(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(plan_id): Path<i64>,

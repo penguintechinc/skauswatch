@@ -70,7 +70,7 @@ pub enum AiProvider {
 }
 
 /// Event/alert severity levels. v1 `Severity`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     /// Requires immediate action.
@@ -105,7 +105,7 @@ pub enum ThreatLevel {
 }
 
 /// Security event categories. v1 `EventType`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
     /// Login/logout/credential check.
@@ -139,7 +139,7 @@ pub enum EventType {
 }
 
 /// Origin of a collected log/event. v1 `LogSource`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LogSource {
     /// Linux audit subsystem.
@@ -157,16 +157,25 @@ pub enum LogSource {
 /// Base security event shared by every collector and returned by the
 /// search/get/stream endpoints. v1 `BaseEvent` dataclass, `processed_data`
 /// added as a real field (see module docs).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct BaseEvent {
     /// Unique event id (UUIDv4 when newly created).
     #[serde(default = "new_uuid")]
     pub id: String,
-    /// Where the event originated.
+    // Deliberately no `///` doc comment on this field (see `source`/
+    // `event_type`/`severity` below — same reason): a field-level doc
+    // comment on a field whose type is itself a `ToSchema` enum makes
+    // utoipa emit `$ref` + a sibling `description` key. That's legal
+    // OpenAPI 3.1 but crashes Spectral 6.x resolving the referenced enum
+    // (`spectral lint` — see `docs/v2-port/openapi-pattern.md`). The
+    // field's meaning lives on `LogSource`'s own doc comment instead, which
+    // utoipa surfaces via the `$ref`.
     pub source: LogSource,
-    /// Event category.
+    // See `source` above for why this has no `///` doc comment — see
+    // `EventType`'s own doc comment for the field's meaning.
     pub event_type: EventType,
-    /// Severity assigned at collection time.
+    // See `source` above for why this has no `///` doc comment — see
+    // `Severity`'s own doc comment for the field's meaning.
     pub severity: Severity,
     /// Human-readable message.
     pub message: String,
@@ -364,7 +373,7 @@ fn default_unknown_status() -> String {
 }
 
 /// Alert model for API responses. v1 `Alert`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Alert {
     /// Alert id.
     pub id: String,
@@ -383,12 +392,22 @@ pub struct Alert {
 /// `Default` is implemented by hand for the same reason as
 /// [`EventSearchRequest`]: a derived impl would give `limit: 0` instead of
 /// the intended 50.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(default)]
 pub struct AlertSearchRequest {
     /// Free-text query.
     pub query: String,
     /// Optional severity filter.
+    // `#[schema(default)]` (bare — not `default = ...`) tells utoipa "no
+    // schema `default:` value" instead of letting the container-level
+    // `#[serde(default)]` above auto-derive one via `Option::default()`.
+    // That auto-derived value would be a literal YAML `default: null`,
+    // which is legal OpenAPI 3.1 but crashes Spectral 6.x resolving the
+    // schema (`spectral lint` — see `docs/v2-port/openapi-pattern.md`).
+    // Doesn't change real (de)serialization: the struct-level `#[serde(
+    // default)]` still applies at runtime, only the *documented* schema
+    // default is omitted.
+    #[schema(default)]
     pub severity: Option<String>,
     /// Page size.
     #[serde(default = "default_limit")]
@@ -413,7 +432,7 @@ fn default_limit() -> i64 {
 }
 
 /// Response for `POST /alerts/search`. v1 `AlertSearchResponse`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AlertSearchResponse {
     /// Matching alerts.
     pub alerts: Vec<Alert>,
@@ -426,7 +445,7 @@ pub struct AlertSearchResponse {
 }
 
 /// Dashboard summary metrics. v1 `DashboardMetrics`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DashboardMetrics {
     /// Total events processed.
     pub total_events: i64,
@@ -454,7 +473,7 @@ pub struct DashboardMetrics {
 /// produce the identical, fully-defaulted request — a derived `Default`
 /// would silently diverge from the `#[serde(default = "...")]` values below
 /// (empty `sort_by`/`sort_order`/`limit` instead of `timestamp`/`desc`/50).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(default)]
 pub struct EventSearchRequest {
     /// Free-text query matched against `message`/`processed_data`.
@@ -466,8 +485,13 @@ pub struct EventSearchRequest {
     /// Restrict to these severities (empty = no filter).
     pub severities: Vec<Severity>,
     /// Inclusive lower timestamp bound.
+    // See `AlertSearchRequest::severity` for why this carries a bare
+    // `#[schema(default)]` instead of letting utoipa auto-derive
+    // `default: null` from the container's `#[serde(default)]`.
+    #[schema(default)]
     pub start_time: Option<DateTime<Utc>>,
     /// Inclusive upper timestamp bound.
+    #[schema(default)]
     pub end_time: Option<DateTime<Utc>>,
     /// Sort field (defaults to `timestamp`).
     #[serde(default = "default_sort_by")]
@@ -507,7 +531,7 @@ fn default_sort_order() -> String {
 }
 
 /// Response for `POST /events/search`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EventSearchResponse {
     /// Matching events.
     pub events: Vec<BaseEvent>,

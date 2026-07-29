@@ -30,6 +30,10 @@ enum Command {
     Serve,
     /// Probe the local /healthz endpoint and exit 0/1 (container HEALTHCHECK).
     Healthcheck,
+    /// Print the generated OpenAPI 3.x spec (YAML) to stdout and exit —
+    /// the authenticated full document (`routes::openapi::ApiDoc`), never
+    /// hand-edited. See `docs/v2-port/openapi-pattern.md`.
+    Openapi,
 }
 
 #[tokio::main]
@@ -37,7 +41,22 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command.unwrap_or(Command::Serve) {
         Command::Serve => serve().await,
         Command::Healthcheck => healthcheck().await,
+        Command::Openapi => print_openapi(),
     }
+}
+
+/// Emits `routes::openapi::ApiDoc`'s generated spec as YAML — the source of
+/// truth for `services/manager/openapi/v1.yaml`. The public login-only
+/// document (`routes::openapi::PublicApiDoc`) is intentionally not emitted
+/// here; it is served live only (see `routes/openapi.rs`), never committed,
+/// since it's a strict subset of the full spec.
+fn print_openapi() -> anyhow::Result<()> {
+    use utoipa::OpenApi;
+    let yaml = routes::openapi::ApiDoc::openapi()
+        .to_yaml()
+        .map_err(|e| anyhow::anyhow!("serialize openapi spec: {e}"))?;
+    print!("{yaml}");
+    Ok(())
 }
 
 /// Default REST port — parity with the v1 Quart manager (env `API_PORT`).

@@ -9,6 +9,21 @@ use axum::extract::FromRequest;
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use serde::Serialize;
+
+/// Documentation-only mirror of `ApiError`'s `{"error": ..., "detail": ...}`
+/// wire envelope — every variant uses this exact two-key shape. `ApiError`
+/// itself builds its body with `serde_json::json!` rather than a typed
+/// struct, so this type exists solely to give `utoipa` something to
+/// reference in `#[utoipa::path]` `responses(...)` clauses (see
+/// `docs/v2-port/openapi-pattern.md`).
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct ErrorResponse {
+    /// Error category (e.g. "Not Found", "Unauthorized").
+    pub error: String,
+    /// Human-readable detail message.
+    pub detail: String,
+}
 
 /// API-level errors carrying the house envelope shape.
 #[derive(Debug)]

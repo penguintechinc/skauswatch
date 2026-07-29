@@ -1,0 +1,709 @@
+openapi: 3.1.0
+info:
+  title: SkausWatch Monitor API
+  description: 'Security event/alert REST API over Elasticsearch/OpenSearch: health/version, dashboard metrics, event search/get/stream, and alert management.'
+  contact:
+    name: Penguin Tech Inc
+    email: support@penguintech.io
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+  version: '1'
+paths:
+  /api/v1/alerts/search:
+    post:
+      tags:
+      - monitor
+      summary: |-
+        v1 `AlertManager.search_alerts`: always empty (no auth required,
+        matching v1).
+      operationId: search_alerts
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertSearchRequest'
+        required: true
+      responses:
+        '200':
+          description: 'Matching alerts (v1 stub: always empty, see module docs)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertSearchResponse'
+        '403':
+          description: monitor feature not enabled for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/alerts/{alert_id}:
+    get:
+      tags:
+      - monitor
+      summary: |-
+        v1 `AlertManager.get_alert_by_id`: always `None` (no auth required,
+        matching v1).
+      operationId: get_alert
+      parameters:
+      - name: alert_id
+        in: path
+        description: Alert id
+        required: true
+        schema:
+          type: string
+      responses:
+        '403':
+          description: monitor feature not enabled for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: 'Alert not found (v1 stub: always 404, see module docs)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/alerts/{alert_id}/status:
+    put:
+      tags:
+      - monitor
+      summary: |-
+        v1 `update_alert_status`: authenticated (any valid bearer token, no
+        admin scope — v1 called `verify_token(credentials)` without
+        `require_admin=True`), acknowledges without persisting.
+      operationId: update_alert_status
+      parameters:
+      - name: alert_id
+        in: path
+        description: Alert id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAlertStatusRequest'
+        required: true
+      responses:
+        '200':
+          description: 'Acknowledged (v1 stub: not persisted, see module docs)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateAlertStatusResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing or empty tenant claim, or monitor feature not enabled for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/events/search:
+    post:
+      tags:
+      - monitor
+      summary: |-
+        v1 `log_processor.search_events`: prefers Elasticsearch, falls back to
+        MongoDB, 503s if neither backend is configured (v1 raised a bare
+        `Exception("No search backend available")`, caught by the generic
+        handler and turned into a 500 — 503 is the correct status for "no
+        backend configured", not a request bug).
+      operationId: search_events
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventSearchRequest'
+        required: true
+      responses:
+        '200':
+          description: Matching events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventSearchResponse'
+        '400':
+          description: Malformed request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: monitor feature not enabled for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: No search backend (Elasticsearch/OpenSearch) configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/events/stream:
+    get:
+      tags:
+      - monitor
+      summary: |-
+        GET /events/stream — real SSE infrastructure; see module docs for why it
+        has no producers yet.
+      operationId: stream_events
+      parameters:
+      - name: sources
+        in: query
+        required: false
+        schema:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogSource'
+      - name: event_types
+        in: query
+        required: false
+        schema:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventType'
+      - name: severities
+        in: query
+        required: false
+        schema:
+          type: array
+          items:
+            $ref: '#/components/schemas/Severity'
+      responses:
+        '200':
+          description: Live event stream (Server-Sent Events; no producer wired up yet, see module docs)
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/BaseEvent'
+        '403':
+          description: monitor feature not enabled for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/events/{event_id}:
+    get:
+      tags:
+      - monitor
+      summary: v1 `log_processor.get_event_by_id`.
+      operationId: get_event
+      parameters:
+      - name: event_id
+        in: path
+        description: Event id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The stored event
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BaseEvent'
+        '403':
+          description: monitor feature not enabled for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Event not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: No search backend (Elasticsearch/OpenSearch) configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/health:
+    get:
+      tags:
+      - monitor
+      summary: GET /health.
+      operationId: health_check
+      responses:
+        '200':
+          description: Event store configured and reachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: No event store backend configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/v1/metrics/dashboard:
+    get:
+      tags:
+      - monitor
+      summary: |-
+        v1 `AnalysisEngine.get_dashboard_metrics`: always all-zero. No auth
+        required, matching v1 (the route had no `Depends(security)`).
+      operationId: get_dashboard_metrics
+      responses:
+        '200':
+          description: 'Dashboard summary metrics (v1 stub: always all-zero, see module docs)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardMetrics'
+        '403':
+          description: monitor feature not enabled for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/version:
+    get:
+      tags:
+      - monitor
+      summary: GET /version — v1 `{name, version, status}`.
+      operationId: version_info
+      responses:
+        '200':
+          description: Service name, version, and status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+components:
+  schemas:
+    Alert:
+      type: object
+      description: Alert model for API responses. v1 `Alert`.
+      required:
+      - id
+      - title
+      - severity
+      - status
+      - created_at
+      properties:
+        created_at:
+          type: string
+          format: date-time
+          description: Creation time.
+        id:
+          type: string
+          description: Alert id.
+        severity:
+          type: string
+          description: Severity string.
+        status:
+          type: string
+          description: Lifecycle status string.
+        title:
+          type: string
+          description: Short title.
+    AlertSearchRequest:
+      type: object
+      description: |-
+        Request body for `POST /alerts/search`. v1 `AlertSearchRequest`.
+
+        `Default` is implemented by hand for the same reason as
+        [`EventSearchRequest`]: a derived impl would give `limit: 0` instead of
+        the intended 50.
+      properties:
+        limit:
+          type: integer
+          format: int64
+          description: Page size.
+          default: 50
+        offset:
+          type: integer
+          format: int64
+          description: Page offset.
+          default: 0
+        query:
+          type: string
+          description: Free-text query.
+          default: ''
+        severity:
+          type:
+          - string
+          - 'null'
+          description: Optional severity filter.
+    AlertSearchResponse:
+      type: object
+      description: Response for `POST /alerts/search`. v1 `AlertSearchResponse`.
+      required:
+      - alerts
+      - total
+      - limit
+      - offset
+      properties:
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Alert'
+          description: Matching alerts.
+        limit:
+          type: integer
+          format: int64
+          description: Echoed page size.
+        offset:
+          type: integer
+          format: int64
+          description: Echoed page offset.
+        total:
+          type: integer
+          format: int64
+          description: Total match count.
+    BaseEvent:
+      type: object
+      description: |-
+        Base security event shared by every collector and returned by the
+        search/get/stream endpoints. v1 `BaseEvent` dataclass, `processed_data`
+        added as a real field (see module docs).
+      required:
+      - source
+      - event_type
+      - severity
+      - message
+      properties:
+        ai_analysis:
+          description: AI analysis result, if any was attached.
+        enrichments:
+          description: |-
+            Enrichment metadata (geo, hostnames, ...). Real field, currently
+            populated only once a collector/enrichment port lands.
+        event_type:
+          $ref: '#/components/schemas/EventType'
+        host:
+          type: string
+          description: Originating host.
+        id:
+          type: string
+          description: Unique event id (UUIDv4 when newly created).
+        message:
+          type: string
+          description: Human-readable message.
+        pid:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Associated process id, if any.
+        process:
+          type:
+          - string
+          - 'null'
+          description: Associated process name, if any.
+        processed_data:
+          description: |-
+            Working enrichment scratch space (see module docs: real field, v1
+            lacked it and enrichment silently no-op'd).
+        raw_data:
+          description: Unmodified source payload.
+        severity:
+          $ref: '#/components/schemas/Severity'
+        source:
+          $ref: '#/components/schemas/LogSource'
+        tags:
+          type: array
+          items:
+            type: string
+          description: Free-form classification tags.
+        threat_matches:
+          type: array
+          items: {}
+          description: Threat-intel matches recorded against this event.
+        timestamp:
+          type: string
+          format: date-time
+          description: Collection timestamp.
+        user:
+          type:
+          - string
+          - 'null'
+          description: Associated username, if any.
+      additionalProperties:
+        description: |-
+          Any additional fields present on a stored document that this struct
+          doesn't model explicitly — preserved instead of failing
+          deserialization (v1's `BaseEvent(**doc)` raised `TypeError` on any
+          unexpected key).
+    DashboardMetrics:
+      type: object
+      description: Dashboard summary metrics. v1 `DashboardMetrics`.
+      required:
+      - total_events
+      - events_per_hour
+      - critical_alerts
+      - high_alerts
+      - medium_alerts
+      - low_alerts
+      - threats_detected
+      - ai_analyses
+      properties:
+        ai_analyses:
+          type: integer
+          format: int64
+          description: AI analyses run.
+        critical_alerts:
+          type: integer
+          format: int64
+          description: Open critical-severity alerts.
+        events_per_hour:
+          type: number
+          format: double
+          description: Rolling events-per-hour rate.
+        high_alerts:
+          type: integer
+          format: int64
+          description: Open high-severity alerts.
+        low_alerts:
+          type: integer
+          format: int64
+          description: Open low-severity alerts.
+        medium_alerts:
+          type: integer
+          format: int64
+          description: Open medium-severity alerts.
+        threats_detected:
+          type: integer
+          format: int64
+          description: Threat-intel matches detected.
+        total_events:
+          type: integer
+          format: int64
+          description: Total events processed.
+    ErrorResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `ApiError`'s `{"error": ..., "detail": ...}`
+        wire envelope — every variant uses this exact two-key shape. `ApiError`
+        itself builds its body with `serde_json::json!` rather than a typed
+        struct, so this type exists solely to give `utoipa` something to
+        reference in `#[utoipa::path]` `responses(...)` clauses (see
+        `docs/v2-port/openapi-pattern.md`).
+      required:
+      - error
+      - detail
+      properties:
+        detail:
+          type: string
+          description: Human-readable detail message.
+        error:
+          type: string
+          description: Error category (e.g. "Not Found", "Unauthorized").
+    EventSearchRequest:
+      type: object
+      description: |-
+        Request body for `POST /events/search`. See module docs for how this
+        differs from (and fixes) the v1 model.
+
+        `Default` is implemented by hand (not derived) so that
+        `EventSearchRequest::default()` in Rust code and `{}` over the wire
+        produce the identical, fully-defaulted request — a derived `Default`
+        would silently diverge from the `#[serde(default = "...")]` values below
+        (empty `sort_by`/`sort_order`/`limit` instead of `timestamp`/`desc`/50).
+      properties:
+        end_time:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Inclusive upper timestamp bound.
+        event_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventType'
+          description: Restrict to these event types (empty = no filter).
+          default: []
+        limit:
+          type: integer
+          format: int64
+          description: Page size.
+          default: 50
+        offset:
+          type: integer
+          format: int64
+          description: Page offset.
+          default: 0
+        query:
+          type: string
+          description: Free-text query matched against `message`/`processed_data`.
+          default: ''
+        severities:
+          type: array
+          items:
+            $ref: '#/components/schemas/Severity'
+          description: Restrict to these severities (empty = no filter).
+          default: []
+        sort_by:
+          type: string
+          description: Sort field (defaults to `timestamp`).
+          default: timestamp
+        sort_order:
+          type: string
+          description: 'Sort order: `asc` or `desc`.'
+          default: desc
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogSource'
+          description: Restrict to these sources (empty = no filter).
+          default: []
+        start_time:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Inclusive lower timestamp bound.
+    EventSearchResponse:
+      type: object
+      description: Response for `POST /events/search`.
+      required:
+      - events
+      - total
+      - limit
+      - offset
+      - query_time_ms
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/BaseEvent'
+          description: Matching events.
+        limit:
+          type: integer
+          format: int64
+          description: Echoed page size.
+        offset:
+          type: integer
+          format: int64
+          description: Echoed page offset.
+        query_time_ms:
+          type: number
+          format: double
+          description: Backend query latency in milliseconds.
+        total:
+          type: integer
+          format: int64
+          description: Total match count (correctly populated — see module docs).
+    EventType:
+      type: string
+      description: Security event categories. v1 `EventType`.
+      enum:
+      - authentication
+      - authorization
+      - privilege_escalation
+      - system_call
+      - network
+      - network_event
+      - file_access
+      - process
+      - accounting
+      - access
+      - security_violation
+      - system_event
+      - container_event
+      - application_event
+    HealthResponse:
+      type: object
+      description: Documentation-only mirror of `health_check`'s `serde_json::json!` body.
+      required:
+      - status
+      - version
+      - event_store
+      properties:
+        event_store:
+          type: string
+          description: '`"connected"` or `"not configured"`.'
+        status:
+          type: string
+          description: '`"healthy"` or `"degraded"`.'
+        version:
+          type: string
+          description: Service version string.
+    LogSource:
+      type: string
+      description: Origin of a collected log/event. v1 `LogSource`.
+      enum:
+      - auditd
+      - file
+      - kubernetes
+      - lxc_lxd
+      - system
+    Severity:
+      type: string
+      description: Event/alert severity levels. v1 `Severity`.
+      enum:
+      - critical
+      - high
+      - medium
+      - low
+      - info
+    UpdateAlertStatusRequest:
+      type: object
+      description: |-
+        Documentation-only mirror of `update_alert_status`'s request body — v1
+        only ever reads a `status` field from the free-form JSON body.
+      properties:
+        status:
+          type:
+          - string
+          - 'null'
+          description: New status string (defaults to `"unknown"` if omitted).
+    UpdateAlertStatusResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `update_alert_status`'s `serde_json::json!`
+        response body.
+      required:
+      - status
+      - alert_id
+      - new_status
+      properties:
+        alert_id:
+          type: string
+          description: Echoed path id.
+        new_status:
+          type: string
+          description: Echoed (or defaulted) new status.
+        status:
+          type: string
+          description: Always `"updated"` — v1 stub, see module docs (no persistence).
+    VersionResponse:
+      type: object
+      description: Documentation-only mirror of `version_info`'s `serde_json::json!` body.
+      required:
+      - name
+      - version
+      - status
+      properties:
+        name:
+          type: string
+          description: Always `"SkausWatch Monitor Service"`.
+        status:
+          type: string
+          description: Always `"running"`.
+        version:
+          type: string
+          description: Service version string.
+  securitySchemes:
+    bearer_jwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+tags:
+- name: monitor
+  description: Health/version, dashboard metrics, event search, and alert management

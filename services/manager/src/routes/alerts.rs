@@ -12,7 +12,7 @@ use serde::Deserialize;
 use sqlx::{Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
 
 const SEVERITIES: [&str; 5] = ["critical", "high", "medium", "low", "info"];
@@ -100,6 +100,36 @@ fn search_json(row: &AlertRow) -> serde_json::Value {
         "source": row.source,
         "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
     })
+}
+
+/// Documentation-only mirror of `alert_json`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AlertItem {
+    id: i32,
+    title: String,
+    description: Option<String>,
+    severity: String,
+    status: String,
+    source: Option<String>,
+    indicators: serde_json::Value,
+    ai_review: Option<serde_json::Value>,
+    assigned_to: Option<i32>,
+    resolved_at: Option<String>,
+    resolution_notes: Option<String>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
+/// Documentation-only mirror of `search_json`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AlertSearchItem {
+    id: i32,
+    title: String,
+    description: Option<String>,
+    severity: String,
+    status: String,
+    source: Option<String>,
+    created_at: Option<String>,
 }
 
 /// v1 parity: `alert.indicators or []` — SQL NULL / jsonb null become `[]`.
@@ -280,7 +310,36 @@ fn required_str(
     Ok(s.clone())
 }
 
-async fn list_alerts(
+/// Documentation-only mirror of `list_alerts`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AlertListResponse {
+    items: Vec<AlertItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
+/// GET /alerts — paginated alert list, filterable by severity/status/source
+/// via repeated query params.
+#[utoipa::path(
+    get,
+    path = "/api/v1/alerts",
+    tag = "alerts",
+    security(("bearer_jwt" = [])),
+    params(
+        ("page" = Option<i64>, Query, description = "1-based page number (default 1)"),
+        ("per_page" = Option<i64>, Query, description = "Page size, capped at 100 (default 20)"),
+        ("severity" = Option<Vec<String>>, Query, description = "Repeatable severity filter"),
+        ("status" = Option<Vec<String>>, Query, description = "Repeatable status filter"),
+        ("source" = Option<String>, Query, description = "Exact source filter"),
+    ),
+    responses(
+        (status = 200, description = "Paginated alert list", body = AlertListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_alerts(
     State(state): State<AppState>,
     _user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
@@ -303,7 +362,20 @@ async fn list_alerts(
     })))
 }
 
-async fn get_alert(
+/// GET /alerts/{alert_id} — single alert detail.
+#[utoipa::path(
+    get,
+    path = "/api/v1/alerts/{alert_id}",
+    tag = "alerts",
+    security(("bearer_jwt" = [])),
+    params(("alert_id" = i32, Path, description = "Alert id")),
+    responses(
+        (status = 200, description = "Alert detail", body = AlertItem),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Alert not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_alert(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(alert_id): Path<i32>,
@@ -320,8 +392,8 @@ async fn get_alert(
 
 /// AlertCreateRequest — fields optional here so missing ones map to the
 /// validation envelope instead of an axum extractor rejection.
-#[derive(Deserialize)]
-struct CreateBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreateBody {
     title: Option<String>,
     description: Option<String>,
     severity: Option<String>,
@@ -405,7 +477,38 @@ fn alert_pending_fields(
     ]
 }
 
-async fn create_alert(
+/// Summary embedded in [`AlertCreateResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AlertCreateSummary {
+    id: i32,
+    title: String,
+    severity: String,
+    status: String,
+    created_at: Option<String>,
+}
+
+/// Documentation-only mirror of `create_alert`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AlertCreateResponse {
+    message: String,
+    alert: AlertCreateSummary,
+}
+
+/// POST /alerts — admin/maintainer only.
+#[utoipa::path(
+    post,
+    path = "/api/v1/alerts",
+    tag = "alerts",
+    security(("bearer_jwt" = [])),
+    request_body = CreateBody,
+    responses(
+        (status = 201, description = "Alert created", body = AlertCreateResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_alert(
     State(state): State<AppState>,
     user: CurrentUser,
     ApiJson(body): ApiJson<CreateBody>,
@@ -452,8 +555,8 @@ async fn create_alert(
 }
 
 /// AlertUpdateRequest — every field optional; absent fields are not touched.
-#[derive(Deserialize)]
-struct UpdateBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct UpdateBody {
     title: Option<String>,
     description: Option<String>,
     severity: Option<String>,
@@ -494,7 +597,40 @@ struct UpdatedRow {
     updated_at: Option<NaiveDateTime>,
 }
 
-async fn update_alert(
+/// Summary embedded in [`AlertUpdateResponse`].
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AlertUpdateSummary {
+    id: i32,
+    title: String,
+    severity: String,
+    status: String,
+    updated_at: Option<String>,
+}
+
+/// Documentation-only mirror of `update_alert`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AlertUpdateResponse {
+    message: String,
+    alert: AlertUpdateSummary,
+}
+
+/// PUT /alerts/{alert_id} — admin/maintainer only; partial update.
+#[utoipa::path(
+    put,
+    path = "/api/v1/alerts/{alert_id}",
+    tag = "alerts",
+    security(("bearer_jwt" = [])),
+    params(("alert_id" = i32, Path, description = "Alert id")),
+    request_body = UpdateBody,
+    responses(
+        (status = 200, description = "Alert updated", body = AlertUpdateResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Alert not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_alert(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(alert_id): Path<i32>,
@@ -565,12 +701,40 @@ async fn update_alert(
     })))
 }
 
-#[derive(Deserialize)]
-struct StatusBody {
+/// PUT /alerts/{alert_id}/status body.
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct StatusBody {
     status: Option<String>,
 }
 
-async fn update_alert_status(
+/// Documentation-only mirror of `update_alert_status`'s `serde_json::json!`
+/// body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AlertStatusResponse {
+    message: String,
+    alert_id: i32,
+    new_status: String,
+}
+
+/// PUT /alerts/{alert_id}/status — admin/maintainer only (contract defect
+/// #7: v1 let any authenticated role mutate status; this port tightens the
+/// gate to match the role model).
+#[utoipa::path(
+    put,
+    path = "/api/v1/alerts/{alert_id}/status",
+    tag = "alerts",
+    security(("bearer_jwt" = [])),
+    params(("alert_id" = i32, Path, description = "Alert id")),
+    request_body = StatusBody,
+    responses(
+        (status = 200, description = "Status updated", body = AlertStatusResponse),
+        (status = 400, description = "Invalid status", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Alert not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_alert_status(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(alert_id): Path<i32>,
@@ -612,8 +776,8 @@ async fn update_alert_status(
 }
 
 /// Optional POST /{id}/ai-review body — v1 tolerates a missing body entirely.
-#[derive(Default, Deserialize)]
-struct AiReviewBody {
+#[derive(Default, Deserialize, utoipa::ToSchema)]
+pub(crate) struct AiReviewBody {
     provider: Option<String>,
     priority: Option<i64>,
 }
@@ -648,7 +812,37 @@ fn ai_enabled_value(raw: Option<&str>) -> bool {
     raw.is_none_or(|v| v.eq_ignore_ascii_case("true"))
 }
 
-async fn request_ai_review(
+/// Documentation-only mirror of `request_ai_review`'s success body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AiReviewResponse {
+    message: String,
+    job_id: String,
+    alert_id: i32,
+    provider: String,
+    priority: i64,
+    /// Python `datetime.utcnow().isoformat()`.
+    submitted_at: String,
+}
+
+/// POST /alerts/{alert_id}/ai-review — admin/maintainer only; enqueues an
+/// async AI review job via the `ai:tasks` stream.
+#[utoipa::path(
+    post,
+    path = "/api/v1/alerts/{alert_id}/ai-review",
+    tag = "alerts",
+    security(("bearer_jwt" = [])),
+    params(("alert_id" = i32, Path, description = "Alert id")),
+    request_body(content = AiReviewBody, description = "Optional — a missing/empty body is accepted"),
+    responses(
+        (status = 202, description = "AI review job queued", body = AiReviewResponse),
+        (status = 400, description = "Invalid JSON body", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Alert not found", body = ErrorResponse),
+        (status = 503, description = "AI integration is disabled", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn request_ai_review(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(alert_id): Path<i32>,
@@ -717,8 +911,8 @@ async fn request_ai_review(
 }
 
 /// AlertSearchRequest — datetimes arrive as strings and are parsed leniently.
-#[derive(Deserialize)]
-struct SearchBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct SearchBody {
     query: Option<String>,
     severity: Option<Vec<String>>,
     status: Option<Vec<String>>,
@@ -792,7 +986,31 @@ fn validate_search(b: &SearchBody) -> Result<(AlertFilters, i64, i64), ApiError>
     Ok((filters, page, per_page))
 }
 
-async fn search_alerts(
+/// Documentation-only mirror of `search_alerts`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AlertSearchResponse {
+    items: Vec<AlertSearchItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
+/// POST /alerts/search — richer filtering than GET /alerts (free-text query,
+/// date range, `assigned_to`).
+#[utoipa::path(
+    post,
+    path = "/api/v1/alerts/search",
+    tag = "alerts",
+    security(("bearer_jwt" = [])),
+    request_body = SearchBody,
+    responses(
+        (status = 200, description = "Paginated search results", body = AlertSearchResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn search_alerts(
     State(state): State<AppState>,
     _user: CurrentUser,
     ApiJson(body): ApiJson<SearchBody>,
@@ -823,7 +1041,30 @@ fn bucket_counts(keys: &[&str], rows: &[(Option<String>, i64)]) -> serde_json::V
     serde_json::Value::Object(map)
 }
 
-async fn alert_statistics(
+/// Documentation-only mirror of `alert_statistics`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AlertStatisticsResponse {
+    total: i64,
+    /// Zero-filled per-severity counts, keyed by the five canonical values.
+    by_severity: std::collections::BTreeMap<String, i64>,
+    /// Zero-filled per-status counts, keyed by the five canonical values.
+    by_status: std::collections::BTreeMap<String, i64>,
+    last_24_hours: i64,
+}
+
+/// GET /alerts/statistics — total, severity/status breakdowns, and a 24h
+/// rolling count.
+#[utoipa::path(
+    get,
+    path = "/api/v1/alerts/statistics",
+    tag = "alerts",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Alert statistics", body = AlertStatisticsResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn alert_statistics(
     State(state): State<AppState>,
     _user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {

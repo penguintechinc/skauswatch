@@ -24,7 +24,7 @@ use sha2::Sha256;
 use sqlx::{Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
 
 /// v1 `EndpointAgentStatus` enum values (order matters for statistics buckets).
@@ -136,7 +136,7 @@ fn ct_eq(a: &str, b: &str) -> bool {
 /// Authenticated ENDPOINT agent identity, extracted from `X-API-Key` +
 /// `X-Agent-ID`. Mirrors v1's `verify_api_key` decorator; failure messages
 /// carry the exact v1 strings inside the shared 401 envelope.
-struct EndpointAgent {
+pub(crate) struct EndpointAgent {
     /// Verified `X-Agent-ID` header value (v1 `g.agent_id`).
     agent_id: String,
 }
@@ -270,8 +270,8 @@ fn parse_page_params(
 
 /// EndpointAgentRegisterRequest — fields optional here so missing ones map to the
 /// validation envelope instead of an axum extractor rejection.
-#[derive(Deserialize)]
-struct RegisterBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct RegisterBody {
     agent_id: Option<String>,
     hostname: Option<String>,
     ip_address: Option<String>,
@@ -306,11 +306,34 @@ fn validate_register(b: &RegisterBody) -> Result<ValidRegister, ApiError> {
     })
 }
 
+/// Documentation-only mirror of `register_agent`'s success bodies (both the
+/// 200 re-register and 201 create paths share this shape).
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct RegisterResponse {
+    message: String,
+    agent_id: String,
+    status: String,
+}
+
 /// POST /endpoint/register — HMAC agent auth. Re-registers (200) when the body's
 /// agent_id already exists (full field overwrite, metadata replaced), else
 /// inserts a new active agent (201). v1 keys off the BODY agent_id, which
 /// need not match the authenticated X-Agent-ID — preserved as-is.
-async fn register_agent(
+#[utoipa::path(
+    post,
+    path = "/api/v1/endpoint/register",
+    tag = "endpoint",
+    security(("endpoint_hmac" = [])),
+    params(("X-Agent-ID" = String, Header, description = "Agent identity — must match the HMAC key")),
+    request_body = RegisterBody,
+    responses(
+        (status = 200, description = "Agent re-registered (agent_id already existed)", body = RegisterResponse),
+        (status = 201, description = "Agent registered", body = RegisterResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing/invalid X-API-Key or X-Agent-ID", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn register_agent(
     State(state): State<AppState>,
     _agent: EndpointAgent,
     ApiJson(body): ApiJson<RegisterBody>,
@@ -377,8 +400,8 @@ async fn register_agent(
 }
 
 /// EndpointHeartbeatRequest — status defaults to "active", metadata to `{}`.
-#[derive(Deserialize)]
-struct HeartbeatBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct HeartbeatBody {
     agent_id: Option<String>,
     status: Option<String>,
     metadata: Option<serde_json::Value>,
@@ -405,10 +428,33 @@ fn validate_heartbeat(b: &HeartbeatBody) -> Result<ValidHeartbeat, ApiError> {
     })
 }
 
+/// Documentation-only mirror of `heartbeat`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct HeartbeatResponse {
+    status: String,
+    agent_id: String,
+    /// Python `datetime.utcnow().isoformat()`.
+    timestamp: String,
+}
+
 /// POST /endpoint/heartbeat — HMAC agent auth. Updates status + last_heartbeat and
 /// merges the payload metadata over the stored metadata (new keys win),
 /// exactly like v1's `{**old, **new}`.
-async fn heartbeat(
+#[utoipa::path(
+    post,
+    path = "/api/v1/endpoint/heartbeat",
+    tag = "endpoint",
+    security(("endpoint_hmac" = [])),
+    params(("X-Agent-ID" = String, Header, description = "Agent identity — must match the HMAC key")),
+    request_body = HeartbeatBody,
+    responses(
+        (status = 200, description = "Heartbeat recorded", body = HeartbeatResponse),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing/invalid X-API-Key or X-Agent-ID", body = ErrorResponse),
+        (status = 404, description = "Agent not registered", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn heartbeat(
     State(state): State<AppState>,
     _agent: EndpointAgent,
     ApiJson(body): ApiJson<HeartbeatBody>,
@@ -595,10 +641,33 @@ fn endpoint_summary_fields(
     ]
 }
 
+/// Documentation-only mirror of `report_events`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct ReportEventsResponse {
+    status: String,
+    events_received: usize,
+    events_stored: i64,
+    /// `{index, error}` entries, capped at 10.
+    errors: Vec<serde_json::Value>,
+}
+
 /// POST /endpoint/events — HMAC agent auth. Accepts a single event object or a
 /// batch (≤100); always 202 with per-item errors capped at 10 — v1 swallows
 /// per-event DB failures into the errors list too.
-async fn report_events(
+#[utoipa::path(
+    post,
+    path = "/api/v1/endpoint/events",
+    tag = "endpoint",
+    security(("endpoint_hmac" = [])),
+    params(("X-Agent-ID" = String, Header, description = "Agent identity — must match the HMAC key")),
+    request_body(content = serde_json::Value, description = "A single event object, or a JSON array of up to 100 event objects"),
+    responses(
+        (status = 202, description = "Batch accepted (per-item failures reported in `errors`, never fail the request)", body = ReportEventsResponse),
+        (status = 400, description = "Invalid JSON body, or batch exceeds 100 events", body = ErrorResponse),
+        (status = 401, description = "Missing/invalid X-API-Key or X-Agent-ID", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn report_events(
     State(state): State<AppState>,
     agent: EndpointAgent,
     body: Bytes,
@@ -667,10 +736,41 @@ fn env_i64(name: &str, default: i64) -> i64 {
     parse_env_i64(std::env::var(name).ok().as_deref(), default)
 }
 
+/// Per-agent config payload embedded in [`AgentConfigResponse`]. Each field
+/// is metadata-overridable, so it is documented generically
+/// (`serde_json::Value`) rather than a fixed primitive type.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AgentConfigInner {
+    reporting_interval: serde_json::Value,
+    heartbeat_interval: serde_json::Value,
+    event_batch_size: serde_json::Value,
+    enabled_collectors: serde_json::Value,
+    severity_threshold: serde_json::Value,
+}
+
+/// Documentation-only mirror of `agent_config`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AgentConfigResponse {
+    agent_id: String,
+    config: AgentConfigInner,
+}
+
 /// GET /endpoint/config — HMAC agent auth. Returns per-agent config: metadata
 /// overrides layered over the env-derived EndpointConfig defaults, mirroring v1's
 /// `agent_config.get(key, config.endpoint.<key>)`.
-async fn agent_config(
+#[utoipa::path(
+    get,
+    path = "/api/v1/endpoint/config",
+    tag = "endpoint",
+    security(("endpoint_hmac" = [])),
+    params(("X-Agent-ID" = String, Header, description = "Agent identity — must match the HMAC key")),
+    responses(
+        (status = 200, description = "Effective per-agent configuration", body = AgentConfigResponse),
+        (status = 401, description = "Missing/invalid X-API-Key or X-Agent-ID", body = ErrorResponse),
+        (status = 404, description = "Agent not registered", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn agent_config(
     State(state): State<AppState>,
     agent: EndpointAgent,
 ) -> Result<Json<serde_json::Value>, ApiError> {
@@ -746,10 +846,52 @@ fn agent_list_json(r: &AgentRow) -> serde_json::Value {
     })
 }
 
+/// Documentation-only mirror of `agent_list_json`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AgentListItem {
+    id: i32,
+    agent_id: String,
+    hostname: Option<String>,
+    ip_address: Option<String>,
+    os_type: Option<String>,
+    os_version: Option<String>,
+    agent_version: Option<String>,
+    status: Option<String>,
+    last_heartbeat: Option<String>,
+    created_at: Option<String>,
+}
+
+/// Documentation-only mirror of `list_agents`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AgentListResponse {
+    items: Vec<AgentListItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
 /// GET /endpoint/agents — JWT, admin/maintainer. Filters: repeated `status` keys
 /// and a single `os_type`; ordered by last_heartbeat DESC; standard
 /// pagination envelope (per_page default 20, cap 100).
-async fn list_agents(
+#[utoipa::path(
+    get,
+    path = "/api/v1/endpoint/agents",
+    tag = "endpoint",
+    security(("bearer_jwt" = [])),
+    params(
+        ("page" = Option<i64>, Query, description = "1-based page number (default 1)"),
+        ("per_page" = Option<i64>, Query, description = "Page size, capped at 100 (default 20)"),
+        ("status" = Option<Vec<String>>, Query, description = "Repeatable status filter"),
+        ("os_type" = Option<String>, Query, description = "Exact os_type filter"),
+    ),
+    responses(
+        (status = 200, description = "Paginated agent list", body = AgentListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_agents(
     State(state): State<AppState>,
     user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
@@ -801,9 +943,38 @@ async fn list_agents(
     })))
 }
 
+/// Documentation-only mirror of `get_agent`'s wire shape.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AgentDetail {
+    id: i32,
+    agent_id: String,
+    hostname: Option<String>,
+    ip_address: Option<String>,
+    os_type: Option<String>,
+    os_version: Option<String>,
+    agent_version: Option<String>,
+    status: Option<String>,
+    last_heartbeat: Option<String>,
+    metadata: serde_json::Value,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
+
 /// GET /endpoint/agents/{agent_id} — JWT (any role). Full agent detail including
 /// metadata (`{}` for null, v1 `agent.metadata or {}`) and updated_at.
-async fn get_agent(
+#[utoipa::path(
+    get,
+    path = "/api/v1/endpoint/agents/{agent_id}",
+    tag = "endpoint",
+    security(("bearer_jwt" = [])),
+    params(("agent_id" = String, Path, description = "Agent identifier")),
+    responses(
+        (status = 200, description = "Agent detail", body = AgentDetail),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Agent not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_agent(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(agent_id): Path<String>,
@@ -848,9 +1019,47 @@ struct EventRow {
     created_at: Option<chrono::NaiveDateTime>,
 }
 
+/// Documentation-only mirror of one `get_agent_events` item.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AgentEventItem {
+    id: i32,
+    event_type: String,
+    severity: Option<String>,
+    process_name: Option<String>,
+    process_path: Option<String>,
+    command_line: Option<String>,
+    created_at: Option<String>,
+}
+
+/// Documentation-only mirror of `get_agent_events`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AgentEventsResponse {
+    items: Vec<AgentEventItem>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+    pages: i64,
+}
+
 /// GET /endpoint/agents/{agent_id}/events — JWT (any role). Paginated events for
 /// one agent, newest first (per_page default 50, cap 200).
-async fn get_agent_events(
+#[utoipa::path(
+    get,
+    path = "/api/v1/endpoint/agents/{agent_id}/events",
+    tag = "endpoint",
+    security(("bearer_jwt" = [])),
+    params(
+        ("agent_id" = String, Path, description = "Agent identifier"),
+        ("page" = Option<i64>, Query, description = "1-based page number (default 1)"),
+        ("per_page" = Option<i64>, Query, description = "Page size, capped at 200 (default 50)"),
+    ),
+    responses(
+        (status = 200, description = "Paginated event list for the agent", body = AgentEventsResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Agent not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_agent_events(
     State(state): State<AppState>,
     _user: CurrentUser,
     Path(agent_id): Path<String>,
@@ -904,9 +1113,29 @@ async fn get_agent_events(
     })))
 }
 
+/// Documentation-only mirror of `deactivate_agent`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct DeactivateResponse {
+    message: String,
+    agent_id: String,
+}
+
 /// POST /endpoint/agents/{agent_id}/deactivate — JWT, admin only. Sets the agent
 /// status to inactive (pyDAL also bumps updated_at).
-async fn deactivate_agent(
+#[utoipa::path(
+    post,
+    path = "/api/v1/endpoint/agents/{agent_id}/deactivate",
+    tag = "endpoint",
+    security(("bearer_jwt" = [])),
+    params(("agent_id" = String, Path, description = "Agent identifier")),
+    responses(
+        (status = 200, description = "Agent deactivated", body = DeactivateResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 404, description = "Agent not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn deactivate_agent(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(agent_id): Path<String>,
@@ -949,10 +1178,35 @@ fn bucket_counts(keys: &[&str], rows: &[(Option<String>, i64)]) -> serde_json::V
     serde_json::Value::Object(map)
 }
 
+/// Documentation-only mirror of `get_statistics`'s `serde_json::json!` body.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct EndpointStatisticsResponse {
+    total_agents: i64,
+    /// Zero-filled per-status counts, keyed by the three canonical values.
+    agents_by_status: std::collections::BTreeMap<String, i64>,
+    /// Per-OS counts; NULL/empty `os_type` values are excluded (v1 parity).
+    agents_by_os: std::collections::BTreeMap<String, i64>,
+    /// Active agents with no heartbeat in the last 5 minutes.
+    stale_agents: i64,
+    total_events: i64,
+    events_last_24h: i64,
+}
+
 /// GET /endpoint/statistics — JWT (any role). Agent counts by status/OS, stale
 /// agents (active with no heartbeat for 5 min), and event totals. v1 skips
 /// falsy os_type values (NULL and "") in agents_by_os.
-async fn get_statistics(
+#[utoipa::path(
+    get,
+    path = "/api/v1/endpoint/statistics",
+    operation_id = "endpoint_get_statistics",
+    tag = "endpoint",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Endpoint fleet statistics", body = EndpointStatisticsResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_statistics(
     State(state): State<AppState>,
     _user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {

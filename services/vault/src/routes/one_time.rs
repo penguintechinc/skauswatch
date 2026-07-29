@@ -5,13 +5,13 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorResponse, InsufficientScopeResponse};
 use crate::state::AppState;
 
 /// Router for `/api/v1/one-time-secrets`.
@@ -35,13 +35,42 @@ fn generate_token() -> (String, String) {
     (token, hash_hex)
 }
 
-#[derive(Deserialize)]
-struct CreateBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreateBody {
+    /// Plaintext value to share — encrypted at rest immediately, never
+    /// persisted or logged unencrypted.
     value: Option<String>,
+    /// Time-to-live in seconds; must be between 60 and 604800 (7 days).
+    /// Defaults to 86400 (24h).
     ttl_seconds: Option<i64>,
 }
 
-async fn create_one_time_secret(
+/// Documentation-only mirror of `create_one_time_secret`'s response
+/// envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct OneTimeCreateResponse {
+    id: String,
+    /// Path to retrieve the secret exactly once — the webui/ingress owns
+    /// the scheme and host it's reachable at.
+    view_url: String,
+    expires_at: String,
+    ttl_seconds: i64,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/one-time-secrets",
+    tag = "one-time-secrets",
+    security(("bearer_jwt" = [])),
+    request_body = CreateBody,
+    responses(
+        (status = 201, description = "One-time secret created", body = OneTimeCreateResponse),
+        (status = 400, description = "Missing value or ttl_seconds out of the 60..=604800 range", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires secrets:write)", body = InsufficientScopeResponse),
+    ),
+)]
+pub(crate) async fn create_one_time_secret(
     State(state): State<AppState>,
     user: CurrentUser,
     body: Option<Json<CreateBody>>,
@@ -110,7 +139,32 @@ struct OneTimeRow {
     viewed_at: Option<chrono::NaiveDateTime>,
 }
 
-async fn retrieve_one_time_secret(
+/// Documentation-only mirror of `retrieve_one_time_secret`'s response
+/// envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct OneTimeValueResponse {
+    /// The decrypted one-time value — never populated with example data in
+    /// the generated schema.
+    value: String,
+    retrieved_at: String,
+}
+
+/// Deliberately **no** `security(...)` clause — unlike every other route in
+/// this service, this endpoint has no bearer-token auth at all by design:
+/// the URL-embedded, single-use token *is* the credential (v1 parity). Not
+/// an oversight; see `docs/v2-port/openapi-pattern.md` step 2.
+#[utoipa::path(
+    get,
+    path = "/api/v1/one-time-secrets/{token}",
+    tag = "one-time-secrets",
+    params(("token" = String, Path, description = "URL-safe single-use retrieval token")),
+    responses(
+        (status = 200, description = "Decrypted value; the token is now consumed and cannot be reused", body = OneTimeValueResponse),
+        (status = 404, description = "Unknown token", body = ErrorResponse),
+        (status = 410, description = "Secret already viewed or expired", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn retrieve_one_time_secret(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<Json<Value>, ApiError> {

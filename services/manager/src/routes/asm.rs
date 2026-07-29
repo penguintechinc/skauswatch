@@ -13,7 +13,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorResponse};
 use crate::state::AppState;
 
 /// v1 upstream default when `SCANNER_URL` is unset.
@@ -230,7 +230,27 @@ async fn scan_subresource(
 }
 
 /// POST /asm/scans — trigger a new ASM scan (proxied; body forwarded).
-async fn create_asm_scan(
+///
+/// This whole router is a thin authenticated proxy to the scanner service —
+/// every response body below is documented as a generic JSON object
+/// (`serde_json::Value`) rather than a fixed schema, since the wire shape is
+/// whatever the upstream scanner returns, not something this service
+/// defines. See `docs/v2-port/openapi-pattern.md`.
+#[utoipa::path(
+    post,
+    path = "/api/v1/asm/scans",
+    tag = "asm",
+    security(("bearer_jwt" = [])),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Proxied scanner response", body = serde_json::Value),
+        (status = 400, description = "Invalid JSON body", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to scanner", body = ErrorResponse),
+        (status = 504, description = "Scanner request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_asm_scan(
     _user: CurrentUser,
     headers: HeaderMap,
     body: Bytes,
@@ -240,7 +260,19 @@ async fn create_asm_scan(
 }
 
 /// GET /asm/scans — list ASM scans; query params forward first-value-wins.
-async fn list_asm_scans(
+#[utoipa::path(
+    get,
+    path = "/api/v1/asm/scans",
+    tag = "asm",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Proxied scanner response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to scanner", body = ErrorResponse),
+        (status = 504, description = "Scanner request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_asm_scans(
     _user: CurrentUser,
     headers: HeaderMap,
     Query(params): Query<Vec<(String, String)>>,
@@ -250,7 +282,20 @@ async fn list_asm_scans(
 }
 
 /// GET /asm/scans/{scan_id} — ASM scan detail (proxied).
-async fn get_asm_scan(
+#[utoipa::path(
+    get,
+    path = "/api/v1/asm/scans/{scan_id}",
+    tag = "asm",
+    security(("bearer_jwt" = [])),
+    params(("scan_id" = i64, Path, description = "ASM scan id")),
+    responses(
+        (status = 200, description = "Proxied scanner response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to scanner", body = ErrorResponse),
+        (status = 504, description = "Scanner request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_asm_scan(
     _user: CurrentUser,
     headers: HeaderMap,
     Path(scan_id): Path<i64>,
@@ -266,7 +311,20 @@ async fn get_asm_scan(
 }
 
 /// GET /asm/scans/{scan_id}/hosts — discovered hosts and services (proxied).
-async fn get_asm_scan_hosts(
+#[utoipa::path(
+    get,
+    path = "/api/v1/asm/scans/{scan_id}/hosts",
+    tag = "asm",
+    security(("bearer_jwt" = [])),
+    params(("scan_id" = i64, Path, description = "ASM scan id")),
+    responses(
+        (status = 200, description = "Proxied scanner response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to scanner", body = ErrorResponse),
+        (status = 504, description = "Scanner request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_asm_scan_hosts(
     _user: CurrentUser,
     headers: HeaderMap,
     Path(scan_id): Path<i64>,
@@ -276,7 +334,20 @@ async fn get_asm_scan_hosts(
 
 /// GET /asm/scans/{scan_id}/screenshots — screenshots with presigned URLs
 /// (proxied).
-async fn get_asm_scan_screenshots(
+#[utoipa::path(
+    get,
+    path = "/api/v1/asm/scans/{scan_id}/screenshots",
+    tag = "asm",
+    security(("bearer_jwt" = [])),
+    params(("scan_id" = i64, Path, description = "ASM scan id")),
+    responses(
+        (status = 200, description = "Proxied scanner response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to scanner", body = ErrorResponse),
+        (status = 504, description = "Scanner request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_asm_scan_screenshots(
     _user: CurrentUser,
     headers: HeaderMap,
     Path(scan_id): Path<i64>,
@@ -285,7 +356,20 @@ async fn get_asm_scan_screenshots(
 }
 
 /// GET /asm/scans/{scan_id}/certs — TLS certificate findings (proxied).
-async fn get_asm_scan_certs(
+#[utoipa::path(
+    get,
+    path = "/api/v1/asm/scans/{scan_id}/certs",
+    tag = "asm",
+    security(("bearer_jwt" = [])),
+    params(("scan_id" = i64, Path, description = "ASM scan id")),
+    responses(
+        (status = 200, description = "Proxied scanner response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to scanner", body = ErrorResponse),
+        (status = 504, description = "Scanner request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_asm_scan_certs(
     _user: CurrentUser,
     headers: HeaderMap,
     Path(scan_id): Path<i64>,
@@ -294,7 +378,20 @@ async fn get_asm_scan_certs(
 }
 
 /// GET /asm/scans/{scan_id}/diff — diff vs the previous scan (proxied).
-async fn get_asm_scan_diff(
+#[utoipa::path(
+    get,
+    path = "/api/v1/asm/scans/{scan_id}/diff",
+    tag = "asm",
+    security(("bearer_jwt" = [])),
+    params(("scan_id" = i64, Path, description = "ASM scan id")),
+    responses(
+        (status = 200, description = "Proxied scanner response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to scanner", body = ErrorResponse),
+        (status = 504, description = "Scanner request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_asm_scan_diff(
     _user: CurrentUser,
     headers: HeaderMap,
     Path(scan_id): Path<i64>,
@@ -304,7 +401,20 @@ async fn get_asm_scan_diff(
 
 /// GET /asm/scans/{scan_id}/report — presigned URL for the full scan report
 /// (proxied).
-async fn get_asm_scan_report(
+#[utoipa::path(
+    get,
+    path = "/api/v1/asm/scans/{scan_id}/report",
+    tag = "asm",
+    security(("bearer_jwt" = [])),
+    params(("scan_id" = i64, Path, description = "ASM scan id")),
+    responses(
+        (status = 200, description = "Proxied scanner response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to scanner", body = ErrorResponse),
+        (status = 504, description = "Scanner request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_asm_scan_report(
     _user: CurrentUser,
     headers: HeaderMap,
     Path(scan_id): Path<i64>,
@@ -313,7 +423,19 @@ async fn get_asm_scan_report(
 }
 
 /// GET /asm/settings/ports — port configuration (proxied; any role).
-async fn get_port_settings(
+#[utoipa::path(
+    get,
+    path = "/api/v1/asm/settings/ports",
+    tag = "asm",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Proxied scanner response", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to scanner", body = ErrorResponse),
+        (status = 504, description = "Scanner request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_port_settings(
     _user: CurrentUser,
     headers: HeaderMap,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -328,7 +450,22 @@ async fn get_port_settings(
 }
 
 /// PUT /asm/settings/ports — update port settings (admin only; proxied).
-async fn update_port_settings(
+#[utoipa::path(
+    put,
+    path = "/api/v1/asm/settings/ports",
+    tag = "asm",
+    security(("bearer_jwt" = [])),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Proxied scanner response", body = serde_json::Value),
+        (status = 400, description = "Invalid JSON body", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient permissions", body = ErrorResponse),
+        (status = 503, description = "Cannot connect to scanner", body = ErrorResponse),
+        (status = 504, description = "Scanner request timed out", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_port_settings(
     user: CurrentUser,
     headers: HeaderMap,
     body: Bytes,

@@ -14,9 +14,10 @@ use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthedUser;
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse};
 use crate::flags::flag_denied;
 use crate::models::{Alert, AlertSearchRequest, AlertSearchResponse};
 use crate::state::AppState;
@@ -29,9 +30,40 @@ pub fn router() -> Router<AppState> {
         .route("/alerts/{alert_id}/status", put(update_alert_status))
 }
 
+/// Documentation-only mirror of `update_alert_status`'s request body — v1
+/// only ever reads a `status` field from the free-form JSON body.
+#[derive(Serialize, Deserialize, utoipa::ToSchema)]
+pub(crate) struct UpdateAlertStatusRequest {
+    /// New status string (defaults to `"unknown"` if omitted).
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// Documentation-only mirror of `update_alert_status`'s `serde_json::json!`
+/// response body.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct UpdateAlertStatusResponse {
+    /// Always `"updated"` — v1 stub, see module docs (no persistence).
+    pub status: String,
+    /// Echoed path id.
+    pub alert_id: String,
+    /// Echoed (or defaulted) new status.
+    pub new_status: String,
+}
+
 /// v1 `AlertManager.search_alerts`: always empty (no auth required,
 /// matching v1).
-async fn search_alerts(
+#[utoipa::path(
+    post,
+    path = "/api/v1/alerts/search",
+    tag = "monitor",
+    request_body = AlertSearchRequest,
+    responses(
+        (status = 200, description = "Matching alerts (v1 stub: always empty, see module docs)", body = AlertSearchResponse),
+        (status = 403, description = "monitor feature not enabled for this deployment", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn search_alerts(
     State(state): State<AppState>,
     ApiJson(req): ApiJson<AlertSearchRequest>,
 ) -> Response {
@@ -49,7 +81,17 @@ async fn search_alerts(
 
 /// v1 `AlertManager.get_alert_by_id`: always `None` (no auth required,
 /// matching v1).
-async fn get_alert(
+#[utoipa::path(
+    get,
+    path = "/api/v1/alerts/{alert_id}",
+    tag = "monitor",
+    params(("alert_id" = String, Path, description = "Alert id")),
+    responses(
+        (status = 404, description = "Alert not found (v1 stub: always 404, see module docs)", body = ErrorResponse),
+        (status = 403, description = "monitor feature not enabled for this deployment", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_alert(
     State(state): State<AppState>,
     Path(alert_id): Path<String>,
 ) -> Result<Json<Alert>, Response> {
@@ -62,7 +104,20 @@ async fn get_alert(
 /// v1 `update_alert_status`: authenticated (any valid bearer token, no
 /// admin scope — v1 called `verify_token(credentials)` without
 /// `require_admin=True`), acknowledges without persisting.
-async fn update_alert_status(
+#[utoipa::path(
+    put,
+    path = "/api/v1/alerts/{alert_id}/status",
+    tag = "monitor",
+    security(("bearer_jwt" = [])),
+    params(("alert_id" = String, Path, description = "Alert id")),
+    request_body = UpdateAlertStatusRequest,
+    responses(
+        (status = 200, description = "Acknowledged (v1 stub: not persisted, see module docs)", body = UpdateAlertStatusResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Missing or empty tenant claim, or monitor feature not enabled for this deployment", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_alert_status(
     State(state): State<AppState>,
     _user: AuthedUser,
     Path(alert_id): Path<String>,

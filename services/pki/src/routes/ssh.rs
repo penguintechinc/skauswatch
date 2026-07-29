@@ -10,7 +10,7 @@ use base64::Engine as _;
 use serde_json::Value;
 
 use crate::ca::ssh::SshIssueParams;
-use crate::error::{ApiError, ApiJson};
+use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::models::{
     AuthorizedKeysRequest, RevokeRequest, SshCertificateRequest, SshConfigRequest,
 };
@@ -38,6 +38,20 @@ fn map_to_pairs(m: std::collections::BTreeMap<String, String>) -> Vec<(String, S
 }
 
 /// POST /api/v1/ssh/certificates — issue an SSH certificate.
+#[utoipa::path(
+    post,
+    path = "/api/v1/ssh/certificates",
+    tag = "ssh",
+    operation_id = "ssh_issue",
+    security(("bearer_jwt" = [])),
+    request_body = SshCertificateRequest,
+    responses(
+        (status = 201, description = "Issued SSH certificate", body = serde_json::Value),
+        (status = 400, description = "Validation error", body = ValidationErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn issue(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -71,6 +85,20 @@ pub async fn issue(
 }
 
 /// GET /api/v1/ssh/certificates/{cert_id}
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssh/certificates/{cert_id}",
+    tag = "ssh",
+    operation_id = "ssh_get_cert",
+    security(("bearer_jwt" = [])),
+    params(("cert_id" = String, Path, description = "Certificate id (UUID)")),
+    responses(
+        (status = 200, description = "Certificate", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn get_cert(
     State(st): State<AppState>,
     Path(cert_id): Path<String>,
@@ -83,6 +111,20 @@ pub async fn get_cert(
 }
 
 /// GET /api/v1/ssh/certificates/serial/{serial}
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssh/certificates/serial/{serial}",
+    tag = "ssh",
+    operation_id = "ssh_get_by_serial",
+    security(("bearer_jwt" = [])),
+    params(("serial" = String, Path, description = "Certificate serial number")),
+    responses(
+        (status = 200, description = "Certificate", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn get_by_serial(
     State(st): State<AppState>,
     Path(serial): Path<String>,
@@ -95,6 +137,21 @@ pub async fn get_by_serial(
 }
 
 /// POST /api/v1/ssh/certificates/{cert_id}/revoke
+#[utoipa::path(
+    post,
+    path = "/api/v1/ssh/certificates/{cert_id}/revoke",
+    tag = "ssh",
+    operation_id = "ssh_revoke_cert",
+    security(("bearer_jwt" = [])),
+    params(("cert_id" = String, Path, description = "Certificate id (UUID)")),
+    request_body = RevokeRequest,
+    responses(
+        (status = 200, description = "Certificate revoked", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn revoke_cert(
     State(st): State<AppState>,
     Path(cert_id): Path<String>,
@@ -120,6 +177,25 @@ pub async fn revoke_cert(
 }
 
 /// GET /api/v1/ssh/certificates — list with filters.
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssh/certificates",
+    tag = "ssh",
+    operation_id = "ssh_list",
+    security(("bearer_jwt" = [])),
+    params(
+        ("status" = Option<String>, Query, description = "Filter by certificate status"),
+        ("type" = Option<String>, Query, description = "Filter by certificate_type (user/host)"),
+        ("principal" = Option<String>, Query, description = "Filter by principal"),
+        ("page" = Option<i64>, Query, description = "Page number (default 1)"),
+        ("page_size" = Option<i64>, Query, description = "Page size (default 50)"),
+    ),
+    responses(
+        (status = 200, description = "Paginated certificate list", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn list(
     State(st): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
@@ -138,7 +214,22 @@ pub async fn list(
     Ok(paginated(items, total, page, page_size))
 }
 
-/// GET /api/v1/ssh/krl
+/// GET /api/v1/ssh/krl — JSON by default; `Accept: application/octet-stream`
+/// returns the raw KRL binary instead (not separately modeled here — see
+/// `docs/v2-port/openapi-pattern.md` on documenting one representative shape
+/// per status code).
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssh/krl",
+    tag = "ssh",
+    operation_id = "ssh_get_krl",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Key Revocation List (JSON; binary if Accept: application/octet-stream)", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn get_krl(State(st): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
     let krl = st.manager.generate_ssh_krl().await?;
     if headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()) == Some("application/octet-stream")
@@ -167,6 +258,17 @@ pub async fn get_krl(State(st): State<AppState>, headers: HeaderMap) -> Result<R
 }
 
 /// GET /api/v1/ssh/ca — SSH CA info.
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssh/ca",
+    tag = "ssh",
+    operation_id = "ssh_ca_info",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "SSH CA info", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
 pub async fn ca_info(State(st): State<AppState>) -> Json<Value> {
     Json(serde_json::json!({
         "ca_public_key": st.manager.ssh.ca_public_key(),
@@ -177,7 +279,19 @@ pub async fn ca_info(State(st): State<AppState>) -> Json<Value> {
     }))
 }
 
-/// GET /api/v1/ssh/ca/public-key
+/// GET /api/v1/ssh/ca/public-key — JSON by default; `Accept: text/plain`
+/// returns the bare key text instead.
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssh/ca/public-key",
+    tag = "ssh",
+    operation_id = "ssh_ca_public_key",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "SSH CA public key (JSON; plain text if Accept: text/plain)", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
 pub async fn ca_public_key(State(st): State<AppState>, headers: HeaderMap) -> Response {
     let key = st.manager.ssh.ca_public_key().to_owned();
     if headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()) == Some("text/plain") {
@@ -187,6 +301,19 @@ pub async fn ca_public_key(State(st): State<AppState>, headers: HeaderMap) -> Re
 }
 
 /// POST /api/v1/ssh/config/known-hosts
+#[utoipa::path(
+    post,
+    path = "/api/v1/ssh/config/known-hosts",
+    tag = "ssh",
+    operation_id = "ssh_known_hosts",
+    security(("bearer_jwt" = [])),
+    request_body(content = serde_json::Value, description = "`{\"hostnames\": [\"host1\", ...]}`"),
+    responses(
+        (status = 200, description = "known_hosts entry", body = serde_json::Value),
+        (status = 400, description = "hostnames required", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
 pub async fn known_hosts(
     State(st): State<AppState>,
     body: ApiJson<Value>,
@@ -211,6 +338,18 @@ pub async fn known_hosts(
 }
 
 /// POST /api/v1/ssh/config/authorized-keys
+#[utoipa::path(
+    post,
+    path = "/api/v1/ssh/config/authorized-keys",
+    tag = "ssh",
+    operation_id = "ssh_authorized_keys",
+    security(("bearer_jwt" = [])),
+    request_body = AuthorizedKeysRequest,
+    responses(
+        (status = 200, description = "authorized_keys entry", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
 pub async fn authorized_keys(
     State(st): State<AppState>,
     body: ApiJson<AuthorizedKeysRequest>,
@@ -229,6 +368,18 @@ pub async fn authorized_keys(
 }
 
 /// POST /api/v1/ssh/config/ssh-config
+#[utoipa::path(
+    post,
+    path = "/api/v1/ssh/config/ssh-config",
+    tag = "ssh",
+    operation_id = "ssh_ssh_config",
+    security(("bearer_jwt" = [])),
+    request_body = SshConfigRequest,
+    responses(
+        (status = 200, description = "ssh_config + known_hosts entry", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+    ),
+)]
 pub async fn ssh_config(
     State(st): State<AppState>,
     body: ApiJson<SshConfigRequest>,
@@ -252,6 +403,20 @@ pub async fn ssh_config(
 }
 
 /// GET /api/v1/ssh/certificates/{cert_id}/status
+#[utoipa::path(
+    get,
+    path = "/api/v1/ssh/certificates/{cert_id}/status",
+    tag = "ssh",
+    operation_id = "ssh_cert_status",
+    security(("bearer_jwt" = [])),
+    params(("cert_id" = String, Path, description = "Certificate id (UUID)")),
+    responses(
+        (status = 200, description = "Certificate status summary", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 404, description = "Certificate not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn cert_status(
     State(st): State<AppState>,
     Path(cert_id): Path<String>,
@@ -282,6 +447,20 @@ pub async fn cert_status(
 }
 
 /// POST /api/v1/ssh/verify — parse + verify an SSH certificate.
+#[utoipa::path(
+    post,
+    path = "/api/v1/ssh/verify",
+    tag = "ssh",
+    operation_id = "ssh_verify",
+    security(("bearer_jwt" = [])),
+    request_body(content = serde_json::Value, description = "`{\"certificate\": \"ssh-ed25519-cert-v01@openssh.com ...\"}`"),
+    responses(
+        (status = 200, description = "Parsed certificate info, with DB-known revocation status overlaid", body = serde_json::Value),
+        (status = 400, description = "Missing certificate field", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    ),
+)]
 pub async fn verify(
     State(st): State<AppState>,
     body: ApiJson<Value>,

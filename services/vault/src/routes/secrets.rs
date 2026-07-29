@@ -7,13 +7,13 @@ use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{NaiveDateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
 use crate::auth::CurrentUser;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorResponse, InsufficientScopeResponse};
 use crate::routes::audit::write_audit;
 use crate::routes::jit::validate_jit_token;
 use crate::state::AppState;
@@ -72,15 +72,51 @@ impl SecretRow {
     }
 }
 
-#[derive(Deserialize)]
-struct ListQuery {
+/// Documentation-only mirror of `SecretRow::to_json`'s wire shape — never
+/// includes the encrypted fields.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct SecretResponse {
+    id: String,
+    name: String,
+    description: Option<String>,
+    secret_type: String,
+    tags: Option<Value>,
+    expires_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+    created_by: Option<String>,
+}
+
+/// Documentation-only mirror of `list_secrets`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct SecretListResponse {
+    secrets: Vec<SecretResponse>,
+    total: i64,
+    page: i64,
+    per_page: i64,
+}
+
+#[derive(Deserialize, utoipa::IntoParams)]
+pub(crate) struct ListQuery {
     page: Option<i64>,
     per_page: Option<i64>,
     #[serde(rename = "type")]
     secret_type: Option<String>,
 }
 
-async fn list_secrets(
+#[utoipa::path(
+    get,
+    path = "/api/v1/secrets",
+    tag = "secrets",
+    security(("bearer_jwt" = [])),
+    params(ListQuery),
+    responses(
+        (status = 200, description = "Paginated list of secrets (metadata only, never encrypted fields)", body = SecretListResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires secrets:read)", body = InsufficientScopeResponse),
+    ),
+)]
+pub(crate) async fn list_secrets(
     State(state): State<AppState>,
     user: CurrentUser,
     Query(q): Query<ListQuery>,
@@ -135,9 +171,11 @@ async fn list_secrets(
     })))
 }
 
-#[derive(Deserialize)]
-struct CreateSecretBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct CreateSecretBody {
     name: Option<String>,
+    /// Plaintext secret value — encrypted at rest immediately, never
+    /// persisted or logged unencrypted.
     value: Option<String>,
     #[serde(rename = "type")]
     secret_type: Option<String>,
@@ -147,7 +185,20 @@ struct CreateSecretBody {
     expires_at: Option<NaiveDateTime>,
 }
 
-async fn create_secret(
+#[utoipa::path(
+    post,
+    path = "/api/v1/secrets",
+    tag = "secrets",
+    security(("bearer_jwt" = [])),
+    request_body = CreateSecretBody,
+    responses(
+        (status = 201, description = "Secret created", body = SecretResponse),
+        (status = 400, description = "Missing name/value or invalid secret type", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires secrets:write)", body = InsufficientScopeResponse),
+    ),
+)]
+pub(crate) async fn create_secret(
     State(state): State<AppState>,
     user: CurrentUser,
     headers: HeaderMap,
@@ -236,7 +287,20 @@ async fn fetch_secret(state: &AppState, id: &str) -> Result<Option<SecretRow>, A
     .await?)
 }
 
-async fn get_secret(
+#[utoipa::path(
+    get,
+    path = "/api/v1/secrets/{id}",
+    tag = "secrets",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Secret id")),
+    responses(
+        (status = 200, description = "Secret metadata", body = SecretResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires secrets:read)", body = InsufficientScopeResponse),
+        (status = 404, description = "Secret not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_secret(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<String>,
@@ -248,8 +312,8 @@ async fn get_secret(
     Ok(Json(secret.to_json()))
 }
 
-#[derive(Deserialize, Default)]
-struct UpdateSecretBody {
+#[derive(Deserialize, Default, utoipa::ToSchema)]
+pub(crate) struct UpdateSecretBody {
     name: Option<String>,
     description: Option<String>,
     tags: Option<Value>,
@@ -257,7 +321,21 @@ struct UpdateSecretBody {
     metadata: Option<Value>,
 }
 
-async fn update_secret(
+#[utoipa::path(
+    put,
+    path = "/api/v1/secrets/{id}",
+    tag = "secrets",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Secret id")),
+    request_body = UpdateSecretBody,
+    responses(
+        (status = 200, description = "Updated secret metadata", body = SecretResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires secrets:write)", body = InsufficientScopeResponse),
+        (status = 404, description = "Secret not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_secret(
     State(state): State<AppState>,
     user: CurrentUser,
     headers: HeaderMap,
@@ -299,7 +377,20 @@ async fn update_secret(
     Ok(Json(secret.to_json()))
 }
 
-async fn delete_secret(
+#[utoipa::path(
+    delete,
+    path = "/api/v1/secrets/{id}",
+    tag = "secrets",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Secret id")),
+    responses(
+        (status = 204, description = "Secret deleted"),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires secrets:delete)", body = InsufficientScopeResponse),
+        (status = 404, description = "Secret not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn delete_secret(
     State(state): State<AppState>,
     user: CurrentUser,
     headers: HeaderMap,
@@ -325,10 +416,36 @@ struct EncryptedValueRow {
     name: String,
 }
 
+/// Documentation-only mirror of `get_secret_value`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct SecretValueResponse {
+    id: String,
+    name: String,
+    /// Decrypted secret value — never populated with example data in the
+    /// generated schema.
+    value: String,
+    retrieved_at: String,
+}
+
 /// GET /secrets/{id}/value — accepts a JIT token OR a standard bearer JWT
 /// with `secrets:read` (v1 does not use the `CurrentUser` extractor here
-/// because it must try the JIT-token path first).
-async fn get_secret_value(
+/// because it must try the JIT-token path first). Documented with the
+/// standard `bearer_jwt` scheme even though a JIT token satisfies the same
+/// `Authorization: Bearer` header shape.
+#[utoipa::path(
+    get,
+    path = "/api/v1/secrets/{id}/value",
+    tag = "secrets",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Secret id")),
+    responses(
+        (status = 200, description = "Decrypted secret value", body = SecretValueResponse),
+        (status = 401, description = "Missing/invalid authorization header or token", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires secrets:read)", body = InsufficientScopeResponse),
+        (status = 404, description = "Secret not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_secret_value(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -393,7 +510,38 @@ struct VersionRow {
     deprecated_at: Option<NaiveDateTime>,
 }
 
-async fn list_secret_versions(
+/// Documentation-only mirror of one entry in `list_secret_versions`'s
+/// `versions` array.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct SecretVersionEntry {
+    id: String,
+    version_number: i32,
+    created_by: Option<String>,
+    created_at: String,
+    deprecated_at: Option<String>,
+}
+
+/// Documentation-only mirror of `list_secret_versions`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct SecretVersionsResponse {
+    secret_id: String,
+    versions: Vec<SecretVersionEntry>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/secrets/{id}/versions",
+    tag = "secrets",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Secret id")),
+    responses(
+        (status = 200, description = "Version history (newest first)", body = SecretVersionsResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires secrets:read)", body = InsufficientScopeResponse),
+        (status = 404, description = "Secret not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_secret_versions(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(id): Path<String>,
@@ -422,12 +570,36 @@ async fn list_secret_versions(
     })))
 }
 
-#[derive(Deserialize)]
-struct RotateBody {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct RotateBody {
+    /// New plaintext secret value — encrypted at rest immediately.
     value: Option<String>,
 }
 
-async fn rotate_secret(
+/// Documentation-only mirror of `rotate_secret`'s response envelope.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct RotateSecretResponse {
+    id: String,
+    version: i32,
+    rotated_at: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/secrets/{id}/rotate",
+    tag = "secrets",
+    security(("bearer_jwt" = [])),
+    params(("id" = String, Path, description = "Secret id")),
+    request_body = RotateBody,
+    responses(
+        (status = 200, description = "New version created and set as current", body = RotateSecretResponse),
+        (status = 400, description = "Missing rotation value", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "Insufficient scope (requires secrets:write)", body = InsufficientScopeResponse),
+        (status = 404, description = "Secret not found", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn rotate_secret(
     State(state): State<AppState>,
     user: CurrentUser,
     headers: HeaderMap,

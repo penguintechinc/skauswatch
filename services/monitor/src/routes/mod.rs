@@ -1,13 +1,16 @@
-//! Router assembly. Every module here is mounted twice by `main.rs` — once
-//! flat (v1's paths, preserved verbatim) and once nested under `/api/v1`
-//! (house standard alias, `backend.md` API Versioning) — so existing v1
-//! consumers keep working unmodified while new callers get the versioned
-//! path.
+//! Router assembly. Every business-route module here is mounted twice by
+//! `main.rs` — once flat (v1's paths, preserved verbatim) and once nested
+//! under `/api/v1` (house standard alias, `backend.md` API Versioning) — so
+//! existing v1 consumers keep working unmodified while new callers get the
+//! versioned path. `openapi` is the one exception: `main.rs` mounts it only
+//! under `/api/v1`, matching the canonical paths documented in
+//! `openapi::ApiDoc` (see `docs/v2-port/openapi-pattern.md`).
 
 mod alerts;
 mod dashboard;
 mod events;
 mod health;
+pub(crate) mod openapi;
 #[cfg(test)]
 pub(crate) mod test_support;
 
