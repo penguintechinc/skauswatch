@@ -28,14 +28,35 @@ static DUMMY_PASSWORD_HASH: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-/// Router for /api/v1/auth.
+/// Router for /api/v1/auth — merges [`public_router`] and
+/// [`protected_router`]. Used as-is by this module's own tests; the app-wide
+/// assembly (`routes/mod.rs`) mounts the two halves separately so
+/// `tenant_middleware` wraps only the protected half (see that module's
+/// docs for why login/refresh/register must never sit behind it).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn router() -> Router<AppState> {
+    public_router().merge(protected_router())
+}
+
+/// The unauthenticated auth endpoints: login (the credential exchange
+/// itself), refresh (the refresh token in the body is its own credential —
+/// no bearer header at all), and register (v1-parity open self-service
+/// signup, see `register`'s docs). None of these carry a bearer token, so
+/// none can carry a `tenant` claim — `tenant_middleware` must never wrap
+/// this half of the router.
+pub fn public_router() -> Router<AppState> {
     Router::new()
         .route("/auth/login", post(login))
         .route("/auth/refresh", post(refresh))
+        .route("/auth/register", post(register))
+}
+
+/// The bearer-JWT-gated auth endpoints — wrapped in `tenant_middleware` like
+/// every other authenticated route in `routes/mod.rs`'s app-wide assembly.
+pub fn protected_router() -> Router<AppState> {
+    Router::new()
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(me))
-        .route("/auth/register", post(register))
 }
 
 fn validation(field: &str, msg: &str) -> ApiError {
@@ -86,6 +107,10 @@ struct LoginRow {
     is_active: bool,
     failed_login_attempts: i32,
     locked: bool,
+    /// Stamped into the minted access token's `tenant` claim and
+    /// denormalized onto the issued `refresh_tokens` row — see
+    /// `issue_token_pair` and docs/v2-port/tenancy-model.md §2.
+    tenant_id: uuid::Uuid,
 }
 
 /// POST /auth/login — the sole unauthenticated endpoint in this service;
@@ -116,11 +141,15 @@ pub(crate) async fn login(
         ));
     }
 
-    // v1 lowercases the login email before lookup.
+    // v1 lowercases the login email before lookup. Not tenant-filtered —
+    // login has no tenant to filter by yet; it's the query that *derives*
+    // one (see docs/v2-port/tenancy-model.md §4's auth-inherently-needs
+    // exception).
     let row = sqlx::query_as::<_, LoginRow>(
         "SELECT id, email, password_hash, COALESCE(full_name, '') AS full_name, role, is_active, \
                 failed_login_attempts, \
-                (account_locked_until IS NOT NULL AND account_locked_until > now()) AS locked \
+                (account_locked_until IS NOT NULL AND account_locked_until > now()) AS locked, \
+                tenant_id \
          FROM users WHERE email = $1",
     )
     .bind(body.email.to_lowercase())
@@ -192,7 +221,8 @@ pub(crate) async fn login(
     .execute(&state.db)
     .await?;
 
-    let (access, refresh_token) = issue_token_pair(&state, user.id, &user.role).await?;
+    let (access, refresh_token) =
+        issue_token_pair(&state, user.id, &user.role, user.tenant_id).await?;
 
     Ok(Json(serde_json::json!({
         "access_token": access,
@@ -208,15 +238,20 @@ pub(crate) async fn login(
     })))
 }
 
-/// Issues an access+refresh pair and stores sha256(refresh) per v1.
+/// Issues an access+refresh pair and stores sha256(refresh) per v1. `tenant`
+/// is stamped into the access token's `tenant` claim AND denormalized onto
+/// the `refresh_tokens` row (docs/v2-port/tenancy-model.md §2), so rotation
+/// (`refresh`, below) never needs a second `users` join to re-derive it.
 async fn issue_token_pair(
     state: &AppState,
     user_id: i32,
     role: &str,
+    tenant: uuid::Uuid,
 ) -> Result<(String, String), ApiError> {
     let access = create_access_token(
         user_id,
         role,
+        &tenant.to_string(),
         &state.auth.jwt_secret,
         state.auth.access_expires_minutes,
     )?;
@@ -227,12 +262,13 @@ async fn issue_token_pair(
     )?;
     let expires_at = (Utc::now() + Duration::days(state.auth.refresh_expires_days)).naive_utc();
     sqlx::query(
-        "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked) \
-         VALUES ($1, $2, $3, false)",
+        "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked, tenant_id) \
+         VALUES ($1, $2, $3, false, $4)",
     )
     .bind(user_id)
     .bind(token_hash(&refresh))
     .bind(expires_at)
+    .bind(tenant)
     .execute(&state.db)
     .await?;
     Ok((access, refresh))
@@ -258,6 +294,10 @@ pub(crate) struct RefreshResponse {
 struct RefreshRow {
     id: i32,
     user_id: i32,
+    /// Read straight off this row (denormalized at issuance by
+    /// `issue_token_pair`) rather than re-derived via a `users` join — see
+    /// docs/v2-port/tenancy-model.md §2.
+    tenant_id: uuid::Uuid,
 }
 
 /// POST /auth/refresh — unauthenticated (the refresh token in the body is
@@ -280,7 +320,7 @@ pub(crate) async fn refresh(
     let hash = token_hash(&body.refresh_token);
 
     let row = sqlx::query_as::<_, RefreshRow>(
-        "SELECT id, user_id FROM refresh_tokens \
+        "SELECT id, user_id, tenant_id FROM refresh_tokens \
          WHERE token_hash = $1 AND revoked = false AND expires_at > now()",
     )
     .bind(&hash)
@@ -318,7 +358,8 @@ pub(crate) async fn refresh(
         .execute(&state.db)
         .await?;
 
-    let (access, new_refresh) = issue_token_pair(&state, row.user_id, &user.role).await?;
+    let (access, new_refresh) =
+        issue_token_pair(&state, row.user_id, &user.role, row.tenant_id).await?;
     Ok(Json(serde_json::json!({
         "access_token": access,
         "refresh_token": new_refresh,
@@ -438,6 +479,13 @@ pub(crate) struct RegisterResponse {
 /// creates a `viewer`-role account (see `PublicApiDoc` note on `login`
 /// above — `register` itself is NOT part of the public doc, only `login`
 /// is, per `docs/v2-port/openapi-pattern.md` §6).
+///
+/// Tenancy (v2.0 decision, docs/v2-port/tenancy-model.md §8): admin-
+/// provisioned tenants only — this endpoint never creates a tenant, it
+/// attaches the new registrant to the seeded bootstrap tenant
+/// ([`crate::auth::DEFAULT_TENANT_ID`]). There is no inviter/admin context
+/// to derive a different tenant from at this unauthenticated call site;
+/// self-serve *multi-tenant* signup is a v2.1 backlog item.
 #[utoipa::path(
     post,
     path = "/api/v1/auth/register",
@@ -483,12 +531,14 @@ pub(crate) async fn register(
 
     let password_hash = auth::hash_password(&body.password)?;
     let (id,): (i32,) = sqlx::query_as(
-        "INSERT INTO users (email, password_hash, full_name, role, is_active, updated_at) \
-         VALUES ($1, $2, $3, 'viewer', true, now()) RETURNING id",
+        "INSERT INTO users (email, password_hash, full_name, role, is_active, updated_at, \
+         tenant_id) \
+         VALUES ($1, $2, $3, 'viewer', true, now(), $4) RETURNING id",
     )
     .bind(&email)
     .bind(&password_hash)
     .bind(&body.full_name)
+    .bind(auth::default_tenant_uuid())
     .fetch_one(&state.db)
     .await?;
 
@@ -537,13 +587,14 @@ mod tests {
         let hash = auth::hash_password(password).unwrap_or_else(|e| panic!("hash: {e:?}"));
         let (id,): (i32,) = sqlx::query_as(
             "INSERT INTO users (email, password_hash, full_name, role, is_active, \
-             failed_login_attempts, created_at) \
-             VALUES ($1, $2, 'Test User', $3, $4, 0, now()) RETURNING id",
+             failed_login_attempts, created_at, tenant_id) \
+             VALUES ($1, $2, 'Test User', $3, $4, 0, now(), $5) RETURNING id",
         )
         .bind(email)
         .bind(&hash)
         .bind(role)
         .bind(is_active)
+        .bind(auth::default_tenant_uuid())
         .fetch_one(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed_login_user: {e}"));
@@ -662,6 +713,20 @@ mod tests {
         assert_eq!(body["user"]["id"], id);
         assert_eq!(body["user"]["email"], "ok@example.com");
         assert_eq!(body["user"]["role"], "admin");
+
+        // Regression: the minted access token must carry the house Claims
+        // shape with a real, non-empty tenant claim (docs/v2-port/
+        // tenancy-model.md §2) — decode it the same way any consumer would.
+        // `db_state`/`AppStateInner::for_tests_with_db` always fixes
+        // `jwt_secret` to this literal (src/state.rs).
+        let access = body["access_token"].as_str().unwrap_or_default();
+        let claims = match auth::decode_access(access, "test-secret") {
+            Ok(c) => c,
+            Err(e) => panic!("decode minted access token: {e:?}"),
+        };
+        assert_eq!(claims.sub, id.to_string());
+        assert_eq!(claims.tenant, crate::auth::DEFAULT_TENANT_ID);
+        assert!(claims.has_scope("users:admin"));
     }
 
     #[tokio::test]
@@ -718,6 +783,16 @@ mod tests {
                 .is_some_and(|s| !s.is_empty())
         );
 
+        // Regression: rotation must preserve the tenant claim (read off the
+        // `refresh_tokens` row, not re-derived — docs/v2-port/
+        // tenancy-model.md §2), not silently drop it on the re-minted token.
+        let rotated_access = first_body["access_token"].as_str().unwrap_or_default();
+        let claims = match auth::decode_access(rotated_access, "test-secret") {
+            Ok(c) => c,
+            Err(e) => panic!("decode rotated access token: {e:?}"),
+        };
+        assert_eq!(claims.tenant, crate::auth::DEFAULT_TENANT_ID);
+
         // The original refresh token was revoked by rotation — reusing it
         // must now fail.
         let reused = server
@@ -737,11 +812,12 @@ mod tests {
         let refresh = create_refresh_token(id, &state.auth.jwt_secret, 7)
             .unwrap_or_else(|e| panic!("encode: {e:?}"));
         sqlx::query(
-            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked) \
-             VALUES ($1, $2, now() + interval '7 days', false)",
+            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked, tenant_id) \
+             VALUES ($1, $2, now() + interval '7 days', false, $3)",
         )
         .bind(id)
         .bind(token_hash(&refresh))
+        .bind(auth::default_tenant_uuid())
         .execute(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed refresh: {e}"));
@@ -766,11 +842,12 @@ mod tests {
         let state = db_state(dev_license()).await;
         let (id, token) = authed_user(&state, "logout@example.com", "viewer").await;
         sqlx::query(
-            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked) \
-             VALUES ($1, 'h1', now() + interval '7 days', false), \
-                    ($1, 'h2', now() + interval '7 days', false)",
+            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked, tenant_id) \
+             VALUES ($1, 'h1', now() + interval '7 days', false, $2), \
+                    ($1, 'h2', now() + interval '7 days', false, $2)",
         )
         .bind(id)
+        .bind(auth::default_tenant_uuid())
         .execute(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed refresh tokens: {e}"));
@@ -877,6 +954,34 @@ mod tests {
         dup.assert_status(StatusCode::CONFLICT);
         let body: serde_json::Value = dup.json();
         assert_eq!(body["error"], "Email already registered");
+    }
+
+    /// "First-user bootstrap" (docs/v2-port/tenancy-model.md §8): the only
+    /// unauthenticated user-creation path this service exposes always
+    /// attaches the new account to the seeded default tenant — there is no
+    /// admin/inviter context yet for whoever registers first (or ever, via
+    /// this endpoint) to be placed anywhere else.
+    #[tokio::test]
+    async fn register_bootstraps_new_user_into_default_tenant() {
+        let state = db_state(dev_license()).await;
+        let server = test_server_with_state(state.clone()).await;
+
+        let res = server
+            .post("/api/v1/auth/register")
+            .json(&serde_json::json!({
+                "email": "bootstrap@example.com",
+                "password": "longenough1",
+            }))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+
+        let (tenant_id,): (uuid::Uuid,) =
+            sqlx::query_as("SELECT tenant_id FROM users WHERE email = $1")
+                .bind("bootstrap@example.com")
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or_else(|e| panic!("verify bootstrap tenant: {e}"));
+        assert_eq!(tenant_id.to_string(), crate::auth::DEFAULT_TENANT_ID);
     }
 
     /// Regression for finding #8 (login timing oracle): the unknown-email

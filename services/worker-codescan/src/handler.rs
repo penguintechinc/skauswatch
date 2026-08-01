@@ -152,30 +152,53 @@ impl StreamHandler for CodeScanReviewHandler {
             "processing CodeScan review task"
         );
 
-        // Mark review as processing.
-        if let Err(e) = db::update_review_status(&self.pool, task.review_id, "processing").await {
+        // Mark review as processing. Scoped to the task's validated tenant —
+        // a spoofed/mismatched tenant simply matches zero rows here; the
+        // get_review call immediately below is what actually surfaces the
+        // tenant mismatch as an error and aborts the task.
+        if let Err(e) =
+            db::update_review_status(&self.pool, task.review_id, task.tenant_id, "processing").await
+        {
             tracing::error!(review_id = task.review_id, error = %e, "failed to mark review processing");
             return Err(format!("db update status: {}", e).into());
         }
 
-        // Validate that review exists and fetch details.
-        let review = match db::get_review(&self.pool, task.review_id).await {
+        // Validate that review exists *for this tenant* and fetch details.
+        // A review that exists under a different tenant is indistinguishable
+        // from a missing review — see db::get_review's doc comment.
+        let review = match db::get_review(&self.pool, task.review_id, task.tenant_id).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(review_id = task.review_id, error = %e, "review not found");
-                let _ =
-                    db::mark_review_failed(&self.pool, task.review_id, "review not found").await;
+                let _ = db::mark_review_failed(
+                    &self.pool,
+                    task.review_id,
+                    task.tenant_id,
+                    "review not found",
+                )
+                .await;
                 return Err(format!("get review: {}", e).into());
             }
         };
 
-        // Fetch repo configuration and credentials.
-        let repo_config = match db::get_repo_config(&self.pool, review.repo_config_id).await {
+        // Fetch repo configuration and credentials, scoped to the same tenant.
+        let repo_config = match db::get_repo_config(
+            &self.pool,
+            review.repo_config_id,
+            task.tenant_id,
+        )
+        .await
+        {
             Ok(rc) => rc,
             Err(e) => {
                 tracing::error!(review_id = task.review_id, error = %e, "repo config not found");
-                let _ = db::mark_review_failed(&self.pool, task.review_id, "repo config not found")
-                    .await;
+                let _ = db::mark_review_failed(
+                    &self.pool,
+                    task.review_id,
+                    task.tenant_id,
+                    "repo config not found",
+                )
+                .await;
                 return Err(format!("get repo config: {}", e).into());
             }
         };
@@ -205,7 +228,9 @@ impl StreamHandler for CodeScanReviewHandler {
             Err(e) => {
                 tracing::error!(review_id = task.review_id, error = %e, "review execution failed");
                 let error_msg = e.to_string();
-                let _ = db::mark_review_failed(&self.pool, task.review_id, &error_msg).await;
+                let _ =
+                    db::mark_review_failed(&self.pool, task.review_id, task.tenant_id, &error_msg)
+                        .await;
                 return Err(format!("execute review: {}", e).into());
             }
         };
@@ -216,6 +241,7 @@ impl StreamHandler for CodeScanReviewHandler {
             match db::insert_review_comment(
                 &self.pool,
                 task.review_id,
+                task.tenant_id,
                 &comment.file_path,
                 comment.line_start,
                 &format!("**{}**\n\n{}", comment.title, comment.body),
@@ -234,6 +260,7 @@ impl StreamHandler for CodeScanReviewHandler {
         if let Err(e) = db::complete_review(
             &self.pool,
             task.review_id,
+            task.tenant_id,
             &review_result.summary,
             comments_count,
         )
@@ -343,12 +370,27 @@ mod tests {
         }
     }
 
+    /// Bootstrap tenant literal — matches manager's
+    /// `crate::auth::DEFAULT_TENANT_ID` / codescan-backend's migration seed
+    /// (see docs/v2-port/tenancy-model.md §8). Every seeded row and every
+    /// `task_entry` in this module use this tenant by default so the two
+    /// stay consistent; [`OTHER_TENANT_ID`] exists solely to prove
+    /// cross-tenant isolation.
+    const TEST_TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
+    const OTHER_TENANT_ID: &str = "00000000-0000-0000-0000-0000000000bb";
+
+    fn test_tenant() -> uuid::Uuid {
+        TEST_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("test tenant uuid: {e}"))
+    }
+
     async fn seed_repo_config(pool: &PgPool, provider: &str) -> i64 {
         let row = sqlx::query(
             "INSERT INTO codescan_repo_configs (tenant_id, provider, repo_url, repo_name) \
              VALUES ($1, $2, $3, $4) RETURNING id",
         )
-        .bind(1i64)
+        .bind(test_tenant())
         .bind(provider)
         .bind("https://github.com/acme/widgets")
         .bind("acme/widgets")
@@ -364,7 +406,7 @@ mod tests {
              VALUES ($1, $2, 'queued') RETURNING id",
         )
         .bind(repo_config_id)
-        .bind(1i64)
+        .bind(test_tenant())
         .fetch_one(pool)
         .await
         .unwrap_or_else(|e| panic!("seed review: {e}"));
@@ -378,7 +420,7 @@ mod tests {
         fields.insert("provider".to_string(), "github".to_string());
         fields.insert("repo_name".to_string(), "acme/widgets".to_string());
         fields.insert("pr_url".to_string(), pr_url.to_string());
-        fields.insert("tenant_id".to_string(), "1".to_string());
+        fields.insert("tenant_id".to_string(), TEST_TENANT_ID.to_string());
         StreamEntry {
             id: "1-0".to_string(),
             fields,
@@ -716,5 +758,40 @@ mod tests {
         let comment_text: String = comment_rows[0].get(0);
         assert!(comment_text.contains("Nit"));
         assert!(comment_text.contains("tidy up"));
+    }
+
+    /// End-to-end tenant-isolation regression: a task claiming a tenant that
+    /// does not own the review must fail, and — critically — must leave the
+    /// review row completely untouched (not even flipped to "failed") since
+    /// every write in the handler is scoped to the task's tenant.
+    #[tokio::test]
+    async fn handle_fails_and_does_not_touch_the_row_when_task_tenant_does_not_own_the_review() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool, "github").await;
+        let review = seed_review(&pool, repo).await;
+        let producer = test_producer().await;
+        let handler = CodeScanReviewHandler::new(pool.clone(), producer, base_config("ollama"));
+
+        let mut entry = task_entry(review, repo, "https://github.com/acme/widgets/pull/1");
+        entry
+            .fields
+            .insert("tenant_id".to_string(), OTHER_TENANT_ID.to_string());
+
+        let result = handler.handle(&entry).await;
+        assert!(
+            result.is_err(),
+            "a task claiming the wrong tenant must be rejected"
+        );
+
+        let row = sqlx::query("SELECT status FROM codescan_reviews WHERE id = $1")
+            .bind(review)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("select review: {e}"));
+        assert_eq!(
+            row.get::<String, _>(0),
+            "queued",
+            "review must be untouched by a task claiming the wrong tenant"
+        );
     }
 }

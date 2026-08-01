@@ -5,6 +5,11 @@
 //! versioned path. `openapi` is the one exception: `main.rs` mounts it only
 //! under `/api/v1`, matching the canonical paths documented in
 //! `openapi::ApiDoc` (see `docs/v2-port/openapi-pattern.md`).
+//!
+//! `events::router` needs the concrete `state` value (not just `Router<
+//! AppState>`'s generic `S`) to build its `tenant_middleware` layer (finding
+//! #1 — see that module's docs), so this function takes `state` and threads
+//! it through rather than staying zero-argument.
 
 mod alerts;
 mod dashboard;
@@ -20,11 +25,11 @@ use crate::state::AppState;
 
 /// Builds the full route set, state-generic so the caller can mount it at
 /// both the flat and `/api/v1`-prefixed paths before applying state.
-pub fn router() -> Router<AppState> {
+pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .merge(health::router())
         .merge(dashboard::router())
-        .merge(events::router())
+        .merge(events::router(state))
         .merge(alerts::router())
 }
 
@@ -40,7 +45,7 @@ mod tests {
     /// one binary — both mount points must resolve.
     #[tokio::test]
     async fn routes_are_reachable_both_flat_and_under_api_v1() {
-        let api = router();
+        let api = router(dev_state());
         let app = Router::new()
             .merge(api.clone())
             .nest("/api/v1", api)

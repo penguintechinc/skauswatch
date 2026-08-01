@@ -40,15 +40,17 @@ pub(crate) struct StatusResponse {
 )]
 pub(crate) async fn codescan_status(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
 ) -> Result<Response, ApiError> {
     if let Some(denied) = crate::routes::license_denied(&state).await {
         return Ok(denied);
     }
 
     let queue_depth: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM codescan_reviews WHERE status IN ('queued', 'in_progress', 'processing')",
+        "SELECT count(*) FROM codescan_reviews \
+         WHERE tenant_id = $1 AND status IN ('queued', 'in_progress', 'processing')",
     )
+    .bind(user.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -139,5 +141,50 @@ mod tests {
         let body: serde_json::Value = resp.json();
         assert_eq!(body["status"], "ok");
         assert_eq!(body["queue_depth"], 0);
+    }
+
+    /// `queue_depth` only counts the caller's own tenant's active reviews —
+    /// another tenant's queued review must not inflate this count.
+    #[tokio::test]
+    async fn queue_depth_is_scoped_to_the_callers_tenant() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let other_tenant: uuid::Uuid = crate::routes::test_support::OTHER_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("uuid: {e}"));
+        let repo_row: (i64,) = match sqlx::query_as(
+            "INSERT INTO codescan_repo_configs (tenant_id, provider, repo_url, repo_name) \
+             VALUES ($1, 'github', 'https://github.com/a/b', 'other-tenant-repo') RETURNING id",
+        )
+        .bind(other_tenant)
+        .fetch_one(&state.db)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => panic!("seed repo config: {e}"),
+        };
+        if let Err(e) = sqlx::query(
+            "INSERT INTO codescan_reviews (tenant_id, repo_config_id, status) \
+             VALUES ($1, $2, 'queued')",
+        )
+        .bind(other_tenant)
+        .bind(repo_row.0)
+        .execute(&state.db)
+        .await
+        {
+            panic!("seed review: {e}");
+        }
+
+        let token = crate::routes::test_support::sign_token(&state, "1", "viewer");
+        let server = test_server(state);
+        let resp = server
+            .get("/api/v1/codescan/status")
+            .authorization_bearer(token)
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(
+            body["queue_depth"], 0,
+            "another tenant's queued review must not be counted"
+        );
     }
 }

@@ -10,6 +10,15 @@ use skauswatch_vault::{EnvelopeEncryption, MekVersion};
 
 use crate::state::{AppState, AppStateInner};
 
+/// Fixed tenant UUID used by [`sign_token`] for handler tests that don't
+/// exercise tenant isolation itself (the large majority) — a real UUID is
+/// required now that `CurrentUser::tenant_uuid()` parses the claim before
+/// every tenant-scoped query.
+pub(crate) const TEST_TENANT: &str = "11111111-1111-1111-1111-111111111111";
+/// A second, distinct tenant id for cross-tenant-isolation tests (tenant A's
+/// token must never see/mutate tenant B's rows).
+pub(crate) const OTHER_TENANT: &str = "22222222-2222-2222-2222-222222222222";
+
 #[derive(Serialize)]
 struct TestClaims<'a> {
     sub: &'a str,
@@ -20,14 +29,28 @@ struct TestClaims<'a> {
 
 /// Signs a Vault-shaped bearer token (`sub`/`exp`/`scope`/`tenant`) using
 /// the given state's configured JWT secret — for exercising `CurrentUser`.
+/// Always stamped with [`TEST_TENANT`]; use [`sign_token_for_tenant`] for
+/// tests that need a specific (or second) tenant.
 #[allow(clippy::panic)]
 pub(crate) fn sign_token(state: &AppState, sub: &str, scope: &str) -> String {
+    sign_token_for_tenant(state, sub, scope, TEST_TENANT)
+}
+
+/// Like [`sign_token`], but with a caller-chosen `tenant` claim — for
+/// cross-tenant-isolation tests.
+#[allow(clippy::panic)]
+pub(crate) fn sign_token_for_tenant(
+    state: &AppState,
+    sub: &str,
+    scope: &str,
+    tenant: &str,
+) -> String {
     let now = chrono::Utc::now().timestamp();
     let claims = TestClaims {
         sub,
         exp: now + 300,
         scope,
-        tenant: "default",
+        tenant,
     };
     match jsonwebtoken::encode(
         &Header::default(),

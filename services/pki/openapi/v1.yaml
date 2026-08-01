@@ -545,72 +545,6 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
       security:
       - bearer_jwt: []
-  /api/v1/cleanup:
-    post:
-      tags:
-      - common
-      summary: POST /api/v1/cleanup — mark expired certificates as `expired`.
-      operationId: common_cleanup
-      responses:
-        '200':
-          description: Cleanup result
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/expiring:
-    get:
-      tags:
-      - common
-      summary: GET /api/v1/expiring — certificates expiring within N days.
-      operationId: common_expiring
-      parameters:
-      - name: days
-        in: query
-        description: Expiry window in days (default 30)
-        required: false
-        schema:
-          type: integer
-          format: int64
-      - name: type
-        in: query
-        description: x509 | ssh | all (default all)
-        required: false
-        schema:
-          type: string
-      responses:
-        '200':
-          description: Certificates expiring within the window
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: Internal server error
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
   /api/v1/ssh/ca:
     get:
       tags:
@@ -1029,7 +963,12 @@ paths:
     post:
       tags:
       - ssh
-      summary: POST /api/v1/ssh/verify — parse + verify an SSH certificate.
+      summary: |-
+        POST /api/v1/ssh/verify — parse + verify an SSH certificate. The
+        revocation-status overlay is scoped to the caller's tenant: a serial
+        this tenant never issued/owns never overlays revocation status from the
+        DB (whether or not some other tenant's certificate happens to share that
+        serial), avoiding a cross-tenant information leak through this endpoint.
       operationId: ssh_verify
       requestBody:
         description: '`{"certificate": "ssh-ed25519-cert-v01@openssh.com ..."}`'
@@ -1330,4 +1269,4 @@ tags:
 - name: ssh
   description: SSH certificate issuance, lookup, revocation, KRL, and client config helpers
 - name: common
-  description: Combined statistics, CA info, audit log, expiring certificates, and cleanup
+  description: Combined statistics, CA info, and audit log (expiring/cleanup moved to the mTLS-only maintenance listener)

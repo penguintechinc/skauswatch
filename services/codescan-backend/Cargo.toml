@@ -25,6 +25,7 @@ penguin-licensing = { workspace = true, features = ["axum"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+skauswatch-auth = { workspace = true }
 skauswatch-db = { workspace = true }
 skauswatch-streams = { workspace = true }
 skauswatch-telemetry = { workspace = true }
@@ -32,6 +33,7 @@ sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+uuid = { workspace = true }
 # "yaml" adds serde_yaml so `codescan-backend openapi` can emit true YAML for
 # openapi/v1.yaml (workspace default features are json-only) — see
 # docs/v2-port/openapi-pattern.md.

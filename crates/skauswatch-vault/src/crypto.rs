@@ -53,6 +53,14 @@ pub enum EnvelopeError {
     /// The MEK version requested for rotation has not been loaded.
     #[error("MEK version {0} not loaded — cannot rotate")]
     RotateTargetNotLoaded(u32),
+    /// JSON (de)serialization failed while encrypting/decrypting a
+    /// structured credential blob (see [`EnvelopeEncryption::encrypt_json`]).
+    #[error("JSON serialization failed: {0}")]
+    Json(#[from] serde_json::Error),
+    /// A decrypted/stored JSON credential blob was missing the mandatory
+    /// `ciphertext`/`dek`/`version` envelope fields.
+    #[error("credential blob missing ciphertext/dek/version fields")]
+    MalformedBlob,
 }
 
 /// A single versioned Master Encryption Key.
@@ -100,19 +108,38 @@ impl EnvelopeEncryption {
     /// Loads MEK versions from the standard `VAULT_MEK*` environment
     /// variables: `VAULT_MEK_CURRENT_VERSION` (default `1`), then
     /// `VAULT_MEK_V{1..=current}` (falling back to bare `VAULT_MEK` for
-    /// each), matching v1 `EnvelopeEncryption.from_env`.
+    /// each), matching v1 `EnvelopeEncryption.from_env`. Thin glue over
+    /// [`Self::parse_mek_versions`] — intentionally left uncovered (same
+    /// convention as `WorkerConfig::from_env` elsewhere in this workspace):
+    /// the actual parsing logic is pure and tested directly.
     pub fn from_env() -> Result<Self, EnvelopeError> {
         let current_version: u32 = std::env::var("VAULT_MEK_CURRENT_VERSION")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1);
+        let mek_versions =
+            Self::parse_mek_versions(current_version, |name| std::env::var(name).ok())?;
+        Ok(Self {
+            mek_versions,
+            current_version,
+        })
+    }
 
+    /// Pure parsing logic behind [`Self::from_env`]: given `current_version`
+    /// and a `lookup` closure resolving a variable name to its value
+    /// (decoupled from `std::env::var` for testability), builds the MEK
+    /// version map for `1..=current_version`, falling back to a bare
+    /// `VAULT_MEK` lookup for any version-specific name that resolves to
+    /// nothing.
+    fn parse_mek_versions(
+        current_version: u32,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<HashMap<u32, MekVersion>, EnvelopeError> {
         let mut mek_versions = HashMap::new();
         for v in 1..=current_version {
             let var_name = format!("VAULT_MEK_V{v}");
-            let mek_b64 = std::env::var(&var_name)
-                .ok()
-                .or_else(|| std::env::var("VAULT_MEK").ok())
+            let mek_b64 = lookup(&var_name)
+                .or_else(|| lookup("VAULT_MEK"))
                 .ok_or_else(|| EnvelopeError::MissingMek(var_name.clone()))?;
             let key_bytes = B64
                 .decode(mek_b64.as_bytes())
@@ -128,11 +155,7 @@ impl EnvelopeEncryption {
                 },
             );
         }
-
-        Ok(Self {
-            mek_versions,
-            current_version,
-        })
+        Ok(mek_versions)
     }
 
     /// The MEK version new encryptions are wrapped under.
@@ -224,6 +247,41 @@ impl EnvelopeEncryption {
 
         let plaintext = Self::aead_decrypt(&dek, &ciphertext)?;
         Ok(String::from_utf8(plaintext)?)
+    }
+
+    /// Encrypts `value` (compact JSON) via envelope encryption and bundles
+    /// the three envelope fields into one JSON blob suitable for a single
+    /// TEXT column: `{"ciphertext","dek","version"}`. Matches the storage
+    /// shape already used by `vault_cloud_integrations.encrypted_credentials`
+    /// (see `worker-vault-sync`) — callers with more than one related secret
+    /// field (e.g. an access-key-id/secret-access-key pair) bundle them into
+    /// one JSON object first rather than encrypting each field separately.
+    pub fn encrypt_json(&self, value: &serde_json::Value) -> Result<String, EnvelopeError> {
+        let plaintext = serde_json::to_string(value)?;
+        let (ciphertext, dek, version) = self.encrypt(&plaintext)?;
+        let blob = serde_json::json!({"ciphertext": ciphertext, "dek": dek, "version": version});
+        Ok(serde_json::to_string(&blob)?)
+    }
+
+    /// Reverses [`Self::encrypt_json`]: unwraps the `{ciphertext,dek,version}`
+    /// blob, decrypts, and parses the recovered plaintext back into JSON.
+    pub fn decrypt_json(&self, blob: &str) -> Result<serde_json::Value, EnvelopeError> {
+        let envelope_fields: serde_json::Value = serde_json::from_str(blob)?;
+        let ciphertext = envelope_fields
+            .get("ciphertext")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(EnvelopeError::MalformedBlob)?;
+        let dek = envelope_fields
+            .get("dek")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(EnvelopeError::MalformedBlob)?;
+        let version = envelope_fields
+            .get("version")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or(EnvelopeError::MalformedBlob)?;
+        let plaintext = self.decrypt(ciphertext, dek, version)?;
+        Ok(serde_json::from_str(&plaintext)?)
     }
 
     /// Re-wraps every row's DEK under `new_version`'s MEK, mutating `rows`
@@ -365,6 +423,28 @@ mod tests {
     }
 
     #[test]
+    fn decrypt_rejects_ciphertext_shorter_than_nonce_prefix() {
+        let enc = test_mek();
+        let (_, dek, v) = enc.encrypt("real-secret").expect("encrypt");
+        let short = B64.encode([1u8; 5]); // shorter than the mandatory 12-byte nonce
+        assert!(matches!(
+            enc.decrypt(&short, &dek, v),
+            Err(EnvelopeError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn decrypt_rejects_wrapped_dek_shorter_than_nonce_prefix() {
+        let enc = test_mek();
+        let (ct, _, v) = enc.encrypt("real-secret").expect("encrypt");
+        let short_dek = B64.encode([1u8; 3]); // shorter than the mandatory 12-byte nonce
+        assert!(matches!(
+            enc.decrypt(&ct, &short_dek, v),
+            Err(EnvelopeError::Truncated)
+        ));
+    }
+
+    #[test]
     fn mek_rotation_allows_decrypt_with_new_mek_and_blocks_old() {
         let old_key = [1u8; KEY_LEN];
         let new_key = [2u8; KEY_LEN];
@@ -413,6 +493,27 @@ mod tests {
     }
 
     #[test]
+    fn rotate_mek_propagates_base64_decode_error_for_malformed_encrypted_dek() {
+        let mut enc = enc_with_mek([1u8; KEY_LEN]);
+        enc.mek_versions.insert(
+            2,
+            MekVersion {
+                version: 2,
+                key_bytes: [2u8; KEY_LEN],
+            },
+        );
+        let mut rows = [RotateRow {
+            id: "row-1".to_owned(),
+            encrypted_dek: "not valid base64 !!!".to_owned(),
+            dek_version: 1,
+        }];
+        assert!(matches!(
+            enc.rotate_mek(2, &mut rows),
+            Err(EnvelopeError::Base64(_))
+        ));
+    }
+
+    #[test]
     fn dek_version_starts_at_configured_current_version() {
         let enc = test_mek();
         let (_, _, v) = enc.encrypt("test").expect("encrypt");
@@ -424,5 +525,117 @@ mod tests {
         let mek = generate_mek_b64();
         let decoded = B64.decode(&mek).expect("valid base64");
         assert_eq!(decoded.len(), KEY_LEN);
+    }
+
+    // ── parse_mek_versions (pure logic behind `from_env`) ───────────────────
+
+    #[test]
+    fn parse_mek_versions_builds_map_for_each_version_specific_var() {
+        let mek1 = B64.encode([1u8; KEY_LEN]);
+        let mek2 = B64.encode([2u8; KEY_LEN]);
+        let vars = HashMap::from([
+            ("VAULT_MEK_V1".to_owned(), mek1),
+            ("VAULT_MEK_V2".to_owned(), mek2),
+        ]);
+        let result =
+            EnvelopeEncryption::parse_mek_versions(2, |k| vars.get(k).cloned()).expect("parse");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[&1].key_bytes, [1u8; KEY_LEN]);
+        assert_eq!(result[&2].key_bytes, [2u8; KEY_LEN]);
+    }
+
+    #[test]
+    fn parse_mek_versions_falls_back_to_bare_vault_mek() {
+        let vars = HashMap::from([("VAULT_MEK".to_owned(), B64.encode([9u8; KEY_LEN]))]);
+        let result =
+            EnvelopeEncryption::parse_mek_versions(1, |k| vars.get(k).cloned()).expect("parse");
+        assert_eq!(result[&1].key_bytes, [9u8; KEY_LEN]);
+    }
+
+    #[test]
+    fn parse_mek_versions_missing_both_names_errors() {
+        let result = EnvelopeEncryption::parse_mek_versions(1, |_| None);
+        assert!(matches!(result, Err(EnvelopeError::MissingMek(name)) if name == "VAULT_MEK_V1"));
+    }
+
+    #[test]
+    fn parse_mek_versions_rejects_wrong_length_key() {
+        let vars = HashMap::from([("VAULT_MEK_V1".to_owned(), B64.encode([1u8; 16]))]);
+        let result = EnvelopeEncryption::parse_mek_versions(1, |k| vars.get(k).cloned());
+        assert!(matches!(result, Err(EnvelopeError::InvalidMekLength(_))));
+    }
+
+    #[test]
+    fn parse_mek_versions_rejects_invalid_base64() {
+        let vars = HashMap::from([("VAULT_MEK_V1".to_owned(), "not valid base64 !!!".to_owned())]);
+        let result = EnvelopeEncryption::parse_mek_versions(1, |k| vars.get(k).cloned());
+        assert!(matches!(result, Err(EnvelopeError::Base64(_))));
+    }
+
+    #[test]
+    fn parse_mek_versions_zero_current_version_is_empty() {
+        let result = EnvelopeEncryption::parse_mek_versions(0, |_| None).expect("parse");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn encrypt_json_decrypt_json_roundtrip() {
+        let enc = test_mek();
+        let value = serde_json::json!({
+            "access_key_id": "AKIAEXAMPLE",
+            "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        });
+        let blob = enc.encrypt_json(&value).expect("encrypt_json");
+        // Blob is itself well-formed JSON with the expected envelope shape.
+        let parsed: serde_json::Value = serde_json::from_str(&blob).expect("blob is json");
+        assert!(parsed.get("ciphertext").is_some());
+        assert!(parsed.get("dek").is_some());
+        assert!(parsed.get("version").is_some());
+        // The plaintext never appears in the stored blob.
+        assert!(!blob.contains("AKIAEXAMPLE"));
+        assert!(!blob.contains("wJalrXUtnFEMI"));
+
+        let decrypted = enc.decrypt_json(&blob).expect("decrypt_json");
+        assert_eq!(decrypted, value);
+    }
+
+    #[test]
+    fn decrypt_json_rejects_malformed_blob() {
+        let enc = test_mek();
+        for bad in [
+            "not json at all",
+            "{}",
+            r#"{"ciphertext": "x"}"#,
+            r#"{"ciphertext": "x", "dek": "y"}"#,
+            r#"{"ciphertext": "x", "dek": "y", "version": "not-a-number"}"#,
+        ] {
+            assert!(
+                matches!(
+                    enc.decrypt_json(bad),
+                    Err(EnvelopeError::MalformedBlob) | Err(EnvelopeError::Json(_))
+                ),
+                "expected malformed/json error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decrypt_json_rejects_tampered_ciphertext() {
+        let enc = test_mek();
+        let blob = enc
+            .encrypt_json(&serde_json::json!({"k": "v"}))
+            .expect("encrypt_json");
+        let mut parsed: serde_json::Value = serde_json::from_str(&blob).expect("json");
+        let mut raw = B64
+            .decode(parsed["ciphertext"].as_str().expect("ciphertext str"))
+            .expect("b64 decode");
+        let last = raw.len() - 1;
+        raw[last] ^= 0xFF;
+        parsed["ciphertext"] = serde_json::Value::String(B64.encode(raw));
+        let tampered = parsed.to_string();
+        assert!(matches!(
+            enc.decrypt_json(&tampered),
+            Err(EnvelopeError::Crypto)
+        ));
     }
 }

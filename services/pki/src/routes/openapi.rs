@@ -77,8 +77,11 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         common::statistics,
         common::all_ca_info,
         common::audit,
-        common::expiring,
-        common::cleanup,
+        // `common::expiring`/`common::cleanup` are deliberately NOT
+        // documented here — they're served exclusively from the dedicated
+        // mTLS-required maintenance listener (`crate::maintenance`), not
+        // this bearer-JWT-secured REST surface. See that module's docs and
+        // docs/v2-port/service-auth-model.md §3.
     ),
     components(schemas(
         ErrorResponse,
@@ -93,7 +96,7 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
     tags(
         (name = "x509", description = "X.509 certificate issuance, lookup, revocation, CRL, and OCSP"),
         (name = "ssh", description = "SSH certificate issuance, lookup, revocation, KRL, and client config helpers"),
-        (name = "common", description = "Combined statistics, CA info, audit log, expiring certificates, and cleanup"),
+        (name = "common", description = "Combined statistics, CA info, and audit log (expiring/cleanup moved to the mTLS-only maintenance listener)"),
     ),
     modifiers(&SecurityAddon),
 )]

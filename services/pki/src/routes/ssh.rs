@@ -15,6 +15,7 @@ use crate::models::{
     AuthorizedKeysRequest, RevokeRequest, SshCertificateRequest, SshConfigRequest,
 };
 use crate::state::AppState;
+use crate::tenant::TenantId;
 
 use super::{page_params, user_id};
 
@@ -54,6 +55,7 @@ fn map_to_pairs(m: std::collections::BTreeMap<String, String>) -> Vec<(String, S
 )]
 pub async fn issue(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     headers: HeaderMap,
     body: ApiJson<SshCertificateRequest>,
 ) -> Result<Response, ApiError> {
@@ -79,7 +81,7 @@ pub async fn issue(
     };
     let result = st
         .manager
-        .issue_ssh(params, user_id(&headers).as_deref())
+        .issue_ssh(params, user_id(&headers).as_deref(), tenant)
         .await?;
     Ok((StatusCode::CREATED, Json(result)).into_response())
 }
@@ -101,10 +103,11 @@ pub async fn issue(
 )]
 pub async fn get_cert(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Path(cert_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     st.manager
-        .get_ssh(Some(&cert_id), None, true)
+        .get_ssh(Some(&cert_id), None, true, tenant)
         .await?
         .map(Json)
         .ok_or_else(|| ApiError::NotFound("Certificate not found".into()))
@@ -127,10 +130,11 @@ pub async fn get_cert(
 )]
 pub async fn get_by_serial(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Path(serial): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     st.manager
-        .get_ssh(None, Some(&serial), true)
+        .get_ssh(None, Some(&serial), true, tenant)
         .await?
         .map(Json)
         .ok_or_else(|| ApiError::NotFound("Certificate not found".into()))
@@ -154,6 +158,7 @@ pub async fn get_by_serial(
 )]
 pub async fn revoke_cert(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Path(cert_id): Path<String>,
     headers: HeaderMap,
     body: ApiJson<RevokeRequest>,
@@ -165,6 +170,7 @@ pub async fn revoke_cert(
             None,
             &body.0.reason,
             user_id(&headers).as_deref(),
+            tenant,
         )
         .await?;
     if !ok {
@@ -198,6 +204,7 @@ pub async fn revoke_cert(
 )]
 pub async fn list(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
     let (page, page_size) = page_params(&q);
@@ -209,6 +216,7 @@ pub async fn list(
             q.get("principal").map(String::as_str),
             page,
             page_size,
+            tenant,
         )
         .await?;
     Ok(paginated(items, total, page, page_size))
@@ -230,8 +238,12 @@ pub async fn list(
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
 )]
-pub async fn get_krl(State(st): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
-    let krl = st.manager.generate_ssh_krl().await?;
+pub async fn get_krl(
+    State(st): State<AppState>,
+    TenantId(tenant): TenantId,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let krl = st.manager.generate_ssh_krl(tenant).await?;
     if headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()) == Some("application/octet-stream")
     {
         let b64 = krl
@@ -419,11 +431,12 @@ pub async fn ssh_config(
 )]
 pub async fn cert_status(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Path(cert_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let cert = st
         .manager
-        .get_ssh(Some(&cert_id), None, false)
+        .get_ssh(Some(&cert_id), None, false, tenant)
         .await?
         .ok_or_else(|| ApiError::NotFound("Certificate not found".into()))?;
     let vb = cert
@@ -446,7 +459,11 @@ pub async fn cert_status(
     })))
 }
 
-/// POST /api/v1/ssh/verify — parse + verify an SSH certificate.
+/// POST /api/v1/ssh/verify — parse + verify an SSH certificate. The
+/// revocation-status overlay is scoped to the caller's tenant: a serial
+/// this tenant never issued/owns never overlays revocation status from the
+/// DB (whether or not some other tenant's certificate happens to share that
+/// serial), avoiding a cross-tenant information leak through this endpoint.
 #[utoipa::path(
     post,
     path = "/api/v1/ssh/verify",
@@ -463,6 +480,7 @@ pub async fn cert_status(
 )]
 pub async fn verify(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     body: ApiJson<Value>,
 ) -> Result<Response, ApiError> {
     let cert = body
@@ -487,7 +505,11 @@ pub async fn verify(
         .and_then(Value::as_str)
         .map(str::to_owned)
     {
-        if let Some(row) = st.manager.get_ssh(None, Some(&serial), false).await? {
+        if let Some(row) = st
+            .manager
+            .get_ssh(None, Some(&serial), false, tenant)
+            .await?
+        {
             if row.get("status").and_then(Value::as_str) == Some("revoked") {
                 info["status"] = Value::String("revoked".into());
             }
@@ -510,6 +532,7 @@ mod tests {
     use axum::http::StatusCode;
 
     use crate::state::AppStateInner;
+    use crate::tenant::TENANT_HEADER;
 
     use super::paginated;
 
@@ -542,6 +565,12 @@ mod tests {
         }
     }
 
+    /// A fixed tenant for tests that don't specifically exercise
+    /// cross-tenant isolation.
+    fn tenant() -> uuid::Uuid {
+        uuid::Uuid::new_v4()
+    }
+
     fn gen_subject_pubkey() -> String {
         let path = std::env::temp_dir().join(format!(
             "skauswatch-ssh-route-subject-{}",
@@ -570,6 +599,7 @@ mod tests {
         let res = server
             .post("/api/v1/ssh/certificates")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({ "public_key": "bad", "key_id": "k", "principals": [] }))
             .await;
         res.assert_status(StatusCode::BAD_REQUEST);
@@ -582,6 +612,7 @@ mod tests {
         let res = server
             .post("/api/v1/ssh/certificates")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({
                 "public_key": pubkey,
                 "key_id": "route-test",
@@ -591,12 +622,31 @@ mod tests {
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    /// Regression: issuance without a tenant header must be rejected before
+    /// touching the CA or store at all.
+    #[tokio::test]
+    async fn issue_without_tenant_header_is_403() {
+        let server = real_ca_server();
+        let pubkey = gen_subject_pubkey();
+        let res = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({
+                "public_key": pubkey,
+                "key_id": "route-test-no-tenant",
+                "principals": ["alice"],
+            }))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
     #[tokio::test]
     async fn get_cert_with_unparseable_id_is_404_without_touching_db() {
         let server = test_server();
         let res = server
             .get("/api/v1/ssh/certificates/not-a-uuid")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .await;
         res.assert_status(StatusCode::NOT_FOUND);
     }
@@ -610,6 +660,7 @@ mod tests {
                 uuid::Uuid::new_v4()
             ))
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -620,6 +671,7 @@ mod tests {
         let res = server
             .get("/api/v1/ssh/certificates/serial/123")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -630,6 +682,7 @@ mod tests {
         let res = server
             .post("/api/v1/ssh/certificates/not-a-uuid/revoke")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({}))
             .await;
         res.assert_status(StatusCode::NOT_FOUND);
@@ -644,6 +697,7 @@ mod tests {
                 uuid::Uuid::new_v4()
             ))
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({}))
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
@@ -655,6 +709,7 @@ mod tests {
         let res = server
             .get("/api/v1/ssh/certificates")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .add_query_param("status", "active")
             .add_query_param("type", "user")
             .add_query_param("principal", "alice")
@@ -668,12 +723,14 @@ mod tests {
         let json_res = server
             .get("/api/v1/ssh/krl")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .await;
         json_res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
 
         let bin_res = server
             .get("/api/v1/ssh/krl")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .add_header(axum::http::header::ACCEPT, "application/octet-stream")
             .await;
         bin_res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
@@ -771,6 +828,7 @@ mod tests {
         let res = server
             .get("/api/v1/ssh/certificates/not-a-uuid/status")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .await;
         res.assert_status(StatusCode::NOT_FOUND);
     }
@@ -784,6 +842,7 @@ mod tests {
                 uuid::Uuid::new_v4()
             ))
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -794,6 +853,7 @@ mod tests {
         let res = server
             .post("/api/v1/ssh/verify")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({}))
             .await;
         res.assert_status(StatusCode::BAD_REQUEST);
@@ -823,6 +883,7 @@ mod tests {
                     hostname: None,
                 },
                 None,
+                tenant(),
             )
             .await;
         // The manager's INSERT still fails against the unreachable pool —
@@ -851,6 +912,7 @@ mod tests {
         let res = server
             .post("/api/v1/ssh/verify")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({ "certificate": real_issued.certificate }))
             .await;
         // check_certificate() ran for real (parsed type/serial/key_id); the
@@ -876,6 +938,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .json(&serde_json::json!({
                 "public_key": gen_subject_pubkey(),
                 "key_id": key_id,
@@ -900,6 +966,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .await;
         by_id.assert_status_ok();
         let by_id_json: serde_json::Value = by_id.json();
@@ -915,6 +985,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .await;
         by_serial.assert_status_ok();
@@ -932,6 +1006,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .json(&serde_json::json!({ "reason": "key_compromise" }))
             .await;
         res.assert_status_ok();
@@ -941,6 +1019,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .await;
         status.assert_status_ok();
@@ -960,6 +1042,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .await;
         res.assert_status_ok();
         let body: serde_json::Value = res.json();
@@ -977,6 +1063,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .json(&serde_json::json!({}))
             .await
             .assert_status_ok();
@@ -986,6 +1076,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .await;
         json_res.assert_status_ok();
@@ -997,6 +1091,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .add_header(axum::http::header::ACCEPT, "application/octet-stream")
             .await;
@@ -1021,6 +1119,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .json(&serde_json::json!({ "certificate": cert }))
             .await;
         before.assert_status_ok();
@@ -1033,6 +1135,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .json(&serde_json::json!({}))
             .await
             .assert_status_ok();
@@ -1043,10 +1149,92 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .json(&serde_json::json!({ "certificate": cert }))
             .await;
         after.assert_status_ok();
         let after_json: serde_json::Value = after.json();
         assert_eq!(after_json["status"], "revoked");
+    }
+
+    /// Regression: tenant A's issued SSH certificate must be invisible —
+    /// not gettable, not listable, not revocable — to a caller presenting
+    /// tenant B's `X-Tenant-ID` header.
+    #[tokio::test]
+    async fn tenant_b_cannot_get_list_or_revoke_tenant_as_certificate() {
+        let server = db_server().await;
+        let tenant_a = uuid::Uuid::new_v4();
+        let tenant_b = uuid::Uuid::new_v4();
+
+        let issued = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(TENANT_HEADER, tenant_a.to_string())
+            .json(&serde_json::json!({
+                "public_key": gen_subject_pubkey(),
+                "key_id": "tenant-isolation",
+                "principals": ["alice"],
+            }))
+            .await;
+        issued.assert_status(StatusCode::CREATED);
+        let issued: serde_json::Value = issued.json();
+        let id = issued["id"].as_str().unwrap();
+
+        server
+            .get(&format!("/api/v1/ssh/certificates/{id}"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(TENANT_HEADER, tenant_b.to_string())
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+
+        let list_res = server
+            .get("/api/v1/ssh/certificates")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(TENANT_HEADER, tenant_b.to_string())
+            .await;
+        list_res.assert_status_ok();
+        let list_json: serde_json::Value = list_res.json();
+        assert!(
+            list_json["certificates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["id"] != id)
+        );
+
+        server
+            .post(&format!("/api/v1/ssh/certificates/{id}/revoke"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(TENANT_HEADER, tenant_b.to_string())
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+
+        let status_res = server
+            .get(&format!("/api/v1/ssh/certificates/{id}/status"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(TENANT_HEADER, tenant_a.to_string())
+            .await;
+        status_res.assert_status_ok();
+        let status_json: serde_json::Value = status_res.json();
+        assert_eq!(status_json["status"], "active");
     }
 }

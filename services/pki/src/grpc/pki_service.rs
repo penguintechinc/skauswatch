@@ -17,6 +17,7 @@ use crate::ca::ssh::SshIssueParams;
 use crate::ca::x509::X509IssueParams;
 use crate::manager::ManagerError;
 use crate::state::AppState;
+use crate::tenant::tenant_from_metadata;
 
 /// gRPC servicer holding shared app state.
 pub struct PkiGrpc {
@@ -27,6 +28,27 @@ impl PkiGrpc {
     /// Builds the servicer over shared state.
     pub fn new(state: AppState) -> Self {
         Self { state }
+    }
+
+    /// Denies with `PERMISSION_DENIED` while `crate::routes::ISSUANCE_FLAG`
+    /// evaluates disabled — the gRPC counterpart of the REST issuance
+    /// routes' `penguin_licensing::axum::FlagGate` layer (this transport has
+    /// no axum middleware to mount it on, so the two issuance RPCs call this
+    /// explicitly instead).
+    async fn require_issuance_enabled(&self) -> Result<(), Status> {
+        if self
+            .state
+            .license
+            .flag_enabled(crate::routes::ISSUANCE_FLAG)
+            .await
+        {
+            Ok(())
+        } else {
+            Err(Status::permission_denied(format!(
+                "feature_disabled: {}",
+                crate::routes::ISSUANCE_FLAG
+            )))
+        }
     }
 }
 
@@ -222,6 +244,8 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<X509CertRequest>,
     ) -> Result<Response<X509CertResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
+        self.require_issuance_enabled().await?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
         let key_usage: Vec<String> = r
@@ -263,7 +287,7 @@ impl PkiService for PkiGrpc {
         let d = self
             .state
             .manager
-            .issue_x509(params, none_if_empty(&r.requester_id))
+            .issue_x509(params, none_if_empty(&r.requester_id), tenant)
             .await
             .map_err(map_err)?;
         Ok(Response::new(x509_response(&d)))
@@ -273,13 +297,14 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<CertQuery>,
     ) -> Result<Response<X509CertResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
         let (id, serial) = query_ids(&r.identifier);
         let d = self
             .state
             .manager
-            .get_x509(id.as_deref(), serial.as_deref(), true)
+            .get_x509(id.as_deref(), serial.as_deref(), true, tenant)
             .await
             .map_err(map_err)?
             .ok_or_else(|| Status::not_found("Certificate not found"))?;
@@ -290,6 +315,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<RevokeRequest>,
     ) -> Result<Response<RevokeResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
         let (id, serial) = revoke_ids(&r.identifier);
@@ -301,6 +327,7 @@ impl PkiService for PkiGrpc {
                 serial.as_deref(),
                 reason_from_proto(r.reason),
                 None,
+                tenant,
             )
             .await
             .map_err(map_err)?;
@@ -319,13 +346,14 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<CertQuery>,
     ) -> Result<Response<StatusResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
         let (id, serial) = query_ids(&r.identifier);
         let d = self
             .state
             .manager
-            .get_x509(id.as_deref(), serial.as_deref(), false)
+            .get_x509(id.as_deref(), serial.as_deref(), false, tenant)
             .await
             .map_err(map_err)?
             .ok_or_else(|| Status::not_found("Certificate not found"))?;
@@ -349,6 +377,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<ListCertRequest>,
     ) -> Result<Response<X509CertListResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
         let page = if r.page == 0 { 1 } else { r.page as i64 };
@@ -361,7 +390,14 @@ impl PkiService for PkiGrpc {
         let (items, total) = self
             .state
             .manager
-            .list_x509(status, none_if_empty(&r.subject), None, page, page_size)
+            .list_x509(
+                status,
+                none_if_empty(&r.subject),
+                None,
+                page,
+                page_size,
+                tenant,
+            )
             .await
             .map_err(map_err)?;
         let certificates = items
@@ -392,6 +428,8 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<SshCertRequest>,
     ) -> Result<Response<SshCertResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
+        self.require_issuance_enabled().await?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
         let cert_type = ssh_type_from_proto(r.certificate_type).to_owned();
@@ -422,7 +460,7 @@ impl PkiService for PkiGrpc {
         let d = self
             .state
             .manager
-            .issue_ssh(params, none_if_empty(&r.requester_id))
+            .issue_ssh(params, none_if_empty(&r.requester_id), tenant)
             .await
             .map_err(map_err)?;
         Ok(Response::new(ssh_response(&d)))
@@ -432,13 +470,14 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<CertQuery>,
     ) -> Result<Response<SshCertResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
         let (id, serial) = query_ids(&r.identifier);
         let d = self
             .state
             .manager
-            .get_ssh(id.as_deref(), serial.as_deref(), true)
+            .get_ssh(id.as_deref(), serial.as_deref(), true, tenant)
             .await
             .map_err(map_err)?
             .ok_or_else(|| Status::not_found("Certificate not found"))?;
@@ -451,6 +490,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<RevokeRequest>,
     ) -> Result<Response<RevokeResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
         let (id, serial) = revoke_ids(&r.identifier);
@@ -462,6 +502,7 @@ impl PkiService for PkiGrpc {
                 serial.as_deref(),
                 reason_from_proto(r.reason),
                 None,
+                tenant,
             )
             .await
             .map_err(map_err)?;
@@ -480,13 +521,14 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<CertQuery>,
     ) -> Result<Response<StatusResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
         let (id, serial) = query_ids(&r.identifier);
         let d = self
             .state
             .manager
-            .get_ssh(id.as_deref(), serial.as_deref(), false)
+            .get_ssh(id.as_deref(), serial.as_deref(), false, tenant)
             .await
             .map_err(map_err)?
             .ok_or_else(|| Status::not_found("Certificate not found"))?;
@@ -510,6 +552,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<ListCertRequest>,
     ) -> Result<Response<SshCertListResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
         let page = if r.page == 0 { 1 } else { r.page as i64 };
@@ -527,6 +570,7 @@ impl PkiService for PkiGrpc {
                 none_if_empty(&r.principal),
                 page,
                 page_size,
+                tenant,
             )
             .await
             .map_err(map_err)?;
@@ -557,11 +601,12 @@ impl PkiService for PkiGrpc {
     }
 
     async fn get_crl(&self, request: Request<Empty>) -> Result<Response<CrlResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
         require_v1(&request.into_inner().api_version)?;
         let d = self
             .state
             .manager
-            .generate_x509_crl()
+            .generate_x509_crl(tenant)
             .await
             .map_err(map_err)?;
         let revoked = d
@@ -588,11 +633,12 @@ impl PkiService for PkiGrpc {
 
     async fn get_krl(&self, request: Request<Empty>) -> Result<Response<KrlResponse>, Status> {
         use base64::Engine as _;
+        let tenant = tenant_from_metadata(request.metadata())?;
         require_v1(&request.into_inner().api_version)?;
         let d = self
             .state
             .manager
-            .generate_ssh_krl()
+            .generate_ssh_krl(tenant)
             .await
             .map_err(map_err)?;
         let revoked = d
@@ -683,8 +729,14 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<StatisticsResponse>, Status> {
+        let tenant = tenant_from_metadata(request.metadata())?;
         require_v1(&request.into_inner().api_version)?;
-        let d = self.state.manager.statistics().await.map_err(map_err)?;
+        let d = self
+            .state
+            .manager
+            .statistics(tenant)
+            .await
+            .map_err(map_err)?;
         let x = d.get("x509").cloned().unwrap_or_default();
         let s = d.get("ssh").cloned().unwrap_or_default();
         Ok(Response::new(StatisticsResponse {
@@ -756,12 +808,41 @@ mod tests {
         assert!(status.message().contains("not supported"));
     }
 
+    /// Fixed tenant used by every test below that isn't specifically
+    /// exercising missing/cross-tenant behavior.
+    fn tenant() -> uuid::Uuid {
+        uuid::Uuid::new_v4()
+    }
+
+    /// Wraps `msg` in a `Request` carrying a valid `x-tenant-id` metadata
+    /// entry (the gRPC counterpart of a REST caller's `X-Tenant-ID` header)
+    /// — every RPC below that touches a certificate table requires this.
+    #[allow(clippy::panic)] // test-only helper fails loudly by design
+    fn req<T>(msg: T) -> Request<T> {
+        req_with_tenant(msg, tenant())
+    }
+
+    /// Like [`req`], but with a caller-chosen tenant — for cross-tenant and
+    /// missing-tenant-metadata tests.
+    #[allow(clippy::panic)] // test-only helper fails loudly by design
+    fn req_with_tenant<T>(msg: T, tenant: uuid::Uuid) -> Request<T> {
+        let mut request = Request::new(msg);
+        let value = match tenant.to_string().parse() {
+            Ok(v) => v,
+            Err(e) => panic!("tenant metadata value: {e}"),
+        };
+        request
+            .metadata_mut()
+            .insert(crate::tenant::TENANT_HEADER, value);
+        request
+    }
+
     // ---------- api_version gate: one test per RPC ----------
 
     #[tokio::test]
     async fn issue_x509_certificate_rejects_unknown_api_version() {
         let status = grpc()
-            .issue_x509_certificate(Request::new(X509CertRequest {
+            .issue_x509_certificate(req(X509CertRequest {
                 api_version: "v2".into(),
                 ..Default::default()
             }))
@@ -773,7 +854,7 @@ mod tests {
     #[tokio::test]
     async fn get_x509_certificate_rejects_unknown_api_version() {
         let status = grpc()
-            .get_x509_certificate(Request::new(CertQuery {
+            .get_x509_certificate(req(CertQuery {
                 api_version: "v2".into(),
                 identifier: None,
             }))
@@ -785,7 +866,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_x509_certificate_rejects_unknown_api_version() {
         let status = grpc()
-            .revoke_x509_certificate(Request::new(RevokeRequest {
+            .revoke_x509_certificate(req(RevokeRequest {
                 api_version: "v2".into(),
                 ..Default::default()
             }))
@@ -797,7 +878,7 @@ mod tests {
     #[tokio::test]
     async fn get_x509_status_rejects_unknown_api_version() {
         let status = grpc()
-            .get_x509_status(Request::new(CertQuery {
+            .get_x509_status(req(CertQuery {
                 api_version: "v2".into(),
                 identifier: None,
             }))
@@ -809,7 +890,7 @@ mod tests {
     #[tokio::test]
     async fn list_x509_certificates_rejects_unknown_api_version() {
         let status = grpc()
-            .list_x509_certificates(Request::new(ListCertRequest {
+            .list_x509_certificates(req(ListCertRequest {
                 api_version: "v2".into(),
                 ..Default::default()
             }))
@@ -821,7 +902,7 @@ mod tests {
     #[tokio::test]
     async fn issue_ssh_certificate_rejects_unknown_api_version() {
         let status = grpc()
-            .issue_ssh_certificate(Request::new(SshCertRequest {
+            .issue_ssh_certificate(req(SshCertRequest {
                 api_version: "v2".into(),
                 ..Default::default()
             }))
@@ -833,7 +914,7 @@ mod tests {
     #[tokio::test]
     async fn get_ssh_certificate_rejects_unknown_api_version() {
         let status = grpc()
-            .get_ssh_certificate(Request::new(CertQuery {
+            .get_ssh_certificate(req(CertQuery {
                 api_version: "v2".into(),
                 identifier: None,
             }))
@@ -845,7 +926,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_ssh_certificate_rejects_unknown_api_version() {
         let status = grpc()
-            .revoke_ssh_certificate(Request::new(RevokeRequest {
+            .revoke_ssh_certificate(req(RevokeRequest {
                 api_version: "v2".into(),
                 ..Default::default()
             }))
@@ -857,7 +938,7 @@ mod tests {
     #[tokio::test]
     async fn get_ssh_status_rejects_unknown_api_version() {
         let status = grpc()
-            .get_ssh_status(Request::new(CertQuery {
+            .get_ssh_status(req(CertQuery {
                 api_version: "v2".into(),
                 identifier: None,
             }))
@@ -869,7 +950,7 @@ mod tests {
     #[tokio::test]
     async fn list_ssh_certificates_rejects_unknown_api_version() {
         let status = grpc()
-            .list_ssh_certificates(Request::new(ListCertRequest {
+            .list_ssh_certificates(req(ListCertRequest {
                 api_version: "v2".into(),
                 ..Default::default()
             }))
@@ -881,7 +962,7 @@ mod tests {
     #[tokio::test]
     async fn get_crl_rejects_unknown_api_version() {
         let status = grpc()
-            .get_crl(Request::new(Empty {
+            .get_crl(req(Empty {
                 api_version: "v2".into(),
             }))
             .await
@@ -892,7 +973,7 @@ mod tests {
     #[tokio::test]
     async fn get_krl_rejects_unknown_api_version() {
         let status = grpc()
-            .get_krl(Request::new(Empty {
+            .get_krl(req(Empty {
                 api_version: "v2".into(),
             }))
             .await
@@ -903,7 +984,7 @@ mod tests {
     #[tokio::test]
     async fn get_x509ca_info_rejects_unknown_api_version() {
         let status = grpc()
-            .get_x509ca_info(Request::new(Empty {
+            .get_x509ca_info(req(Empty {
                 api_version: "v2".into(),
             }))
             .await
@@ -914,7 +995,7 @@ mod tests {
     #[tokio::test]
     async fn get_sshca_info_rejects_unknown_api_version() {
         let status = grpc()
-            .get_sshca_info(Request::new(Empty {
+            .get_sshca_info(req(Empty {
                 api_version: "v2".into(),
             }))
             .await
@@ -925,7 +1006,7 @@ mod tests {
     #[tokio::test]
     async fn get_statistics_rejects_unknown_api_version() {
         let status = grpc()
-            .get_statistics(Request::new(Empty {
+            .get_statistics(req(Empty {
                 api_version: "v2".into(),
             }))
             .await
@@ -940,7 +1021,7 @@ mod tests {
         let svc = grpc();
         for identifier in [None, Some(cert_query::Identifier::Id("not-a-uuid".into()))] {
             let status = svc
-                .get_x509_certificate(Request::new(CertQuery {
+                .get_x509_certificate(req(CertQuery {
                     api_version: String::new(),
                     identifier,
                 }))
@@ -953,7 +1034,7 @@ mod tests {
     #[tokio::test]
     async fn get_ssh_certificate_not_found_without_db_for_bad_identifier() {
         let status = grpc()
-            .get_ssh_certificate(Request::new(CertQuery {
+            .get_ssh_certificate(req(CertQuery {
                 api_version: "v1".into(),
                 identifier: Some(cert_query::Identifier::Id("not-a-uuid".into())),
             }))
@@ -965,7 +1046,7 @@ mod tests {
     #[tokio::test]
     async fn get_x509_status_not_found_without_db_for_bad_identifier() {
         let status = grpc()
-            .get_x509_status(Request::new(CertQuery {
+            .get_x509_status(req(CertQuery {
                 api_version: "v1".into(),
                 identifier: None,
             }))
@@ -977,7 +1058,7 @@ mod tests {
     #[tokio::test]
     async fn get_ssh_status_not_found_without_db_for_bad_identifier() {
         let status = grpc()
-            .get_ssh_status(Request::new(CertQuery {
+            .get_ssh_status(req(CertQuery {
                 api_version: "v1".into(),
                 identifier: Some(cert_query::Identifier::Id("bad".into())),
             }))
@@ -994,7 +1075,7 @@ mod tests {
             Some(revoke_request::Identifier::Id("not-a-uuid".into())),
         ] {
             let status = svc
-                .revoke_x509_certificate(Request::new(RevokeRequest {
+                .revoke_x509_certificate(req(RevokeRequest {
                     api_version: "v1".into(),
                     identifier,
                     reason: 0,
@@ -1009,7 +1090,7 @@ mod tests {
     #[tokio::test]
     async fn revoke_ssh_certificate_not_found_without_db_for_bad_identifier() {
         let status = grpc()
-            .revoke_ssh_certificate(Request::new(RevokeRequest {
+            .revoke_ssh_certificate(req(RevokeRequest {
                 api_version: "v1".into(),
                 identifier: Some(revoke_request::Identifier::Id("bad".into())),
                 reason: 0,
@@ -1025,7 +1106,7 @@ mod tests {
         // The SSH CA engine itself rejects this before any DB call — proves
         // map_err's BadRequest -> invalid_argument branch.
         let status = grpc()
-            .issue_ssh_certificate(Request::new(SshCertRequest {
+            .issue_ssh_certificate(req(SshCertRequest {
                 api_version: "v1".into(),
                 public_key: "ssh-ed25519 AAAA".into(),
                 certificate_type: 1,
@@ -1043,7 +1124,7 @@ mod tests {
     #[tokio::test]
     async fn issue_x509_certificate_runs_real_crypto_then_internal_on_db() {
         let status = grpc()
-            .issue_x509_certificate(Request::new(X509CertRequest {
+            .issue_x509_certificate(req(X509CertRequest {
                 api_version: "v1".into(),
                 subject: "CN=grpc-test.example.com".into(),
                 is_ca: false,
@@ -1065,7 +1146,7 @@ mod tests {
         // Exercises map_err's X509(BadRequest) arm specifically (the SSH
         // arm is covered by issue_ssh_certificate_empty_principals_is_invalid_argument).
         let status = grpc()
-            .issue_x509_certificate(Request::new(X509CertRequest {
+            .issue_x509_certificate(req(X509CertRequest {
                 api_version: "v1".into(),
                 subject: "CN=grpc-badcsr.example.com".into(),
                 csr_pem: "not a real csr".into(),
@@ -1079,7 +1160,7 @@ mod tests {
     #[tokio::test]
     async fn list_x509_certificates_defaults_page_then_internal_on_db() {
         let status = grpc()
-            .list_x509_certificates(Request::new(ListCertRequest {
+            .list_x509_certificates(req(ListCertRequest {
                 api_version: "v1".into(),
                 page: 0,
                 page_size: 0,
@@ -1093,7 +1174,7 @@ mod tests {
     #[tokio::test]
     async fn list_ssh_certificates_internal_on_db() {
         let status = grpc()
-            .list_ssh_certificates(Request::new(ListCertRequest {
+            .list_ssh_certificates(req(ListCertRequest {
                 api_version: "v1".into(),
                 ..Default::default()
             }))
@@ -1105,7 +1186,7 @@ mod tests {
     #[tokio::test]
     async fn get_crl_internal_on_db() {
         let status = grpc()
-            .get_crl(Request::new(Empty {
+            .get_crl(req(Empty {
                 api_version: "v1".into(),
             }))
             .await
@@ -1116,7 +1197,7 @@ mod tests {
     #[tokio::test]
     async fn get_krl_internal_on_db() {
         let status = grpc()
-            .get_krl(Request::new(Empty {
+            .get_krl(req(Empty {
                 api_version: "v1".into(),
             }))
             .await
@@ -1127,7 +1208,7 @@ mod tests {
     #[tokio::test]
     async fn get_statistics_internal_on_db() {
         let status = grpc()
-            .get_statistics(Request::new(Empty {
+            .get_statistics(req(Empty {
                 api_version: "v1".into(),
             }))
             .await
@@ -1140,7 +1221,7 @@ mod tests {
     #[tokio::test]
     async fn get_x509ca_info_succeeds_without_db() {
         let resp = grpc()
-            .get_x509ca_info(Request::new(Empty {
+            .get_x509ca_info(req(Empty {
                 api_version: String::new(),
             }))
             .await
@@ -1154,7 +1235,7 @@ mod tests {
     #[tokio::test]
     async fn get_sshca_info_succeeds_without_db() {
         let resp = grpc()
-            .get_sshca_info(Request::new(Empty {
+            .get_sshca_info(req(Empty {
                 api_version: "v1".into(),
             }))
             .await
@@ -1167,7 +1248,7 @@ mod tests {
     #[tokio::test]
     async fn health_check_reports_healthy_true_regardless_of_db_and_ignores_api_version() {
         let resp = grpc()
-            .health_check(Request::new(Empty {
+            .health_check(req(Empty {
                 api_version: "totally-unchecked".into(),
             }))
             .await
@@ -1201,7 +1282,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("read pubkey: {e}"));
 
         let grpc_status = real_ca_grpc()
-            .issue_ssh_certificate(Request::new(SshCertRequest {
+            .issue_ssh_certificate(req(SshCertRequest {
                 api_version: "v1".into(),
                 public_key: pubkey,
                 certificate_type: 1,
@@ -1390,5 +1471,161 @@ mod tests {
         assert_eq!(proto_status_name(3), Some("expired"));
         assert_eq!(proto_status_name(4), Some("pending"));
         assert_eq!(proto_status_name(0), None);
+    }
+
+    // ---------- tenant metadata: missing x-tenant-id is UNAUTHENTICATED ----------
+
+    #[tokio::test]
+    async fn issue_x509_certificate_missing_tenant_metadata_is_unauthenticated() {
+        let status = grpc()
+            .issue_x509_certificate(Request::new(X509CertRequest {
+                api_version: "v1".into(),
+                subject: "CN=no-tenant.example.com".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn get_x509_certificate_missing_tenant_metadata_is_unauthenticated() {
+        let status = grpc()
+            .get_x509_certificate(Request::new(CertQuery {
+                api_version: "v1".into(),
+                identifier: Some(cert_query::Identifier::Id(uuid::Uuid::new_v4().to_string())),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn issue_ssh_certificate_missing_tenant_metadata_is_unauthenticated() {
+        let status = grpc()
+            .issue_ssh_certificate(Request::new(SshCertRequest {
+                api_version: "v1".into(),
+                public_key: "ssh-ed25519 AAAA".into(),
+                certificate_type: 1,
+                key_id: "k".into(),
+                principals: vec!["alice".into()],
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn list_x509_certificates_missing_tenant_metadata_is_unauthenticated() {
+        let status = grpc()
+            .list_x509_certificates(Request::new(ListCertRequest {
+                api_version: "v1".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::Unauthenticated);
+    }
+
+    // ---------- issuance flag gate ----------
+
+    /// `release_mode = true` license client (flags default OFF) — mirrors
+    /// `routes::tests::gated_license`.
+    fn gated_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
+        let mut cfg = match penguin_licensing::LicenseConfig::new("skauswatch") {
+            Ok(c) => c,
+            Err(e) => panic!("license config: {e}"),
+        };
+        cfg.release_mode = true;
+        match penguin_licensing::LicenseClient::new(cfg) {
+            Ok(c) => c,
+            Err(e) => panic!("license client: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_x509_certificate_denied_when_issuance_flag_disabled() {
+        let svc = PkiGrpc::new(crate::state::AppStateInner::for_tests_with_license(
+            gated_license(),
+        ));
+        let status = svc
+            .issue_x509_certificate(req(X509CertRequest {
+                api_version: "v1".into(),
+                subject: "CN=flag-off.example.com".into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn issue_ssh_certificate_denied_when_issuance_flag_disabled() {
+        let svc = PkiGrpc::new(crate::state::AppStateInner::for_tests_with_license(
+            gated_license(),
+        ));
+        let status = svc
+            .issue_ssh_certificate(req(SshCertRequest {
+                api_version: "v1".into(),
+                public_key: "ssh-ed25519 AAAA".into(),
+                certificate_type: 1,
+                key_id: "k".into(),
+                principals: vec!["alice".into()],
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::PermissionDenied);
+    }
+
+    // ---------- cross-tenant isolation (real DB) ----------
+
+    async fn db_grpc() -> PkiGrpc {
+        PkiGrpc::new(crate::routes::test_support::db_state().await)
+    }
+
+    #[tokio::test]
+    async fn get_x509_certificate_cannot_see_another_tenants_certificate() {
+        let svc = db_grpc().await;
+        let tenant_a = uuid::Uuid::new_v4();
+        let tenant_b = uuid::Uuid::new_v4();
+
+        let issued = svc
+            .issue_x509_certificate(req_with_tenant(
+                X509CertRequest {
+                    api_version: "v1".into(),
+                    subject: "CN=grpc-tenant-isolation.example.com".into(),
+                    ..Default::default()
+                },
+                tenant_a,
+            ))
+            .await
+            .unwrap_or_else(|e| panic!("issue: {e}"))
+            .into_inner();
+
+        let status = svc
+            .get_x509_certificate(req_with_tenant(
+                CertQuery {
+                    api_version: "v1".into(),
+                    identifier: Some(cert_query::Identifier::Id(issued.id.clone())),
+                },
+                tenant_b,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::NotFound);
+
+        // Same tenant can still fetch it.
+        let found = svc
+            .get_x509_certificate(req_with_tenant(
+                CertQuery {
+                    api_version: "v1".into(),
+                    identifier: Some(cert_query::Identifier::Id(issued.id)),
+                },
+                tenant_a,
+            ))
+            .await;
+        assert!(found.is_ok());
     }
 }

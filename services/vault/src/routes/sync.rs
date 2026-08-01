@@ -133,8 +133,10 @@ pub(crate) async fn list_integrations(
     user.require_scope("sync:read")?;
     let rows = sqlx::query_as::<_, IntegrationRow>(
         "SELECT id, provider, name, description, sync_direction, sync_scopes, enabled, config, \
-         last_sync_at, created_at FROM vault_cloud_integrations ORDER BY name",
+         last_sync_at, created_at FROM vault_cloud_integrations WHERE tenant_id = $1 \
+         ORDER BY name",
     )
+    .bind(user.tenant_uuid()?)
     .fetch_all(&state.db)
     .await?;
     Ok(Json(json!({
@@ -175,6 +177,7 @@ pub(crate) async fn create_integration(
     Json(body): Json<CreateIntegrationBody>,
 ) -> Result<(axum::http::StatusCode, Json<Value>), ApiError> {
     user.require_scope("sync:admin")?;
+    let tenant_id = user.tenant_uuid()?;
 
     let provider = body
         .provider
@@ -221,11 +224,12 @@ pub(crate) async fn create_integration(
 
     let integration_id = Uuid::new_v4().to_string();
     sqlx::query(
-        "INSERT INTO vault_cloud_integrations (id, provider, name, description, sync_direction, \
-         sync_scopes, encrypted_credentials, enabled, config, created_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+        "INSERT INTO vault_cloud_integrations (id, tenant_id, provider, name, description, \
+         sync_direction, sync_scopes, encrypted_credentials, enabled, config, created_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
     )
     .bind(&integration_id)
+    .bind(tenant_id)
     .bind(&provider)
     .bind(&name)
     .bind(body.description.unwrap_or_default())
@@ -238,18 +242,23 @@ pub(crate) async fn create_integration(
     .execute(&state.db)
     .await?;
 
-    let row = fetch_integration(&state, &integration_id)
+    let row = fetch_integration(&state, tenant_id, &integration_id)
         .await?
         .ok_or_else(|| ApiError::internal("create_integration", "row vanished after insert"))?;
     Ok((axum::http::StatusCode::CREATED, Json(row.to_json())))
 }
 
-async fn fetch_integration(state: &AppState, id: &str) -> Result<Option<IntegrationRow>, ApiError> {
+async fn fetch_integration(
+    state: &AppState,
+    tenant_id: Uuid,
+    id: &str,
+) -> Result<Option<IntegrationRow>, ApiError> {
     Ok(sqlx::query_as::<_, IntegrationRow>(
         "SELECT id, provider, name, description, sync_direction, sync_scopes, enabled, config, \
-         last_sync_at, created_at FROM vault_cloud_integrations WHERE id = $1",
+         last_sync_at, created_at FROM vault_cloud_integrations WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
+    .bind(tenant_id)
     .fetch_optional(&state.db)
     .await?)
 }
@@ -286,7 +295,8 @@ pub(crate) async fn update_integration(
     body: Option<Json<UpdateIntegrationBody>>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_scope("sync:admin")?;
-    if fetch_integration(&state, &id).await?.is_none() {
+    let tenant_id = user.tenant_uuid()?;
+    if fetch_integration(&state, tenant_id, &id).await?.is_none() {
         return Err(ApiError::NotFound("Not found".to_owned()));
     }
     let body = body.map(|Json(b)| b).unwrap_or_default();
@@ -304,7 +314,7 @@ pub(crate) async fn update_integration(
          sync_scopes = COALESCE($4, sync_scopes), \
          config = COALESCE($5, config), \
          enabled = COALESCE($6, enabled) \
-         WHERE id = $7",
+         WHERE id = $7 AND tenant_id = $8",
     )
     .bind(body.name)
     .bind(body.description)
@@ -313,10 +323,11 @@ pub(crate) async fn update_integration(
     .bind(body.config.map(SqlxJson))
     .bind(body.enabled)
     .bind(&id)
+    .bind(tenant_id)
     .execute(&state.db)
     .await?;
 
-    let row = fetch_integration(&state, &id)
+    let row = fetch_integration(&state, tenant_id, &id)
         .await?
         .ok_or_else(|| ApiError::internal("update_integration", "row vanished after update"))?;
     Ok(Json(row.to_json()))
@@ -341,11 +352,13 @@ pub(crate) async fn delete_integration(
     Path(id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
     user.require_scope("sync:admin")?;
-    if fetch_integration(&state, &id).await?.is_none() {
+    let tenant_id = user.tenant_uuid()?;
+    if fetch_integration(&state, tenant_id, &id).await?.is_none() {
         return Err(ApiError::NotFound("Not found".to_owned()));
     }
-    sqlx::query("DELETE FROM vault_cloud_integrations WHERE id = $1")
+    sqlx::query("DELETE FROM vault_cloud_integrations WHERE id = $1 AND tenant_id = $2")
         .bind(&id)
+        .bind(tenant_id)
         .execute(&state.db)
         .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -381,7 +394,7 @@ pub(crate) async fn trigger_sync(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_scope("sync:admin")?;
-    let row = fetch_integration(&state, &id)
+    let row = fetch_integration(&state, user.tenant_uuid()?, &id)
         .await?
         .ok_or_else(|| ApiError::NotFound("Not found".to_owned()))?;
     if !row.enabled {
@@ -586,5 +599,62 @@ mod tests {
             .authorization_bearer(&admin)
             .await;
         missing.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tenant_isolation_across_list_update_delete_and_trigger() {
+        use crate::routes::test_support::{OTHER_TENANT, sign_token_for_tenant};
+
+        let state = db_state(dev_license("skauswatch")).await;
+        let tenant_a_admin = sign_token(&state, "u", "sync:admin sync:read");
+        let tenant_b_admin =
+            sign_token_for_tenant(&state, "u", "sync:admin sync:read", OTHER_TENANT);
+        let server = test_server_with_state(state);
+
+        let created = server
+            .post("/api/v1/sync/integrations")
+            .authorization_bearer(&tenant_a_admin)
+            .json(&json!({"provider": "aws", "name": "tenant-a-integration"}))
+            .await;
+        created.assert_status(axum::http::StatusCode::CREATED);
+        let id = created.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let listed = server
+            .get("/api/v1/sync/integrations")
+            .authorization_bearer(&tenant_b_admin)
+            .await;
+        assert_eq!(listed.json::<Value>()["integrations"], json!([]));
+
+        server
+            .put(&format!("/api/v1/sync/integrations/{id}"))
+            .authorization_bearer(&tenant_b_admin)
+            .json(&json!({"name": "hijacked"}))
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+        server
+            .post(&format!("/api/v1/sync/integrations/{id}/trigger"))
+            .authorization_bearer(&tenant_b_admin)
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+        server
+            .delete(&format!("/api/v1/sync/integrations/{id}"))
+            .authorization_bearer(&tenant_b_admin)
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+
+        // Untouched by tenant B's attempts.
+        let still_there = server
+            .get("/api/v1/sync/integrations")
+            .authorization_bearer(&tenant_a_admin)
+            .await;
+        assert_eq!(
+            still_there.json::<Value>()["integrations"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
     }
 }

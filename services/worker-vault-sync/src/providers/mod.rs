@@ -64,14 +64,22 @@ pub trait CloudProvider: Send + Sync {
 }
 
 /// Factory: instantiates the correct [`CloudProvider`] for `provider_name`.
-/// Matches v1 `get_provider`.
+/// Matches v1 `get_provider`. `federated_credentials` is only consulted by
+/// the `"aws"` arm (see [`aws::AwsProvider::with_federated_fallback`]) —
+/// every other provider ignores it; pass `None` when own-AWS federation
+/// isn't configured or wasn't attempted.
 pub fn get_provider(
     provider_name: &str,
     credentials: &Value,
     config: &Value,
+    federated_credentials: Option<aws_sdk_secretsmanager::config::Credentials>,
 ) -> Result<Box<dyn CloudProvider>, ProviderError> {
     match provider_name {
-        "aws" => Ok(Box::new(aws::AwsProvider::new(credentials, config))),
+        "aws" => Ok(Box::new(aws::AwsProvider::with_federated_fallback(
+            credentials,
+            config,
+            federated_credentials,
+        ))),
         "azure" => Ok(Box::new(not_implemented::NotImplementedProvider::new(
             "azure",
         ))),
@@ -120,7 +128,7 @@ mod tests {
         let config = serde_json::json!({"endpoint_url": server.uri()});
 
         let provider =
-            get_provider("aws", &credentials, &config).expect("aws provider construction");
+            get_provider("aws", &credentials, &config, None).expect("aws provider construction");
         let result = provider.push_secret("dispatch-check", "v", "id-1").await;
 
         assert!(result.success);
@@ -132,9 +140,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_provider_aws_dispatches_federated_credentials_when_no_static_pair() {
+        // Same dispatch proof as above, but with no static credentials and
+        // a federated override instead — confirms `get_provider` actually
+        // threads `federated_credentials` into `AwsProvider::with_federated_fallback`
+        // rather than silently dropping it.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(header("x-amz-target", "secretsmanager.PutSecretValue"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ARN": "arn:1", "Name": "vault/fed-dispatch-check", "VersionId": "v1",
+            })))
+            .mount(&server)
+            .await;
+        let config = serde_json::json!({"endpoint_url": server.uri()});
+        let federated = aws_sdk_secretsmanager::config::Credentials::new(
+            "AKIAFEDERATED",
+            "federatedSecret",
+            None,
+            None,
+            "skauswatch-federated-base",
+        );
+
+        let provider = get_provider("aws", &Value::Null, &config, Some(federated))
+            .expect("aws provider construction");
+        let result = provider
+            .push_secret("fed-dispatch-check", "v", "id-fed")
+            .await;
+
+        assert!(result.success);
+    }
+
+    #[tokio::test]
     async fn get_provider_dispatches_each_not_implemented_target() {
         for name in ["azure", "gcp", "oracle", "kubernetes"] {
-            let provider = get_provider(name, &Value::Null, &Value::Null)
+            let provider = get_provider(name, &Value::Null, &Value::Null, None)
                 .unwrap_or_else(|e| panic!("{name} provider construction: {e}"));
             let result = provider.push_secret("n", "v", "id").await;
             assert!(!result.success, "{name} push_secret should fail");
@@ -154,7 +195,7 @@ mod tests {
 
     #[test]
     fn get_provider_rejects_unknown_provider_name() {
-        let result = get_provider("not-a-real-provider", &Value::Null, &Value::Null);
+        let result = get_provider("not-a-real-provider", &Value::Null, &Value::Null, None);
         match result {
             Err(ProviderError::Failed(msg)) => {
                 assert!(msg.contains("not-a-real-provider"));

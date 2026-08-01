@@ -4,7 +4,12 @@
 //! only — `roles` is informational/audit, never branched on.
 //!
 //! Middleware ordering contract (enforced where routers are assembled):
-//! tenant check → scope check → feature/licensing check.
+//! tenant check → scope check → feature/licensing check. [`tenant_middleware`]
+//! is the shared implementation of the first stage: it decodes the bearer
+//! token, enforces the tenant boundary, and publishes the result as a
+//! [`TenantContext`] that every downstream layer/handler in the service can
+//! extract — see that function's docs for the exact axum layer ordering
+//! this requires.
 //!
 //! This crate also carries the house fail-fast secret policy
 //! ([`load_jwt_secret`]) and a service-to-service JWT verifier
@@ -15,9 +20,10 @@
 //! `JWT_SECRET_KEY` on every request.
 
 use axum::Json;
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
@@ -25,7 +31,7 @@ use serde::{Deserialize, Serialize};
 /// Mandatory claims carried by every skauswatch token, per the PenguinTech
 /// JWT standard. Requests without a valid `tenant` claim are rejected with
 /// 403 before any scope evaluation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Claims {
     /// Subject — user or machine identity UUID (never PII).
     pub sub: String,
@@ -39,7 +45,14 @@ pub struct Claims {
     pub exp: i64,
     /// Space-separated `resource:action` scopes — the sole authz input.
     pub scope: String,
-    /// Tenant boundary — mandatory on all tokens.
+    /// Tenant boundary — mandatory on all tokens. `#[serde(default)]` is
+    /// deliberate: it lets a token with the `tenant` key entirely absent
+    /// decode successfully (as `""`) instead of hard-failing JSON
+    /// deserialization, so [`Claims::require_tenant`]/[`decode_claims`]/
+    /// [`tenant_middleware`] can reject *both* "key absent" and "key present
+    /// but empty" the same way — a clean 403 — rather than the former
+    /// surfacing as a generic 401 "invalid token" decode failure.
+    #[serde(default)]
     pub tenant: String,
     /// Team memberships (team-scoped permissions).
     #[serde(default)]
@@ -97,6 +110,210 @@ impl Claims {
         } else {
             Err(AuthError::MissingScope(required.to_owned()))
         }
+    }
+}
+
+/// Failures from decoding and tenant-validating a bearer token via
+/// [`decode_claims`]/[`tenant_middleware`]. Deliberately distinguishes an
+/// *unauthenticated* request (no valid credential at all — 401) from an
+/// *authenticated* request that fails the tenant-isolation gate (a
+/// correctly signed, unexpired token that simply carries no usable
+/// `tenant` — 403), per the house policy: "Tenant mismatch = immediate
+/// 403" and requests without a valid `tenant` claim are rejected before
+/// any scope evaluation.
+#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
+pub enum TenantAuthError {
+    /// No `Authorization: Bearer <token>` header present.
+    #[error("Missing or invalid authorization header")]
+    MissingOrInvalidHeader,
+    /// Signature valid but the token has expired.
+    #[error("Token expired")]
+    Expired,
+    /// Signature invalid, malformed token, or undecodable claims.
+    #[error("Invalid token")]
+    Invalid,
+    /// Token decoded and verified, but carried no usable `tenant` claim
+    /// (absent or empty after trimming).
+    #[error("missing or empty tenant claim")]
+    MissingTenant,
+}
+
+impl IntoResponse for TenantAuthError {
+    fn into_response(self) -> Response {
+        let status = match self {
+            TenantAuthError::MissingTenant => axum::http::StatusCode::FORBIDDEN,
+            TenantAuthError::MissingOrInvalidHeader
+            | TenantAuthError::Expired
+            | TenantAuthError::Invalid => axum::http::StatusCode::UNAUTHORIZED,
+        };
+        (
+            status,
+            Json(serde_json::json!({ "error": self.to_string() })),
+        )
+            .into_response()
+    }
+}
+
+/// Decodes and signature/expiry-validates the mandatory [`Claims`] shape
+/// from an HS256 token signed with `secret`. Does not itself enforce the
+/// tenant boundary — callers needing that call [`Claims::require_tenant`]
+/// on the result (this is exactly what [`tenant_middleware`] does).
+///
+/// Audience-value matching (`Validation::set_audience`) is deliberately not
+/// performed here: `jsonwebtoken` treats "an `aud` claim is present but no
+/// expected audience was configured" as a hard validation failure, and this
+/// crate has no single expected audience to configure on behalf of every
+/// service. Expected-audience/issuer checks remain a per-service concern
+/// (or a future, explicitly-scoped enhancement here) — this function's
+/// job is strictly the tenant-isolation boundary.
+pub fn decode_claims(token: &str, secret: &str) -> Result<Claims, TenantAuthError> {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = true;
+    validation.validate_aud = false;
+    validation.required_spec_claims.clear();
+    jsonwebtoken::decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )
+    .map(|data| data.claims)
+    .map_err(|e| match e.kind() {
+        jsonwebtoken::errors::ErrorKind::ExpiredSignature => TenantAuthError::Expired,
+        _ => TenantAuthError::Invalid,
+    })
+}
+
+/// A validated tenant identifier. The *only* legitimate source of a
+/// `Tenant` is a successfully decoded, tenant-checked [`Claims`] token
+/// (via [`tenant_middleware`]) — never a client-supplied path/body/query
+/// parameter (see the house tenant-isolation rule: "client cannot set
+/// tenant — auth service only").
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Tenant(pub String);
+
+impl Tenant {
+    /// Borrows the tenant id as a string slice, e.g. for use as an ORM
+    /// filter value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for Tenant {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for Tenant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The validated tenant boundary for the current request. Inserted into
+/// request extensions by [`tenant_middleware`] and read back out by the
+/// `FromRequestParts` impl below — handlers and any layer running *after*
+/// `tenant_middleware` extract this instead of re-decoding the token.
+///
+/// # Service usage contract
+///
+/// Every database query a handler issues MUST filter on this tenant — no
+/// exceptions, and never take a tenant id from the request path/body/query
+/// instead. With SeaORM (see `backend-rust.md`):
+///
+/// ```ignore
+/// let rows = widget::Entity::find()
+///     .filter(widget::Column::TenantId.eq(tenant_ctx.tenant.as_str()))
+///     .all(&db)
+///     .await?;
+/// ```
+///
+/// The same pattern applies to cache keys and any other per-tenant lookup:
+/// always key/filter on `tenant_ctx.tenant.as_str()`, never on a value the
+/// caller supplied directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantContext {
+    /// The validated tenant for this request.
+    pub tenant: Tenant,
+}
+
+impl<S> FromRequestParts<S> for TenantContext
+where
+    S: Send + Sync,
+{
+    type Rejection = TenantAuthError;
+
+    /// Reads the [`TenantContext`] [`tenant_middleware`] already inserted
+    /// into request extensions. If it's absent — meaning
+    /// `tenant_middleware` was never run ahead of this extractor, a router
+    /// wiring bug — this fails closed with the same 403 a genuinely missing
+    /// tenant claim would produce, never a panic or a silent bypass.
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<TenantContext>()
+            .cloned()
+            .ok_or(TenantAuthError::MissingTenant)
+    }
+}
+
+/// Router-wide layer implementing the first stage of the crate's middleware
+/// ordering contract (tenant → scope → feature): decodes the bearer token
+/// with `S`'s JWT secret, requires a non-empty `tenant` claim, and inserts
+/// a [`TenantContext`] into request extensions for every downstream
+/// extractor/handler/layer. A missing/invalid/expired token is 401; a
+/// validly signed token with no usable tenant is 403 — no request reaches
+/// the handler without a [`TenantContext`] available.
+///
+/// Register with `axum::middleware::from_fn_with_state`. **Ordering
+/// matters**: axum layers execute outside-in in the *reverse* of the order
+/// `.layer()` was called (the last `.layer()` call becomes the outermost —
+/// and therefore first-executed — wrapper). To satisfy tenant → scope →
+/// feature, add this layer LAST, after any scope/feature layers:
+///
+/// ```ignore
+/// use axum::middleware::from_fn_with_state;
+///
+/// let app = Router::new()
+///     .route("/api/v1/widgets", get(list_widgets))
+///     .layer(from_fn_with_state(state.clone(), feature_gate_middleware)) // innermost — runs LAST
+///     .layer(from_fn_with_state(state.clone(), scope_middleware))        // runs 2nd
+///     .layer(from_fn_with_state(state.clone(), skauswatch_auth::tenant_middleware::<AppState>)) // outermost — runs FIRST
+///     .with_state(state);
+/// ```
+pub async fn tenant_middleware<S>(
+    State(state): State<S>,
+    mut request: Request,
+    next: Next,
+) -> Response
+where
+    S: JwtSecretSource + Clone + Send + Sync + 'static,
+{
+    let token = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(bearer_token);
+
+    let outcome = match token {
+        Some(token) => decode_claims(token, state.jwt_secret()).and_then(|claims| {
+            claims
+                .require_tenant()
+                .map(|tenant| TenantContext {
+                    tenant: Tenant(tenant.to_owned()),
+                })
+                .map_err(|_| TenantAuthError::MissingTenant)
+        }),
+        None => Err(TenantAuthError::MissingOrInvalidHeader),
+    };
+
+    match outcome {
+        Ok(ctx) => {
+            request.extensions_mut().insert(ctx);
+            next.run(request).await
+        }
+        Err(err) => err.into_response(),
     }
 }
 
@@ -523,5 +740,237 @@ mod tests {
             claims("*:read", "  ").require_tenant(),
             Err(AuthError::MissingTenant)
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)] // tests fail loudly by design
+mod tenant_middleware_tests {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request as HttpRequest, StatusCode};
+    use axum::routing::get;
+    use tower::ServiceExt as _;
+
+    use super::*;
+
+    const SECRET: &str = "s3cr3t";
+
+    #[derive(Clone)]
+    struct TestState;
+
+    impl JwtSecretSource for TestState {
+        fn jwt_secret(&self) -> &str {
+            SECRET
+        }
+    }
+
+    fn claims_with_tenant(tenant: &str) -> Claims {
+        Claims {
+            sub: "u-1".into(),
+            iss: "https://auth.skauswatch.app".into(),
+            aud: "skauswatch".into(),
+            iat: 0,
+            exp: i64::MAX,
+            scope: "*:read".into(),
+            tenant: tenant.into(),
+            teams: vec![],
+            roles: vec![],
+        }
+    }
+
+    fn sign(claims: &Claims, secret: &str) -> String {
+        jsonwebtoken::encode(
+            &Header::new(Algorithm::HS256),
+            claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap_or_else(|e| panic!("sign: {e}"))
+    }
+
+    /// A hand-rolled claim set with no `tenant` key at all — simulates a
+    /// pre-tenancy or third-party-issued token, exercising the
+    /// `#[serde(default)]` decode path rather than an explicit empty string.
+    #[derive(Serialize)]
+    struct ClaimsWithoutTenant {
+        sub: String,
+        iss: String,
+        aud: String,
+        iat: i64,
+        exp: i64,
+        scope: String,
+    }
+
+    fn sign_without_tenant(secret: &str) -> String {
+        let claims = ClaimsWithoutTenant {
+            sub: "u-1".into(),
+            iss: "https://auth.skauswatch.app".into(),
+            aud: "skauswatch".into(),
+            iat: 0,
+            exp: i64::MAX,
+            scope: "*:read".into(),
+        };
+        jsonwebtoken::encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap_or_else(|e| panic!("sign: {e}"))
+    }
+
+    // -- decode_claims -------------------------------------------------
+
+    #[test]
+    fn decode_claims_round_trips_tenant() {
+        let token = sign(&claims_with_tenant("acme"), SECRET);
+        let decoded = match decode_claims(&token, SECRET) {
+            Ok(c) => c,
+            Err(e) => panic!("decode: {e:?}"),
+        };
+        assert_eq!(decoded.tenant, "acme");
+    }
+
+    #[test]
+    fn decode_claims_defaults_absent_tenant_to_empty_string() {
+        let token = sign_without_tenant(SECRET);
+        let decoded = match decode_claims(&token, SECRET) {
+            Ok(c) => c,
+            Err(e) => panic!("decode: {e:?}"),
+        };
+        assert_eq!(decoded.tenant, "");
+    }
+
+    #[test]
+    fn decode_claims_rejects_wrong_secret() {
+        let token = sign(&claims_with_tenant("acme"), SECRET);
+        assert_eq!(
+            decode_claims(&token, "wrong"),
+            Err(TenantAuthError::Invalid)
+        );
+    }
+
+    #[test]
+    fn decode_claims_rejects_expired_token() {
+        let mut c = claims_with_tenant("acme");
+        // jsonwebtoken parses `exp` as an unsigned epoch-seconds value, so a
+        // negative literal would fail as a malformed claim rather than
+        // exercise expiry — use a tiny-but-non-negative, long-past value
+        // instead (1970-01-01T00:00:01Z), comfortably beyond any leeway.
+        c.exp = 1;
+        let token = sign(&c, SECRET);
+        assert_eq!(decode_claims(&token, SECRET), Err(TenantAuthError::Expired));
+    }
+
+    #[test]
+    fn decode_claims_rejects_garbage() {
+        assert_eq!(
+            decode_claims("not-a-jwt", SECRET),
+            Err(TenantAuthError::Invalid)
+        );
+    }
+
+    // -- tenant_middleware / TenantContext extractor --------------------
+
+    async fn tenant_probe(ctx: TenantContext) -> String {
+        ctx.tenant.as_str().to_owned()
+    }
+
+    fn app() -> Router {
+        Router::new()
+            .route("/probe", get(tenant_probe))
+            .layer(axum::middleware::from_fn_with_state(
+                TestState,
+                tenant_middleware::<TestState>,
+            ))
+            .with_state(TestState)
+    }
+
+    fn request_with_auth(auth: Option<&str>) -> HttpRequest<Body> {
+        let mut builder = HttpRequest::builder().uri("/probe");
+        if let Some(v) = auth {
+            builder = builder.header(AUTHORIZATION, v);
+        }
+        builder
+            .body(Body::empty())
+            .unwrap_or_else(|e| panic!("request: {e}"))
+    }
+
+    #[tokio::test]
+    async fn valid_tenant_reaches_handler_via_extractor() {
+        let token = sign(&claims_with_tenant("acme"), SECRET);
+        let resp = app()
+            .oneshot(request_with_auth(Some(&format!("Bearer {token}"))))
+            .await
+            .unwrap_or_else(|e| panic!("response: {e}"));
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn missing_authorization_header_is_401() {
+        let resp = app()
+            .oneshot(request_with_auth(None))
+            .await
+            .unwrap_or_else(|e| panic!("response: {e}"));
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn malformed_bearer_token_is_401() {
+        let resp = app()
+            .oneshot(request_with_auth(Some("Bearer not-a-jwt")))
+            .await
+            .unwrap_or_else(|e| panic!("response: {e}"));
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn empty_tenant_claim_is_403() {
+        let token = sign(&claims_with_tenant("   "), SECRET);
+        let resp = app()
+            .oneshot(request_with_auth(Some(&format!("Bearer {token}"))))
+            .await
+            .unwrap_or_else(|e| panic!("response: {e}"));
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn absent_tenant_claim_is_403_not_401() {
+        let token = sign_without_tenant(SECRET);
+        let resp = app()
+            .oneshot(request_with_auth(Some(&format!("Bearer {token}"))))
+            .await
+            .unwrap_or_else(|e| panic!("response: {e}"));
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn wrong_secret_is_401_not_403() {
+        let token = sign(&claims_with_tenant("acme"), "wrong-secret");
+        let resp = app()
+            .oneshot(request_with_auth(Some(&format!("Bearer {token}"))))
+            .await
+            .unwrap_or_else(|e| panic!("response: {e}"));
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn extractor_rejects_when_middleware_never_ran() {
+        // Directly exercises the FromRequestParts impl's fail-closed branch
+        // (no TenantContext in extensions) without spinning up a router.
+        let (mut parts, _body) = HttpRequest::builder()
+            .uri("/probe")
+            .body(Body::empty())
+            .unwrap_or_else(|e| panic!("request: {e}"))
+            .into_parts();
+        let outcome = TenantContext::from_request_parts(&mut parts, &TestState).await;
+        assert_eq!(outcome, Err(TenantAuthError::MissingTenant));
+    }
+
+    #[test]
+    fn tenant_display_and_as_ref_match_inner_value() {
+        let t = Tenant("acme".to_owned());
+        assert_eq!(t.as_str(), "acme");
+        assert_eq!(t.as_ref(), "acme");
+        assert_eq!(t.to_string(), "acme");
     }
 }

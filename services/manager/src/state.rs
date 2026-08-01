@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use penguin_licensing::{LicenseClient, LicenseConfig};
 use skauswatch_streams::StreamProducer;
+use skauswatch_vault::EnvelopeEncryption;
 use sqlx::PgPool;
 
 /// Auth settings mirroring the v1 `AuthConfig` defaults.
@@ -77,10 +78,24 @@ pub struct AppStateInner {
     /// (tests) — v1 guards every publish with `if stream_manager:` and its
     /// healthz reports `not initialized` in the same situation.
     pub streams: Option<StreamProducer>,
+    /// Envelope-encryption engine for `static`-mode S3 bucket credentials
+    /// (security finding #2 — see `routes::s3_scan` and
+    /// `skauswatch_s3::credentials`). Same `VAULT_MEK*` env vars as the
+    /// `vault`/`worker-vault-sync`/`s3scan` services.
+    pub envelope: EnvelopeEncryption,
 }
 
 /// Cheap-to-clone handle used as axum state.
 pub type AppState = Arc<AppStateInner>;
+
+/// Lets `skauswatch_auth::tenant_middleware`/`AuthenticatedCaller` verify
+/// tokens against this service's `JWT_SECRET_KEY` without re-threading the
+/// secret through every call site — see `crates/skauswatch-auth`.
+impl skauswatch_auth::JwtSecretSource for AppStateInner {
+    fn jwt_secret(&self) -> &str {
+        &self.auth.jwt_secret
+    }
+}
 
 impl AppStateInner {
     /// Builds state from environment configuration. DB connects with
@@ -107,6 +122,12 @@ impl AppStateInner {
             .await
             .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
 
+        // Same fail-fast policy as `vault`/`worker-vault-sync`/`s3scan`: a
+        // manager that can never decrypt a static S3 credential must not
+        // start silently.
+        let envelope = EnvelopeEncryption::from_env()
+            .map_err(|e| anyhow::anyhow!("envelope encryption init failed: {e}"))?;
+
         // v1 env semantics: REDIS_URL (default redis://redis:6379/0),
         // optional REDIS_PASSWORD, REDIS_KEY_PREFIX (default skauswatch).
         // v1 raises out of startup when the broker is unreachable — match.
@@ -123,6 +144,7 @@ impl AppStateInner {
             db,
             auth,
             streams: Some(streams),
+            envelope,
         }))
     }
 
@@ -168,8 +190,33 @@ impl AppStateInner {
                 lockout_minutes: 15,
             },
             streams: None,
+            envelope: test_envelope(),
         })
     }
+}
+
+/// Fixed single-MEK envelope shared by every manager test (mirrors the
+/// identical fixture pattern in `skauswatch-vault`/`skauswatch-s3`'s own
+/// tests) — good enough since no manager test exercises MEK rotation.
+/// Not `#[cfg(test)]`-gated: [`AppStateInner::for_tests_with_db`] (which
+/// calls this) is itself only `#[allow(dead_code)]`-suppressed outside
+/// tests, not `cfg(test)`-gated, so this must compile in every profile too.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn test_envelope() -> EnvelopeEncryption {
+    use std::collections::HashMap;
+
+    use skauswatch_vault::MekVersion;
+
+    EnvelopeEncryption::new(
+        HashMap::from([(
+            1,
+            MekVersion {
+                version: 1,
+                key_bytes: [3u8; 32],
+            },
+        )]),
+        1,
+    )
 }
 
 #[cfg(test)]

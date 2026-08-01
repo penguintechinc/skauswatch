@@ -13,13 +13,27 @@
 -- `s3_scan_schedules` and other manager-owned tables are intentionally
 -- omitted — this worker never queries them.
 
+-- Hybrid credential model (security finding #2 — plaintext customer AWS
+-- keys): `credential_mode` selects how a bucket's S3 client is authorized.
+--   - 'assume_role' (preferred, real AWS only): `role_arn` (+ optional
+--     `external_id`) is exchanged for short-lived creds via sts:AssumeRole —
+--     no customer secret is ever stored.
+--   - 'static' (fallback, required for S3-compatible endpoints with no STS —
+--     MinIO/Wasabi/etc.): `credential_enc` holds an envelope-encrypted JSON
+--     blob (`{"ciphertext","dek","version"}`, see
+--     `skauswatch_vault::EnvelopeEncryption::encrypt_json`) wrapping
+--     `{"access_key_id","secret_access_key"}`. Plaintext keys are never
+--     persisted; the plaintext columns this replaces (`access_key_id`,
+--     `secret_access_key`) are gone, not just renamed.
 CREATE TABLE IF NOT EXISTS s3_bucket_configs (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) UNIQUE NOT NULL,
     endpoint_url VARCHAR(255) NOT NULL,
     bucket_name VARCHAR(255) NOT NULL,
-    access_key_id VARCHAR(255) NOT NULL,
-    secret_access_key VARCHAR(255) NOT NULL,
+    credential_mode VARCHAR(20) NOT NULL DEFAULT 'static',
+    credential_enc TEXT,
+    role_arn VARCHAR(2048),
+    external_id VARCHAR(1224),
     region VARCHAR(50),
     use_ssl BOOLEAN DEFAULT true,
     path_style BOOLEAN DEFAULT false,
@@ -30,7 +44,14 @@ CREATE TABLE IF NOT EXISTS s3_bucket_configs (
     yara_enabled BOOLEAN DEFAULT false,
     created_by INTEGER NOT NULL,
     created_at TIMESTAMP DEFAULT now(),
-    updated_at TIMESTAMP
+    updated_at TIMESTAMP,
+    CONSTRAINT s3_bucket_configs_credential_mode_check
+        CHECK (credential_mode IN ('assume_role', 'static')),
+    CONSTRAINT s3_bucket_configs_credential_shape_check CHECK (
+        (credential_mode = 'assume_role' AND role_arn IS NOT NULL)
+        OR
+        (credential_mode = 'static' AND credential_enc IS NOT NULL)
+    )
 );
 
 CREATE TABLE IF NOT EXISTS s3_scan_jobs (

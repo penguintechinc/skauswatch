@@ -214,6 +214,18 @@ pub struct BaseEvent {
     /// lacked it and enrichment silently no-op'd).
     #[serde(default)]
     pub processed_data: serde_json::Value,
+    /// Owning tenant — the hard multi-tenant isolation boundary for the
+    /// event store (`docs/v2-port/tenancy-model.md`). Not part of v1 (v1
+    /// had no tenancy concept at all); added here so search/get can filter
+    /// on it (`crate::es::build_search_body`, `EventStore::get_by_id`).
+    /// `#[serde(default)]` lets a pre-tenancy or not-yet-tenant-stamped
+    /// document (see `EventStore::index_event` doc comment — no HTTP route
+    /// writes documents today) deserialize as `""` rather than failing;
+    /// an empty value can never match a real caller's non-empty tenant
+    /// filter, so such a document is simply unreachable rather than
+    /// accidentally exposed cross-tenant.
+    #[serde(default)]
+    pub tenant_id: String,
     /// Any additional fields present on a stored document that this struct
     /// doesn't model explicitly — preserved instead of failing
     /// deserialization (v1's `BaseEvent(**doc)` raised `TypeError` on any

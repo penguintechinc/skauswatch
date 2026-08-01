@@ -1148,6 +1148,13 @@ paths:
         creates a `viewer`-role account (see `PublicApiDoc` note on `login`
         above — `register` itself is NOT part of the public doc, only `login`
         is, per `docs/v2-port/openapi-pattern.md` §6).
+      description: |-
+        Tenancy (v2.0 decision, docs/v2-port/tenancy-model.md §8): admin-
+        provisioned tenants only — this endpoint never creates a tenant, it
+        attaches the new registrant to the seeded bootstrap tenant
+        ([`crate::auth::DEFAULT_TENANT_ID`]). There is no inviter/admin context
+        to derive a different tenant from at this unauthenticated call site;
+        self-serve *multi-tenant* signup is a v2.1 backlog item.
       operationId: register
       requestBody:
         content:
@@ -3668,6 +3675,56 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
       security:
       - bearer_jwt: []
+  /api/v1/tenants:
+    post:
+      tags:
+      - tenants
+      summary: |-
+        POST /tenants — super_admin only; the sole tenant-creation surface for
+        v2.0 (admin-provisioned, per the module docs). 409 on a duplicate slug,
+        201 `{message,tenant}` on success. Every call is audit-logged against
+        the newly created tenant (the only tenant the action is meaningfully
+        "about" — see `security.md`'s "Super-admin ... audit-logged").
+      operationId: create_tenant
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+        required: true
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantCreateResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions — super_admin required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Slug already in use
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
   /api/v1/threat-intel/feeds:
     get:
       tags:
@@ -5065,6 +5122,10 @@ components:
       description: |-
         BucketConfigCreateRequest — fields optional so missing ones map to the
         validation envelope instead of an axum extractor rejection.
+        `credential_mode` selects the hybrid credential model (security finding
+        #2): `"static"` (default) requires `access_key_id`/`secret_access_key`;
+        `"assume_role"` requires `role_arn` (+ optional `external_id`) and is
+        only valid against a genuine AWS S3 endpoint.
       properties:
         access_key_id:
           type:
@@ -5074,7 +5135,15 @@ components:
           type:
           - string
           - 'null'
+        credential_mode:
+          type:
+          - string
+          - 'null'
         endpoint_url:
+          type:
+          - string
+          - 'null'
+        external_id:
           type:
           - string
           - 'null'
@@ -5102,6 +5171,10 @@ components:
           - string
           - 'null'
         region:
+          type:
+          - string
+          - 'null'
+        role_arn:
           type:
           - string
           - 'null'
@@ -5134,26 +5207,36 @@ components:
           type: string
     BucketCreateSummary:
       type: object
-      description: Summary embedded in [`BucketCreateResponse`].
+      description: |-
+        Summary embedded in [`BucketCreateResponse`]. `access_key_id`/`role_arn`
+        mirror the row's credential mode (see [`BucketItem`]).
       required:
       - id
       - name
       - bucket_name
-      - access_key_id
+      - credential_mode
       properties:
         access_key_id:
-          type: string
+          type:
+          - string
+          - 'null'
         bucket_name:
           type: string
         created_at:
           type:
           - string
           - 'null'
+        credential_mode:
+          type: string
         id:
           type: integer
           format: int32
         name:
           type: string
+        role_arn:
+          type:
+          - string
+          - 'null'
     BucketDeleteResponse:
       type: object
       description: Documentation-only mirror of `delete_bucket`'s `serde_json::json!` body.
@@ -5167,25 +5250,35 @@ components:
       description: |-
         Documentation-only mirror of `bucket_json`'s wire shape (list items and
         GET detail share this shape) — credentials are masked, never raw.
+        `access_key_id`/`secret_access_key` are populated (masked) for `static`
+        mode only; `role_arn` (shown in full — ARNs aren't secret) and
+        `external_id` (masked) for `assume_role` mode only.
       required:
       - id
       - name
       - endpoint_url
       - bucket_name
-      - access_key_id
-      - secret_access_key
+      - credential_mode
       - file_types_filter
       properties:
         access_key_id:
-          type: string
+          type:
+          - string
+          - 'null'
         bucket_name:
           type: string
         created_at:
           type:
           - string
           - 'null'
+        credential_mode:
+          type: string
         endpoint_url:
           type: string
+        external_id:
+          type:
+          - string
+          - 'null'
         file_types_filter: {}
         id:
           type: integer
@@ -5209,12 +5302,18 @@ components:
           type:
           - string
           - 'null'
+        role_arn:
+          type:
+          - string
+          - 'null'
         scan_enabled:
           type:
           - boolean
           - 'null'
         secret_access_key:
-          type: string
+          type:
+          - string
+          - 'null'
         updated_at:
           type:
           - string
@@ -5282,7 +5381,13 @@ components:
           type: boolean
     BucketUpdateBody:
       type: object
-      description: BucketConfigUpdateRequest — every field optional; absent fields untouched.
+      description: |-
+        BucketConfigUpdateRequest — every field optional; absent fields untouched.
+        Credential fields (security finding #2 — hybrid model) are coupled: any
+        one of `credential_mode`/`access_key_id`/`secret_access_key`/`role_arn`/
+        `external_id` present triggers a full re-resolve (see
+        `resolve_updated_credentials`), merging with the existing stored values
+        for whichever sub-fields weren't supplied.
       properties:
         access_key_id:
           type:
@@ -5292,7 +5397,15 @@ components:
           type:
           - string
           - 'null'
+        credential_mode:
+          type:
+          - string
+          - 'null'
         endpoint_url:
+          type:
+          - string
+          - 'null'
+        external_id:
           type:
           - string
           - 'null'
@@ -5320,6 +5433,10 @@ components:
           - string
           - 'null'
         region:
+          type:
+          - string
+          - 'null'
+        role_arn:
           type:
           - string
           - 'null'
@@ -5356,15 +5473,23 @@ components:
       required:
       - id
       - name
-      - access_key_id
+      - credential_mode
       properties:
         access_key_id:
+          type:
+          - string
+          - 'null'
+        credential_mode:
           type: string
         id:
           type: integer
           format: int32
         name:
           type: string
+        role_arn:
+          type:
+          - string
+          - 'null'
         updated_at:
           type:
           - string
@@ -5461,6 +5586,17 @@ components:
         password:
           type: string
         role:
+          type: string
+    CreateTenantRequest:
+      type: object
+      description: POST /tenants body.
+      required:
+      - slug
+      - name
+      properties:
+        name:
+          type: string
+        slug:
           type: string
     DeactivateResponse:
       type: object
@@ -6835,6 +6971,35 @@ components:
           type:
           - string
           - 'null'
+    TenantCreateResponse:
+      type: object
+      description: Documentation-only mirror of `create_tenant`'s `serde_json::json!` body.
+      required:
+      - message
+      - tenant
+      properties:
+        message:
+          type: string
+        tenant:
+          $ref: '#/components/schemas/TenantSummary'
+    TenantSummary:
+      type: object
+      description: Tenant summary embedded in [`TenantCreateResponse`].
+      required:
+      - id
+      - slug
+      - name
+      - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        status:
+          type: string
     ThreatIntelStatisticsResponse:
       type: object
       description: |-
@@ -7415,6 +7580,8 @@ tags:
   description: User account management
 - name: license
   description: License tier and feature-flag entitlements
+- name: tenants
+  description: Super-admin tenant provisioning
 - name: alerts
   description: Security alert lifecycle and AI-assisted review
 - name: threat-intel

@@ -18,7 +18,7 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
-penguin-licensing = { workspace = true }
+penguin-licensing = { workspace = true, features = ["axum"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

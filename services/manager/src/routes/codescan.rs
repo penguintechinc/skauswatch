@@ -707,6 +707,7 @@ mod tests {
             is_active: true,
             mfa_enabled: false,
             created_at: None,
+            tenant_id: uuid::Uuid::nil(),
         }
     }
 

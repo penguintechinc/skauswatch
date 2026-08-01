@@ -17,6 +17,12 @@ use crate::state::{AppState, AppStateInner};
 /// publish more than a handful of events.
 const TEST_EVENT_BUS_CAPACITY: usize = 64;
 
+/// Fixed HS256 secret shared by every test state below — matches
+/// `AppStateInner::for_tests`'s own fixed value, kept independently here
+/// since `test_support`'s states are constructed directly, not via
+/// `for_tests`.
+const TEST_JWT_SECRET: &str = "test-secret";
+
 fn build_state(
     config: Config,
     license: Arc<LicenseClient>,
@@ -28,6 +34,7 @@ fn build_state(
         license,
         event_store,
         event_bus,
+        jwt_secret: TEST_JWT_SECRET.to_owned(),
     })
 }
 
@@ -105,7 +112,7 @@ pub(crate) fn sign_claims(state: &AppState, claims: &Claims) -> String {
     match jsonwebtoken::encode(
         &Header::default(),
         claims,
-        &EncodingKey::from_secret(state.config.security.secret_key.as_bytes()),
+        &EncodingKey::from_secret(state.jwt_secret.as_bytes()),
     ) {
         Ok(t) => t,
         Err(e) => panic!("skauswatch-monitor test_support: sign_claims: {e}"),

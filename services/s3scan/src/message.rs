@@ -13,6 +13,14 @@
 //!
 //! All values arrive as redis-py strings: booleans are `"True"`/`"False"`,
 //! absent optionals are `""`.
+//!
+//! Every entry also carries a `tenant_id` (stringified UUID), stamped by the
+//! manager from the authenticated dispatching caller's JWT/gRPC metadata —
+//! see `services/manager/src/routes/s3_scan.rs::scan_task_fields` and
+//! `services/manager/src/grpc/s3_scan_service.rs::{submit_task_fields,
+//! adhoc_task_fields}`. Per docs/v2-port/tenancy-model.md §3, an entry
+//! without a valid `tenant_id` is a permanent parse failure — this worker
+//! never falls back to a default tenant.
 
 use skauswatch_streams::StreamEntry;
 
@@ -40,6 +48,10 @@ pub struct EnumerateTask {
     pub bucket_config_id: i32,
     /// Whether YARA is requested for the objects (carried through re-dispatch).
     pub yara_enabled: bool,
+    /// Dispatching caller's tenant — every DB read/write for this task is
+    /// scoped to it, and it is carried forward onto the re-dispatched
+    /// per-object tasks (see `enumerate::dispatch_fields`).
+    pub tenant_id: uuid::Uuid,
 }
 
 /// Per-object scan against a stored bucket config.
@@ -57,6 +69,9 @@ pub struct BucketObjectTask {
     pub object_etag: String,
     /// Whether YARA is requested.
     pub yara_enabled: bool,
+    /// Dispatching caller's tenant — every DB read/write for this task is
+    /// scoped to it.
+    pub tenant_id: uuid::Uuid,
 }
 
 /// Per-object scan with inline credentials (gRPC `SubmitScanTask`).
@@ -88,6 +103,9 @@ pub struct InlineObjectTask {
     pub path_style: bool,
     /// Whether YARA is requested.
     pub yara_enabled: bool,
+    /// Dispatching caller's tenant — every DB read/write for this task is
+    /// scoped to it.
+    pub tenant_id: uuid::Uuid,
 }
 
 /// Ad-hoc upload scan request.
@@ -101,6 +119,9 @@ pub struct AdhocTask {
     pub object_size: i64,
     /// Whether YARA is requested.
     pub yara_enabled: bool,
+    /// Dispatching caller's tenant — every DB read/write for this task is
+    /// scoped to it.
+    pub tenant_id: uuid::Uuid,
 }
 
 /// Reasons an entry cannot be turned into a [`Task`]. These are permanent
@@ -113,6 +134,14 @@ pub enum ParseError {
     /// A numeric field could not be parsed.
     #[error("invalid integer for field {field}: {value:?}")]
     InvalidInt {
+        /// Field name.
+        field: &'static str,
+        /// Offending raw value.
+        value: String,
+    },
+    /// The `tenant_id` field was present but not a valid UUID.
+    #[error("invalid uuid for field {field}: {value:?}")]
+    InvalidUuid {
         /// Field name.
         field: &'static str,
         /// Offending raw value.
@@ -162,6 +191,21 @@ fn parse_i32(e: &StreamEntry, key: &'static str) -> Result<i32, ParseError> {
     })
 }
 
+/// Parses the required `tenant_id` field. Missing/empty is a
+/// [`ParseError::MissingField`]; present-but-not-a-UUID is a
+/// [`ParseError::InvalidUuid`]. Every producer (`scan_task_fields`,
+/// `submit_task_fields`, `adhoc_task_fields`) stamps this from the
+/// authenticated dispatching caller — an entry without one is fail-closed,
+/// never defaulted to a bootstrap tenant.
+fn parse_tenant_id(e: &StreamEntry) -> Result<uuid::Uuid, ParseError> {
+    let v = required(e, "tenant_id")?;
+    v.parse::<uuid::Uuid>()
+        .map_err(|_| ParseError::InvalidUuid {
+            field: "tenant_id",
+            value: v.to_owned(),
+        })
+}
+
 impl Task {
     /// Classifies and parses one `s3scan:tasks` entry.
     ///
@@ -170,6 +214,7 @@ impl Task {
     /// unparseable ids); callers should ack such poison entries.
     pub fn parse(e: &StreamEntry) -> Result<Task, ParseError> {
         let job_id = required(e, "job_id")?.to_owned();
+        let tenant_id = parse_tenant_id(e)?;
         let yara_enabled = parse_py_bool(field(e, "yara_enabled"));
 
         // gRPC full-task: inline credentials present.
@@ -199,6 +244,7 @@ impl Task {
                 use_ssl: parse_py_bool_default(field(e, "use_ssl"), true),
                 path_style: parse_py_bool(field(e, "path_style")),
                 yara_enabled,
+                tenant_id,
             }));
         }
 
@@ -209,6 +255,7 @@ impl Task {
                 object_key: required(e, "object_key")?.to_owned(),
                 object_size: parse_int_or_zero(e, "object_size")?,
                 yara_enabled,
+                tenant_id,
             }));
         }
 
@@ -219,6 +266,7 @@ impl Task {
                 job_id,
                 bucket_config_id,
                 yara_enabled,
+                tenant_id,
             }))
         } else {
             Ok(Task::BucketObject(BucketObjectTask {
@@ -228,6 +276,7 @@ impl Task {
                 object_size: parse_int_or_zero(e, "object_size")?,
                 object_etag: field(e, "object_etag").to_owned(),
                 yara_enabled,
+                tenant_id,
             }))
         }
     }
@@ -244,10 +293,18 @@ fn parse_py_bool_default(s: &str, default: bool) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)] // tests fail loudly by design
+#[allow(clippy::panic, clippy::expect_used)] // tests fail loudly by design
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// Fixed tenant used by tests that don't specifically exercise tenant
+    /// parsing itself.
+    const TENANT: &str = "11111111-1111-1111-1111-111111111111";
+
+    fn tenant_uuid() -> uuid::Uuid {
+        TENANT.parse().expect("valid uuid literal")
+    }
 
     fn entry(fields: &[(&str, &str)]) -> StreamEntry {
         StreamEntry {
@@ -259,11 +316,20 @@ mod tests {
         }
     }
 
+    /// Same as [`entry`] but also stamps the fixed test tenant, matching
+    /// every real producer shape (`scan_task_fields`/`submit_task_fields`/
+    /// `adhoc_task_fields` all append `tenant_id`).
+    fn entry_with_tenant(fields: &[(&str, &str)]) -> StreamEntry {
+        let mut owned: Vec<(&str, &str)> = fields.to_vec();
+        owned.push(("tenant_id", TENANT));
+        entry(&owned)
+    }
+
     // Exact field shape emitted by manager routes/s3_scan.rs `scan_task_fields`
     // for a REST trigger-scan (job-level enumerate).
     #[test]
     fn parses_job_level_enumerate() {
-        let e = entry(&[
+        let e = entry_with_tenant(&[
             ("job_id", "job-uuid"),
             ("bucket_config_id", "7"),
             ("object_key", ""),
@@ -279,13 +345,14 @@ mod tests {
                 job_id: "job-uuid".to_owned(),
                 bucket_config_id: 7,
                 yara_enabled: false,
+                tenant_id: tenant_uuid(),
             }))
         );
     }
 
     #[test]
     fn parses_per_object_redispatch() {
-        let e = entry(&[
+        let e = entry_with_tenant(&[
             ("job_id", "job-uuid"),
             ("bucket_config_id", "7"),
             ("object_key", "uploads/a.bin"),
@@ -304,6 +371,7 @@ mod tests {
                 object_size: 1024,
                 object_etag: "\"abc\"".to_owned(),
                 yara_enabled: true,
+                tenant_id: tenant_uuid(),
             }))
         );
     }
@@ -311,7 +379,7 @@ mod tests {
     // Manager grpc/s3_scan_service.rs `adhoc_task_fields` shape.
     #[test]
     fn parses_adhoc() {
-        let e = entry(&[
+        let e = entry_with_tenant(&[
             ("job_id", "scan-uuid"),
             ("bucket_config_id", ""),
             ("object_key", "scan-uuid/a.bin"),
@@ -328,6 +396,7 @@ mod tests {
                 object_key: "scan-uuid/a.bin".to_owned(),
                 object_size: 7,
                 yara_enabled: true,
+                tenant_id: tenant_uuid(),
             }))
         );
     }
@@ -335,7 +404,7 @@ mod tests {
     // Manager grpc/s3_scan_service.rs `submit_task_fields` shape.
     #[test]
     fn parses_inline_grpc_full_task() {
-        let e = entry(&[
+        let e = entry_with_tenant(&[
             ("task_id", "task-1"),
             ("job_id", "job-1"),
             ("bucket_config_id", "3"),
@@ -367,6 +436,7 @@ mod tests {
                 use_ssl: true,
                 path_style: false,
                 yara_enabled: true,
+                tenant_id: tenant_uuid(),
             }))
         );
     }
@@ -379,7 +449,7 @@ mod tests {
 
     #[test]
     fn non_numeric_bucket_config_is_parse_error() {
-        let e = entry(&[
+        let e = entry_with_tenant(&[
             ("job_id", "j"),
             ("bucket_config_id", "notanint"),
             ("object_key", ""),
@@ -388,6 +458,68 @@ mod tests {
             Task::parse(&e),
             Err(ParseError::InvalidInt {
                 field: "bucket_config_id",
+                ..
+            })
+        ));
+    }
+
+    // ── tenant_id fail-closed behavior (docs/v2-port/tenancy-model.md §3) ──
+
+    #[test]
+    fn missing_tenant_id_is_parse_error() {
+        // job_id present, tenant_id absent entirely — every producer shape
+        // stamps tenant_id, so a missing one is a poison entry, not a
+        // default-tenant fallback.
+        let e = entry(&[
+            ("job_id", "job-uuid"),
+            ("bucket_config_id", "7"),
+            ("object_key", ""),
+        ]);
+        assert_eq!(Task::parse(&e), Err(ParseError::MissingField("tenant_id")));
+    }
+
+    #[test]
+    fn empty_tenant_id_is_parse_error() {
+        let e = entry(&[
+            ("job_id", "job-uuid"),
+            ("tenant_id", ""),
+            ("bucket_config_id", "7"),
+            ("object_key", ""),
+        ]);
+        assert_eq!(Task::parse(&e), Err(ParseError::MissingField("tenant_id")));
+    }
+
+    #[test]
+    fn non_uuid_tenant_id_is_parse_error() {
+        let e = entry(&[
+            ("job_id", "job-uuid"),
+            ("tenant_id", "not-a-uuid"),
+            ("bucket_config_id", "7"),
+            ("object_key", ""),
+        ]);
+        assert!(matches!(
+            Task::parse(&e),
+            Err(ParseError::InvalidUuid {
+                field: "tenant_id",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn tenant_id_is_parsed_before_bucket_config_id() {
+        // tenant_id is checked first regardless of task shape — a poisoned
+        // tenant on an otherwise-valid ad-hoc entry is still rejected.
+        let e = entry(&[
+            ("job_id", "scan-uuid"),
+            ("tenant_id", "garbage"),
+            ("bucket_config_id", ""),
+            ("object_key", "scan-uuid/a.bin"),
+        ]);
+        assert!(matches!(
+            Task::parse(&e),
+            Err(ParseError::InvalidUuid {
+                field: "tenant_id",
                 ..
             })
         ));

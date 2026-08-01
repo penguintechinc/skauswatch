@@ -127,7 +127,7 @@ paths:
         required: true
       responses:
         '200':
-          description: Matching events
+          description: Matching events, scoped to the caller's tenant
           content:
             application/json:
               schema:
@@ -138,8 +138,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: monitor feature not enabled for this deployment
+          description: Missing or empty tenant claim, or monitor feature not enabled for this deployment
           content:
             application/json:
               schema:
@@ -150,6 +156,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
   /api/v1/events/stream:
     get:
       tags:
@@ -182,17 +190,25 @@ paths:
             $ref: '#/components/schemas/Severity'
       responses:
         '200':
-          description: Live event stream (Server-Sent Events; no producer wired up yet, see module docs)
+          description: Live event stream scoped to the caller's tenant (Server-Sent Events; no producer wired up yet, see module docs)
           content:
             text/event-stream:
               schema:
                 $ref: '#/components/schemas/BaseEvent'
-        '403':
-          description: monitor feature not enabled for this deployment
+        '401':
+          description: Missing or invalid authorization header
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing or empty tenant claim, or monitor feature not enabled for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
   /api/v1/events/{event_id}:
     get:
       tags:
@@ -208,19 +224,25 @@ paths:
           type: string
       responses:
         '200':
-          description: The stored event
+          description: The stored event (only if owned by the caller's tenant)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/BaseEvent'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: monitor feature not enabled for this deployment
+          description: Missing or empty tenant claim, or monitor feature not enabled for this deployment
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: Event not found
+          description: Event not found, or owned by a different tenant
           content:
             application/json:
               schema:
@@ -231,6 +253,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
   /api/v1/health:
     get:
       tags:
@@ -421,6 +445,19 @@ components:
           items:
             type: string
           description: Free-form classification tags.
+        tenant_id:
+          type: string
+          description: |-
+            Owning tenant — the hard multi-tenant isolation boundary for the
+            event store (`docs/v2-port/tenancy-model.md`). Not part of v1 (v1
+            had no tenancy concept at all); added here so search/get can filter
+            on it (`crate::es::build_search_body`, `EventStore::get_by_id`).
+            `#[serde(default)]` lets a pre-tenancy or not-yet-tenant-stamped
+            document (see `EventStore::index_event` doc comment — no HTTP route
+            writes documents today) deserialize as `""` rather than failing;
+            an empty value can never match a real caller's non-empty tenant
+            filter, so such a document is simply unreachable rather than
+            accidentally exposed cross-tenant.
         threat_matches:
           type: array
           items: {}

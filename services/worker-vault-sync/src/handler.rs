@@ -21,8 +21,23 @@ use serde_json::Value;
 use skauswatch_streams::{HandlerError, StreamEntry, StreamHandler};
 use skauswatch_vault::EnvelopeEncryption;
 use sqlx::PgPool;
+use uuid::Uuid;
 
+use crate::providers::aws::{has_static_credentials, resolve_region};
 use crate::providers::{SyncResult, get_provider};
+
+/// This worker's own-AWS JWT-SVID federation config for
+/// [`SyncHandler::federated_credentials_for`] — dal2's IRSA equivalent (see
+/// `docs/v2-port/aws-identity-runbook.md`). `identity` is a trait object
+/// (not the concrete `skauswatch_identity::IdentityProvider`) purely so
+/// this module's own tests can substitute a hermetic fake; the real binary
+/// always wires the genuine `IdentityProvider`.
+#[derive(Clone)]
+struct Federation {
+    identity: std::sync::Arc<dyn skauswatch_s3::credentials::JwtSvidSource>,
+    /// This worker's own service-owned IAM role ARN — never a customer's.
+    role_arn: String,
+}
 
 /// Consumes one provider's sync stream, decrypting/pushing/deleting secrets
 /// against that provider's cloud API and updating `vault_cloud_sync_state`.
@@ -30,6 +45,11 @@ pub struct SyncHandler {
     provider: String,
     db: PgPool,
     envelope: EnvelopeEncryption,
+    /// Own-AWS federation for `"aws"`-provider integrations that carry no
+    /// static credentials. `None` (the only value [`SyncHandler::new`]
+    /// ever sets) preserves today's behavior exactly — see
+    /// [`SyncHandler::with_federation`].
+    federation: Option<Federation>,
 }
 
 impl SyncHandler {
@@ -40,17 +60,86 @@ impl SyncHandler {
             provider: provider.into(),
             db,
             envelope,
+            federation: None,
         }
     }
 
+    /// Enables JWT-SVID-&gt;STS federation for this worker's own-AWS
+    /// access — the fallback `AwsProvider` uses when an integration's
+    /// `credentials` carry no static access-key/secret pair (see
+    /// `docs/v2-port/aws-identity-runbook.md`). A no-op for any provider
+    /// other than `"aws"`.
+    ///
+    /// Fail-safe by construction: [`SyncHandler::federated_credentials_for`]
+    /// only *attempts* federation when this has been called, and any
+    /// failure there (degraded identity, STS error) is logged and treated
+    /// as "no override" — the caller falls back to `AwsProvider`'s
+    /// pre-existing default-credential-chain behavior, never fatal.
+    #[must_use]
+    pub fn with_federation(
+        mut self,
+        identity: std::sync::Arc<dyn skauswatch_s3::credentials::JwtSvidSource>,
+        role_arn: String,
+    ) -> Self {
+        self.federation = Some(Federation { identity, role_arn });
+        self
+    }
+
+    /// Resolves this worker's own-AWS federated credentials for one
+    /// integration's `credentials`/`config`, if applicable: only for the
+    /// `"aws"` provider, only when the integration itself carries no
+    /// static access-key/secret pair (a customer's own credentials always
+    /// win), and only when federation has been configured via
+    /// [`SyncHandler::with_federation`]. Otherwise (or on any federation
+    /// failure) returns `None` — the caller falls back to `AwsProvider`'s
+    /// pre-existing default-credential-chain behavior.
+    async fn federated_credentials_for(
+        &self,
+        credentials: &Value,
+        config: &Value,
+    ) -> Option<aws_sdk_secretsmanager::config::Credentials> {
+        if self.provider != "aws" || has_static_credentials(credentials) {
+            return None;
+        }
+        let federation = self.federation.as_ref()?;
+        let region = resolve_region(credentials, config);
+        match skauswatch_s3::credentials::federated_base_credentials(
+            federation.identity.as_ref(),
+            &federation.role_arn,
+            &region,
+        )
+        .await
+        {
+            Ok(creds) => Some(creds),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "own-AWS JWT-SVID federation unavailable for vault cloud sync — \
+                     falling back to the default AWS credential-provider chain"
+                );
+                None
+            }
+        }
+    }
+
+    /// Loads an enabled integration by id, including its owning tenant.
+    ///
+    /// `tenant_id` here is the *only* source of tenant for everything this
+    /// handler subsequently writes to `vault_cloud_sync_state` — it is
+    /// resolved server-side from the vault-owned `vault_cloud_integrations`
+    /// row (never from the Redis stream message, which this worker treats
+    /// as producer-trusted but tenant-silent) and stamped, unchanged, onto
+    /// every sync-state row this integration's push/delete produces. See
+    /// `docs/v2-port/tenancy-model.md` and `migrations/0002_worker_vault_sync_tenancy.sql`.
     async fn load_integration(&self, integration_id: &str) -> Option<LoadedIntegration> {
         #[derive(sqlx::FromRow)]
         struct Row {
+            tenant_id: Uuid,
             encrypted_credentials: Option<String>,
             config: Option<sqlx::types::Json<Value>>,
         }
         let row = sqlx::query_as::<_, Row>(
-            "SELECT encrypted_credentials, config FROM vault_cloud_integrations \
+            "SELECT tenant_id, encrypted_credentials, config FROM vault_cloud_integrations \
              WHERE id = $1 AND enabled = true",
         )
         .bind(integration_id)
@@ -58,6 +147,7 @@ impl SyncHandler {
         .await
         .ok()??;
 
+        let tenant_id = row.tenant_id;
         let creds_blob = row.encrypted_credentials?;
         let envelope_fields: Value = serde_json::from_str(&creds_blob).ok()?;
         let ciphertext = envelope_fields.get("ciphertext")?.as_str()?;
@@ -71,6 +161,7 @@ impl SyncHandler {
             .unwrap_or_else(|| serde_json::json!({}));
 
         Some(LoadedIntegration {
+            tenant_id,
             credentials,
             config,
         })
@@ -106,10 +197,14 @@ impl SyncHandler {
             return;
         };
 
+        let federated_credentials = self
+            .federated_credentials_for(&integration.credentials, &integration.config)
+            .await;
         let provider = match get_provider(
             &self.provider,
             &integration.credentials,
             &integration.config,
+            federated_credentials,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -132,7 +227,7 @@ impl SyncHandler {
                 "push to cloud provider failed"
             );
         }
-        self.update_sync_state(&secret_id, &integration_id, &result)
+        self.update_sync_state(&secret_id, &integration_id, integration.tenant_id, &result)
             .await;
     }
 
@@ -147,10 +242,14 @@ impl SyncHandler {
         let Some(integration) = self.load_integration(&integration_id).await else {
             return;
         };
+        let federated_credentials = self
+            .federated_credentials_for(&integration.credentials, &integration.config)
+            .await;
         let provider = match get_provider(
             &self.provider,
             &integration.credentials,
             &integration.config,
+            federated_credentials,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -160,7 +259,10 @@ impl SyncHandler {
         };
 
         match provider.delete_secret(external_ref).await {
-            Ok(true) => self.remove_sync_state(&secret_id, &integration_id).await,
+            Ok(true) => {
+                self.remove_sync_state(&secret_id, &integration_id, integration.tenant_id)
+                    .await
+            }
             Ok(false) => {
                 tracing::info!(secret_id, external_ref, "delete target already absent");
             }
@@ -168,19 +270,30 @@ impl SyncHandler {
         }
     }
 
-    async fn update_sync_state(&self, secret_id: &str, integration_id: &str, result: &SyncResult) {
+    /// `tenant_id` is always the caller's already-resolved
+    /// `LoadedIntegration::tenant_id` — never re-derived here — so a row is
+    /// never written without the tenant of the integration that produced it.
+    async fn update_sync_state(
+        &self,
+        secret_id: &str,
+        integration_id: &str,
+        tenant_id: Uuid,
+        result: &SyncResult,
+    ) {
         let status = if result.success { "synced" } else { "error" };
         let now = Utc::now().naive_utc();
         let res = sqlx::query(
             "INSERT INTO vault_cloud_sync_state \
-             (secret_id, integration_id, external_ref, last_synced_at, sync_status, conflict_resolution) \
-             VALUES ($1,$2,$3,$4,$5,'vault_wins') \
+             (secret_id, integration_id, tenant_id, external_ref, last_synced_at, sync_status, conflict_resolution) \
+             VALUES ($1,$2,$3,$4,$5,$6,'vault_wins') \
              ON CONFLICT (secret_id, integration_id) DO UPDATE SET \
              external_ref = EXCLUDED.external_ref, last_synced_at = EXCLUDED.last_synced_at, \
-             sync_status = EXCLUDED.sync_status",
+             sync_status = EXCLUDED.sync_status \
+             WHERE vault_cloud_sync_state.tenant_id = EXCLUDED.tenant_id",
         )
         .bind(secret_id)
         .bind(integration_id)
+        .bind(tenant_id)
         .bind(&result.external_ref)
         .bind(now)
         .bind(status)
@@ -191,12 +304,20 @@ impl SyncHandler {
         }
     }
 
-    async fn remove_sync_state(&self, secret_id: &str, integration_id: &str) {
+    /// `tenant_id` is bound into the `WHERE` clause alongside the
+    /// `(secret_id, integration_id)` key — defense in depth per
+    /// `docs/v2-port/tenancy-model.md` §4 ("tenant_id in the WHERE clause is
+    /// mandatory even when filtering by primary key"), even though this
+    /// composite key is already unique per integration (and therefore per
+    /// tenant) by construction.
+    async fn remove_sync_state(&self, secret_id: &str, integration_id: &str, tenant_id: Uuid) {
         let res = sqlx::query(
-            "DELETE FROM vault_cloud_sync_state WHERE secret_id = $1 AND integration_id = $2",
+            "DELETE FROM vault_cloud_sync_state \
+             WHERE secret_id = $1 AND integration_id = $2 AND tenant_id = $3",
         )
         .bind(secret_id)
         .bind(integration_id)
+        .bind(tenant_id)
         .execute(&self.db)
         .await;
         if let Err(e) = res {
@@ -206,6 +327,7 @@ impl SyncHandler {
 }
 
 struct LoadedIntegration {
+    tenant_id: Uuid,
     credentials: Value,
     config: Value,
 }
@@ -339,22 +461,44 @@ mod tests {
         json!({"ciphertext": ciphertext, "dek": dek, "version": version}).to_string()
     }
 
+    /// Fixed tenant used by every test that isn't specifically exercising
+    /// cross-tenant isolation — deliberately distinct from both the
+    /// migration's bootstrap-tenant backfill value and [`other_tenant`], so
+    /// a test can't pass by accidentally matching a default.
+    fn test_tenant() -> Uuid {
+        "11111111-1111-1111-1111-111111111111"
+            .parse()
+            .expect("valid uuid")
+    }
+
+    /// A second, distinct tenant — used only by the cross-tenant isolation
+    /// test below.
+    fn other_tenant() -> Uuid {
+        "22222222-2222-2222-2222-222222222222"
+            .parse()
+            .expect("valid uuid")
+    }
+
     /// Seeds one `vault_cloud_integrations` row (owned by the `vault`
     /// service, borrowed here per `skauswatch_testkit::db::test_pool_multi`
-    /// docs).
+    /// docs). `tenant_id` is the row's owning tenant — the sole source
+    /// `load_integration`/`update_sync_state`/`remove_sync_state` use to
+    /// stamp `vault_cloud_sync_state.tenant_id`.
     async fn seed_integration(
         pool: &PgPool,
         id: &str,
+        tenant_id: Uuid,
         enabled: bool,
         encrypted_credentials: Option<&str>,
         config: Value,
     ) {
         sqlx::query(
             "INSERT INTO vault_cloud_integrations \
-             (id, provider, name, sync_direction, encrypted_credentials, enabled, config) \
-             VALUES ($1, 'aws', 'test-integration', 'vault_to_cloud', $2, $3, $4)",
+             (id, tenant_id, provider, name, sync_direction, encrypted_credentials, enabled, config) \
+             VALUES ($1, $2, 'aws', 'test-integration', 'vault_to_cloud', $3, $4, $5)",
         )
         .bind(id)
+        .bind(tenant_id)
         .bind(encrypted_credentials)
         .bind(enabled)
         .bind(SqlxJson(config))
@@ -367,16 +511,18 @@ mod tests {
         pool: &PgPool,
         secret_id: &str,
         integration_id: &str,
+        tenant_id: Uuid,
         external_ref: &str,
         sync_status: &str,
     ) {
         sqlx::query(
             "INSERT INTO vault_cloud_sync_state \
-             (secret_id, integration_id, external_ref, sync_status, conflict_resolution) \
-             VALUES ($1, $2, $3, $4, 'vault_wins')",
+             (secret_id, integration_id, tenant_id, external_ref, sync_status, conflict_resolution) \
+             VALUES ($1, $2, $3, $4, $5, 'vault_wins')",
         )
         .bind(secret_id)
         .bind(integration_id)
+        .bind(tenant_id)
         .bind(external_ref)
         .bind(sync_status)
         .execute(pool)
@@ -385,6 +531,7 @@ mod tests {
     }
 
     struct SyncStateRow {
+        tenant_id: Uuid,
         external_ref: Option<String>,
         sync_status: String,
         conflict_resolution: String,
@@ -397,12 +544,13 @@ mod tests {
     ) -> Option<SyncStateRow> {
         #[derive(sqlx::FromRow)]
         struct Row {
+            tenant_id: Uuid,
             external_ref: Option<String>,
             sync_status: String,
             conflict_resolution: String,
         }
         let row = sqlx::query_as::<_, Row>(
-            "SELECT external_ref, sync_status, conflict_resolution \
+            "SELECT tenant_id, external_ref, sync_status, conflict_resolution \
              FROM vault_cloud_sync_state WHERE secret_id = $1 AND integration_id = $2",
         )
         .bind(secret_id)
@@ -411,6 +559,7 @@ mod tests {
         .await
         .expect("select sync state");
         row.map(|r| SyncStateRow {
+            tenant_id: r.tenant_id,
             external_ref: r.external_ref,
             sync_status: r.sync_status,
             conflict_resolution: r.conflict_resolution,
@@ -483,6 +632,7 @@ mod tests {
         seed_integration(
             &pool,
             "int-1",
+            test_tenant(),
             true,
             Some(&creds_blob),
             json!({"endpoint_url": server.uri()}),
@@ -525,6 +675,7 @@ mod tests {
         seed_integration(
             &pool,
             "int-2",
+            test_tenant(),
             true,
             Some(&creds_blob),
             json!({"endpoint_url": server.uri()}),
@@ -561,6 +712,7 @@ mod tests {
         seed_integration(
             &pool,
             "int-3",
+            test_tenant(),
             true,
             Some(&creds_blob),
             json!({"endpoint_url": server.uri()}),
@@ -597,13 +749,22 @@ mod tests {
         seed_integration(
             &pool,
             "int-4",
+            test_tenant(),
             true,
             Some(&creds_blob),
             json!({"endpoint_url": server.uri()}),
         )
         .await;
         // Pre-existing row from a prior (failed) sync attempt.
-        seed_sync_state(&pool, "secret-4", "int-4", "vault/stale-ref", "error").await;
+        seed_sync_state(
+            &pool,
+            "secret-4",
+            "int-4",
+            test_tenant(),
+            "vault/stale-ref",
+            "error",
+        )
+        .await;
         let handler = SyncHandler::new("aws", pool.clone(), envelope.clone());
 
         let entry = push_entry("int-4", "secret-4", "db-password", &envelope, "hunter2");
@@ -647,7 +808,15 @@ mod tests {
         let pool = db_pool().await;
         let envelope = test_envelope();
         let creds_blob = encrypt_credentials(&envelope, &aws_credentials());
-        seed_integration(&pool, "int-6", false, Some(&creds_blob), json!({})).await;
+        seed_integration(
+            &pool,
+            "int-6",
+            test_tenant(),
+            false,
+            Some(&creds_blob),
+            json!({}),
+        )
+        .await;
         let handler = SyncHandler::new("aws", pool.clone(), envelope.clone());
 
         let entry = push_entry("int-6", "secret-6", "x", &envelope, "v");
@@ -664,7 +833,15 @@ mod tests {
         let pool = db_pool().await;
         let envelope = test_envelope();
         let creds_blob = encrypt_credentials(&envelope, &aws_credentials());
-        seed_integration(&pool, "int-7", true, Some(&creds_blob), json!({})).await;
+        seed_integration(
+            &pool,
+            "int-7",
+            test_tenant(),
+            true,
+            Some(&creds_blob),
+            json!({}),
+        )
+        .await;
         let handler = SyncHandler::new("not-a-real-provider", pool.clone(), envelope.clone());
 
         let entry = push_entry("int-7", "secret-7", "x", &envelope, "v");
@@ -684,8 +861,24 @@ mod tests {
         let pool = db_pool().await;
         let envelope = test_envelope();
         let creds_blob = encrypt_credentials(&envelope, &aws_credentials());
-        seed_integration(&pool, "int-12", true, Some(&creds_blob), json!({})).await;
-        seed_sync_state(&pool, "secret-12", "int-12", "vault/x", "synced").await;
+        seed_integration(
+            &pool,
+            "int-12",
+            test_tenant(),
+            true,
+            Some(&creds_blob),
+            json!({}),
+        )
+        .await;
+        seed_sync_state(
+            &pool,
+            "secret-12",
+            "int-12",
+            test_tenant(),
+            "vault/x",
+            "synced",
+        )
+        .await;
         let handler = SyncHandler::new("not-a-real-provider", pool.clone(), envelope.clone());
 
         let entry = delete_entry("int-12", "secret-12", "vault/x");
@@ -713,12 +906,21 @@ mod tests {
         seed_integration(
             &pool,
             "int-8",
+            test_tenant(),
             true,
             Some(&creds_blob),
             json!({"endpoint_url": server.uri()}),
         )
         .await;
-        seed_sync_state(&pool, "secret-8", "int-8", "vault/db-password", "synced").await;
+        seed_sync_state(
+            &pool,
+            "secret-8",
+            "int-8",
+            test_tenant(),
+            "vault/db-password",
+            "synced",
+        )
+        .await;
         let handler = SyncHandler::new("aws", pool.clone(), envelope.clone());
 
         let entry = delete_entry("int-8", "secret-8", "vault/db-password");
@@ -743,12 +945,21 @@ mod tests {
         seed_integration(
             &pool,
             "int-9",
+            test_tenant(),
             true,
             Some(&creds_blob),
             json!({"endpoint_url": server.uri()}),
         )
         .await;
-        seed_sync_state(&pool, "secret-9", "int-9", "vault/gone", "synced").await;
+        seed_sync_state(
+            &pool,
+            "secret-9",
+            "int-9",
+            test_tenant(),
+            "vault/gone",
+            "synced",
+        )
+        .await;
         let handler = SyncHandler::new("aws", pool.clone(), envelope.clone());
 
         let entry = delete_entry("int-9", "secret-9", "vault/gone");
@@ -780,12 +991,21 @@ mod tests {
         seed_integration(
             &pool,
             "int-10",
+            test_tenant(),
             true,
             Some(&creds_blob),
             json!({"endpoint_url": server.uri()}),
         )
         .await;
-        seed_sync_state(&pool, "secret-10", "int-10", "vault/x", "synced").await;
+        seed_sync_state(
+            &pool,
+            "secret-10",
+            "int-10",
+            test_tenant(),
+            "vault/x",
+            "synced",
+        )
+        .await;
         let handler = SyncHandler::new("aws", pool.clone(), envelope.clone());
 
         let entry = delete_entry("int-10", "secret-10", "vault/x");
@@ -816,6 +1036,311 @@ mod tests {
             fetch_sync_state(&pool, "secret-11", "no-such-integration")
                 .await
                 .is_none()
+        );
+    }
+
+    // ── tenant isolation ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn push_stamps_tenant_from_owning_integration_with_no_cross_tenant_mixing() {
+        // Two integrations owned by two different tenants, synced through
+        // the same handler instance (this worker has no per-request tenant
+        // context — every tenant boundary comes from the integration row).
+        // Each resulting `vault_cloud_sync_state` row must carry its own
+        // integration's tenant, never the other's.
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "PutSecretValue",
+            200,
+            json!({"ARN": "arn:1", "Name": "vault/db-password", "VersionId": "v1"}),
+        )
+        .await;
+        let pool = db_pool().await;
+        let envelope = test_envelope();
+        let creds_blob = encrypt_credentials(&envelope, &aws_credentials());
+        seed_integration(
+            &pool,
+            "int-tenant-a",
+            test_tenant(),
+            true,
+            Some(&creds_blob),
+            json!({"endpoint_url": server.uri()}),
+        )
+        .await;
+        seed_integration(
+            &pool,
+            "int-tenant-b",
+            other_tenant(),
+            true,
+            Some(&creds_blob),
+            json!({"endpoint_url": server.uri()}),
+        )
+        .await;
+        let handler = SyncHandler::new("aws", pool.clone(), envelope.clone());
+
+        let entry_a = push_entry(
+            "int-tenant-a",
+            "secret-tenant-a",
+            "db-password",
+            &envelope,
+            "hunter2",
+        );
+        assert!(handler.handle(&entry_a).await.is_ok());
+        let entry_b = push_entry(
+            "int-tenant-b",
+            "secret-tenant-b",
+            "db-password",
+            &envelope,
+            "hunter3",
+        );
+        assert!(handler.handle(&entry_b).await.is_ok());
+
+        let row_a = fetch_sync_state(&pool, "secret-tenant-a", "int-tenant-a")
+            .await
+            .expect("tenant A sync state row written");
+        let row_b = fetch_sync_state(&pool, "secret-tenant-b", "int-tenant-b")
+            .await
+            .expect("tenant B sync state row written");
+        assert_eq!(row_a.tenant_id, test_tenant());
+        assert_eq!(row_b.tenant_id, other_tenant());
+        assert_ne!(row_a.tenant_id, row_b.tenant_id);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_only_the_row_matching_secret_integration_and_tenant() {
+        // `remove_sync_state` binds `tenant_id` into its `WHERE` clause
+        // (defense in depth, tenancy-model.md §4) even though
+        // `(secret_id, integration_id)` already uniquely identifies the
+        // row. Confirms deleting tenant A's row leaves an unrelated tenant
+        // B row (different secret/integration entirely) untouched.
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "DeleteSecret",
+            200,
+            json!({"ARN": "vault/db-password", "Name": "vault/db-password"}),
+        )
+        .await;
+        let pool = db_pool().await;
+        let envelope = test_envelope();
+        let creds_blob = encrypt_credentials(&envelope, &aws_credentials());
+        seed_integration(
+            &pool,
+            "int-tenant-c",
+            test_tenant(),
+            true,
+            Some(&creds_blob),
+            json!({"endpoint_url": server.uri()}),
+        )
+        .await;
+        seed_integration(
+            &pool,
+            "int-tenant-d",
+            other_tenant(),
+            true,
+            Some(&creds_blob),
+            json!({"endpoint_url": server.uri()}),
+        )
+        .await;
+        seed_sync_state(
+            &pool,
+            "secret-tenant-c",
+            "int-tenant-c",
+            test_tenant(),
+            "vault/db-password",
+            "synced",
+        )
+        .await;
+        seed_sync_state(
+            &pool,
+            "secret-tenant-d",
+            "int-tenant-d",
+            other_tenant(),
+            "vault/other",
+            "synced",
+        )
+        .await;
+        let handler = SyncHandler::new("aws", pool.clone(), envelope.clone());
+
+        let entry = delete_entry("int-tenant-c", "secret-tenant-c", "vault/db-password");
+        assert!(handler.handle(&entry).await.is_ok());
+
+        assert!(
+            fetch_sync_state(&pool, "secret-tenant-c", "int-tenant-c")
+                .await
+                .is_none(),
+            "tenant C's row must be removed"
+        );
+        let row_d = fetch_sync_state(&pool, "secret-tenant-d", "int-tenant-d")
+            .await
+            .expect("tenant D's unrelated row must be untouched");
+        assert_eq!(row_d.tenant_id, other_tenant());
+    }
+
+    // ── own-AWS federation (federated_credentials_for) ──────────────────
+    //
+    // `federated_base_credentials`'s success path (JWT flows through to a
+    // real `sts:AssumeRoleWithWebIdentity` call) is exhaustively covered in
+    // `crates/skauswatch-s3::credentials`'s own tests via its
+    // `sts_endpoint_override` seam, which is private to that crate — the
+    // public `federated_base_credentials` entry point this worker calls
+    // always targets the real STS endpoint, so it can't be hermetically
+    // redirected from here. What *is* this worker's own responsibility to
+    // prove is the gating/fail-safe wiring below.
+
+    /// A [`skauswatch_s3::credentials::JwtSvidSource`] double that always
+    /// reports "no identity held" — mirrors what a degraded/unattested
+    /// `IdentityProvider` (no SPIRE agent reachable) would surface.
+    struct DegradedJwtSource;
+
+    #[async_trait::async_trait]
+    impl skauswatch_s3::credentials::JwtSvidSource for DegradedJwtSource {
+        async fn fetch_jwt_svid_token(
+            &self,
+            _audience: &str,
+        ) -> Result<String, skauswatch_s3::credentials::CredentialError> {
+            Err(skauswatch_s3::credentials::CredentialError::Identity(
+                "no identity held (test double)".to_owned(),
+            ))
+        }
+    }
+
+    fn federation_role_arn() -> String {
+        "arn:aws:iam::123456789012:role/skauswatch-base".to_owned()
+    }
+
+    #[tokio::test]
+    async fn federated_credentials_for_returns_none_for_non_aws_provider() {
+        let handler = SyncHandler::new(
+            "azure",
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://test:test@127.0.0.1:1/test")
+                .expect("lazy pool"),
+            EnvelopeEncryption::default(),
+        )
+        .with_federation(
+            std::sync::Arc::new(DegradedJwtSource),
+            federation_role_arn(),
+        );
+
+        let result = handler
+            .federated_credentials_for(&json!({}), &json!({}))
+            .await;
+        assert!(
+            result.is_none(),
+            "federation must only ever apply to the aws provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn federated_credentials_for_returns_none_without_federation_configured() {
+        let handler = test_handler(); // federation: None (default via SyncHandler::new)
+        let result = handler
+            .federated_credentials_for(&json!({}), &json!({}))
+            .await;
+        assert!(
+            result.is_none(),
+            "no federation configured must never attempt federation"
+        );
+    }
+
+    #[tokio::test]
+    async fn federated_credentials_for_returns_none_when_static_credentials_present() {
+        let handler = test_handler().with_federation(
+            std::sync::Arc::new(DegradedJwtSource),
+            federation_role_arn(),
+        );
+        let result = handler
+            .federated_credentials_for(&aws_credentials(), &json!({}))
+            .await;
+        assert!(
+            result.is_none(),
+            "a customer's own static credentials must always win over federation"
+        );
+    }
+
+    #[tokio::test]
+    async fn federated_credentials_for_returns_none_when_identity_degraded() {
+        let handler = test_handler().with_federation(
+            std::sync::Arc::new(DegradedJwtSource),
+            federation_role_arn(),
+        );
+        let result = handler
+            .federated_credentials_for(&json!({}), &json!({}))
+            .await;
+        assert!(
+            result.is_none(),
+            "a degraded identity source must fall back to None, never fatal"
+        );
+    }
+
+    /// Same shape as `push_success_inserts_synced_sync_state_row`, but the
+    /// integration carries no static credentials and federation is
+    /// configured against a degraded identity source. `AwsProvider`'s
+    /// no-static/no-override path builds its client directly via
+    /// `Config::builder()` (not `aws-config`'s default chain — see that
+    /// builder's own doc comment), so it has never had ambient
+    /// env/IMDS/profile credentials to fall back to; a degraded federation
+    /// attempt lands on exactly that same pre-existing behavior. What this
+    /// test proves is the fail-safe contract this feature adds: the
+    /// failed federation attempt is caught, logged, and treated as "no
+    /// override" — the sync completes deterministically (a clean `"error"`
+    /// sync-state row, matching `push_provider_failure_records_error_sync_status`'s
+    /// shape), never a panic, hang, or unhandled `Result::Err` propagating
+    /// out of `do_push`.
+    #[tokio::test]
+    async fn push_falls_back_to_default_chain_when_federation_degraded_and_no_static_creds() {
+        // No route mounted — proves no request ever reaches this server at
+        // all (request construction fails locally, credential-less, before
+        // any network I/O), mirroring
+        // `push_secret_without_static_credentials_falls_back_gracefully`'s
+        // pattern for the exact same `AwsProvider` no-credentials shape.
+        let server = MockServer::start().await;
+        let pool = db_pool().await;
+        let envelope = test_envelope();
+        // No access_key_id/secret_access_key at all — exercises the
+        // "no static creds" branch of `federated_credentials_for`.
+        let creds_blob = encrypt_credentials(&envelope, &json!({}));
+        seed_integration(
+            &pool,
+            "int-fed-fallback",
+            test_tenant(),
+            true,
+            Some(&creds_blob),
+            json!({"endpoint_url": server.uri()}),
+        )
+        .await;
+        let handler = SyncHandler::new("aws", pool.clone(), envelope.clone()).with_federation(
+            std::sync::Arc::new(DegradedJwtSource),
+            federation_role_arn(),
+        );
+
+        let entry = push_entry(
+            "int-fed-fallback",
+            "secret-fed-fallback",
+            "fed-fallback",
+            &envelope,
+            "hunter2",
+        );
+        assert!(handler.handle(&entry).await.is_ok());
+
+        let row = fetch_sync_state(&pool, "secret-fed-fallback", "int-fed-fallback")
+            .await
+            .expect("sync state row inserted (do_push always records an outcome)");
+        assert_eq!(
+            row.sync_status, "error",
+            "degraded federation + no static creds must land on AwsProvider's pre-existing \
+             no-credentials outcome deterministically, never panic or hang"
+        );
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording enabled");
+        assert!(
+            requests.is_empty(),
+            "no request should ever reach the mock — credential-less request construction \
+             fails locally"
         );
     }
 }

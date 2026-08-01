@@ -13,6 +13,15 @@
 //! configurable the same way every other PenguinTech service is (12-factor
 //! env vars, no config file).
 //!
+//! **JWT secret (finding #3, hardened):** `MONITOR_SECRET_KEY`/
+//! `MONITOR_JWT_SECRET` are no longer read at all — this service now shares
+//! the house `JWT_SECRET_KEY` var with every other JWT-consuming service
+//! (manager, vault, pki, sshca, codescan-backend), loaded via
+//! `skauswatch_auth::load_jwt_secret` in `state.rs::AppStateInner::from_env`
+//! (fail-fast in production, no random-UUID fallback). It is intentionally
+//! not part of this module's `Config`/`SecurityConfig` — the shared crate
+//! owns that env var's parsing/fail-fast policy, not each service.
+//!
 //! Parsing is split into pure `from_values` constructors (testable without
 //! touching process env — `unsafe_code = "deny"` at the workspace level
 //! rules out `std::env::set_var` in tests) and a thin `from_env` that reads
@@ -30,12 +39,12 @@ pub struct ApiConfig {
     pub port: u16,
 }
 
-/// Auth/security config. v1 `SecurityConfig`.
+/// Auth/security config. v1 `SecurityConfig`. The HS256 signing secret
+/// itself is deliberately not a field here — see the module doc comment's
+/// "JWT secret (finding #3, hardened)" note: it lives on `AppStateInner`,
+/// loaded via `skauswatch_auth::load_jwt_secret`.
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
-    /// HS256 signing secret for bearer tokens (`MONITOR_SECRET_KEY`/
-    /// `MONITOR_JWT_SECRET`).
-    pub secret_key: String,
     /// Dev-only bypass (`MONITOR_AUTH_ENABLED=false`) — never the default.
     pub auth_enabled: bool,
 }
@@ -83,7 +92,6 @@ impl Config {
     fn from_values(
         api_host: Option<&str>,
         api_port: Option<&str>,
-        secret_key: Option<&str>,
         auth_enabled: Option<&str>,
         es_enabled: Option<&str>,
         es_url: Option<&str>,
@@ -91,20 +99,12 @@ impl Config {
         es_username: Option<&str>,
         es_password: Option<&str>,
     ) -> Self {
-        let secret_key = secret_key.map(str::to_owned).unwrap_or_else(|| {
-            // Random per-process secret (not the old guessable dev-{pid}) — an
-            // unset secret fails closed (nothing can forge a token). Full
-            // production fail-fast is tracked for the monitor security pass.
-            tracing::warn!("MONITOR_SECRET_KEY not set — using a random ephemeral dev secret");
-            uuid::Uuid::new_v4().to_string()
-        });
         Self {
             api: ApiConfig {
                 host: api_host.unwrap_or("0.0.0.0").to_owned(),
                 port: api_port.and_then(|p| p.parse().ok()).unwrap_or(8003),
             },
             security: SecurityConfig {
-                secret_key,
                 auth_enabled: parse_bool(auth_enabled, true),
             },
             elasticsearch: ElasticsearchConfig {
@@ -119,15 +119,12 @@ impl Config {
 
     /// Loads configuration from the process environment. Never fails: every
     /// field has a v1-compatible default, matching v1's fully-optional env
-    /// override design.
+    /// override design. The JWT secret is loaded separately (and can fail,
+    /// deliberately, in production) — see `state.rs::AppStateInner::from_env`.
     pub fn from_env() -> Self {
         Self::from_values(
             env::var("MONITOR_API_HOST").ok().as_deref(),
             env::var("MONITOR_API_PORT").ok().as_deref(),
-            env::var("MONITOR_SECRET_KEY")
-                .or_else(|_| env::var("MONITOR_JWT_SECRET"))
-                .ok()
-                .as_deref(),
             env::var("MONITOR_AUTH_ENABLED").ok().as_deref(),
             env::var("MONITOR_ES_ENABLED").ok().as_deref(),
             env::var("MONITOR_ES_URL").ok().as_deref(),
@@ -155,17 +152,7 @@ mod tests {
 
     #[test]
     fn defaults_match_v1_when_unset() {
-        let cfg = Config::from_values(
-            None,
-            None,
-            Some("test-secret"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
+        let cfg = Config::from_values(None, None, None, None, None, None, None, None);
         assert_eq!(cfg.api.host, "0.0.0.0");
         assert_eq!(cfg.api.port, 8003);
         assert!(!cfg.elasticsearch.enabled);
@@ -178,7 +165,6 @@ mod tests {
         let cfg = Config::from_values(
             Some("127.0.0.1"),
             Some("9999"),
-            Some("s3cr3t"),
             Some("false"),
             Some("true"),
             Some("http://es:9200"),
@@ -188,7 +174,6 @@ mod tests {
         );
         assert_eq!(cfg.api.host, "127.0.0.1");
         assert_eq!(cfg.api.port, 9999);
-        assert_eq!(cfg.security.secret_key, "s3cr3t");
         assert!(!cfg.security.auth_enabled);
         assert!(cfg.elasticsearch.enabled);
         assert_eq!(cfg.elasticsearch.url, "http://es:9200");

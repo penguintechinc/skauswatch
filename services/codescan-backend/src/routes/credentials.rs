@@ -27,6 +27,12 @@ use crate::auth::AdminOnly;
 use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
 
+// NOTE: `codescan_git_credentials` is keyed by `user_id`, not directly by
+// tenant (docs/v2-port/tenancy-model.md §5) — `tenant_id` is denormalized
+// from the owning user for tenant-scoped listing/audit without a join on
+// every query, and every query below filters on it, but the authoritative
+// ownership boundary stays `user_id`.
+
 const VALID_PLATFORMS: [&str; 2] = ["github", "gitlab"];
 const VALID_CREDENTIAL_TYPES: [&str; 2] = ["token", "ssh_key"];
 
@@ -99,12 +105,13 @@ pub(crate) struct CredentialListResponse {
 )]
 pub(crate) async fn list_credentials(
     State(state): State<AppState>,
-    _admin: AdminOnly,
+    AdminOnly(admin): AdminOnly,
     Query(q): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(format!(
-        "SELECT {SUMMARY_COLUMNS} FROM codescan_git_credentials WHERE 1=1"
+        "SELECT {SUMMARY_COLUMNS} FROM codescan_git_credentials WHERE tenant_id = "
     ));
+    qb.push_bind(admin.tenant_id);
     if let Some(platform) = &q.platform {
         qb.push(" AND platform = ").push_bind(platform.clone());
     }
@@ -192,11 +199,12 @@ pub(crate) async fn create_credential(
 
     let query = format!(
         "INSERT INTO codescan_git_credentials \
-         (user_id, name, platform, credential_type, encrypted_token, token_expires_at, updated_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,now()) RETURNING {SUMMARY_COLUMNS}"
+         (user_id, tenant_id, name, platform, credential_type, encrypted_token, token_expires_at, updated_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,now()) RETURNING {SUMMARY_COLUMNS}"
     );
     let created = sqlx::query_as::<_, CredentialSummary>(sqlx::AssertSqlSafe(query))
         .bind(user.id)
+        .bind(user.tenant_id)
         .bind(&body.name)
         .bind(&body.platform)
         .bind(&body.credential_type)
@@ -231,12 +239,15 @@ pub(crate) async fn create_credential(
 )]
 pub(crate) async fn get_credential(
     State(state): State<AppState>,
-    _admin: AdminOnly,
+    AdminOnly(admin): AdminOnly,
     Path(credential_id): Path<i64>,
 ) -> Result<Response, ApiError> {
-    let query = format!("SELECT {SUMMARY_COLUMNS} FROM codescan_git_credentials WHERE id = $1");
+    let query = format!(
+        "SELECT {SUMMARY_COLUMNS} FROM codescan_git_credentials WHERE id = $1 AND tenant_id = $2"
+    );
     let row = sqlx::query_as::<_, CredentialSummary>(sqlx::AssertSqlSafe(query))
         .bind(credential_id)
+        .bind(admin.tenant_id)
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| ApiError::NotFound("Credential not found".to_owned()))?;
@@ -278,13 +289,14 @@ pub(crate) struct CredentialUpdateResponse {
 )]
 pub(crate) async fn update_credential(
     State(state): State<AppState>,
-    _admin: AdminOnly,
+    AdminOnly(admin): AdminOnly,
     Path(credential_id): Path<i64>,
     ApiJson(body): ApiJson<UpdateCredentialRequest>,
 ) -> Result<Response, ApiError> {
     let exists: Option<(i64,)> =
-        sqlx::query_as("SELECT id FROM codescan_git_credentials WHERE id = $1")
+        sqlx::query_as("SELECT id FROM codescan_git_credentials WHERE id = $1 AND tenant_id = $2")
             .bind(credential_id)
+            .bind(admin.tenant_id)
             .fetch_optional(&state.db)
             .await?;
     if exists.is_none() {
@@ -324,11 +336,15 @@ pub(crate) async fn update_credential(
         set.push("updated_at = now()");
     }
     qb.push(" WHERE id = ").push_bind(credential_id);
+    qb.push(" AND tenant_id = ").push_bind(admin.tenant_id);
     qb.build().execute(&state.db).await?;
 
-    let query = format!("SELECT {SUMMARY_COLUMNS} FROM codescan_git_credentials WHERE id = $1");
+    let query = format!(
+        "SELECT {SUMMARY_COLUMNS} FROM codescan_git_credentials WHERE id = $1 AND tenant_id = $2"
+    );
     let updated = sqlx::query_as::<_, CredentialSummary>(sqlx::AssertSqlSafe(query))
         .bind(credential_id)
+        .bind(admin.tenant_id)
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| ApiError::NotFound("Credential not found".to_owned()))?;
@@ -366,13 +382,15 @@ pub(crate) struct CredentialDeleteResponse {
 )]
 pub(crate) async fn delete_credential(
     State(state): State<AppState>,
-    _admin: AdminOnly,
+    AdminOnly(admin): AdminOnly,
     Path(credential_id): Path<i64>,
 ) -> Result<Response, ApiError> {
-    let result = sqlx::query("DELETE FROM codescan_git_credentials WHERE id = $1")
-        .bind(credential_id)
-        .execute(&state.db)
-        .await?;
+    let result =
+        sqlx::query("DELETE FROM codescan_git_credentials WHERE id = $1 AND tenant_id = $2")
+            .bind(credential_id)
+            .bind(admin.tenant_id)
+            .execute(&state.db)
+            .await?;
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound("Credential not found".to_owned()));
     }
@@ -723,5 +741,64 @@ mod tests {
         let body: serde_json::Value = resp.json();
         assert_eq!(body["total"], 1);
         assert_eq!(body["data"][0]["platform"], "gitlab");
+    }
+
+    /// Tenant A's admin cannot list, read, update, or delete tenant B's git
+    /// credentials — even though this table is keyed by `user_id`, tenant
+    /// scoping is a separate, mandatory boundary on top of it (see the
+    /// module-level NOTE at the top of this file).
+    #[tokio::test]
+    async fn tenant_a_cannot_access_tenant_b_credentials() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin_a = sign_token(&state, "1", "admin");
+        let admin_b = crate::routes::test_support::sign_token_for_tenant(
+            &state,
+            "2",
+            "admin",
+            crate::routes::test_support::OTHER_TENANT_ID,
+        );
+        let server = test_server(state);
+
+        let created = server
+            .post("/api/v1/credentials")
+            .authorization_bearer(&admin_b)
+            .json(&serde_json::json!({"platform": "github", "token": "ghp_tenantbtoken123"}))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let credential_id = created.json::<serde_json::Value>()["credential"]["id"]
+            .as_i64()
+            .unwrap_or_default();
+
+        let listed = server
+            .get("/api/v1/credentials")
+            .authorization_bearer(&admin_a)
+            .await;
+        listed.assert_status_ok();
+        assert_eq!(listed.json::<serde_json::Value>()["total"], 0);
+
+        server
+            .get(&format!("/api/v1/credentials/{credential_id}"))
+            .authorization_bearer(&admin_a)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        server
+            .patch(&format!("/api/v1/credentials/{credential_id}"))
+            .authorization_bearer(&admin_a)
+            .json(&serde_json::json!({"name": "hijacked"}))
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        server
+            .delete(&format!("/api/v1/credentials/{credential_id}"))
+            .authorization_bearer(&admin_a)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+
+        // Tenant B still has it — proves the 404s above are tenant-scoped
+        // rejections, not accidental deletion/corruption.
+        server
+            .get(&format!("/api/v1/credentials/{credential_id}"))
+            .authorization_bearer(&admin_b)
+            .await
+            .assert_status_ok();
     }
 }

@@ -5,7 +5,7 @@
 use std::net::SocketAddr;
 
 use clap::{Parser, Subcommand};
-use skauswatch_pki::{grpc, health, routes, state};
+use skauswatch_pki::{grpc, health, maintenance, routes, state};
 
 /// SkausWatch PKI server.
 #[derive(Parser)]
@@ -78,7 +78,8 @@ async fn serve() -> anyhow::Result<()> {
     tracing::info!(%addr, "pki REST listening");
     readiness.set_ready();
 
-    // One signal fans out to both servers so REST and gRPC shut down together.
+    // One signal fans out to every server so REST, gRPC, and the
+    // maintenance listener shut down together.
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         shutdown_signal().await;
@@ -92,12 +93,28 @@ async fn serve() -> anyhow::Result<()> {
             .map_err(anyhow::Error::from)
     };
 
+    // mTLS-required maintenance listener (docs/v2-port/service-auth-model.md
+    // §3) — always part of the join; it degrades to "disabled" on its own
+    // when no SPIFFE identity is held rather than needing an enabled/
+    // disabled flag here (see maintenance::serve's docs).
+    let maintenance_addr: SocketAddr = ([0, 0, 0, 0], maintenance::port()).into();
+    let maintenance_fut = maintenance::serve(
+        state.clone(),
+        maintenance_addr,
+        wait_for_shutdown(shutdown_rx.clone()),
+    );
+
     if grpc::enabled() {
-        let grpc_fut = grpc::serve(state.clone(), wait_for_shutdown(shutdown_rx.clone()));
-        tokio::try_join!(http, grpc_fut)?;
+        let grpc_addr: SocketAddr = ([0, 0, 0, 0], grpc::port()).into();
+        let grpc_fut = grpc::serve(
+            state.clone(),
+            grpc_addr,
+            wait_for_shutdown(shutdown_rx.clone()),
+        );
+        tokio::try_join!(http, grpc_fut, maintenance_fut)?;
     } else {
         tracing::info!("gRPC server disabled");
-        http.await?;
+        tokio::try_join!(http, maintenance_fut)?;
     }
     Ok(())
 }

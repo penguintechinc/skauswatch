@@ -44,23 +44,67 @@ const AGENT_COLUMNS: &str = "SELECT id, agent_id, hostname, ip_address, os_type,
      agent_version, status, last_heartbeat, metadata, created_at, updated_at \
      FROM endpoint_agents WHERE TRUE";
 
-/// Router for /api/v1/endpoint. Also mounts the pre-rename `/edr/*` paths as
-/// a deprecated alias to the same handlers (see docs/MIGRATION.md) — old
-/// callers keep working and get `Deprecation`/`Sunset` response headers via
-/// [`crate::deprecated`].
+/// Router for /api/v1/endpoint — merges [`agent_router`] and
+/// [`operator_router`]. Used as-is by this module's own tests; the app-wide
+/// assembly (`routes/mod.rs`) mounts the two halves separately so
+/// `tenant_middleware` wraps only the operator half (see [`agent_router`]'s
+/// docs for why the agent-facing half must never sit behind it).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .merge(canonical_router())
-        .merge(legacy_router())
+    agent_router().merge(operator_router())
 }
 
-/// The canonical `/endpoint/*` routes.
-fn canonical_router() -> Router<AppState> {
+/// The HMAC-authenticated ENDPOINT agent ingestion routes (`EndpointAgent`
+/// extractor — `X-API-Key`/`X-Agent-ID` headers, never a bearer JWT). Per
+/// docs/v2-port/tenancy-model.md §3, an agent's tenant is resolved
+/// server-side from `endpoint_agents.tenant_id` (looked up by `agent_id`),
+/// not from a JWT `tenant` claim these requests don't and can't carry —
+/// `tenant_middleware` must never wrap this half of the router, or every
+/// agent request would be rejected before reaching the HMAC check at all.
+/// Also mounts the pre-rename `/edr/*` paths as a deprecated alias (see
+/// docs/MIGRATION.md).
+pub fn agent_router() -> Router<AppState> {
+    Router::new()
+        .merge(canonical_agent_router())
+        .merge(legacy_agent_router())
+}
+
+/// The canonical `/endpoint/*` agent-ingestion routes.
+fn canonical_agent_router() -> Router<AppState> {
     Router::new()
         .route("/endpoint/register", post(register_agent))
         .route("/endpoint/heartbeat", post(heartbeat))
         .route("/endpoint/events", post(report_events))
         .route("/endpoint/config", get(agent_config))
+}
+
+/// The deprecated `/edr/*` agent-ingestion aliases — identical handlers,
+/// tagged deprecated.
+fn legacy_agent_router() -> Router<AppState> {
+    Router::new()
+        .route("/edr/register", post(register_agent))
+        .route("/edr/heartbeat", post(heartbeat))
+        .route("/edr/events", post(report_events))
+        .route("/edr/config", get(agent_config))
+        .layer(axum::middleware::from_fn(
+            crate::deprecated::deprecated_alias,
+        ))
+}
+
+/// The JWT/`CurrentUser`-authenticated operator routes (agent list/get/
+/// events/deactivate, fleet statistics) — wrapped in `tenant_middleware`
+/// like every other authenticated route in the app-wide assembly. Also
+/// mounts the pre-rename `/edr/*` paths as a deprecated alias (see
+/// docs/MIGRATION.md).
+pub fn operator_router() -> Router<AppState> {
+    Router::new()
+        .merge(canonical_operator_router())
+        .merge(legacy_operator_router())
+}
+
+/// The canonical `/endpoint/*` operator routes.
+fn canonical_operator_router() -> Router<AppState> {
+    Router::new()
         .route("/endpoint/agents", get(list_agents))
         .route("/endpoint/agents/{agent_id}", get(get_agent))
         .route("/endpoint/agents/{agent_id}/events", get(get_agent_events))
@@ -71,13 +115,10 @@ fn canonical_router() -> Router<AppState> {
         .route("/endpoint/statistics", get(get_statistics))
 }
 
-/// The deprecated `/edr/*` aliases — identical handlers, tagged deprecated.
-fn legacy_router() -> Router<AppState> {
+/// The deprecated `/edr/*` operator aliases — identical handlers, tagged
+/// deprecated.
+fn legacy_operator_router() -> Router<AppState> {
     Router::new()
-        .route("/edr/register", post(register_agent))
-        .route("/edr/heartbeat", post(heartbeat))
-        .route("/edr/events", post(report_events))
-        .route("/edr/config", get(agent_config))
         .route("/edr/agents", get(list_agents))
         .route("/edr/agents/{agent_id}", get(get_agent))
         .route("/edr/agents/{agent_id}/events", get(get_agent_events))
@@ -347,7 +388,12 @@ pub(crate) async fn register_agent(
             .await?;
 
     if existing.is_some() {
-        // pyDAL sets updated_at automatically on every update (update=utcnow).
+        // Re-registration never touches tenant_id — an already-provisioned
+        // agent stays on the tenant it was created under (see
+        // docs/v2-port/tenancy-model.md §3: agent tenant is resolved
+        // server-side from the stored row, never re-derived from the
+        // request). pyDAL sets updated_at automatically on every update
+        // (update=utcnow).
         sqlx::query(
             "UPDATE endpoint_agents SET hostname = $1, ip_address = $2, os_type = $3, \
              os_version = $4, agent_version = $5, status = 'active', \
@@ -374,10 +420,17 @@ pub(crate) async fn register_agent(
         ));
     }
 
+    // A brand-new agent has no JWT/tenant claim to derive a tenant from (HMAC
+    // auth, not a bearer token — see the `agent_router` module docs). v2.0's
+    // provisioning model is admin-provisioned, single bootstrap tenant (no
+    // self-serve signup — docs/v2-port/tenancy-model.md §8), so new agents
+    // attach to that tenant, mirroring how `/auth/register` attaches new
+    // users to it. Multi-tenant agent provisioning (e.g. a per-tenant
+    // enrollment token) is out of scope for this fix — flagged for review.
     sqlx::query(
         "INSERT INTO endpoint_agents (agent_id, hostname, ip_address, os_type, os_version, \
-         agent_version, status, last_heartbeat, metadata, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'active', now(), $7, now(), now())",
+         agent_version, status, last_heartbeat, metadata, tenant_id, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'active', now(), $7, $8, now(), now())",
     )
     .bind(&v.agent_id)
     .bind(&v.hostname)
@@ -386,6 +439,7 @@ pub(crate) async fn register_agent(
     .bind(&v.os_version)
     .bind(&v.agent_version)
     .bind(&v.metadata)
+    .bind(crate::auth::default_tenant_uuid())
     .execute(&state.db)
     .await?;
 
@@ -587,21 +641,25 @@ fn parse_event(raw: &serde_json::Value) -> Result<EventInsert, String> {
 }
 
 /// Checks the event's agent exists then inserts it. `Ok(false)` = agent not
-/// registered (v1 skips the event with an error entry, not a 404).
+/// registered (v1 skips the event with an error entry, not a 404). Per
+/// docs/v2-port/tenancy-model.md §3, the event's `tenant_id` is resolved
+/// server-side from the owning `endpoint_agents` row (looked up by
+/// `agent_id`) — this HMAC-authenticated path carries no JWT/tenant claim of
+/// its own, so the agent's own tenant is the only trustworthy source.
 async fn store_event(db: &sqlx::PgPool, ev: &EventInsert) -> Result<bool, sqlx::Error> {
-    let exists: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM endpoint_agents WHERE agent_id = $1")
+    let agent: Option<(i32, uuid::Uuid)> =
+        sqlx::query_as("SELECT id, tenant_id FROM endpoint_agents WHERE agent_id = $1")
             .bind(&ev.agent_id)
             .fetch_optional(db)
             .await?;
-    if exists.is_none() {
+    let Some((_, tenant_id)) = agent else {
         return Ok(false);
-    }
+    };
     sqlx::query(
         "INSERT INTO endpoint_events (agent_id, event_type, severity, process_name, process_path, \
          process_hash, parent_process, command_line, network_connections, file_operations, \
-         registry_operations, details, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())",
+         registry_operations, details, tenant_id, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())",
     )
     .bind(&ev.agent_id)
     .bind(&ev.event_type)
@@ -615,6 +673,7 @@ async fn store_event(db: &sqlx::PgPool, ev: &EventInsert) -> Result<bool, sqlx::
     .bind(&ev.file_operations)
     .bind(&ev.registry_operations)
     .bind(&ev.details)
+    .bind(tenant_id)
     .execute(db)
     .await?;
     Ok(true)
@@ -922,6 +981,7 @@ pub(crate) async fn list_agents(
     };
 
     let mut qb = QueryBuilder::new(AGENT_COLUMNS);
+    qb.push(" AND tenant_id = ").push_bind(user.tenant_id);
     push_filters(&mut qb);
     qb.push(" ORDER BY last_heartbeat DESC LIMIT ")
         .push_bind(per_page)
@@ -930,6 +990,7 @@ pub(crate) async fn list_agents(
     let rows = qb.build_query_as::<AgentRow>().fetch_all(&state.db).await?;
 
     let mut cq = QueryBuilder::new("SELECT COUNT(*) FROM endpoint_agents WHERE TRUE");
+    cq.push(" AND tenant_id = ").push_bind(user.tenant_id);
     push_filters(&mut cq);
     let total: i64 = cq.build_query_scalar().fetch_one(&state.db).await?;
 
@@ -976,11 +1037,14 @@ pub(crate) struct AgentDetail {
 )]
 pub(crate) async fn get_agent(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(agent_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut qb = QueryBuilder::new(AGENT_COLUMNS);
-    qb.push(" AND agent_id = ").push_bind(&agent_id);
+    qb.push(" AND agent_id = ")
+        .push_bind(&agent_id)
+        .push(" AND tenant_id = ")
+        .push_bind(user.tenant_id);
     let row = qb
         .build_query_as::<AgentRow>()
         .fetch_optional(&state.db)
@@ -1061,13 +1125,14 @@ pub(crate) struct AgentEventsResponse {
 )]
 pub(crate) async fn get_agent_events(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(agent_id): Path<String>,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let exists: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM endpoint_agents WHERE agent_id = $1")
+        sqlx::query_as("SELECT id FROM endpoint_agents WHERE agent_id = $1 AND tenant_id = $2")
             .bind(&agent_id)
+            .bind(user.tenant_id)
             .fetch_optional(&state.db)
             .await?;
     if exists.is_none() {
@@ -1077,18 +1142,22 @@ pub(crate) async fn get_agent_events(
     let (page, per_page) = parse_page_params(&params, 50, 200);
     let rows = sqlx::query_as::<_, EventRow>(
         "SELECT id, event_type, severity, process_name, process_path, command_line, \
-         created_at FROM endpoint_events WHERE agent_id = $1 \
-         ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+         created_at FROM endpoint_events WHERE agent_id = $1 AND tenant_id = $2 \
+         ORDER BY created_at DESC LIMIT $3 OFFSET $4",
     )
     .bind(&agent_id)
+    .bind(user.tenant_id)
     .bind(per_page)
     .bind((page - 1) * per_page)
     .fetch_all(&state.db)
     .await?;
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_events WHERE agent_id = $1")
-        .bind(&agent_id)
-        .fetch_one(&state.db)
-        .await?;
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM endpoint_events WHERE agent_id = $1 AND tenant_id = $2",
+    )
+    .bind(&agent_id)
+    .bind(user.tenant_id)
+    .fetch_one(&state.db)
+    .await?;
 
     let items: Vec<serde_json::Value> = rows
         .iter()
@@ -1143,8 +1212,9 @@ pub(crate) async fn deactivate_agent(
     user.require_role(&["admin"])?;
 
     let exists: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM endpoint_agents WHERE agent_id = $1")
+        sqlx::query_as("SELECT id FROM endpoint_agents WHERE agent_id = $1 AND tenant_id = $2")
             .bind(&agent_id)
+            .bind(user.tenant_id)
             .fetch_optional(&state.db)
             .await?;
     if exists.is_none() {
@@ -1152,9 +1222,11 @@ pub(crate) async fn deactivate_agent(
     }
 
     sqlx::query(
-        "UPDATE endpoint_agents SET status = 'inactive', updated_at = now() WHERE agent_id = $1",
+        "UPDATE endpoint_agents SET status = 'inactive', updated_at = now() \
+         WHERE agent_id = $1 AND tenant_id = $2",
     )
     .bind(&agent_id)
+    .bind(user.tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -1208,19 +1280,24 @@ pub(crate) struct EndpointStatisticsResponse {
 )]
 pub(crate) async fn get_statistics(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let total_agents: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_agents")
-        .fetch_one(&state.db)
-        .await?;
-    let status_rows: Vec<(Option<String>, i64)> =
-        sqlx::query_as("SELECT status, COUNT(*) FROM endpoint_agents GROUP BY status")
-            .fetch_all(&state.db)
+    let total_agents: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_agents WHERE tenant_id = $1")
+            .bind(user.tenant_id)
+            .fetch_one(&state.db)
             .await?;
+    let status_rows: Vec<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT status, COUNT(*) FROM endpoint_agents WHERE tenant_id = $1 GROUP BY status",
+    )
+    .bind(user.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
     let os_rows: Vec<(Option<String>, i64)> = sqlx::query_as(
         "SELECT os_type, COUNT(*) FROM endpoint_agents \
-         WHERE os_type IS NOT NULL AND os_type <> '' GROUP BY os_type",
+         WHERE tenant_id = $1 AND os_type IS NOT NULL AND os_type <> '' GROUP BY os_type",
     )
+    .bind(user.tenant_id)
     .fetch_all(&state.db)
     .await?;
     let mut agents_by_os = serde_json::Map::new();
@@ -1232,21 +1309,27 @@ pub(crate) async fn get_statistics(
 
     let stale_cutoff = Utc::now().naive_utc() - chrono::Duration::minutes(5);
     let stale_agents: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM endpoint_agents WHERE status = 'active' AND last_heartbeat < $1",
+        "SELECT COUNT(*) FROM endpoint_agents \
+         WHERE tenant_id = $1 AND status = 'active' AND last_heartbeat < $2",
     )
+    .bind(user.tenant_id)
     .bind(stale_cutoff)
     .fetch_one(&state.db)
     .await?;
 
-    let total_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_events")
-        .fetch_one(&state.db)
-        .await?;
-    let cutoff_24h = Utc::now().naive_utc() - chrono::Duration::days(1);
-    let events_last_24h: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_events WHERE created_at >= $1")
-            .bind(cutoff_24h)
+    let total_events: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_events WHERE tenant_id = $1")
+            .bind(user.tenant_id)
             .fetch_one(&state.db)
             .await?;
+    let cutoff_24h = Utc::now().naive_utc() - chrono::Duration::days(1);
+    let events_last_24h: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM endpoint_events WHERE tenant_id = $1 AND created_at >= $2",
+    )
+    .bind(user.tenant_id)
+    .bind(cutoff_24h)
+    .fetch_one(&state.db)
+    .await?;
 
     Ok(Json(serde_json::json!({
         "total_agents": total_agents,
@@ -1684,15 +1767,33 @@ mod tests {
     }
 
     async fn seed_agent(state: &AppState, agent_id: &str, status: &str) -> i32 {
+        seed_agent_in_tenant(
+            state,
+            crate::routes::test_support::default_tenant_id(),
+            agent_id,
+            status,
+        )
+        .await
+    }
+
+    /// Like [`seed_agent`] but stamps an explicit `tenant_id` — used by the
+    /// cross-tenant isolation tests below.
+    async fn seed_agent_in_tenant(
+        state: &AppState,
+        tenant_id: uuid::Uuid,
+        agent_id: &str,
+        status: &str,
+    ) -> i32 {
         let (id,): (i32,) = sqlx::query_as(
             "INSERT INTO endpoint_agents \
              (agent_id, hostname, ip_address, os_type, os_version, agent_version, status, \
-              last_heartbeat, metadata, created_at, updated_at) \
-             VALUES ($1, 'host-1', '10.0.0.1', 'linux', 'Ubuntu', '1.0', $2, now(), '{}', \
+              last_heartbeat, metadata, tenant_id, created_at, updated_at) \
+             VALUES ($1, 'host-1', '10.0.0.1', 'linux', 'Ubuntu', '1.0', $2, now(), '{}', $3, \
                      now(), now()) RETURNING id",
         )
         .bind(agent_id)
         .bind(status)
+        .bind(tenant_id)
         .fetch_one(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed_agent: {e}"));
@@ -1921,5 +2022,111 @@ mod tests {
         let body: serde_json::Value = res.json();
         assert!(body["total_agents"].as_i64().unwrap_or(0) >= 1);
         assert!(body["agents_by_status"]["active"].as_i64().unwrap_or(0) >= 1);
+    }
+
+    // -- tenant isolation (docs/v2-port/tenancy-model.md) -------------------
+
+    #[tokio::test]
+    async fn new_agent_registration_stamps_the_bootstrap_tenant() {
+        let state = db_state(dev_license()).await;
+        let server = server_for(state.clone()).await;
+
+        server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "tenant-check-agent")
+            .add_header("X-API-Key", valid_key("tenant-check-agent"))
+            .json(&serde_json::json!({
+                "agent_id": "tenant-check-agent", "hostname": "h", "agent_version": "1"
+            }))
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        let (tenant_id,): (uuid::Uuid,) =
+            sqlx::query_as("SELECT tenant_id FROM endpoint_agents WHERE agent_id = $1")
+                .bind("tenant-check-agent")
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or_else(|e| panic!("fetch: {e}"));
+        assert_eq!(tenant_id, crate::routes::test_support::default_tenant_id());
+    }
+
+    #[tokio::test]
+    async fn reported_events_inherit_the_agents_tenant_not_the_bootstrap_default() {
+        let state = db_state(dev_license()).await;
+        let tenant_b = crate::routes::test_support::seed_tenant(&state.db, "ep-tenant-b").await;
+        seed_agent_in_tenant(&state, tenant_b, "tenant-b-agent", "active").await;
+        let server = server_for(state.clone()).await;
+
+        server
+            .post("/api/v1/endpoint/events")
+            .add_header("X-Agent-ID", "tenant-b-agent")
+            .add_header("X-API-Key", valid_key("tenant-b-agent"))
+            .json(&serde_json::json!([
+                {"agent_id": "tenant-b-agent", "event_type": "process_start"},
+            ]))
+            .await
+            .assert_status(StatusCode::ACCEPTED);
+
+        let (tenant_id,): (uuid::Uuid,) =
+            sqlx::query_as("SELECT tenant_id FROM endpoint_events WHERE agent_id = $1")
+                .bind("tenant-b-agent")
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or_else(|e| panic!("fetch: {e}"));
+        assert_eq!(tenant_id, tenant_b);
+    }
+
+    #[tokio::test]
+    async fn tenant_a_cannot_list_get_or_deactivate_tenant_bs_agent() {
+        let state = db_state(dev_license()).await;
+        let tenant_b = crate::routes::test_support::seed_tenant(&state.db, "ep-tenant-b-2").await;
+        seed_agent_in_tenant(&state, tenant_b, "b-only-agent", "active").await;
+        let (_, admin_a) = authed_user(&state, "ep-admin-a@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let list = server
+            .get("/api/v1/endpoint/agents")
+            .authorization_bearer(&admin_a)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        let items = body["items"].as_array().cloned().unwrap_or_default();
+        assert!(items.iter().all(|i| i["agent_id"] != "b-only-agent"));
+
+        let get = server
+            .get("/api/v1/endpoint/agents/b-only-agent")
+            .authorization_bearer(&admin_a)
+            .await;
+        get.assert_status(StatusCode::NOT_FOUND);
+
+        let events = server
+            .get("/api/v1/endpoint/agents/b-only-agent/events")
+            .authorization_bearer(&admin_a)
+            .await;
+        events.assert_status(StatusCode::NOT_FOUND);
+
+        let deactivate = server
+            .post("/api/v1/endpoint/agents/b-only-agent/deactivate")
+            .authorization_bearer(&admin_a)
+            .await;
+        deactivate.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn statistics_are_scoped_to_the_caller_tenant() {
+        let state = db_state(dev_license()).await;
+        let tenant_b =
+            crate::routes::test_support::seed_tenant(&state.db, "ep-tenant-stats-b").await;
+        seed_agent_in_tenant(&state, tenant_b, "stats-b-agent", "active").await;
+        let (_, token_a) = authed_user(&state, "ep-stats-a@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let stats = server
+            .get("/api/v1/endpoint/statistics")
+            .authorization_bearer(&token_a)
+            .await;
+        stats.assert_status_ok();
+        let body: serde_json::Value = stats.json();
+        assert_eq!(body["total_agents"], 0);
     }
 }

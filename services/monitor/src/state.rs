@@ -28,18 +28,43 @@ pub struct AppStateInner {
     /// Live-event broadcast bus backing `GET /events/stream`. No producer
     /// publishes to it yet — see `src/routes/events.rs` module docs.
     pub event_bus: tokio::sync::broadcast::Sender<BaseEvent>,
+    /// HS256 signing secret for bearer tokens (house `JWT_SECRET_KEY`,
+    /// finding #3) — loaded via `skauswatch_auth::load_jwt_secret`, which
+    /// FAILS STARTUP in production rather than the previous
+    /// `MONITOR_SECRET_KEY`-or-random-UUID fallback. That fallback was
+    /// worse than refusing to start: a fresh random secret on every
+    /// restart silently invalidated every outstanding token, and — because
+    /// it was never the *same* secret manager mints access tokens with —
+    /// no genuine caller's token could ever validate here in the first
+    /// place. Shared with every other JWT-consuming service (manager,
+    /// vault, pki, sshca, codescan-backend) via the same env var, as it
+    /// must be: they all verify tokens minted by manager's login endpoint
+    /// against one shared secret.
+    pub jwt_secret: String,
 }
 
 /// Cheap-to-clone handle used as axum state.
 pub type AppState = Arc<AppStateInner>;
+
+/// Lets `skauswatch_auth::tenant_middleware`/`AuthenticatedCaller` verify
+/// tokens against this service's `JWT_SECRET_KEY` without re-threading the
+/// secret through every call site — see `crates/skauswatch-auth`.
+impl skauswatch_auth::JwtSecretSource for AppStateInner {
+    fn jwt_secret(&self) -> &str {
+        &self.jwt_secret
+    }
+}
 
 impl AppStateInner {
     /// Builds state from environment configuration. The event store
     /// degrades gracefully: a misconfigured/unreachable backend logs a
     /// warning and leaves `event_store` `None` rather than failing startup
     /// (matches v1: ES/Mongo init failures are caught and logged, service
-    /// still starts — see `main.py::startup`).
+    /// still starts — see `main.py::startup`). Fails fast (before any
+    /// network I/O) if `JWT_SECRET_KEY` is missing in production — see
+    /// `skauswatch_auth::load_jwt_secret` and the `jwt_secret` field docs.
     pub async fn from_env() -> anyhow::Result<AppState> {
+        let jwt_secret = skauswatch_auth::load_jwt_secret().map_err(|e| anyhow::anyhow!("{e}"))?;
         let config = Config::from_env();
 
         let cfg = LicenseConfig::from_env("skauswatch")
@@ -57,11 +82,15 @@ impl AppStateInner {
             license,
             event_store,
             event_bus,
+            jwt_secret,
         }))
     }
 
     /// Test constructor: no event store, dev auth bypass off by default so
-    /// auth tests exercise the real path unless a test opts in.
+    /// auth tests exercise the real path unless a test opts in. Fixed
+    /// `jwt_secret` (not loaded from env — mutating process env in tests is
+    /// `unsafe`, denied workspace-wide) so tests can mint valid bearer
+    /// tokens deterministically; see `routes::test_support::sign_claims`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn for_tests(license: Arc<LicenseClient>) -> AppState {
         let (event_bus, _rx) = tokio::sync::broadcast::channel(EVENT_BUS_CAPACITY);
@@ -70,6 +99,7 @@ impl AppStateInner {
             license,
             event_store: None,
             event_bus,
+            jwt_secret: "test-secret".to_owned(),
         })
     }
 }

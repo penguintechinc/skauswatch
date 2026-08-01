@@ -46,6 +46,35 @@ pub(crate) mod test_support {
             Err(e) => panic!("issue test token: {e}"),
         }
     }
+
+    /// A fixed tenant id for DB-backed tests that don't specifically
+    /// exercise cross-tenant isolation — pair with [`bearer`] and the
+    /// `crate::tenant::TENANT_HEADER` header.
+    #[allow(clippy::panic)] // test-only helper fails loudly by design
+    pub(crate) fn tenant() -> uuid::Uuid {
+        match uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111") {
+            Ok(u) => u,
+            Err(e) => panic!("fixed test tenant: {e}"),
+        }
+    }
+
+    /// A [`skauswatch_identity::IdentityProvider`] holding no identity at
+    /// all — via the crate's `testutil`-feature test seam
+    /// (`IdentityProvider::degraded_for_test`), not by asking a real
+    /// `connect()` to degrade. Deliberately does not reuse `from_env`'s
+    /// production bootstrap path here at all: since the identity
+    /// prod-hard-fail bypass fix, there is no deployment-domain argument
+    /// left to coax `connect()` into degrading, and there shouldn't be —
+    /// forcing degrade via a real connect would mean re-introducing
+    /// exactly the kind of domain-based override this fix removed. Used by
+    /// `grpc`/`maintenance` tests that need to exercise the "identity held
+    /// but degraded" branch specifically, distinct from the `identity:
+    /// None` shortcut every other test constructor uses.
+    pub(crate) fn degraded_identity() -> std::sync::Arc<skauswatch_identity::IdentityProvider> {
+        let provider = skauswatch_identity::IdentityProvider::degraded_for_test();
+        assert!(!provider.has_identity());
+        std::sync::Arc::new(provider)
+    }
 }
 
 use std::collections::HashMap;
@@ -53,8 +82,17 @@ use std::collections::HashMap;
 use axum::Router;
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
+use penguin_licensing::axum::{FlagGate, flag_gate};
 
 use crate::state::AppState;
+
+/// PostHog flag gating certificate/SSH-certificate *issuance* — default
+/// OFF until validated (see `general.md` Feature Toggling & License
+/// Enforcement). Independent of `openapi::OPENAPI_FLAG`. This is a
+/// separate concern from tenant isolation: a disabled flag blocks issuance
+/// for every tenant; `crate::tenant::TenantId` still governs which
+/// tenant's data an *enabled* request can touch.
+pub const ISSUANCE_FLAG: &str = "skauswatch.pki";
 
 /// Extracts the `X-User-ID` requester header (v1 `request.headers.get`).
 pub fn user_id(headers: &HeaderMap) -> Option<String> {
@@ -75,10 +113,31 @@ pub fn page_params(q: &HashMap<String, String>) -> (i64, i64) {
 }
 
 /// Builds the full /api/v1 application router.
+///
+/// Cert-issuance routes (`POST /certificates`, `POST /ssh/certificates`)
+/// are split into their own sub-router so `ISSUANCE_FLAG` can gate them
+/// without affecting the read/list/revoke routes on the same paths —
+/// `Router::merge` combines method routers registered for the same path
+/// across two routers, so `GET /certificates` (ungated) and
+/// `POST /certificates` (gated) coexist normally once merged. The flag
+/// layer is applied to `issuance` before it merges into `api`, so it sits
+/// *innermost* relative to the outer `AuthenticatedCaller` layer below —
+/// auth runs first, then the flag check, matching this crate's
+/// auth → feature layering (this service has no per-request tenant scope
+/// to gate on between the two, unlike the manager's tenant → scope →
+/// feature contract).
 pub fn router(state: AppState) -> Router {
+    let issuance = Router::new()
+        .route("/certificates", post(x509::issue))
+        .route("/ssh/certificates", post(ssh::issue))
+        .layer(axum::middleware::from_fn_with_state(
+            FlagGate::new(state.license.clone(), ISSUANCE_FLAG),
+            flag_gate,
+        ));
+
     let api = Router::new()
         // ---- X.509 (/api/v1/certificates) ----
-        .route("/certificates", post(x509::issue).get(x509::list))
+        .route("/certificates", get(x509::list))
         .route("/certificates/search", post(x509::search))
         .route("/certificates/crl", get(x509::get_crl))
         .route("/certificates/ocsp", post(x509::ocsp))
@@ -93,7 +152,7 @@ pub fn router(state: AppState) -> Router {
         .route("/certificates/{cert_id}/revoke", post(x509::revoke_cert))
         .route("/certificates/{cert_id}/status", get(x509::cert_status))
         // ---- SSH (/api/v1/ssh) ----
-        .route("/ssh/certificates", post(ssh::issue).get(ssh::list))
+        .route("/ssh/certificates", get(ssh::list))
         .route("/ssh/certificates/serial/{serial}", get(ssh::get_by_serial))
         .route("/ssh/certificates/{cert_id}", get(ssh::get_cert))
         .route("/ssh/certificates/{cert_id}/revoke", post(ssh::revoke_cert))
@@ -106,11 +165,17 @@ pub fn router(state: AppState) -> Router {
         .route("/ssh/config/ssh-config", post(ssh::ssh_config))
         .route("/ssh/verify", post(ssh::verify))
         // ---- Common (/api/v1) ----
+        // NOTE: `/expiring` and `/cleanup` are deliberately NOT mounted here
+        // — they moved to the dedicated mTLS-required maintenance listener
+        // (`crate::maintenance`) so their cross-tenant access is
+        // cryptographically enforced (SPIFFE `endpoint-agent-maintenance`
+        // identity) instead of relying on this HS256-bearer-gated listener's
+        // network reachability. See `crate::maintenance` module docs and
+        // `docs/v2-port/service-auth-model.md` §3.
         .route("/statistics", get(common::statistics))
         .route("/ca/info", get(common::all_ca_info))
         .route("/audit", get(common::audit))
-        .route("/expiring", get(common::expiring))
-        .route("/cleanup", post(common::cleanup))
+        .merge(issuance)
         // ---- OpenAPI (/api/v1/openapi.json) ----
         .merge(openapi::router())
         .layer(axum::middleware::from_extractor_with_state::<
@@ -193,8 +258,6 @@ mod tests {
             ("GET", "/api/v1/statistics"),
             ("GET", "/api/v1/ca/info"),
             ("GET", "/api/v1/audit"),
-            ("GET", "/api/v1/expiring"),
-            ("POST", "/api/v1/cleanup"),
             ("GET", "/api/v1/openapi.json"),
         ] {
             let res = match method {
@@ -202,6 +265,28 @@ mod tests {
                 _ => server.post(path).await,
             };
             res.assert_status(StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    /// Regression for R3-1 (`docs/v2-port/service-auth-model.md` §3):
+    /// `/expiring` and `/cleanup` must no longer be reachable on the
+    /// primary, HS256-bearer-gated listener at all — not even behind the
+    /// auth layer — since they now live exclusively on the dedicated
+    /// mTLS-required maintenance listener (`crate::maintenance`). A bare
+    /// 404 here (not 401) proves the route was actually removed, not just
+    /// re-gated.
+    #[tokio::test]
+    async fn expiring_and_cleanup_are_no_longer_served_on_the_primary_router() {
+        let server = test_server();
+        for (method, path) in [("GET", "/api/v1/expiring"), ("POST", "/api/v1/cleanup")] {
+            let request = match method {
+                "GET" => server.get(path),
+                _ => server.post(path),
+            };
+            let res = request
+                .add_header(axum::http::header::AUTHORIZATION, bearer("test-secret"))
+                .await;
+            res.assert_status(StatusCode::NOT_FOUND);
         }
     }
 
@@ -226,5 +311,68 @@ mod tests {
             .add_header(axum::http::header::AUTHORIZATION, bearer("wrong-secret"))
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    /// `release_mode = true` license client (flags default OFF, no dev
+    /// bypass) — mirrors `openapi::tests::gated_license`.
+    fn gated_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
+        let mut cfg = match penguin_licensing::LicenseConfig::new("skauswatch") {
+            Ok(c) => c,
+            Err(e) => panic!("license config: {e}"),
+        };
+        cfg.release_mode = true;
+        match penguin_licensing::LicenseClient::new(cfg) {
+            Ok(c) => c,
+            Err(e) => panic!("license client: {e}"),
+        }
+    }
+
+    /// Regression: cert issuance (both CAs) must be denied while
+    /// `ISSUANCE_FLAG` evaluates disabled, even for an authenticated,
+    /// correctly-tenanted caller — read/list/revoke routes on the same
+    /// paths are unaffected by the flag.
+    #[tokio::test]
+    async fn issuance_is_denied_when_the_flag_is_disabled() {
+        let state = AppStateInner::for_tests_with_license(gated_license());
+        let server = axum_test::TestServer::new(super::router(state));
+        let tenant = uuid::Uuid::new_v4().to_string();
+
+        let x509_res = server
+            .post("/api/v1/certificates")
+            .add_header(axum::http::header::AUTHORIZATION, bearer("test-secret"))
+            .add_header(crate::tenant::TENANT_HEADER, tenant.clone())
+            .json(&serde_json::json!({ "subject": "CN=flag-off.example.com" }))
+            .await;
+        x509_res.assert_status(StatusCode::FORBIDDEN);
+        let x509_body: serde_json::Value = x509_res.json();
+        assert_eq!(x509_body["error"], "feature_disabled");
+        assert_eq!(x509_body["flag"], super::ISSUANCE_FLAG);
+
+        let ssh_res = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(axum::http::header::AUTHORIZATION, bearer("test-secret"))
+            .add_header(crate::tenant::TENANT_HEADER, tenant)
+            .json(&serde_json::json!({
+                "certificate_type": "user",
+                "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabcdefghij",
+                "key_id": "k",
+                "principals": ["alice"],
+            }))
+            .await;
+        ssh_res.assert_status(StatusCode::FORBIDDEN);
+        let ssh_body: serde_json::Value = ssh_res.json();
+        assert_eq!(ssh_body["error"], "feature_disabled");
+
+        // Read routes on the same paths are unaffected by the flag —
+        // proves the split targets POST only, not the whole path.
+        let list_res = server
+            .get("/api/v1/certificates")
+            .add_header(axum::http::header::AUTHORIZATION, bearer("test-secret"))
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .await;
+        assert_ne!(list_res.status_code(), StatusCode::FORBIDDEN);
     }
 }

@@ -76,6 +76,7 @@ pub(crate) async fn create_one_time_secret(
     body: Option<Json<CreateBody>>,
 ) -> Result<(axum::http::StatusCode, Json<Value>), ApiError> {
     user.require_scope("secrets:write")?;
+    let tenant_id = user.tenant_uuid()?;
 
     let body = body.map(|Json(b)| b).unwrap_or(CreateBody {
         value: None,
@@ -99,10 +100,12 @@ pub(crate) async fn create_one_time_secret(
     let expires_at = Utc::now() + chrono::Duration::seconds(ttl_seconds);
 
     sqlx::query(
-        "INSERT INTO vault_one_time_secrets (id, token_hash, encrypted_value, encrypted_dek, \
-         dek_version, expires_at, created_by, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        "INSERT INTO vault_one_time_secrets (id, tenant_id, token_hash, encrypted_value, \
+         encrypted_dek, dek_version, expires_at, created_by, created_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
     )
     .bind(&secret_id)
+    .bind(tenant_id)
     .bind(&token_hash)
     .bind(&encrypted_value)
     .bind(&encrypted_dek)
@@ -164,6 +167,16 @@ pub(crate) struct OneTimeValueResponse {
         (status = 410, description = "Secret already viewed or expired", body = ErrorResponse),
     ),
 )]
+/// Deliberately **not** filtered by `tenant_id`: this route has no
+/// `CurrentUser` (see the doc comment above) so there is no validated
+/// tenant claim to filter on. This is a documented exception to "every
+/// query filters on tenant_id, no exceptions" — the URL-embedded token
+/// (32 cryptographically random bytes, SHA-256-hashed, globally unique by
+/// construction) is already the *complete* credential; a tenant filter
+/// would add no isolation value on top of it, since possessing the token
+/// already proves authorization regardless of tenant. `tenant_id` is still
+/// stamped on the row at creation (`create_one_time_secret`) for audit/
+/// listing purposes, just never consulted on this read path.
 pub(crate) async fn retrieve_one_time_secret(
     State(state): State<AppState>,
     Path(token): Path<String>,
@@ -357,12 +370,16 @@ mod tests {
         let (ciphertext, dek, dek_version) = crate::routes::test_support::test_envelope()
             .encrypt("stale")
             .unwrap_or_else(|e| panic!("encrypt: {e}"));
+        let tenant_id: Uuid = crate::routes::test_support::TEST_TENANT
+            .parse()
+            .unwrap_or_else(|e| panic!("test tenant uuid: {e}"));
         sqlx::query(
-            "INSERT INTO vault_one_time_secrets (id, token_hash, encrypted_value, \
+            "INSERT INTO vault_one_time_secrets (id, tenant_id, token_hash, encrypted_value, \
              encrypted_dek, dek_version, expires_at, created_by, created_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,'u',$7)",
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'u',$8)",
         )
         .bind(Uuid::new_v4().to_string())
+        .bind(tenant_id)
         .bind(&token_hash)
         .bind(ciphertext)
         .bind(dek)

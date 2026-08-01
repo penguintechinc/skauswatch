@@ -27,6 +27,9 @@ skauswatch-s3 = { path = "crates/skauswatch-s3" }
 # builders) — see docs/v2-port/testing-pattern.md. Added as a dev-dependency
 # by service crates, never a runtime dependency.
 skauswatch-testkit = { path = "crates/skauswatch-testkit" }
+# SPIFFE Workload API integration (SVID-based mTLS, AWS federation) shared
+# by every service — see crates/skauswatch-identity.
+skauswatch-identity = { path = "crates/skauswatch-identity" }
 
 # Async runtime
 tokio = { version = "=1.52.3", features = ["full"] }
@@ -79,6 +82,17 @@ aws-config = { version = "=1.9.0", default-features = false, features = [
 aws-sdk-s3 = { version = "=1.138.0", default-features = false, features = [
     "sigv4a",
     "http-1x",
+    "default-https-client",
+    "rt-tokio",
+] }
+# aws-sdk-sts: hybrid S3 bucket-credential model (crates/skauswatch-s3
+# credentials.rs) — sts:AssumeRole is the preferred credential path for
+# real-AWS buckets (envelope-encrypted static keys are the fallback for
+# S3-compatible endpoints with no STS, e.g. MinIO/Wasabi). Already present
+# transitively via aws-config's "sso" feature at a compatible version; same
+# trim as aws-sdk-s3/aws-sdk-secretsmanager above — no sigv4a/http-1x needed
+# for a low-volume control-plane API like STS.
+aws-sdk-sts = { version = "=1.108.0", default-features = false, features = [
     "default-https-client",
     "rt-tokio",
 ] }
@@ -170,6 +184,17 @@ tokio-cron-scheduler = "=0.15.1"
 wiremock = "=0.6.5"
 mockall = "=0.15.0"
 axum-test = "=21.0.0"
+
+# SPIFFE Workload API (skauswatch-identity): SVID-based mTLS + JWT-SVID
+# federation. rustls/tokio-rustls are pinned to the exact versions already
+# resolved transitively elsewhere in the tree (reqwest's "rustls" feature,
+# sqlx's "tls-rustls" feature) — see `cargo tree -i rustls@0.23.42` — so
+# adding them as direct dependencies here does not move anything already
+# locked. tokio-rustls is dev-only (mTLS handshake tests); rustls itself is
+# a runtime dependency (building `rustls::ServerConfig`/`ClientConfig`).
+spiffe = { version = "=0.16.0", default-features = false, features = ["workload-api"] }
+rustls = "=0.23.42"
+tokio-rustls = "=0.26.4"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

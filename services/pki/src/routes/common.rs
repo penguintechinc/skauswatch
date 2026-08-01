@@ -1,5 +1,19 @@
 //! Common REST handlers (v1 `api/v1/common.py`): statistics, combined CA
 //! info, audit log, expiring certificates, and expired-status cleanup.
+//!
+//! TENANT ISOLATION (`docs/v2-port/tenancy-model.md` §6): `statistics` and
+//! `audit` are per-tenant operational views and are filtered on the
+//! caller's `crate::tenant::TenantId` like every other endpoint. `expiring`
+//! and `cleanup` are the one deliberate exception in this service — see
+//! their doc comments below.
+//!
+//! `expiring`/`cleanup` are defined here (bodies unchanged) but are no
+//! longer mounted on this crate's primary, HS256-bearer-gated router
+//! (`crate::routes::router`) or documented in the public OpenAPI spec —
+//! they're served exclusively from the dedicated mTLS-required maintenance
+//! listener, `crate::maintenance`, which is also where their request/
+//! response-level tests now live. See that module's docs and
+//! `docs/v2-port/service-auth-model.md` §3.
 
 use std::collections::HashMap;
 
@@ -13,6 +27,7 @@ use uuid::Uuid;
 
 use crate::error::{ApiError, ErrorResponse};
 use crate::state::AppState;
+use crate::tenant::TenantId;
 
 /// GET /api/v1/statistics — combined X.509 + SSH counts.
 #[utoipa::path(
@@ -27,8 +42,11 @@ use crate::state::AppState;
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
 )]
-pub async fn statistics(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(st.manager.statistics().await?))
+pub async fn statistics(
+    State(st): State<AppState>,
+    TenantId(tenant): TenantId,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(st.manager.statistics(tenant).await?))
 }
 
 /// GET /api/v1/ca/info — info for both certificate authorities.
@@ -86,6 +104,7 @@ pub async fn all_ca_info(State(st): State<AppState>) -> Json<Value> {
 )]
 pub async fn audit(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
     let page: i64 = q.get("page").and_then(|v| v.parse().ok()).unwrap_or(1);
@@ -97,14 +116,14 @@ pub async fn audit(
     let cert_type = q.get("certificate_type").map(String::as_str);
 
     let mut count = QueryBuilder::new("SELECT COUNT(*) FROM pki_audit_log");
-    push_audit_filters(&mut count, event_type, cert_type);
+    push_audit_filters(&mut count, tenant, event_type, cert_type);
     let total: i64 = count.build().fetch_one(st.manager.db()).await?.try_get(0)?;
 
     let mut qb = QueryBuilder::new(
         "SELECT id, event_type, certificate_type, certificate_id, serial_number, subject, \
          actor_id, action, status, error_message, timestamp FROM pki_audit_log",
     );
-    push_audit_filters(&mut qb, event_type, cert_type);
+    push_audit_filters(&mut qb, tenant, event_type, cert_type);
     qb.push(" ORDER BY timestamp DESC LIMIT ")
         .push_bind(page_size)
         .push(" OFFSET ")
@@ -143,20 +162,31 @@ pub async fn audit(
     })))
 }
 
-/// GET /api/v1/expiring — certificates expiring within N days.
+/// GET /api/v1/expiring (served only via `crate::maintenance`) —
+/// certificates expiring within N days.
+///
+/// CROSS-TENANT BY DESIGN: unlike every other query in this service, this
+/// scans `x509_certificates`/`ssh_certificates` across all tenants with no
+/// `tenant_id` filter. This is a deliberate exception (not an oversight —
+/// see `docs/v2-port/tenancy-model.md` §6), authorized by the dedicated
+/// `spiffe://penguintech.io/<env>/endpoint-agent-maintenance` mTLS peer
+/// identity `crate::maintenance` requires to complete a connection to this
+/// handler at all (`docs/v2-port/service-auth-model.md` §3) — a
+/// cryptographic check, not the network-topology-only enforcement this
+/// service relied on previously. No local extractor/scope check is needed
+/// here: by the time this handler runs, the caller has already proven that
+/// identity at the TLS layer.
 #[utoipa::path(
     get,
     path = "/api/v1/expiring",
     tag = "common",
     operation_id = "common_expiring",
-    security(("bearer_jwt" = [])),
     params(
         ("days" = Option<i64>, Query, description = "Expiry window in days (default 30)"),
         ("type" = Option<String>, Query, description = "x509 | ssh | all (default all)"),
     ),
     responses(
         (status = 200, description = "Certificates expiring within the window", body = serde_json::Value),
-        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
 )]
@@ -224,16 +254,20 @@ pub async fn expiring(
     Ok(Json(result))
 }
 
-/// POST /api/v1/cleanup — mark expired certificates as `expired`.
+/// POST /api/v1/cleanup (served only via `crate::maintenance`) — mark
+/// expired certificates as `expired`.
+///
+/// CROSS-TENANT BY DESIGN — same disposition and rationale as `expiring`
+/// above: a maintenance sweep across every tenant's expired rows,
+/// cryptographically authorized by the `endpoint-agent-maintenance` mTLS
+/// peer identity (see that handler's doc comment).
 #[utoipa::path(
     post,
     path = "/api/v1/cleanup",
     tag = "common",
     operation_id = "common_cleanup",
-    security(("bearer_jwt" = [])),
     responses(
         (status = 200, description = "Cleanup result", body = serde_json::Value),
-        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
 )]
@@ -263,21 +297,16 @@ pub async fn cleanup(State(st): State<AppState>) -> Result<Json<Value>, ApiError
 
 fn push_audit_filters(
     qb: &mut QueryBuilder<sqlx::Postgres>,
+    tenant: Uuid,
     event_type: Option<&str>,
     cert_type: Option<&str>,
 ) {
-    let mut first = true;
-    let mut sep = |qb: &mut QueryBuilder<sqlx::Postgres>| {
-        qb.push(if first { " WHERE " } else { " AND " });
-        first = false;
-    };
+    qb.push(" WHERE tenant_id = ").push_bind(tenant);
     if let Some(e) = event_type {
-        sep(qb);
-        qb.push("event_type = ").push_bind(e.to_owned());
+        qb.push(" AND event_type = ").push_bind(e.to_owned());
     }
     if let Some(c) = cert_type {
-        sep(qb);
-        qb.push("certificate_type = ").push_bind(c.to_owned());
+        qb.push(" AND certificate_type = ").push_bind(c.to_owned());
     }
 }
 
@@ -293,8 +322,10 @@ fn push_audit_filters(
 mod tests {
     use axum::http::StatusCode;
     use sqlx::QueryBuilder;
+    use uuid::Uuid;
 
     use crate::state::AppStateInner;
+    use crate::tenant::TENANT_HEADER;
 
     use super::push_audit_filters;
 
@@ -309,15 +340,27 @@ mod tests {
         }
     }
 
+    /// Fixed tenant used by tests that don't specifically exercise
+    /// cross-tenant isolation.
+    fn tenant() -> Uuid {
+        Uuid::new_v4()
+    }
+
     #[test]
     fn push_audit_filters_builds_expected_where_clauses() {
+        let t = tenant();
         let mut qb = QueryBuilder::new("SELECT 1 FROM x");
-        push_audit_filters(&mut qb, None, None);
-        assert_eq!(qb.sql().as_str(), "SELECT 1 FROM x");
+        push_audit_filters(&mut qb, t, None, None);
+        assert!(
+            qb.sql()
+                .as_str()
+                .contains("SELECT 1 FROM x WHERE tenant_id = ")
+        );
 
         let mut qb2 = QueryBuilder::new("SELECT 1 FROM x");
-        push_audit_filters(&mut qb2, Some("certificate_issued"), Some("x509"));
-        assert!(qb2.sql().as_str().contains(" WHERE event_type = "));
+        push_audit_filters(&mut qb2, t, Some("certificate_issued"), Some("x509"));
+        assert!(qb2.sql().as_str().contains(" WHERE tenant_id = "));
+        assert!(qb2.sql().as_str().contains(" AND event_type = "));
         assert!(qb2.sql().as_str().contains(" AND certificate_type = "));
     }
 
@@ -327,8 +370,29 @@ mod tests {
         let res = server
             .get("/api/v1/statistics")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn statistics_without_tenant_header_is_403() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/statistics")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn audit_without_tenant_header_is_403() {
+        let server = test_server();
+        let res = server
+            .get("/api/v1/audit")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
@@ -360,6 +424,7 @@ mod tests {
         let res = server
             .get("/api/v1/audit")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .add_query_param("event_type", "certificate_issued")
             .add_query_param("certificate_type", "x509")
             .add_query_param("page", "2")
@@ -368,36 +433,12 @@ mod tests {
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    #[tokio::test]
-    async fn expiring_touches_db_for_x509_ssh_and_all_types() {
-        let server = test_server();
-        for cert_type in ["x509", "ssh", "all", "unrecognized"] {
-            let res = server
-                .get("/api/v1/expiring")
-                .add_header(axum::http::header::AUTHORIZATION, bearer())
-                .add_query_param("days", "7")
-                .add_query_param("type", cert_type)
-                .await;
-            if cert_type == "unrecognized" {
-                // Neither x509 nor ssh branch runs a query -> no DB touch.
-                res.assert_status_ok();
-                let body: serde_json::Value = res.json();
-                assert_eq!(body["expiring_within_days"], 7);
-            } else {
-                res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn cleanup_touches_db_and_500s() {
-        let server = test_server();
-        let res = server
-            .post("/api/v1/cleanup")
-            .add_header(axum::http::header::AUTHORIZATION, bearer())
-            .await;
-        res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
-    }
+    // `expiring`/`cleanup` request-level tests (both the DB-error and
+    // DB-backed-success shapes previously here) moved to
+    // `crate::maintenance`'s test module — those handlers are no longer
+    // reachable via this router at all (see `super::router`'s doc comment
+    // and `expiring_and_cleanup_are_no_longer_served_on_the_primary_router`
+    // in `routes::mod`'s tests).
 
     // ===================== DB-backed success paths =====================
 
@@ -412,6 +453,7 @@ mod tests {
     #[tokio::test]
     async fn statistics_reports_real_counts() {
         let (server, state) = db_server_and_state().await;
+        let t = tenant();
         state
             .manager
             .issue_x509(
@@ -430,6 +472,7 @@ mod tests {
                     csr_pem: None,
                 },
                 None,
+                t,
             )
             .await
             .unwrap();
@@ -437,10 +480,47 @@ mod tests {
         let res = server
             .get("/api/v1/statistics")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, t.to_string())
             .await;
         res.assert_status_ok();
         let body: serde_json::Value = res.json();
         assert!(body["x509"]["total"].as_i64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn statistics_does_not_count_another_tenants_certificates() {
+        let (server, state) = db_server_and_state().await;
+        state
+            .manager
+            .issue_x509(
+                crate::ca::x509::X509IssueParams {
+                    subject: "CN=common-stats-other-tenant.example.com".into(),
+                    key_algorithm: "RSA".into(),
+                    key_size: 2048,
+                    validity_days: 30,
+                    san_dns: vec![],
+                    san_ip: vec![],
+                    san_email: vec![],
+                    key_usage: vec![],
+                    extended_key_usage: vec![],
+                    is_ca: false,
+                    path_length: None,
+                    csr_pem: None,
+                },
+                None,
+                tenant(), // a different tenant than the caller below
+            )
+            .await
+            .unwrap();
+
+        let res = server
+            .get("/api/v1/statistics")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["x509"]["total"], 0);
     }
 
     #[tokio::test]
@@ -458,6 +538,7 @@ mod tests {
     #[tokio::test]
     async fn audit_lists_a_real_row_written_by_issuance() {
         let (server, state) = db_server_and_state().await;
+        let t = tenant();
         state
             .manager
             .issue_x509(
@@ -476,6 +557,7 @@ mod tests {
                     csr_pem: None,
                 },
                 None,
+                t,
             )
             .await
             .unwrap();
@@ -483,6 +565,7 @@ mod tests {
         let res = server
             .get("/api/v1/audit")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, t.to_string())
             .add_query_param("event_type", "certificate_issued")
             .add_query_param("certificate_type", "x509")
             .await;
@@ -497,134 +580,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn expiring_lists_real_x509_and_ssh_rows() {
-        let (server, state) = db_server_and_state().await;
-        state
-            .manager
-            .issue_x509(
-                crate::ca::x509::X509IssueParams {
-                    subject: "CN=common-expiring.example.com".into(),
-                    key_algorithm: "RSA".into(),
-                    key_size: 2048,
-                    validity_days: 30,
-                    san_dns: vec![],
-                    san_ip: vec![],
-                    san_email: vec![],
-                    key_usage: vec![],
-                    extended_key_usage: vec![],
-                    is_ca: false,
-                    path_length: None,
-                    csr_pem: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
-
-        let x509_res = server
-            .get("/api/v1/expiring")
-            .add_header(axum::http::header::AUTHORIZATION, bearer())
-            .add_query_param("days", "60")
-            .add_query_param("type", "x509")
-            .await;
-        x509_res.assert_status_ok();
-        let x509_body: serde_json::Value = x509_res.json();
-        assert!(!x509_body["x509"].as_array().unwrap().is_empty());
-        assert!(x509_body["ssh"].as_array().unwrap().is_empty());
-
-        // ssh_config's default validity is 86400s (1 day) — a 2-day window
-        // catches a freshly-issued cert without needing to seed a row.
-        let pubkey_path = std::env::temp_dir().join(format!(
-            "skauswatch-pki-expiring-subject-{}",
-            uuid::Uuid::new_v4()
-        ));
-        assert!(
-            std::process::Command::new("ssh-keygen")
-                .arg("-t")
-                .arg("ed25519")
-                .arg("-f")
-                .arg(&pubkey_path)
-                .arg("-N")
-                .arg("")
-                .arg("-q")
-                .status()
-                .unwrap()
-                .success()
-        );
-        let pubkey = std::fs::read_to_string(format!("{}.pub", pubkey_path.display())).unwrap();
-        state
-            .manager
-            .issue_ssh(
-                crate::ca::ssh::SshIssueParams {
-                    public_key: pubkey,
-                    certificate_type: "user".into(),
-                    key_id: None,
-                    principals: vec!["alice".into()],
-                    validity_seconds: 86_400,
-                    extensions: None,
-                    critical_options: None,
-                    source_addresses: vec![],
-                    force_command: None,
-                    hostname: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
-
-        let all_res = server
-            .get("/api/v1/expiring")
-            .add_header(axum::http::header::AUTHORIZATION, bearer())
-            .add_query_param("days", "2")
-            .add_query_param("type", "all")
-            .await;
-        all_res.assert_status_ok();
-        let all_body: serde_json::Value = all_res.json();
-        assert!(!all_body["ssh"].as_array().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn cleanup_marks_real_expired_rows() {
-        let (server, state) = db_server_and_state().await;
-        // Seed one already-expired row per CA directly — `issue_*` can only
-        // ever produce future dates, so a real "already past not_after /
-        // valid_before" row requires inserting past the API, exactly the
-        // FK-seed pattern docs/v2-port/testing-pattern.md recommends.
-        sqlx::query(
-            "INSERT INTO x509_certificates \
-             (id, serial_number, subject, issuer, not_before, not_after, key_algorithm, \
-              signature_algorithm, fingerprint_sha256, certificate_pem, san_dns, san_ip, \
-              san_email, key_usage, extended_key_usage, is_ca, status, metadata, \
-              created_at, updated_at) \
-             VALUES ($1,'expired-1','CN=expired','CN=expired', now() - interval '400 days', \
-              now() - interval '1 day', 'RSA','SHA256','deadbeef','PEM','{}','{}','{}','{}', \
-              '{}',false,'active','{}'::jsonb,now(),now())",
-        )
-        .bind(uuid::Uuid::new_v4())
-        .execute(state.manager.db())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO ssh_certificates \
-             (id, serial_number, key_id, certificate_type, principals, valid_after, \
-              valid_before, key_type, public_key, certificate, status, metadata, \
-              created_at, updated_at) \
-             VALUES ($1,'expired-1','k','user','{alice}', now() - interval '2 days', \
-              now() - interval '1 day', 'ed25519','ssh-ed25519 AAAA','cert-data','active', \
-              '{}'::jsonb, now(), now())",
-        )
-        .bind(uuid::Uuid::new_v4())
-        .execute(state.manager.db())
-        .await
-        .unwrap();
-
-        let res = server
-            .post("/api/v1/cleanup")
-            .add_header(axum::http::header::AUTHORIZATION, bearer())
-            .await;
-        res.assert_status_ok();
-        let body: serde_json::Value = res.json();
-        assert!(body["updated_count"].as_i64().unwrap() >= 2);
-    }
+    // `expiring_lists_real_x509_and_ssh_rows` / `cleanup_marks_real_expired_rows`
+    // (DB-backed success paths) also moved to `crate::maintenance`'s test
+    // module alongside the DB-error-path tests above.
 }

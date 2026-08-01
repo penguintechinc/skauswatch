@@ -98,9 +98,19 @@ async fn serve() -> anyhow::Result<()> {
             .map_err(anyhow::Error::from)
     };
 
+    // Own-AWS JWT-SVID federation (see `docs/v2-port/aws-identity-runbook.md`)
+    // — resolved once and shared across the loop below; only the `"aws"`
+    // provider's handler ever consults it.
+    let federation = own_aws_federation().await;
+
     let mut consumer_futs = Vec::new();
     for provider in PROVIDERS {
-        let handler = SyncHandler::new(*provider, db.clone(), envelope.clone());
+        let mut handler = SyncHandler::new(*provider, db.clone(), envelope.clone());
+        if *provider == "aws"
+            && let Some((identity, role_arn)) = &federation
+        {
+            handler = handler.with_federation(std::sync::Arc::clone(identity), role_arn.clone());
+        }
         let cfg = ConsumerConfig::new(
             format!("vault:sync:{provider}"),
             consumer_group.clone(),
@@ -123,6 +133,42 @@ async fn serve() -> anyhow::Result<()> {
 
 async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
     let _ = rx.wait_for(|stop| *stop).await;
+}
+
+/// Resolves this worker's own-AWS JWT-SVID federation, if configured — see
+/// `docs/v2-port/aws-identity-runbook.md`. Opt-in via `AWS_FEDERATION_ROLE_ARN`
+/// (this worker's own service-owned IAM role, never a customer's): when
+/// unset, this returns `None` immediately without even attempting to reach
+/// a SPIRE agent, leaving the `"aws"` provider's `SyncHandler` byte-for-byte
+/// unchanged from before this feature existed. When set but the local
+/// SPIFFE identity is unavailable (no SPIRE agent reachable), logs a
+/// warning and returns `None` — federation is an opportunistic enhancement
+/// over the default AWS credential-provider chain, never a
+/// startup-blocking requirement.
+async fn own_aws_federation() -> Option<(
+    std::sync::Arc<dyn skauswatch_s3::credentials::JwtSvidSource>,
+    String,
+)> {
+    let role_arn = std::env::var("AWS_FEDERATION_ROLE_ARN")
+        .ok()
+        .filter(|v| !v.is_empty())?;
+    match skauswatch_identity::IdentityProvider::connect().await {
+        Ok(identity) => {
+            tracing::info!(
+                "own-AWS JWT-SVID federation enabled for vault cloud sync (AWS_FEDERATION_ROLE_ARN set)"
+            );
+            Some((std::sync::Arc::new(identity), role_arn))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "AWS_FEDERATION_ROLE_ARN is set but no SPIFFE identity is available — \
+                 own-AWS federation disabled, vault cloud sync falls back to the default \
+                 AWS credential-provider chain"
+            );
+            None
+        }
+    }
 }
 
 async fn shutdown_signal() {

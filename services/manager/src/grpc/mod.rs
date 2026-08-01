@@ -101,6 +101,26 @@ fn check_api_version(v: &str) -> Result<(), Status> {
     }
 }
 
+/// Extracts and validates the `x-tenant-id` gRPC metadata entry per
+/// docs/v2-port/tenancy-model.md §3 (mirrors the pki/sshca `x-tenant-id`/
+/// `X-Tenant-ID` contract): stamped by the calling *service*, never an end
+/// client, and required on every task-dispatching RPC this surface exposes.
+/// `UNAUTHENTICATED` if absent, empty, or not a valid UUID — this crate's
+/// gRPC surface has zero in-repo callers today (see module docs above), so
+/// this only takes effect once a future caller adopts the contract, but the
+/// surface must never silently accept an untenanted task in the meantime.
+pub(crate) fn require_tenant_metadata(
+    metadata: &tonic::metadata::MetadataMap,
+) -> Result<uuid::Uuid, Status> {
+    let raw = metadata
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Status::unauthenticated("missing x-tenant-id metadata"))?;
+    raw.parse()
+        .map_err(|_| Status::unauthenticated("invalid x-tenant-id metadata"))
+}
+
 /// Dead-RPC response — v1's grpcio servicer base class answered every
 /// unimplemented method with UNIMPLEMENTED "Method not implemented!"
 /// before parsing the request, so no api_version routing applies here.
@@ -214,6 +234,40 @@ mod tests {
         };
         assert_eq!(err.code(), tonic::Code::Unimplemented);
         assert_eq!(err.message(), "api_version v9 not supported");
+    }
+
+    #[test]
+    fn tenant_metadata_requires_present_nonempty_valid_uuid() {
+        let empty = tonic::metadata::MetadataMap::new();
+        match require_tenant_metadata(&empty) {
+            Err(e) => assert_eq!(e.code(), tonic::Code::Unauthenticated),
+            Ok(_) => panic!("missing x-tenant-id must be rejected"),
+        }
+
+        let mut blank = tonic::metadata::MetadataMap::new();
+        blank.insert("x-tenant-id", "".parse().unwrap_or_else(|e| panic!("{e}")));
+        assert!(require_tenant_metadata(&blank).is_err());
+
+        let mut garbage = tonic::metadata::MetadataMap::new();
+        garbage.insert(
+            "x-tenant-id",
+            "not-a-uuid".parse().unwrap_or_else(|e| panic!("{e}")),
+        );
+        match require_tenant_metadata(&garbage) {
+            Err(e) => assert_eq!(e.code(), tonic::Code::Unauthenticated),
+            Ok(_) => panic!("non-UUID x-tenant-id must be rejected"),
+        }
+
+        let tenant = uuid::Uuid::new_v4();
+        let mut valid = tonic::metadata::MetadataMap::new();
+        valid.insert(
+            "x-tenant-id",
+            tenant.to_string().parse().unwrap_or_else(|e| panic!("{e}")),
+        );
+        assert_eq!(
+            require_tenant_metadata(&valid).unwrap_or_else(|e| panic!("{e}")),
+            tenant
+        );
     }
 
     #[test]

@@ -10,6 +10,13 @@ image:
 imagePullSecrets:
   - name: ghcr-pull-secret
 
+# skauswatch prod today runs on-prem (dal2-equivalent) -> inherits the
+# base chart's "spire" default. If a future prod cluster is EKS, override:
+# awsIdentity:
+#   mode: "irsa"
+#   irsa:
+#     roleArn: "arn:aws:iam::<account-id>:role/skauswatch-base"
+
 service:
   type: ClusterIP
 
@@ -50,3 +57,9 @@ configMapData:
   db-pool-size: "20"
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
+
+# MUST be enabled: identity-consuming services hard-require a live SVID
+# whenever RELEASE_MODE is "true". See k8s/helm/spire/README.md
+# "Service-pod SVID pattern".
+spire:
+  enabled: true

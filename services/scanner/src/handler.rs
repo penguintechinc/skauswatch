@@ -57,6 +57,7 @@ impl StreamHandler for ScannerHandler {
         let scan_type = fields.get("scan_type").map(|s| s.to_string());
         let target = fields.get("target").map(|s| s.to_string());
         let file_path = fields.get("file_path").map(|s| s.to_string());
+        let tenant_id = fields.get("tenant_id").map(|s| s.to_string());
         let params_json = fields
             .get("params")
             .cloned()
@@ -94,7 +95,22 @@ impl StreamHandler for ScannerHandler {
             }
         };
 
-        info!(job_id = %job_id, scan_type = %scan_type, target = %target, "processing scanner task");
+        // Tenant provenance: the `tenant_id` stream field only, never
+        // trusted from anywhere else. Missing or unparseable is a fail-closed
+        // rejection (see docs/v2-port/tenancy-model.md §3) — the message is
+        // left un-acked (`Err`) so it is retried and eventually dead-lettered
+        // rather than silently processed without tenant scoping.
+        let tenant_id: uuid::Uuid = match tenant_id.as_deref().map(str::parse) {
+            Some(Ok(id)) => id,
+            _ => {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "missing or invalid tenant_id",
+                )));
+            }
+        };
+
+        info!(job_id = %job_id, scan_type = %scan_type, target = %target, tenant_id = %tenant_id, "processing scanner task");
 
         // Execute the appropriate scan.
         let clamav_timeout = Duration::from_secs(self.config.clamav_timeout_sec);
@@ -137,9 +153,11 @@ impl StreamHandler for ScannerHandler {
             }
         };
 
-        // Write result to database.
+        // Write result to database, stamped with the tenant derived from the
+        // stream message above — never re-derived or trusted from `result`.
         if let Err(e) = crate::db::insert_scan_result(
             &self.pool,
+            tenant_id,
             &result.job_id,
             &result.scan_type,
             &target,
@@ -253,6 +271,17 @@ mod tests {
         format!("test-scanner-{}", uuid::Uuid::new_v4())
     }
 
+    /// Fixed, distinct tenant UUIDs for handler-level tests — never the
+    /// well-known bootstrap tenant seeded by the migration. Kept as string
+    /// literals (the wire shape a stream field actually carries); parsed to
+    /// `Uuid` at bind sites via [`tenant_uuid`] for query filtering.
+    const TENANT_A: &str = "00000000-0000-0000-0000-0000000000aa";
+    const TENANT_B: &str = "00000000-0000-0000-0000-0000000000bb";
+
+    fn tenant_uuid(s: &str) -> uuid::Uuid {
+        s.parse().expect("valid uuid literal")
+    }
+
     #[tokio::test]
     async fn handle_rejects_missing_job_id() {
         let prefix = unique_prefix();
@@ -318,6 +347,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handle_rejects_missing_tenant_id() {
+        let prefix = unique_prefix();
+        let handler = ScannerHandler::new(
+            db_pool().await,
+            test_producer(&prefix).await,
+            test_config(&prefix),
+        );
+        // All other required fields present and valid — only tenant_id is
+        // absent — proves the rejection is specifically the tenant check,
+        // not a fall-through from an earlier missing-field error.
+        let e = entry(&[("job_id", "job-1"), ("scan_type", "yara"), ("target", "t")]);
+        let err = handler
+            .handle(&e)
+            .await
+            .expect_err("missing tenant_id must error");
+        assert!(err.to_string().contains("tenant_id"));
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_unparseable_tenant_id() {
+        let prefix = unique_prefix();
+        let handler = ScannerHandler::new(
+            db_pool().await,
+            test_producer(&prefix).await,
+            test_config(&prefix),
+        );
+        let e = entry(&[
+            ("job_id", "job-1"),
+            ("scan_type", "yara"),
+            ("target", "t"),
+            ("tenant_id", "not-a-uuid"),
+        ]);
+        let err = handler
+            .handle(&e)
+            .await
+            .expect_err("non-UUID tenant_id must error same as absent");
+        assert!(err.to_string().contains("tenant_id"));
+    }
+
+    #[tokio::test]
     async fn handle_yara_success_persists_row_and_publishes_result() {
         let prefix = unique_prefix();
         let db = db_pool().await;
@@ -337,16 +406,18 @@ mod tests {
             ("scan_type", "yara"),
             ("target", "benign.txt"),
             ("file_path", &path),
+            ("tenant_id", TENANT_A),
         ]);
         handler.handle(&e).await.expect("handle succeeds");
 
         let row = sqlx::query(
-            "SELECT status, findings_count, target FROM scanner_scan_results WHERE job_id = $1",
+            "SELECT status, findings_count, target FROM scanner_scan_results WHERE job_id = $1 AND tenant_id = $2",
         )
         .bind("job-yara-1")
+        .bind(tenant_uuid(TENANT_A))
         .fetch_one(&db)
         .await
-        .expect("row written to db");
+        .expect("row written to db, scoped to the submitting tenant");
         assert_eq!(row.get::<String, _>("status"), "success");
         assert_eq!(row.get::<i32, _>("findings_count"), 0);
         assert_eq!(row.get::<String, _>("target"), "benign.txt");
@@ -369,6 +440,7 @@ mod tests {
             ("job_id", "job-bad"),
             ("scan_type", "bogus"),
             ("target", "t"),
+            ("tenant_id", TENANT_A),
         ]);
         // Scan-level failures are not handler-level failures: the message
         // is still acked (Ok) because a result — even an error result — was
@@ -378,12 +450,14 @@ mod tests {
             .await
             .expect("handler acks scan-level errors");
 
-        let row =
-            sqlx::query("SELECT status, error_message FROM scanner_scan_results WHERE job_id = $1")
-                .bind("job-bad")
-                .fetch_one(&db)
-                .await
-                .expect("row written to db");
+        let row = sqlx::query(
+            "SELECT status, error_message FROM scanner_scan_results WHERE job_id = $1 AND tenant_id = $2",
+        )
+        .bind("job-bad")
+        .bind(tenant_uuid(TENANT_A))
+        .fetch_one(&db)
+        .await
+        .expect("row written to db");
         assert_eq!(row.get::<String, _>("status"), "error");
         assert_eq!(
             row.get::<Option<String>, _>("error_message"),
@@ -411,17 +485,74 @@ mod tests {
             ("scan_type", "clamav"),
             ("target", "t"),
             ("file_path", &path),
+            ("tenant_id", TENANT_A),
         ]);
         handler.handle(&e).await.expect("handle succeeds");
 
-        let row =
-            sqlx::query("SELECT status, error_message FROM scanner_scan_results WHERE job_id = $1")
-                .bind("job-clam-1")
-                .fetch_one(&db)
-                .await
-                .expect("row written to db");
+        let row = sqlx::query(
+            "SELECT status, error_message FROM scanner_scan_results WHERE job_id = $1 AND tenant_id = $2",
+        )
+        .bind("job-clam-1")
+        .bind(tenant_uuid(TENANT_A))
+        .fetch_one(&db)
+        .await
+        .expect("row written to db");
         assert_eq!(row.get::<String, _>("status"), "success");
         assert_eq!(row.get::<Option<String>, _>("error_message"), None);
+    }
+
+    #[tokio::test]
+    async fn handle_stamps_rows_with_the_submitting_tenant_only() {
+        let prefix = unique_prefix();
+        let db = db_pool().await;
+        let handler = ScannerHandler::new(
+            db.clone(),
+            test_producer(&prefix).await,
+            test_config(&prefix),
+        );
+
+        // Same job_id from two different tenants — proves the row is
+        // isolated by tenant, not just present in the table.
+        let e_a = entry(&[
+            ("job_id", "job-shared"),
+            ("scan_type", "bogus"),
+            ("target", "target-a"),
+            ("tenant_id", TENANT_A),
+        ]);
+        let e_b = entry(&[
+            ("job_id", "job-shared"),
+            ("scan_type", "bogus"),
+            ("target", "target-b"),
+            ("tenant_id", TENANT_B),
+        ]);
+        handler
+            .handle(&e_a)
+            .await
+            .expect("tenant A handle succeeds");
+        handler
+            .handle(&e_b)
+            .await
+            .expect("tenant B handle succeeds");
+
+        let a_row = sqlx::query(
+            "SELECT target FROM scanner_scan_results WHERE job_id = $1 AND tenant_id = $2",
+        )
+        .bind("job-shared")
+        .bind(tenant_uuid(TENANT_A))
+        .fetch_one(&db)
+        .await
+        .expect("tenant A row exists");
+        assert_eq!(a_row.get::<String, _>("target"), "target-a");
+
+        let b_row = sqlx::query(
+            "SELECT target FROM scanner_scan_results WHERE job_id = $1 AND tenant_id = $2",
+        )
+        .bind("job-shared")
+        .bind(tenant_uuid(TENANT_B))
+        .fetch_one(&db)
+        .await
+        .expect("tenant B row exists");
+        assert_eq!(b_row.get::<String, _>("target"), "target-b");
     }
 
     #[tokio::test]

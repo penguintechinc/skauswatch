@@ -131,4 +131,22 @@ mod tests {
         );
         assert_eq!(cfg.ca_key_path, PathBuf::from("/explicit/somewhere/key"));
     }
+
+    /// Exercises the `from_env` -> `from_values` glue itself (the
+    /// precedence resolution it performs — `SERVICE_PORT` over `API_PORT`,
+    /// `SSHCA_KEY_PATH` over `CA_PRIVATE_KEY_PATH` — is already covered
+    /// above via `from_values`). Cannot assert specific values by
+    /// controlling the process environment: `std::env::set_var` is
+    /// `unsafe` and `unsafe_code = "deny"` at the workspace level rules
+    /// that out in tests, so this only asserts the result is well-formed
+    /// regardless of whatever the test process's environment happens to
+    /// contain.
+    #[test]
+    fn from_env_reads_the_process_environment_without_panicking() {
+        let cfg = SshCaConfig::from_env();
+        assert!(cfg.http_port > 0);
+        assert!(!cfg.sshca_dir.as_os_str().is_empty());
+        assert!(!cfg.ssh_keys_dir.as_os_str().is_empty());
+        assert!(!cfg.ca_key_path.as_os_str().is_empty());
+    }
 }

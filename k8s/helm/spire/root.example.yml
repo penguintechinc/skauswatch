@@ -1,0 +1,66 @@
+# REFERENCE ONLY — not one of the four mandated per-env values files
+# (alpha.yml/beta.yml/gamma.yml/production.yml). The root SPIRE server
+# for the penguintech.io trust domain is an org-wide, single deployment;
+# it is not part of skauswatch's own alpha/beta/gamma/production
+# footprint (namespace = product name only, per devops-kubernetes.md —
+# root doesn't belong to any one product's namespace).
+#
+# k8s-ops copies this into whatever namespace/cluster is designated as
+# the shared root (that placement decision is itself a live-ops/
+# architecture call — see chart README "Live-Ops"). Committed here so
+# the values shape a root deployment needs sits next to the child
+# configs (beta.yml/gamma.yml/production.yml) that depend on it.
+#
+# helm install spire-root ./k8s/helm/spire \
+#   --kube-context <root-cluster-context> \
+#   --namespace spire-root --create-namespace \
+#   --values ./k8s/helm/spire/root.example.yml
+
+spire:
+  enabled: true
+  environment: "root"
+
+  topology:
+    role: root
+    children:
+      - name: dal2-beta
+        downstreamSpiffeID: "spiffe://penguintech.io/spire/server/dal2-beta"
+      - name: dal2-gamma
+        downstreamSpiffeID: "spiffe://penguintech.io/spire/server/dal2-gamma"
+      - name: skauswatch-prod
+        downstreamSpiffeID: "spiffe://penguintech.io/spire/server/skauswatch-prod"
+
+  server:
+    replicaCount: 3
+    dataStore:
+      type: postgresql
+      postgresql:
+        host: "marchproxy.nest.svc"
+        port: 5432
+        dbName: spire_root
+        secretName: spire-root-db-credentials
+    nodeAttestation:
+      k8sPsat:
+        enabled: true
+        cluster: "spire-root"
+        serviceAccountAllowList:
+          - "spire-root:spire-agent"
+
+  # No fleet agent DaemonSet workloads of skauswatch's own run against
+  # root — it exists to serve child servers, not product pods.
+  federation:
+    enabled: false
+
+  oidcProvider:
+    enabled: true
+    issuerHost: "spire-oidc.dal2.penguintech.cloud"
+    httproute:
+      enabled: true
+      gatewayName: shared
+      gatewayNamespace: gateway
+
+  csiDriver:
+    enabled: false
+
+  autoEnroll:
+    enabled: false

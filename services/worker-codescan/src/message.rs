@@ -16,8 +16,14 @@ pub struct CodeScanReviewTask {
     pub repo_name: String,
     /// PR/MR URL or identifier.
     pub pr_url: String,
-    /// Tenant ID (for multi-tenancy).
-    pub _tenant_id: i64,
+    /// Validated tenant UUID this task belongs to. Sourced from the
+    /// `codescan:tasks` stream `tenant_id` field, which codescan-backend
+    /// stamps from the authenticated caller's `TenantContext`
+    /// (`routes/reviews.rs::build_review_task_fields`) — never
+    /// client-supplied. Every DB query in this worker must be scoped to
+    /// this value; the nil UUID is rejected at parse time so a
+    /// zero-value/sentinel can never be mistaken for a real tenant.
+    pub tenant_id: uuid::Uuid,
     /// AI provider to use (optional override).
     pub ai_provider: Option<String>,
     /// AI model to use (optional override).
@@ -52,9 +58,15 @@ impl CodeScanReviewTask {
             .ok_or_else(|| anyhow::anyhow!("missing pr_url"))?
             .to_string();
 
-        let tenant_id = entry
+        // Reject both an unparseable value and the nil UUID — a
+        // zero/sentinel tenant is never a legitimate tenant identity, and
+        // treating it as valid would open a fail-open hole identical to
+        // "missing" (see docs/v2-port/tenancy-model.md §3: a receiver
+        // missing a validated tenant provenance rejects the message).
+        let tenant_id: uuid::Uuid = entry
             .get("tenant_id")
-            .and_then(|v| v.parse().ok())
+            .and_then(|v| v.parse::<uuid::Uuid>().ok())
+            .filter(|id| !id.is_nil())
             .ok_or_else(|| anyhow::anyhow!("missing/invalid tenant_id"))?;
 
         Ok(Self {
@@ -63,7 +75,7 @@ impl CodeScanReviewTask {
             _provider: provider,
             repo_name,
             pr_url,
-            _tenant_id: tenant_id,
+            tenant_id,
             ai_provider: entry.get("ai_provider").map(String::from),
             ai_model: entry.get("ai_model").map(String::from),
         })
@@ -93,6 +105,14 @@ mod tests {
 
     use super::*;
 
+    const TEST_TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+    fn test_tenant() -> uuid::Uuid {
+        TEST_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("test tenant uuid: {e}"))
+    }
+
     fn entry(fields: &[(&str, &str)]) -> StreamEntry {
         let mut map = HashMap::new();
         for (k, v) in fields {
@@ -111,7 +131,7 @@ mod tests {
             ("provider", "github"),
             ("repo_name", "acme/widgets"),
             ("pr_url", "https://github.com/acme/widgets/pull/1"),
-            ("tenant_id", "1"),
+            ("tenant_id", TEST_TENANT_ID),
         ]
     }
 
@@ -124,7 +144,7 @@ mod tests {
         assert_eq!(task._provider, "github");
         assert_eq!(task.repo_name, "acme/widgets");
         assert_eq!(task.pr_url, "https://github.com/acme/widgets/pull/1");
-        assert_eq!(task._tenant_id, 1);
+        assert_eq!(task.tenant_id, test_tenant());
         assert_eq!(task.ai_provider, None);
         assert_eq!(task.ai_model, None);
     }
@@ -203,11 +223,22 @@ mod tests {
     }
 
     #[test]
-    fn non_numeric_tenant_id_is_an_error() {
+    fn invalid_tenant_id_is_an_error() {
         let mut fields = full_fields();
         fields.retain(|(k, _)| *k != "tenant_id");
         fields.push(("tenant_id", "nope"));
         assert!(CodeScanReviewTask::from_stream_entry(&entry(&fields)).is_err());
+    }
+
+    #[test]
+    fn nil_tenant_id_is_an_error() {
+        let mut fields = full_fields();
+        fields.retain(|(k, _)| *k != "tenant_id");
+        fields.push(("tenant_id", "00000000-0000-0000-0000-000000000000"));
+        assert!(
+            CodeScanReviewTask::from_stream_entry(&entry(&fields)).is_err(),
+            "the nil UUID must never be treated as a valid tenant"
+        );
     }
 
     #[test]

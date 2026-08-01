@@ -186,15 +186,19 @@ fn push_filters(qb: &mut QueryBuilder<Postgres>, f: &AlertFilters) {
 }
 
 /// Runs the filtered page query plus the matching COUNT(*) — v1 orders by
-/// created_at DESC for both list and search.
+/// created_at DESC for both list and search. `tenant` is bound from
+/// `TenantContext`/`CurrentUser`, never from `filters` (client input) — see
+/// docs/v2-port/tenancy-model.md §4.
 async fn fetch_alert_page(
     db: &sqlx::PgPool,
+    tenant: uuid::Uuid,
     filters: &AlertFilters,
     page: i64,
     per_page: i64,
 ) -> Result<(Vec<AlertRow>, i64), ApiError> {
     let offset = (page - 1) * per_page;
     let mut qb = QueryBuilder::new(ALERT_COLUMNS);
+    qb.push(" AND tenant_id = ").push_bind(tenant);
     push_filters(&mut qb, filters);
     qb.push(" ORDER BY created_at DESC LIMIT ")
         .push_bind(per_page)
@@ -203,6 +207,7 @@ async fn fetch_alert_page(
     let rows = qb.build_query_as::<AlertRow>().fetch_all(db).await?;
 
     let mut cq = QueryBuilder::new("SELECT COUNT(*) FROM alerts WHERE TRUE");
+    cq.push(" AND tenant_id = ").push_bind(tenant);
     push_filters(&mut cq, filters);
     let total: i64 = cq.build_query_scalar().fetch_one(db).await?;
     Ok((rows, total))
@@ -341,7 +346,7 @@ pub(crate) struct AlertListResponse {
 )]
 pub(crate) async fn list_alerts(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let q = parse_list_params(&params);
@@ -351,7 +356,8 @@ pub(crate) async fn list_alerts(
         source: q.source,
         ..AlertFilters::default()
     };
-    let (rows, total) = fetch_alert_page(&state.db, &filters, q.page, q.per_page).await?;
+    let (rows, total) =
+        fetch_alert_page(&state.db, user.tenant_id, &filters, q.page, q.per_page).await?;
     let items: Vec<serde_json::Value> = rows.iter().map(alert_json).collect();
     Ok(Json(serde_json::json!({
         "items": items,
@@ -377,11 +383,14 @@ pub(crate) async fn list_alerts(
 )]
 pub(crate) async fn get_alert(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(alert_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut qb = QueryBuilder::new(ALERT_COLUMNS);
-    qb.push(" AND id = ").push_bind(alert_id);
+    qb.push(" AND id = ")
+        .push_bind(alert_id)
+        .push(" AND tenant_id = ")
+        .push_bind(user.tenant_id);
     let row = qb
         .build_query_as::<AlertRow>()
         .fetch_optional(&state.db)
@@ -517,9 +526,9 @@ pub(crate) async fn create_alert(
     let v = validate_create(&body)?;
 
     let row = sqlx::query_as::<_, CreatedRow>(
-        "INSERT INTO alerts (title, description, severity, status, source, indicators, created_at, \
-          updated_at) \
-         VALUES ($1, $2, $3, 'pending', $4, $5, now(), now()) \
+        "INSERT INTO alerts (title, description, severity, status, source, indicators, \
+          tenant_id, created_at, updated_at) \
+         VALUES ($1, $2, $3, 'pending', $4, $5, $6, now(), now()) \
          RETURNING id, title, severity, status, created_at",
     )
     .bind(&v.title)
@@ -527,6 +536,7 @@ pub(crate) async fn create_alert(
     .bind(&v.severity)
     .bind(&v.source)
     .bind(serde_json::Value::from(v.indicators))
+    .bind(user.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -639,10 +649,12 @@ pub(crate) async fn update_alert(
     user.require_role(&["admin", "maintainer"])?;
     validate_update(&body)?;
 
-    let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM alerts WHERE id = $1")
-        .bind(alert_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let exists: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM alerts WHERE id = $1 AND tenant_id = $2")
+            .bind(alert_id)
+            .bind(user.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound("Alert not found".to_owned()));
     }
@@ -677,14 +689,19 @@ pub(crate) async fn update_alert(
         if let Some(v) = &body.resolution_notes {
             qb.push(", resolution_notes = ").push_bind(v.clone());
         }
-        qb.push(" WHERE id = ").push_bind(alert_id);
+        qb.push(" WHERE id = ")
+            .push_bind(alert_id)
+            .push(" AND tenant_id = ")
+            .push_bind(user.tenant_id);
         qb.build().execute(&state.db).await?;
     }
 
     let row = sqlx::query_as::<_, UpdatedRow>(
-        "SELECT id, title, severity, status, updated_at FROM alerts WHERE id = $1",
+        "SELECT id, title, severity, status, updated_at FROM alerts \
+         WHERE id = $1 AND tenant_id = $2",
     )
     .bind(alert_id)
+    .bind(user.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("Alert not found".to_owned()))?;
@@ -745,10 +762,12 @@ pub(crate) async fn update_alert_status(
     // status. That contradicts the role model; gate like the peer
     // alert mutations.
     user.require_role(&["admin", "maintainer"])?;
-    let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM alerts WHERE id = $1")
-        .bind(alert_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let exists: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM alerts WHERE id = $1 AND tenant_id = $2")
+            .bind(alert_id)
+            .bind(user.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound("Alert not found".to_owned()));
     }
@@ -758,13 +777,15 @@ pub(crate) async fn update_alert_status(
     };
 
     let sql = if status == "resolved" {
-        "UPDATE alerts SET status = $1, resolved_at = now(), updated_at = now() WHERE id = $2"
+        "UPDATE alerts SET status = $1, resolved_at = now(), updated_at = now() \
+         WHERE id = $2 AND tenant_id = $3"
     } else {
-        "UPDATE alerts SET status = $1, updated_at = now() WHERE id = $2"
+        "UPDATE alerts SET status = $1, updated_at = now() WHERE id = $2 AND tenant_id = $3"
     };
     sqlx::query(sql)
         .bind(status)
         .bind(alert_id)
+        .bind(user.tenant_id)
         .execute(&state.db)
         .await?;
 
@@ -858,10 +879,12 @@ pub(crate) async fn request_ai_review(
         ));
     }
 
-    let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM alerts WHERE id = $1")
-        .bind(alert_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let exists: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM alerts WHERE id = $1 AND tenant_id = $2")
+            .bind(alert_id)
+            .bind(user.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound("Alert not found".to_owned()));
     }
@@ -1012,11 +1035,12 @@ pub(crate) struct AlertSearchResponse {
 )]
 pub(crate) async fn search_alerts(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     ApiJson(body): ApiJson<SearchBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (filters, page, per_page) = validate_search(&body)?;
-    let (rows, total) = fetch_alert_page(&state.db, &filters, page, per_page).await?;
+    let (rows, total) =
+        fetch_alert_page(&state.db, user.tenant_id, &filters, page, per_page).await?;
     let items: Vec<serde_json::Value> = rows.iter().map(search_json).collect();
     Ok(Json(serde_json::json!({
         "items": items,
@@ -1066,22 +1090,27 @@ pub(crate) struct AlertStatisticsResponse {
 )]
 pub(crate) async fn alert_statistics(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alerts")
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE tenant_id = $1")
+        .bind(user.tenant_id)
         .fetch_one(&state.db)
         .await?;
-    let sev_rows: Vec<(Option<String>, i64)> =
-        sqlx::query_as("SELECT severity, COUNT(*) FROM alerts GROUP BY severity")
-            .fetch_all(&state.db)
-            .await?;
+    let sev_rows: Vec<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT severity, COUNT(*) FROM alerts WHERE tenant_id = $1 GROUP BY severity",
+    )
+    .bind(user.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
     let status_rows: Vec<(Option<String>, i64)> =
-        sqlx::query_as("SELECT status, COUNT(*) FROM alerts GROUP BY status")
+        sqlx::query_as("SELECT status, COUNT(*) FROM alerts WHERE tenant_id = $1 GROUP BY status")
+            .bind(user.tenant_id)
             .fetch_all(&state.db)
             .await?;
     let cutoff = Utc::now().naive_utc() - chrono::Duration::days(1);
     let last_24_hours: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE created_at >= $1")
+        sqlx::query_scalar("SELECT COUNT(*) FROM alerts WHERE tenant_id = $1 AND created_at >= $2")
+            .bind(user.tenant_id)
             .bind(cutoff)
             .fetch_one(&state.db)
             .await?;
@@ -1377,14 +1406,36 @@ mod tests {
     }
 
     async fn seed_alert(state: &AppState, title: &str, severity: &str, source: &str) -> i32 {
+        seed_alert_in_tenant(
+            state,
+            crate::routes::test_support::default_tenant_id(),
+            title,
+            severity,
+            source,
+        )
+        .await
+    }
+
+    /// Like [`seed_alert`] but stamps an explicit `tenant_id` — used by the
+    /// cross-tenant isolation tests below, which need two alerts in two
+    /// distinct real tenants (not just two users sharing the seeded default).
+    async fn seed_alert_in_tenant(
+        state: &AppState,
+        tenant_id: uuid::Uuid,
+        title: &str,
+        severity: &str,
+        source: &str,
+    ) -> i32 {
         let (id,): (i32,) = sqlx::query_as(
             "INSERT INTO alerts (title, description, severity, status, source, indicators, \
-             created_at, updated_at) VALUES ($1, 'd', $2, 'pending', $3, '[]', now(), now()) \
+             tenant_id, created_at, updated_at) \
+             VALUES ($1, 'd', $2, 'pending', $3, '[]', $4, now(), now()) \
              RETURNING id",
         )
         .bind(title)
         .bind(severity)
         .bind(source)
+        .bind(tenant_id)
         .fetch_one(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed_alert: {e}"));
@@ -1629,5 +1680,92 @@ mod tests {
         assert!(body["by_severity"]["high"].as_i64().unwrap_or(0) >= 1);
         assert_eq!(body["by_status"]["resolved"], 0);
         assert!(body["last_24_hours"].as_i64().unwrap_or(0) >= 1);
+    }
+
+    // -- tenant isolation (docs/v2-port/tenancy-model.md) ------------------
+
+    #[tokio::test]
+    async fn tenant_a_cannot_list_or_get_tenant_bs_alert() {
+        let state = db_state(dev_license()).await;
+        let tenant_b = crate::routes::test_support::seed_tenant(&state.db, "alerts-tenant-b").await;
+        let id_b = seed_alert_in_tenant(&state, tenant_b, "B-only", "critical", "endpoint").await;
+        let (_, token_a) = authed_user(&state, "alerts-tenant-a@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let list = server
+            .get("/api/v1/alerts")
+            .authorization_bearer(&token_a)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        let items = body["items"].as_array().cloned().unwrap_or_default();
+        assert!(items.iter().all(|i| i["title"] != "B-only"));
+
+        let get = server
+            .get(&format!("/api/v1/alerts/{id_b}"))
+            .authorization_bearer(&token_a)
+            .await;
+        get.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tenant_a_cannot_update_or_transition_tenant_bs_alert() {
+        let state = db_state(dev_license()).await;
+        let tenant_b =
+            crate::routes::test_support::seed_tenant(&state.db, "alerts-tenant-b-2").await;
+        let id_b = seed_alert_in_tenant(&state, tenant_b, "B-mutate", "low", "manual").await;
+        let (_, maint_a) = authed_user(&state, "alerts-mutate-a@example.com", "maintainer").await;
+        let server = server_for(state).await;
+
+        let update = server
+            .put(&format!("/api/v1/alerts/{id_b}"))
+            .authorization_bearer(&maint_a)
+            .json(&serde_json::json!({"title": "hijacked"}))
+            .await;
+        update.assert_status(StatusCode::NOT_FOUND);
+
+        let status = server
+            .put(&format!("/api/v1/alerts/{id_b}/status"))
+            .authorization_bearer(&maint_a)
+            .json(&serde_json::json!({"status": "resolved"}))
+            .await;
+        status.assert_status(StatusCode::NOT_FOUND);
+
+        let ai = server
+            .post(&format!("/api/v1/alerts/{id_b}/ai-review"))
+            .authorization_bearer(&maint_a)
+            .await;
+        ai.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn statistics_and_search_are_scoped_to_the_caller_tenant() {
+        let state = db_state(dev_license()).await;
+        let tenant_b =
+            crate::routes::test_support::seed_tenant(&state.db, "alerts-tenant-stats-b").await;
+        seed_alert_in_tenant(&state, tenant_b, "B-stat", "critical", "endpoint").await;
+        seed_alert(&state, "A-stat", "low", "endpoint").await;
+        let (_, token_a) = authed_user(&state, "alerts-stats-a@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let stats = server
+            .get("/api/v1/alerts/statistics")
+            .authorization_bearer(&token_a)
+            .await;
+        stats.assert_status_ok();
+        let body: serde_json::Value = stats.json();
+        // Tenant A sees only its own "low"-severity alert, never tenant B's
+        // "critical" one seeded above.
+        assert_eq!(body["by_severity"]["critical"], 0);
+        assert!(body["by_severity"]["low"].as_i64().unwrap_or(0) >= 1);
+
+        let search = server
+            .post("/api/v1/alerts/search")
+            .authorization_bearer(&token_a)
+            .json(&serde_json::json!({"query": "B-stat"}))
+            .await;
+        search.assert_status_ok();
+        let body: serde_json::Value = search.json();
+        assert_eq!(body["total"], 0);
     }
 }

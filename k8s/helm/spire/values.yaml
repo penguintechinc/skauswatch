@@ -4,6 +4,98 @@ spire:
   trustDomain: "penguintech.io"
   environment: "alpha"
 
+  # --- Nested SPIRE topology -------------------------------------------
+  # standalone : single self-contained server, self-signed root CA, no
+  #              nesting. Alpha/local dev only.
+  # root       : the org-wide trust root for penguintech.io. Issues
+  #              intermediate signing CAs to child servers via the
+  #              `spire` UpstreamAuthority plugin. Deployed ONCE, outside
+  #              any single product's per-env footprint — see
+  #              root.example.yml (NOT one of the four mandated env
+  #              files; a reference for whoever stands up the shared
+  #              root — see chart README "Live-Ops").
+  # child      : per-cluster server (beta/gamma/prod). Runs self-signed
+  #              until `topology.upstreamRoot.enabled` is flipped true by
+  #              k8s-ops once a live root + join token exist (see README)
+  #              — this lets the chart deploy safely today and cut over
+  #              to nested mode later without a topology.role change.
+  topology:
+    role: standalone
+
+    # role: root only. Downstream children this root has authorized.
+    # Nothing is auto-registered from this list — root-side `-downstream`
+    # entry creation requires a live join-token exchange with each child
+    # (see README "Live-Ops: bootstrapping a child"). This list exists so
+    # the values shape documents the org's known nested inventory.
+    children: []
+    # children:
+    #   - name: dal2-beta
+    #     downstreamSpiffeID: "spiffe://penguintech.io/spire/server/dal2-beta"
+    #   - name: dal2-gamma
+    #     downstreamSpiffeID: "spiffe://penguintech.io/spire/server/dal2-gamma"
+    #   - name: skauswatch-prod
+    #     downstreamSpiffeID: "spiffe://penguintech.io/spire/server/skauswatch-prod"
+
+    # role: child only. Cross-cluster nested-CA bootstrap. The child
+    # server gets its intermediate signing CA through a small local
+    # "downstream agent" (see downstream-agent-configmap.yaml +
+    # server-deployment.yaml) that attests to root and hands its Workload
+    # API socket to this server's `UpstreamAuthority "spire"` plugin.
+    upstreamRoot:
+      # Gate for the whole nested wiring (UpstreamAuthority block +
+      # downstream-agent sidecar + secret/configmap mounts). Stays false
+      # until root is live and a join token has been minted for this
+      # cluster — flipping it before then means the extra container
+      # crash-loops trying to reach an address that isn't set.
+      enabled: false
+      serverAddress: ""
+      serverPort: 8081
+      # This child's own SPIFFE ID, registered on root with `-downstream`.
+      downstreamSpiffeID: ""
+      # Bootstrap attestor for the downstream agent ONLY — never the
+      # fleet workload attestor (see server.nodeAttestation below).
+      # join_token is the default because root cannot reach into the
+      # child cluster's TokenReview API to validate a k8s_psat token
+      # cross-cluster; x509pop is the documented alternative for
+      # longer-lived bootstrap credentials if join tokens prove too
+      # operationally heavy (one-time-use, minted per cutover/rotation).
+      nodeAttestor: join_token
+      # Secret pre-created by k8s-ops (live-ops) holding the one-time
+      # join token minted on root via `spire-server token generate`.
+      joinTokenSecret:
+        name: spire-upstream-join-token
+        key: token
+      # ConfigMap pre-created by k8s-ops holding root's trust bundle
+      # (PEM), so the downstream agent can validate root on first
+      # connect without insecure bootstrap.
+      trustBundleConfigMap:
+        name: spire-upstream-root-bundle
+        key: bundle.pem
+
+  # --- SVID lifetimes ---------------------------------------------------
+  # Deploy-time default TTL for every issued SVID, both X.509-SVID and
+  # JWT-SVID. Wired to two places: the server-wide default
+  # (`default_x509_svid_ttl`/`default_jwt_svid_ttl` in server.conf, used
+  # when a registration entry doesn't specify its own) AND every
+  # registration entry the auto-enroll Job creates (`-x509SVIDTTL`/
+  # `-jwtSVIDTTL` on `spire-server entry create`) — see README
+  # "Admin-adjustable SVID TTL".
+  #
+  # 5m keeps compromise blast-radius small: skauswatch-identity
+  # (crates/skauswatch-identity) auto-rotates at ~half-life, so a 5m TTL
+  # means each workload's SVID is re-issued roughly every ~2.5m.
+  #
+  # Runtime-adjustable 1m-24h by the `manager` service (its registration
+  # entry is the only one with `admin: true` below) via the SPIRE Server
+  # Entry API's UpdateEntry call — that is a live, in-cluster operation,
+  # NOT a chart/values change, and will drift from what's shown here
+  # until the next `helm upgrade` re-applies this default. Per-env values
+  # files may override x509/jwt independently if an environment ever
+  # needs a different deploy-time default.
+  svidTtl:
+    x509: "5m"
+    jwt: "5m"
+
   server:
     replicaCount: 1
     image:
@@ -12,6 +104,20 @@ spire:
       tag: "1.9.4"  # Reference only; digest in repository takes precedence
       pullPolicy: IfNotPresent
 
+    # SPIRE clamps any issued SVID TTL to <= half of ca_ttl (the signing
+    # CA must outlive everything it signs by a safety margin). The
+    # admin-adjustable ceiling above (svidTtl, runtime UpdateEntry) tops
+    # out at 24h, so ca_ttl MUST stay >= 48h (2x the 24h max) or a
+    # legitimate 24h UpdateEntry would get silently clamped down by
+    # SPIRE itself before the admin's requested value ever takes effect.
+    # 168h (7d) leaves ~3.5x headroom above the 48h floor — do not lower
+    # this below 48h without also lowering the 24h ceiling documented in
+    # the README and enforced by manager's own admin-adjust logic.
+    # Governs both root's self-signed CA lifetime (topology.role: root)
+    # and a child's requested intermediate-CA lifetime from upstream
+    # (topology.role: child) — same constraint, same value, both roles.
+    caTtl: "168h"
+
     ports:
       grpc: 8081
       federation: 8443
@@ -19,7 +125,7 @@ spire:
 
     dataStore:
       # sqlite: zero-dependency bootstrap; switch to postgresql once NEST/PG is available.
-      # postgresql: preferred for production; works with NEST (marchproxy) or any PG host.
+      # postgresql: preferred for production; works with NEST or any PG host.
       type: sqlite
       sqlite:
         path: "/run/spire/data/datastore.sqlite"
@@ -40,13 +146,36 @@ spire:
         passwordKey: password
 
     nodeAttestation:
-      k8sSat:
+      # k8s_psat (projected service account token) — REQUIRED default for
+      # every on-prem/dal2 cluster (alpha/beta/gamma/prod). Replaces the
+      # deprecated k8s_sat (service-account-token) attestor, which reads
+      # long-lived, non-audience-bound tokens from the API server and is
+      # no longer the recommended SPIRE node attestor.
+      k8sPsat:
         enabled: true
         cluster: "skauswatch"
         serviceAccountAllowList:
           - "skauswatch:spire-agent"
+        # Audience the agent's projected token is bound to; must match
+        # agent.serviceAccountTokenAudience below.
+        audience:
+          - "spire-server"
+      # aws_iid (EC2 Instance Identity Document) — toggle ONLY for node
+      # pools that are AWS-resident. dal2 is on-prem bare metal, so this
+      # stays disabled on every skauswatch environment today. Flip on
+      # (per env) only if/when a cluster's nodes actually run in AWS
+      # (e.g. a future EKS-backed DR cluster) — never toggle globally.
+      awsIid:
+        enabled: false
+        # Restrict to known-good AWS account IDs; empty = accept any
+        # account, which is almost never what you want once enabled.
+        accountIdAllowList: []
+      # join_token as a FLEET node attestor is legacy/manual bootstrap
+      # only (a human runs `spire-server token generate` per node) — kept
+      # available but disabled; the nested-upstream bootstrap has its own
+      # independent join_token usage under topology.upstreamRoot above.
       joinToken:
-        enabled: true
+        enabled: false
 
     resources:
       requests:
@@ -84,6 +213,13 @@ spire:
 
     socketPath: /run/spire/sockets/agent.sock
     socketDir: /run/spire/sockets
+
+    # Projected service-account token delivered to the agent pod for
+    # k8s_psat node attestation. audience MUST match
+    # server.nodeAttestation.k8sPsat.audience[0].
+    serviceAccountTokenAudience: "spire-server"
+    serviceAccountTokenPath: /var/run/secrets/tokens/spire-agent
+    serviceAccountTokenExpirationSeconds: 3600
 
     workloadAttestors:
       k8s:
@@ -124,7 +260,43 @@ spire:
 
     nodeSelector: {}
 
+  # --- Workload API socket delivery to service pods ---------------------
+  # Default mechanism: hostPath (agent.socketDir above), already wired —
+  # see chart README "Service-pod SVID pattern" for the exact volume/
+  # mount snippet other charts add.
+  #
+  # Recommended (not yet approved) mechanism: SPIFFE CSI Driver
+  # (csi.spiffe.io) — workload pods get a CSI ephemeral volume instead of
+  # a raw hostPath mount, and the driver alone talks to the host
+  # filesystem. DISABLED BY DEFAULT IN EVERY ENVIRONMENT: the driver's
+  # DaemonSet must run `privileged: true` to bind-mount the agent socket
+  # into other pods' mount namespaces via the kubelet plugin registry —
+  # this is the standard upstream spiffe-csi-driver security posture, and
+  # it is a ROOT EXCEPTION per devops-containers.md. Do not set
+  # `enabled: true` in any values file without explicit user approval
+  # first (see chart README).
+  csiDriver:
+    enabled: false
+    image:
+      repository: ghcr.io/spiffe/spiffe-csi-driver@sha256:4144101005b23c18a354f8c0ab7bd5da00f2e160403da8d56f6a9e9d4efe3edf
+      tag: "0.2.3"  # Reference only; digest in repository takes precedence
+      pullPolicy: IfNotPresent
+    pluginName: csi.spiffe.io
+    kubeletPath: /var/lib/kubelet
+    resources:
+      requests:
+        cpu: 50m
+        memory: 32Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+
   federation:
+    # Cross-TRUST-DOMAIN federation (e.g. a different product's own
+    # penguintech.io-external trust domain, or a customer's SPIRE). This
+    # is orthogonal to the nested root/child topology above — nested
+    # servers share ONE trust domain and never use federation between
+    # each other.
     enabled: false
     bundleEndpoint:
       port: 8443
@@ -137,6 +309,17 @@ spire:
 
   oidcProvider:
     enabled: false
+    # Public hostname AWS federates against for JWT-SVID -> STS
+    # (AssumeRoleWithWebIdentity). See docs/v2-port/aws-identity-runbook.md.
+    # e.g. "spire-oidc.dal2.penguintech.cloud"
+    #
+    # IMPORTANT: only meaningful on the ROOT server. In a nested topology
+    # the trust-domain bundle (X.509 *and* JWT signing authorities) is
+    # aggregated at root across every child, so ONE root-hosted discovery
+    # provider is authoritative for every child's issued JWT-SVIDs. Do
+    # NOT enable this per-child (beta/gamma/production leave it false) —
+    # see root.example.yml.
+    issuerHost: ""
     image:
       repository: ghcr.io/spiffe/oidc-discovery-provider@sha256:1da5c3f80c6772d731a00fe33035baa77ce515991d28e23576f4f86d8d8a4759
       tag: "1.9.4"  # Reference only; digest in repository takes precedence
@@ -150,6 +333,19 @@ spire:
       limits:
         cpu: 100m
         memory: 128Mi
+    # Exposure — pick one. Both default off; k8s-ops enables whichever
+    # matches the target cluster's ingress mechanism when the OIDC
+    # endpoint goes live (TLS MUST terminate with a real (non-self-signed)
+    # CA cert — AWS OIDC federation pins a thumbprint, not just any TLS).
+    ingress:
+      enabled: false
+      className: "nginx"
+      annotations: {}
+      tls: []
+    httproute:
+      enabled: false
+      gatewayName: shared
+      gatewayNamespace: gateway
 
   autoEnroll:
     enabled: true
@@ -165,6 +361,12 @@ spire:
       - name: manager
         namespace: skauswatch
         serviceAccount: manager
+        # Sole admin-flagged identity in this chart: manager's SVID (minted
+        # from this entry) is authorized to call the SPIRE Server Entry API
+        # (UpdateEntry) at runtime to adjust SVID TTLs — see README
+        # "Admin-adjustable SVID TTL". Never add `admin: true` to another
+        # service's entry without updating that doc.
+        admin: true
       - name: pki
         namespace: skauswatch
         serviceAccount: pki
@@ -183,9 +385,15 @@ spire:
       - name: scanner
         namespace: skauswatch
         serviceAccount: scanner
-      - name: flask-backend
+      - name: codescan-backend
         namespace: skauswatch
-        serviceAccount: flask-backend
+        serviceAccount: codescan-backend
+      - name: worker-vault-sync
+        namespace: skauswatch
+        serviceAccount: worker-vault-sync
+      - name: vault
+        namespace: skauswatch
+        serviceAccount: vault
       - name: logs
         namespace: skauswatch
         serviceAccount: logs

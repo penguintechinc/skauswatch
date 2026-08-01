@@ -347,17 +347,13 @@ mod tests {
         Ok(())
     }
 
-    // Cross-parity emitter: when `SSHCA_PARITY_DIR` points at a directory
-    // containing `ca_key` + subject fixtures, sign a user and host cert with
-    // the real load+sign code path and write them out for an external
-    // `ssh-keygen -L` diff against the OpenSSH golden. A no-op otherwise, so it
-    // never runs (or touches the filesystem) during normal `cargo test`.
-    #[test]
-    fn emit_parity_certs_when_requested() -> anyhow::Result<()> {
-        let Ok(dir) = std::env::var("SSHCA_PARITY_DIR") else {
-            return Ok(());
-        };
-        let dir = std::path::PathBuf::from(dir);
+    /// Core logic shared by the always-run coverage test below and the
+    /// opt-in `SSHCA_PARITY_DIR` manual export: sign a user and host cert
+    /// with the real load+sign code path and write them to `dir`, reading
+    /// subject fixtures (`ca_key`, `subj_ed25519.pub`, `subj_rsa.pub`) from
+    /// the same directory. Split out purely for testability — no behaviour
+    /// change from the original single-function version.
+    fn emit_parity_certs(dir: &Path) -> anyhow::Result<()> {
         let ca = SshCa::load_or_generate(&dir.join("ca_key"))?;
 
         let user_permits = [
@@ -404,6 +400,52 @@ mod tests {
             dir.join("v2_host-cert.pub"),
             format!("{}\n", host.signed_certificate),
         )?;
+        Ok(())
+    }
+
+    // Cross-parity emitter: when `SSHCA_PARITY_DIR` points at a directory
+    // containing `ca_key` + subject fixtures, sign a user and host cert with
+    // the real load+sign code path and write them out for an external
+    // `ssh-keygen -L` diff against the OpenSSH golden. A no-op otherwise, so it
+    // never runs (or touches the filesystem) during normal `cargo test`.
+    #[test]
+    fn emit_parity_certs_when_requested() -> anyhow::Result<()> {
+        let Ok(dir) = std::env::var("SSHCA_PARITY_DIR") else {
+            return Ok(());
+        };
+        emit_parity_certs(&std::path::PathBuf::from(dir))
+    }
+
+    /// Always-run exercise of [`emit_parity_certs`] against a scratch
+    /// directory with freshly generated subject fixtures, so the emitter's
+    /// logic — otherwise only reachable via the opt-in `SSHCA_PARITY_DIR`
+    /// manual workflow above — has automated regression coverage.
+    #[test]
+    fn emit_parity_certs_writes_valid_certificates() -> anyhow::Result<()> {
+        let dir = scratch_key_path();
+        std::fs::create_dir_all(&dir)?;
+
+        std::fs::write(dir.join("subj_ed25519.pub"), gen_subject())?;
+        let rsa_subject = PrivateKey::random(&mut OsRng, Algorithm::Rsa { hash: None })?;
+        std::fs::write(
+            dir.join("subj_rsa.pub"),
+            rsa_subject.public_key().to_openssh()?,
+        )?;
+
+        emit_parity_certs(&dir)?;
+
+        let user_cert = std::fs::read_to_string(dir.join("v2_user-cert.pub"))?;
+        let user = Certificate::from_openssh(user_cert.trim())?;
+        assert_eq!(user.cert_type(), CertType::User);
+        assert_eq!(user.key_id(), "user-req-USERID");
+        assert!(user.extensions().0.contains_key("permit-pty"));
+
+        let host_cert = std::fs::read_to_string(dir.join("v2_host-cert.pub"))?;
+        let host = Certificate::from_openssh(host_cert.trim())?;
+        assert_eq!(host.cert_type(), CertType::Host);
+        assert_eq!(host.key_id(), "host-req-HOSTID");
+
+        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
 

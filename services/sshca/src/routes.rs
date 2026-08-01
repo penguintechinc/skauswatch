@@ -41,6 +41,7 @@ use crate::model::{
     RevokeCertificateRequest, RevokeCertificateResponse,
 };
 use crate::store::{CertStore, StoredCert};
+use crate::tenant::TenantId;
 
 /// Shared handler state.
 #[derive(Clone)]
@@ -64,15 +65,33 @@ impl skauswatch_auth::JwtSecretSource for AppState {
     }
 }
 
+/// PostHog flag gating certificate *issuance* — default OFF until
+/// validated (see `general.md` Feature Toggling & License Enforcement).
+/// Independent of `openapi::OPENAPI_FLAG`. Read/list/revoke routes on the
+/// same `/api/v1/ssh/certificates` path are unaffected by this flag.
+pub const ISSUANCE_FLAG: &str = "skauswatch.sshca";
+
 /// Builds the `/api/v1/ssh` router. Every route requires a valid bearer
 /// token (finding #2) — enforced as a single router-wide layer so no
 /// individual handler can accidentally be added without the gate.
+///
+/// `POST /api/v1/ssh/certificates` (issuance) is split into its own
+/// sub-router so `ISSUANCE_FLAG` can gate it without affecting
+/// `GET /api/v1/ssh/certificates` (list) on the same path — `Router::merge`
+/// combines method routers registered for the same path across two
+/// routers. The flag layer is applied to `issuance` before it merges, so it
+/// sits *innermost* relative to the outer `AuthenticatedCaller` layer:
+/// auth runs first, then the flag check.
 pub fn router(state: AppState) -> Router {
+    let issuance = Router::new()
+        .route("/api/v1/ssh/certificates", post(issue_certificate))
+        .layer(axum::middleware::from_fn_with_state(
+            penguin_licensing::axum::FlagGate::new(state.license.clone(), ISSUANCE_FLAG),
+            penguin_licensing::axum::flag_gate,
+        ));
+
     Router::new()
-        .route(
-            "/api/v1/ssh/certificates",
-            post(issue_certificate).get(list_certificates),
-        )
+        .route("/api/v1/ssh/certificates", get(list_certificates))
         .route("/api/v1/ssh/certificates/{id}", get(get_certificate))
         .route(
             "/api/v1/ssh/certificates/{id}/revoke",
@@ -80,6 +99,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/ssh/krl", get(get_krl))
         .route("/api/v1/ssh/ca/public-key", get(get_ca_public_key))
+        .merge(issuance)
         // Merged *before* the auth layer below so the router-wide
         // AuthenticatedCaller layer covers this route the same as every
         // other one (see openapi.rs module docs and
@@ -125,6 +145,7 @@ fn to_naive(secs: i64) -> chrono::NaiveDateTime {
 )]
 pub(crate) async fn issue_certificate(
     State(state): State<AppState>,
+    TenantId(tenant): TenantId,
     ApiJson(req): ApiJson<IssueCertificateRequest>,
 ) -> Result<Response, ApiError> {
     if req.public_key.trim().is_empty() {
@@ -201,6 +222,7 @@ pub(crate) async fn issue_certificate(
     let metadata = req.metadata.clone().unwrap_or(serde_json::Value::Null);
     let stored = StoredCert {
         certificate_id: request_id.clone(),
+        tenant_id: tenant,
         certificate_type: req.certificate_type,
         serial_number: serial,
         key_id: key_id.clone(),
@@ -280,12 +302,13 @@ pub(crate) struct ListQuery {
 )]
 pub(crate) async fn list_certificates(
     State(state): State<AppState>,
+    TenantId(tenant): TenantId,
     Query(q): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let certs = state
         .store
-        .list(q.certificate_type, q.status.as_deref(), limit);
+        .list(tenant, q.certificate_type, q.status.as_deref(), limit);
     let items: Vec<serde_json::Value> = certs.iter().map(stored_to_json).collect();
     let total = items.len();
     Ok(Json(serde_json::json!({ "certificates": items, "total": total })).into_response())
@@ -306,9 +329,10 @@ pub(crate) async fn list_certificates(
 )]
 pub(crate) async fn get_certificate(
     State(state): State<AppState>,
+    TenantId(tenant): TenantId,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    match state.store.get(&id) {
+    match state.store.get(&id, tenant) {
         Some(c) => Ok(Json(stored_to_json(&c)).into_response()),
         None => Err(ApiError::NotFound("Certificate not found".to_owned())),
     }
@@ -331,11 +355,15 @@ pub(crate) async fn get_certificate(
 )]
 pub(crate) async fn revoke_certificate(
     State(state): State<AppState>,
+    TenantId(tenant): TenantId,
     Path(id): Path<String>,
     ApiJson(req): ApiJson<RevokeCertificateRequest>,
 ) -> Result<Response, ApiError> {
     let reason = req.reason.unwrap_or_else(|| "unspecified".to_owned());
-    if state.store.revoke(&id, &reason, Utc::now().naive_utc()) {
+    if state
+        .store
+        .revoke(&id, tenant, &reason, Utc::now().naive_utc())
+    {
         Ok(Json(serde_json::json!({
             "message": "Certificate revoked",
             "certificate_id": id,
@@ -357,10 +385,13 @@ pub(crate) async fn revoke_certificate(
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
     ),
 )]
-pub(crate) async fn get_krl(State(state): State<AppState>) -> Result<Response, ApiError> {
+pub(crate) async fn get_krl(
+    State(state): State<AppState>,
+    TenantId(tenant): TenantId,
+) -> Result<Response, ApiError> {
     let revoked: Vec<serde_json::Value> = state
         .store
-        .krl_entries()
+        .krl_entries(tenant)
         .iter()
         .map(|e| {
             serde_json::json!({
@@ -456,6 +487,16 @@ mod tests {
         ("Authorization", format!("Bearer {token}"))
     }
 
+    /// `X-Tenant-ID` header value with a fresh tenant — pair with
+    /// [`auth_header`] for every request that touches a tenant-scoped
+    /// handler (everything except `get_ca_public_key`).
+    fn tenant_header() -> (&'static str, String) {
+        (
+            crate::tenant::TENANT_HEADER,
+            uuid::Uuid::new_v4().to_string(),
+        )
+    }
+
     fn subject_pub_line() -> String {
         let key = ssh_key::PrivateKey::random(
             &mut ssh_key::rand_core::OsRng,
@@ -469,6 +510,7 @@ mod tests {
     async fn issue_get_list_revoke_flow() {
         let server = axum_test::TestServer::new(router(test_state()));
         let (hdr, val) = auth_header();
+        let (thdr, tval) = tenant_header();
         let body = serde_json::json!({
             "certificate_type": "user",
             "public_key": subject_pub_line(),
@@ -479,6 +521,7 @@ mod tests {
         let resp = server
             .post("/api/v1/ssh/certificates")
             .add_header(hdr, val.clone())
+            .add_header(thdr, tval.clone())
             .json(&body)
             .await;
         resp.assert_status(StatusCode::CREATED);
@@ -502,6 +545,7 @@ mod tests {
         let got = server
             .get(&format!("/api/v1/ssh/certificates/{cert_id}"))
             .add_header(hdr, val.clone())
+            .add_header(thdr, tval.clone())
             .await;
         got.assert_status_ok();
         assert_eq!(got.json::<serde_json::Value>()["status"], "active");
@@ -510,6 +554,7 @@ mod tests {
         let list = server
             .get("/api/v1/ssh/certificates")
             .add_header(hdr, val.clone())
+            .add_header(thdr, tval.clone())
             .add_query_param("type", "user")
             .await;
         list.assert_status_ok();
@@ -519,6 +564,7 @@ mod tests {
         let rev = server
             .post(&format!("/api/v1/ssh/certificates/{cert_id}/revoke"))
             .add_header(hdr, val.clone())
+            .add_header(thdr, tval.clone())
             .json(&serde_json::json!({ "reason": "keyCompromise" }))
             .await;
         rev.assert_status_ok();
@@ -527,6 +573,7 @@ mod tests {
         let krl = server
             .get("/api/v1/ssh/krl")
             .add_header(hdr, val.clone())
+            .add_header(thdr, tval.clone())
             .await;
         krl.assert_status_ok();
         let krl_json: serde_json::Value = krl.json();
@@ -540,9 +587,11 @@ mod tests {
     async fn unknown_certificate_is_404() {
         let server = axum_test::TestServer::new(router(test_state()));
         let (hdr, val) = auth_header();
+        let (thdr, tval) = tenant_header();
         let resp = server
             .get("/api/v1/ssh/certificates/nope")
             .add_header(hdr, val)
+            .add_header(thdr, tval)
             .await;
         resp.assert_status(StatusCode::NOT_FOUND);
     }
@@ -551,9 +600,11 @@ mod tests {
     async fn missing_public_key_is_400() {
         let server = axum_test::TestServer::new(router(test_state()));
         let (hdr, val) = auth_header();
+        let (thdr, tval) = tenant_header();
         let resp = server
             .post("/api/v1/ssh/certificates")
             .add_header(hdr, val)
+            .add_header(thdr, tval)
             .json(&serde_json::json!({ "certificate_type": "user", "public_key": "" }))
             .await;
         resp.assert_status(StatusCode::BAD_REQUEST);
@@ -563,9 +614,11 @@ mod tests {
     async fn zero_validity_duration_is_400() {
         let server = axum_test::TestServer::new(router(test_state()));
         let (hdr, val) = auth_header();
+        let (thdr, tval) = tenant_header();
         let resp = server
             .post("/api/v1/ssh/certificates")
             .add_header(hdr, val)
+            .add_header(thdr, tval)
             .json(&serde_json::json!({
                 "certificate_type": "user",
                 "public_key": subject_pub_line(),
@@ -575,13 +628,32 @@ mod tests {
         resp.assert_status(StatusCode::BAD_REQUEST);
     }
 
+    /// Regression: issuance without a tenant header must be rejected before
+    /// touching the CA or store at all.
     #[tokio::test]
-    async fn invalid_subject_key_is_400_via_http() {
+    async fn issue_without_tenant_header_is_403() {
         let server = axum_test::TestServer::new(router(test_state()));
         let (hdr, val) = auth_header();
         let resp = server
             .post("/api/v1/ssh/certificates")
             .add_header(hdr, val)
+            .json(&serde_json::json!({
+                "certificate_type": "user",
+                "public_key": subject_pub_line(),
+            }))
+            .await;
+        resp.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn invalid_subject_key_is_400_via_http() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
+        let (thdr, tval) = tenant_header();
+        let resp = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val)
+            .add_header(thdr, tval)
             .json(&serde_json::json!({
                 "certificate_type": "user",
                 "public_key": "not-a-real-openssh-key",
@@ -598,9 +670,11 @@ mod tests {
     async fn explicit_extensions_are_used_verbatim() {
         let server = axum_test::TestServer::new(router(test_state()));
         let (hdr, val) = auth_header();
+        let (thdr, tval) = tenant_header();
         let resp = server
             .post("/api/v1/ssh/certificates")
             .add_header(hdr, val)
+            .add_header(thdr, tval)
             .json(&serde_json::json!({
                 "certificate_type": "user",
                 "public_key": subject_pub_line(),
@@ -621,9 +695,11 @@ mod tests {
     async fn host_certificate_defaults_to_no_extensions() {
         let server = axum_test::TestServer::new(router(test_state()));
         let (hdr, val) = auth_header();
+        let (thdr, tval) = tenant_header();
         let resp = server
             .post("/api/v1/ssh/certificates")
             .add_header(hdr, val)
+            .add_header(thdr, tval)
             .json(&serde_json::json!({
                 "certificate_type": "host",
                 "public_key": subject_pub_line(),
@@ -645,9 +721,11 @@ mod tests {
     async fn source_address_and_force_command_become_critical_options() {
         let server = axum_test::TestServer::new(router(test_state()));
         let (hdr, val) = auth_header();
+        let (thdr, tval) = tenant_header();
         let resp = server
             .post("/api/v1/ssh/certificates")
             .add_header(hdr, val)
+            .add_header(thdr, tval)
             .json(&serde_json::json!({
                 "certificate_type": "user",
                 "public_key": subject_pub_line(),
@@ -667,9 +745,11 @@ mod tests {
     async fn revoking_unknown_certificate_is_404() {
         let server = axum_test::TestServer::new(router(test_state()));
         let (hdr, val) = auth_header();
+        let (thdr, tval) = tenant_header();
         let resp = server
             .post("/api/v1/ssh/certificates/nope/revoke")
             .add_header(hdr, val)
+            .add_header(thdr, tval)
             .json(&serde_json::json!({ "reason": "keyCompromise" }))
             .await;
         resp.assert_status(StatusCode::NOT_FOUND);
@@ -693,10 +773,12 @@ mod tests {
     async fn list_respects_limit_clamp() {
         let server = axum_test::TestServer::new(router(test_state()));
         let (hdr, val) = auth_header();
+        let (thdr, tval) = tenant_header();
         for _ in 0..3 {
             let resp = server
                 .post("/api/v1/ssh/certificates")
                 .add_header(hdr, val.clone())
+                .add_header(thdr, tval.clone())
                 .json(&serde_json::json!({
                     "certificate_type": "user",
                     "public_key": subject_pub_line(),
@@ -707,6 +789,7 @@ mod tests {
         let list = server
             .get("/api/v1/ssh/certificates")
             .add_header(hdr, val)
+            .add_header(thdr, tval)
             .add_query_param("limit", 1)
             .await;
         list.assert_status_ok();
@@ -764,5 +847,116 @@ mod tests {
             .add_header("Authorization", format!("Bearer {bad_token}"))
             .await;
         resp.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    /// Regression: tenant A's issued certificate must be invisible — not
+    /// gettable, not listable, not revocable — to a caller presenting
+    /// tenant B's `X-Tenant-ID` header, even with a fully valid bearer
+    /// token. This service holds an SSH CA signing key; cross-tenant
+    /// visibility here is a severe bug.
+    #[tokio::test]
+    async fn tenant_b_cannot_get_list_or_revoke_tenant_as_certificate() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
+        let tenant_a = uuid::Uuid::new_v4().to_string();
+        let tenant_b = uuid::Uuid::new_v4().to_string();
+
+        let issued = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val.clone())
+            .add_header(crate::tenant::TENANT_HEADER, tenant_a.clone())
+            .json(&serde_json::json!({
+                "certificate_type": "user",
+                "public_key": subject_pub_line(),
+                "principals": ["alice"],
+            }))
+            .await;
+        issued.assert_status(StatusCode::CREATED);
+        let issued: serde_json::Value = issued.json();
+        let cert_id = issued["certificate_id"].as_str().expect("cert id");
+
+        server
+            .get(&format!("/api/v1/ssh/certificates/{cert_id}"))
+            .add_header(hdr, val.clone())
+            .add_header(crate::tenant::TENANT_HEADER, tenant_b.clone())
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+
+        let list_res = server
+            .get("/api/v1/ssh/certificates")
+            .add_header(hdr, val.clone())
+            .add_header(crate::tenant::TENANT_HEADER, tenant_b.clone())
+            .await;
+        list_res.assert_status_ok();
+        let list_json: serde_json::Value = list_res.json();
+        assert_eq!(list_json["total"], 0);
+
+        server
+            .post(&format!("/api/v1/ssh/certificates/{cert_id}/revoke"))
+            .add_header(hdr, val.clone())
+            .add_header(crate::tenant::TENANT_HEADER, tenant_b)
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+
+        let status_res = server
+            .get(&format!("/api/v1/ssh/certificates/{cert_id}"))
+            .add_header(hdr, val)
+            .add_header(crate::tenant::TENANT_HEADER, tenant_a)
+            .await;
+        status_res.assert_status_ok();
+        assert_eq!(status_res.json::<serde_json::Value>()["status"], "active");
+    }
+
+    /// `release_mode = true` license client (flags default OFF).
+    fn gated_license() -> Arc<penguin_licensing::LicenseClient> {
+        let mut cfg = match penguin_licensing::LicenseConfig::new("skauswatch") {
+            Ok(c) => c,
+            Err(e) => panic!("license config: {e}"),
+        };
+        cfg.release_mode = true;
+        match penguin_licensing::LicenseClient::new(cfg) {
+            Ok(c) => c,
+            Err(e) => panic!("license client: {e}"),
+        }
+    }
+
+    /// Regression: issuance must be denied while `ISSUANCE_FLAG` evaluates
+    /// disabled — read/list/revoke routes on the same path are unaffected.
+    #[tokio::test]
+    async fn issuance_is_denied_when_the_flag_is_disabled() {
+        let ca = SshCa::load_or_generate(Path::new("/nonexistent-skauswatch-sshca-key-2"))
+            .expect("ephemeral ca");
+        let state = AppState {
+            ca: Arc::new(ca),
+            store: Arc::new(CertStore::new()),
+            jwt_secret: TEST_JWT_SECRET.into(),
+            license: gated_license(),
+        };
+        let server = axum_test::TestServer::new(router(state));
+        let (hdr, val) = auth_header();
+        let (thdr, tval) = tenant_header();
+
+        let issue_res = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val.clone())
+            .add_header(thdr, tval.clone())
+            .json(&serde_json::json!({
+                "certificate_type": "user",
+                "public_key": subject_pub_line(),
+            }))
+            .await;
+        issue_res.assert_status(StatusCode::FORBIDDEN);
+        let body: serde_json::Value = issue_res.json();
+        assert_eq!(body["error"], "feature_disabled");
+        assert_eq!(body["flag"], super::ISSUANCE_FLAG);
+
+        // Read route on the same path is unaffected by the flag.
+        let list_res = server
+            .get("/api/v1/ssh/certificates")
+            .add_header(hdr, val)
+            .add_header(thdr, tval)
+            .await;
+        list_res.assert_status_ok();
     }
 }

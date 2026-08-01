@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use penguin_licensing::LicenseClient;
+use skauswatch_identity::IdentityProvider;
 
 use crate::ca::ssh::SshCa;
 use crate::ca::x509::X509Ca;
@@ -26,6 +27,17 @@ pub struct AppStateInner {
     /// License entitlement + PostHog flag client (fail-safe) — currently
     /// only used to gate the live `/api/v1/openapi.json` route.
     pub license: Arc<LicenseClient>,
+    /// SPIFFE Workload API identity (`docs/v2-port/service-auth-model.md`
+    /// §2/§3) — presents pki's own X.509-SVID for gRPC/maintenance mTLS and
+    /// verifies peer SVIDs against a `skauswatch_identity::SpiffeIdMatcher`.
+    /// `None` only in test constructors that don't exercise mTLS at all
+    /// (`grpc::serve`/`maintenance::serve` treat that identically to a
+    /// held-but-degraded provider: fall back to the pre-mTLS behavior for
+    /// gRPC, or refuse to bind the maintenance listener at all — see those
+    /// modules' docs). Real `from_env()` startup always populates `Some`;
+    /// production hard-fails inside `IdentityProvider::connect`
+    /// itself before this field would ever be `None` in prod.
+    pub identity: Option<Arc<IdentityProvider>>,
 }
 
 /// Cheap-to-clone handle used as axum/gRPC state.
@@ -52,6 +64,26 @@ impl AppStateInner {
             LicenseClient::new(license_cfg).map_err(|e| anyhow::anyhow!("license client: {e}"))?;
         let _ = license.refresh().await;
 
+        // SPIFFE Workload API identity for gRPC/maintenance mTLS
+        // (docs/v2-port/service-auth-model.md §2/§3). Fails fast in
+        // production if no SPIRE agent is attestable — same fail-safe
+        // posture as the JWT secret and license client above.
+        //
+        // Deliberately `connect()`, not a domain-gated variant: identity is
+        // authentication, and per `general.md`'s Feature Toggling &
+        // License Enforcement, a deployment-domain bypass is for
+        // license/feature-flag gating only — never for exempting
+        // authentication. `skauswatch.app` (used just above for the
+        // license client's *own* bypass list) is this product's real
+        // production domain; passing it here would have silently disabled
+        // the SPIRE identity requirement in production itself. See
+        // `skauswatch_identity`'s crate-level docs for the full rationale.
+        let identity = Arc::new(
+            IdentityProvider::connect()
+                .await
+                .map_err(|e| anyhow::anyhow!("identity provider: {e}"))?,
+        );
+
         let x509_config = X509CaConfig::from_env();
         let ssh_config = SshCaConfig::from_env();
         let server = ServerConfig::from_env();
@@ -77,6 +109,7 @@ impl AppStateInner {
             server,
             jwt_secret,
             license,
+            identity: Some(identity),
         }))
     }
 
@@ -144,6 +177,53 @@ impl AppStateInner {
             },
             jwt_secret: "test-secret".to_owned(),
             license,
+            identity: None,
+        })
+    }
+
+    /// Like [`Self::for_tests`], but with a caller-supplied
+    /// [`IdentityProvider`] — used by `grpc`/`maintenance` tests that need
+    /// to exercise the SPIFFE-identity-aware code paths (degraded-provider
+    /// fallback, matcher wiring) rather than the `identity: None` shortcut
+    /// every other test constructor uses, which skips the identity check
+    /// entirely instead of exercising its degraded branch.
+    #[cfg(test)]
+    #[allow(clippy::panic)] // test-only constructor fails loudly by design
+    pub fn for_tests_with_identity(identity: Arc<IdentityProvider>) -> AppState {
+        let dir = std::env::temp_dir().join(format!(
+            "skauswatch-pki-test-identity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let x509_config = X509CaConfig {
+            ca_key_path: dir.join("ca.key").to_string_lossy().into_owned(),
+            ca_cert_path: dir.join("ca.crt").to_string_lossy().into_owned(),
+            ca_key_password: None,
+            default_validity_days: 365,
+            max_validity_days: 825,
+            default_key_algorithm: "RSA".to_owned(),
+            default_key_size: 2048,
+            crl_validity_days: 7,
+            ocsp_responder_url: None,
+        };
+        let x509 = Arc::new(
+            X509Ca::load_or_generate(x509_config.clone())
+                .unwrap_or_else(|e| panic!("test X.509 CA: {e}")),
+        );
+        let ssh = Arc::new(SshCa::for_tests());
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@127.0.0.1:1/test")
+            .unwrap_or_else(|e| panic!("lazy test pool: {e}"));
+
+        Arc::new(Self {
+            manager: Arc::new(CertManager::new(x509, ssh, db)),
+            x509_config,
+            server: ServerConfig {
+                api_port: 8001,
+                grpc_port: 50_052,
+            },
+            jwt_secret: "test-secret".to_owned(),
+            license: Self::dev_license(),
+            identity: Some(identity),
         })
     }
 
@@ -213,6 +293,7 @@ impl AppStateInner {
             },
             jwt_secret: "test-secret".to_owned(),
             license: Self::dev_license(),
+            identity: None,
         })
     }
 
@@ -233,6 +314,7 @@ impl AppStateInner {
             },
             jwt_secret: "test-secret".to_owned(),
             license: Self::dev_license(),
+            identity: None,
         })
     }
 }

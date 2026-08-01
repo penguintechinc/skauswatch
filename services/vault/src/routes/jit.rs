@@ -48,9 +48,19 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
-/// Validates a JIT access token for `secret_id`. Returns the grantee id on
-/// success. Rust port of v1 `_validate_jit_token`.
-pub async fn validate_jit_token(state: &AppState, token: &str, secret_id: &str) -> Option<String> {
+/// Validates a JIT access token for `secret_id`. Returns the grantee id and
+/// the grant's tenant on success — the tenant `vault_jit_grants.tenant_id`
+/// was stamped with at approval time (denormalized from the approving
+/// admin's tenant), since the bearer-less JIT token itself carries no
+/// tenant claim of its own. Callers (`secrets::get_secret_value`) use the
+/// returned tenant to scope the final `vault_secrets` lookup and the audit
+/// write — never trusting `secret_id` from the URL path alone. Rust port of
+/// v1 `_validate_jit_token`.
+pub async fn validate_jit_token(
+    state: &AppState,
+    token: &str,
+    secret_id: &str,
+) -> Option<(String, Uuid)> {
     let parts: Vec<&str> = token.split(':').collect();
     if parts.len() != 4 || parts[0] != "jit" {
         return None;
@@ -68,10 +78,11 @@ pub async fn validate_jit_token(state: &AppState, token: &str, secret_id: &str) 
     struct GrantRow {
         access_token_hash: String,
         expires_at: NaiveDateTime,
+        tenant_id: Uuid,
     }
 
     let grant = sqlx::query_as::<_, GrantRow>(
-        "SELECT access_token_hash, expires_at FROM vault_jit_grants \
+        "SELECT access_token_hash, expires_at, tenant_id FROM vault_jit_grants \
          WHERE id = $1 AND secret_id = $2 AND grantee_id = $3 AND revoked_at IS NULL",
     )
     .bind(grant_id)
@@ -87,7 +98,7 @@ pub async fn validate_jit_token(state: &AppState, token: &str, secret_id: &str) 
     if token_hash(token) != grant.access_token_hash {
         return None;
     }
-    Some(grantee_id.to_owned())
+    Some((grantee_id.to_owned(), grant.tenant_id))
 }
 
 #[derive(sqlx::FromRow)]
@@ -147,13 +158,15 @@ pub(crate) struct JitRequestListResponse {
 
 async fn is_secret_owner(
     state: &AppState,
+    tenant_id: Uuid,
     secret_id: &str,
     user_id: &str,
 ) -> Result<bool, ApiError> {
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM vault_secret_owners \
-         WHERE secret_id = $1 AND owner_type = 'user' AND owner_id = $2",
+         WHERE tenant_id = $1 AND secret_id = $2 AND owner_type = 'user' AND owner_id = $3",
     )
+    .bind(tenant_id)
     .bind(secret_id)
     .bind(user_id)
     .fetch_one(&state.db)
@@ -190,6 +203,7 @@ pub(crate) async fn list_jit_requests(
     Query(raw_query): Query<Vec<(String, String)>>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_any_scope(&["jit:request", "jit:approve"])?;
+    let tenant_id = user.tenant_uuid()?;
     let status_filter: Vec<String> = raw_query
         .iter()
         .filter(|(k, _)| k == "status")
@@ -202,11 +216,13 @@ pub(crate) async fn list_jit_requests(
             "SELECT r.id, r.secret_id, r.requestor_id, r.reason, r.requested_duration_seconds, \
              r.approved_duration_seconds, r.status, r.approved_by, r.approved_at, \
              r.access_expires_at, r.created_at FROM vault_jit_requests r \
-             WHERE r.requestor_id = $1 \
+             WHERE r.tenant_id = $1 \
+               AND (r.requestor_id = $2 \
                 OR r.secret_id IN (SELECT secret_id FROM vault_secret_owners \
-                                   WHERE owner_type = 'user' AND owner_id = $1) \
+                                   WHERE tenant_id = $1 AND owner_type = 'user' AND owner_id = $2)) \
              ORDER BY r.created_at DESC",
         )
+        .bind(tenant_id)
         .bind(&user.user_id)
         .fetch_all(&state.db)
         .await?
@@ -214,8 +230,10 @@ pub(crate) async fn list_jit_requests(
         sqlx::query_as::<_, RequestRow>(
             "SELECT id, secret_id, requestor_id, reason, requested_duration_seconds, \
              approved_duration_seconds, status, approved_by, approved_at, access_expires_at, \
-             created_at FROM vault_jit_requests WHERE requestor_id = $1 ORDER BY created_at DESC",
+             created_at FROM vault_jit_requests WHERE tenant_id = $1 AND requestor_id = $2 \
+             ORDER BY created_at DESC",
         )
+        .bind(tenant_id)
         .bind(&user.user_id)
         .fetch_all(&state.db)
         .await?
@@ -261,6 +279,7 @@ pub(crate) async fn create_jit_request(
     body: Option<Json<CreateJitRequestBody>>,
 ) -> Result<(axum::http::StatusCode, Json<Value>), ApiError> {
     user.require_scope("jit:request")?;
+    let tenant_id = user.tenant_uuid()?;
     let body = body.map(|Json(b)| b).unwrap_or(CreateJitRequestBody {
         secret_id: None,
         reason: None,
@@ -276,10 +295,12 @@ pub(crate) async fn create_jit_request(
         ));
     }
 
-    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vault_secrets WHERE id = $1")
-        .bind(&secret_id)
-        .fetch_one(&state.db)
-        .await?;
+    let exists: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM vault_secrets WHERE id = $1 AND tenant_id = $2")
+            .bind(&secret_id)
+            .bind(tenant_id)
+            .fetch_one(&state.db)
+            .await?;
     if exists == 0 {
         return Err(ApiError::NotFound("Secret not found".to_owned()));
     }
@@ -298,10 +319,12 @@ pub(crate) async fn create_jit_request(
     let req_id = Uuid::new_v4().to_string();
     let now = Utc::now().naive_utc();
     sqlx::query(
-        "INSERT INTO vault_jit_requests (id, secret_id, requestor_id, reason, \
-         requested_duration_seconds, status, created_at) VALUES ($1,$2,$3,$4,$5,'pending',$6)",
+        "INSERT INTO vault_jit_requests (id, tenant_id, secret_id, requestor_id, reason, \
+         requested_duration_seconds, status, created_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,'pending',$7)",
     )
     .bind(&req_id)
+    .bind(tenant_id)
     .bind(&secret_id)
     .bind(&user.user_id)
     .bind(&reason)
@@ -313,9 +336,10 @@ pub(crate) async fn create_jit_request(
     let row = sqlx::query_as::<_, RequestRow>(
         "SELECT id, secret_id, requestor_id, reason, requested_duration_seconds, \
          approved_duration_seconds, status, approved_by, approved_at, access_expires_at, \
-         created_at FROM vault_jit_requests WHERE id = $1",
+         created_at FROM vault_jit_requests WHERE id = $1 AND tenant_id = $2",
     )
     .bind(&req_id)
+    .bind(tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -362,13 +386,15 @@ pub(crate) async fn approve_jit_request(
     body: Option<Json<ApproveBody>>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_scope("jit:approve")?;
+    let tenant_id = user.tenant_uuid()?;
 
     let jit_req = sqlx::query_as::<_, RequestRow>(
         "SELECT id, secret_id, requestor_id, reason, requested_duration_seconds, \
          approved_duration_seconds, status, approved_by, approved_at, access_expires_at, \
-         created_at FROM vault_jit_requests WHERE id = $1",
+         created_at FROM vault_jit_requests WHERE id = $1 AND tenant_id = $2",
     )
     .bind(&request_id)
+    .bind(tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("Request not found".to_owned()))?;
@@ -379,7 +405,7 @@ pub(crate) async fn approve_jit_request(
             jit_req.status
         )));
     }
-    if !is_secret_owner(&state, &jit_req.secret_id, &user.user_id).await? {
+    if !is_secret_owner(&state, tenant_id, &jit_req.secret_id, &user.user_id).await? {
         return Err(ApiError::Forbidden(
             "Not an owner of this secret".to_owned(),
         ));
@@ -402,10 +428,11 @@ pub(crate) async fn approve_jit_request(
     let hash = token_hash(&token);
 
     sqlx::query(
-        "INSERT INTO vault_jit_grants (id, request_id, secret_id, grantee_id, \
-         access_token_hash, expires_at) VALUES ($1,$2,$3,$4,$5,$6)",
+        "INSERT INTO vault_jit_grants (id, tenant_id, request_id, secret_id, grantee_id, \
+         access_token_hash, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
     )
     .bind(&grant_id)
+    .bind(tenant_id)
     .bind(&request_id)
     .bind(&jit_req.secret_id)
     .bind(&jit_req.requestor_id)
@@ -416,13 +443,14 @@ pub(crate) async fn approve_jit_request(
 
     sqlx::query(
         "UPDATE vault_jit_requests SET status = 'approved', approved_by = $1, approved_at = $2, \
-         approved_duration_seconds = $3, access_expires_at = $4 WHERE id = $5",
+         approved_duration_seconds = $3, access_expires_at = $4 WHERE id = $5 AND tenant_id = $6",
     )
     .bind(&user.user_id)
     .bind(now.naive_utc())
     .bind(approved_duration)
     .bind(expires_at.naive_utc())
     .bind(&request_id)
+    .bind(tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -462,13 +490,15 @@ pub(crate) async fn reject_jit_request(
     Path(request_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_scope("jit:approve")?;
+    let tenant_id = user.tenant_uuid()?;
 
     let jit_req = sqlx::query_as::<_, RequestRow>(
         "SELECT id, secret_id, requestor_id, reason, requested_duration_seconds, \
          approved_duration_seconds, status, approved_by, approved_at, access_expires_at, \
-         created_at FROM vault_jit_requests WHERE id = $1",
+         created_at FROM vault_jit_requests WHERE id = $1 AND tenant_id = $2",
     )
     .bind(&request_id)
+    .bind(tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("Request not found".to_owned()))?;
@@ -479,7 +509,7 @@ pub(crate) async fn reject_jit_request(
             jit_req.status
         )));
     }
-    if !is_secret_owner(&state, &jit_req.secret_id, &user.user_id).await? {
+    if !is_secret_owner(&state, tenant_id, &jit_req.secret_id, &user.user_id).await? {
         return Err(ApiError::Forbidden(
             "Not an owner of this secret".to_owned(),
         ));
@@ -487,11 +517,12 @@ pub(crate) async fn reject_jit_request(
 
     sqlx::query(
         "UPDATE vault_jit_requests SET status = 'rejected', approved_by = $1, approved_at = $2 \
-         WHERE id = $3",
+         WHERE id = $3 AND tenant_id = $4",
     )
     .bind(&user.user_id)
     .bind(Utc::now().naive_utc())
     .bind(&request_id)
+    .bind(tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -573,7 +604,7 @@ mod tests {
     use axum_test::TestServer;
     use skauswatch_testkit::license::dev_license;
 
-    use crate::routes::test_support::{db_state, sign_token};
+    use crate::routes::test_support::{OTHER_TENANT, TEST_TENANT, db_state, sign_token};
 
     fn test_server_with_state(state: crate::state::AppState) -> TestServer {
         let app = axum::Router::new()
@@ -582,25 +613,42 @@ mod tests {
         TestServer::new(app)
     }
 
+    fn test_tenant() -> Uuid {
+        TEST_TENANT
+            .parse()
+            .unwrap_or_else(|e| panic!("test tenant uuid: {e}"))
+    }
+
     async fn seed_secret(state: &crate::state::AppState, owner_id: &str) -> String {
+        seed_secret_for_tenant(state, owner_id, test_tenant()).await
+    }
+
+    async fn seed_secret_for_tenant(
+        state: &crate::state::AppState,
+        owner_id: &str,
+        tenant_id: Uuid,
+    ) -> String {
         let secret_id = Uuid::new_v4().to_string();
         let now = Utc::now().naive_utc();
         sqlx::query(
-            "INSERT INTO vault_secrets (id, name, description, secret_type, encrypted_value, \
-             encrypted_dek, dek_version, tags, secret_metadata, expires_at, created_at, \
-             updated_at, created_by) VALUES ($1,'n',NULL,'api_key','ct','dek',1,NULL,NULL,NULL,$2,$2,$3)",
+            "INSERT INTO vault_secrets (id, tenant_id, name, description, secret_type, \
+             encrypted_value, encrypted_dek, dek_version, tags, secret_metadata, expires_at, \
+             created_at, updated_at, created_by) \
+             VALUES ($1,$2,'n',NULL,'api_key','ct','dek',1,NULL,NULL,NULL,$3,$3,$4)",
         )
         .bind(&secret_id)
+        .bind(tenant_id)
         .bind(now)
         .bind(owner_id)
         .execute(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed secret: {e}"));
         sqlx::query(
-            "INSERT INTO vault_secret_owners (secret_id, owner_type, owner_id) \
-             VALUES ($1, 'user', $2)",
+            "INSERT INTO vault_secret_owners (secret_id, tenant_id, owner_type, owner_id) \
+             VALUES ($1, $2, 'user', $3)",
         )
         .bind(&secret_id)
+        .bind(tenant_id)
         .bind(owner_id)
         .execute(&state.db)
         .await
@@ -613,11 +661,12 @@ mod tests {
     /// grant row directly (bypassing `approve_jit_request`).
     async fn seed_jit_request_row(state: &crate::state::AppState, id: &str, secret_id: &str) {
         sqlx::query(
-            "INSERT INTO vault_jit_requests (id, secret_id, requestor_id, reason, \
+            "INSERT INTO vault_jit_requests (id, tenant_id, secret_id, requestor_id, reason, \
              requested_duration_seconds, status, created_at) \
-             VALUES ($1,$2,'requestor-1','test',3600,'approved',$3)",
+             VALUES ($1,$2,$3,'requestor-1','test',3600,'approved',$4)",
         )
         .bind(id)
+        .bind(test_tenant())
         .bind(secret_id)
         .bind(Utc::now().naive_utc())
         .execute(&state.db)
@@ -873,10 +922,11 @@ mod tests {
 
         seed_jit_request_row(&state, "req-1", &secret_id).await;
         sqlx::query(
-            "INSERT INTO vault_jit_grants (id, request_id, secret_id, grantee_id, \
-             access_token_hash, expires_at) VALUES ($1,'req-1',$2,$3,$4,$5)",
+            "INSERT INTO vault_jit_grants (id, tenant_id, request_id, secret_id, grantee_id, \
+             access_token_hash, expires_at) VALUES ($1,$2,'req-1',$3,$4,$5,$6)",
         )
         .bind(grant_id)
+        .bind(test_tenant())
         .bind(&secret_id)
         .bind(grantee_id)
         .bind(&hash)
@@ -891,7 +941,7 @@ mod tests {
 
         assert_eq!(
             validate_jit_token(&state, &token, &secret_id).await,
-            Some(grantee_id.to_owned())
+            Some((grantee_id.to_owned(), test_tenant()))
         );
 
         // Wrong secret id: grant row exists but doesn't match.
@@ -917,10 +967,11 @@ mod tests {
         let past_hash = token_hash(&past_token);
         seed_jit_request_row(&state, "req-2", &secret_id).await;
         sqlx::query(
-            "INSERT INTO vault_jit_grants (id, request_id, secret_id, grantee_id, \
-             access_token_hash, expires_at) VALUES ($1,'req-2',$2,$3,$4,$5)",
+            "INSERT INTO vault_jit_grants (id, tenant_id, request_id, secret_id, grantee_id, \
+             access_token_hash, expires_at) VALUES ($1,$2,'req-2',$3,$4,$5,$6)",
         )
         .bind(past_grant_id)
+        .bind(test_tenant())
         .bind(&secret_id)
         .bind(grantee_id)
         .bind(&past_hash)
@@ -933,5 +984,81 @@ mod tests {
                 .await
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn tenant_isolation_across_list_approve_and_reject() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let other_tenant: Uuid = OTHER_TENANT
+            .parse()
+            .unwrap_or_else(|e| panic!("other tenant uuid: {e}"));
+        let secret_a = seed_secret(&state, "owner-a").await;
+        let secret_b = seed_secret_for_tenant(&state, "owner-b", other_tenant).await;
+
+        let requestor_a = sign_token(&state, "requestor-a", "jit:request");
+        let requestor_b = crate::routes::test_support::sign_token_for_tenant(
+            &state,
+            "requestor-b",
+            "jit:request",
+            OTHER_TENANT,
+        );
+        let owner_a = sign_token(&state, "owner-a", "jit:approve");
+        let owner_b = crate::routes::test_support::sign_token_for_tenant(
+            &state,
+            "owner-b",
+            "jit:approve",
+            OTHER_TENANT,
+        );
+        let server = test_server_with_state(state.clone());
+
+        let created_a = server
+            .post("/api/v1/jit/requests")
+            .authorization_bearer(&requestor_a)
+            .json(&serde_json::json!({"secret_id": secret_a, "reason": "need it"}))
+            .await;
+        created_a.assert_status(axum::http::StatusCode::CREATED);
+        let request_a_id = created_a.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        server
+            .post("/api/v1/jit/requests")
+            .authorization_bearer(&requestor_b)
+            .json(&serde_json::json!({"secret_id": secret_b, "reason": "need it"}))
+            .await
+            .assert_status(axum::http::StatusCode::CREATED);
+
+        // Tenant B's owner sees only tenant B's request.
+        let listed = server
+            .get("/api/v1/jit/requests")
+            .authorization_bearer(&owner_b)
+            .await;
+        assert_eq!(
+            listed.json::<Value>()["requests"].as_array().map(Vec::len),
+            Some(1)
+        );
+
+        // Tenant B cannot approve or reject tenant A's request — 404, not
+        // 403, so existence isn't leaked across the tenant boundary either.
+        server
+            .patch(&format!("/api/v1/jit/requests/{request_a_id}/approve"))
+            .authorization_bearer(&owner_b)
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+        server
+            .patch(&format!("/api/v1/jit/requests/{request_a_id}/reject"))
+            .authorization_bearer(&owner_b)
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+
+        // Tenant A's own owner can still approve it normally.
+        server
+            .patch(&format!("/api/v1/jit/requests/{request_a_id}/approve"))
+            .authorization_bearer(&owner_a)
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status_ok();
     }
 }

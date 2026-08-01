@@ -1,8 +1,13 @@
 //! S3/MinIO operations for the scan pipeline, ported from v1 `s3/` (client,
-//! downloader, tagger). Per-object work builds an `aws-sdk-s3` client from the
-//! stored bucket credentials (mirroring the manager's connection-test path),
-//! enumerates with pagination + prefix, downloads with a size guard, and
-//! writes result tags best-effort.
+//! downloader, tagger): enumerates with pagination + prefix, downloads with a
+//! size guard, and writes result tags best-effort.
+//!
+//! [`client_from_credentials`] here builds a client from *explicit, inline*
+//! credentials (gRPC/stream-provided ad-hoc task creds — never persisted, so
+//! no envelope-decryption concern). Stored `s3_bucket_configs` credentials
+//! (hybrid `assume_role`/`static`, security finding #2) route instead through
+//! `skauswatch_s3::credentials::resolve_client`, called directly from
+//! `handler.rs` — see `S3ScanHandler::client_for_bucket`.
 
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};

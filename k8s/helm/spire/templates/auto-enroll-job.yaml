@@ -34,7 +34,12 @@ spec:
           readOnlyRootFilesystem: true
           capabilities:
             drop: [ALL]
-        image: "bitnami/kubectl:latest"
+        # Bitnami archived versioned kubectl tags in its 2025 licensing
+        # change — only a rolling `latest` tag remains available. Pinning
+        # the digest keeps this immutable regardless; re-resolve via
+        # `pinning-dependency-digests` skill on rotation, same as any
+        # other external image in this chart.
+        image: "bitnami/kubectl@sha256:95de17e6eb92da83a58c90a9df0c4cede634f898d2e6b92ea04f4a6ee6ace08d"
         imagePullPolicy: IfNotPresent
         command:
         - /bin/sh

@@ -25,6 +25,7 @@ use skauswatch_streams::{
     EntryFields, HandlerError, STREAM_S3_SCAN_RESULTS, STREAM_S3_SCAN_TASKS, StreamEntry,
     StreamHandler, StreamProducer, py_bool, py_now_isoformat,
 };
+use skauswatch_vault::EnvelopeEncryption;
 use sqlx::PgPool;
 
 use crate::clamav;
@@ -64,24 +65,102 @@ struct Verdict {
     ti_enrichment: Option<serde_json::Value>,
 }
 
-/// Worker task handler holding the shared DB pool, stream producer (re-dispatch
-/// + onward events), an HTTP client for TI, and the loaded config.
+/// This worker's own-AWS JWT-SVID federation config for [`S3ScanHandler::adhoc_client`]
+/// — dal2's IRSA equivalent (see `docs/v2-port/aws-identity-runbook.md`).
+/// `identity` is a trait object (not the concrete
+/// `skauswatch_identity::IdentityProvider`) purely so this module's own
+/// tests can substitute a hermetic fake; the real binary always wires the
+/// genuine `IdentityProvider`. Absent entirely (the default via
+/// [`S3ScanHandler::new`]) means `adhoc_client` behaves exactly as before
+/// this feature existed.
+#[derive(Clone)]
+struct Federation {
+    identity: std::sync::Arc<dyn skauswatch_s3::credentials::JwtSvidSource>,
+    /// This worker's own service-owned IAM role ARN — never a customer's.
+    role_arn: String,
+}
+
+/// Worker task handler holding the shared DB pool, stream producer
+/// (re-dispatch and onward events), an HTTP client for TI, the loaded
+/// config, and the envelope-encryption engine used to decrypt `static`-mode
+/// stored bucket credentials (security finding #2 — see
+/// `skauswatch_s3::credentials`).
 pub struct S3ScanHandler {
     pool: PgPool,
     producer: StreamProducer,
     http: reqwest::Client,
     cfg: WorkerConfig,
+    envelope: EnvelopeEncryption,
+    /// Own-AWS federation for `adhoc_client`'s default-chain fallback.
+    /// `None` (the only value [`S3ScanHandler::new`] ever sets) preserves
+    /// today's behavior exactly — see [`S3ScanHandler::with_federation`].
+    federation: Option<Federation>,
 }
 
 impl S3ScanHandler {
     /// Builds a handler from its dependencies.
-    pub fn new(pool: PgPool, producer: StreamProducer, cfg: WorkerConfig) -> Self {
+    pub fn new(
+        pool: PgPool,
+        producer: StreamProducer,
+        cfg: WorkerConfig,
+        envelope: EnvelopeEncryption,
+    ) -> Self {
         Self {
             pool,
             producer,
             http: reqwest::Client::new(),
             cfg,
+            envelope,
+            federation: None,
         }
+    }
+
+    /// Enables JWT-SVID-&gt;STS federation for `adhoc_client`'s own-AWS
+    /// access (`docs/v2-port/aws-identity-runbook.md` §1) — dal2 has no
+    /// IRSA/instance-profile identity to fall back to, so without this the
+    /// default AWS credential-provider chain has nothing to resolve to.
+    ///
+    /// Fail-safe by construction: `adhoc_client` only *attempts*
+    /// federation when this has been called; if the underlying
+    /// `identity` source itself has no attested identity (or the STS
+    /// exchange fails), `adhoc_client` logs a warning and falls back to
+    /// the default AWS credential-provider chain — the caller here never
+    /// needs to pre-check identity health.
+    #[must_use]
+    pub fn with_federation(
+        mut self,
+        identity: std::sync::Arc<dyn skauswatch_s3::credentials::JwtSvidSource>,
+        role_arn: String,
+    ) -> Self {
+        self.federation = Some(Federation { identity, role_arn });
+        self
+    }
+
+    /// Resolves a stored bucket config's hybrid credentials
+    /// (`assume_role`/`static`) into a ready-to-use S3 client. Any failure
+    /// here — bad config shape, decrypt failure, STS error — is transient
+    /// from the harness's point of view unless the underlying
+    /// `CredentialError` is itself classified permanent (config-shape
+    /// errors that will never succeed on retry).
+    async fn client_for_bucket(
+        &self,
+        bucket: &db::BucketConfig,
+    ) -> Result<aws_sdk_s3::Client, ProcessError> {
+        skauswatch_s3::credentials::resolve_client(&self.envelope, &bucket.credential_config())
+            .await
+            .map_err(|e| {
+                if e.is_permanent() {
+                    ProcessError::Permanent(format!(
+                        "bucket {} credential resolution failed: {e}",
+                        bucket.id
+                    ))
+                } else {
+                    ProcessError::Transient(format!(
+                        "bucket {} credential resolution failed: {e}",
+                        bucket.id
+                    ))
+                }
+            })
     }
 
     /// Runs the content pipeline (file type, hashes, ClamAV, TI) over `data`.
@@ -172,11 +251,11 @@ impl S3ScanHandler {
     /// Enumerates a bucket and re-dispatches per-object tasks.
     async fn enumerate(&self, t: &EnumerateTask) -> Result<(), ProcessError> {
         let job = self
-            .lookup_job(&t.job_id)
+            .lookup_job(&t.job_id, t.tenant_id)
             .await?
             .ok_or_else(|| ProcessError::Permanent(format!("unknown job {}", t.job_id)))?;
         let bucket = self
-            .lookup_bucket(t.bucket_config_id)
+            .lookup_bucket(t.bucket_config_id, t.tenant_id)
             .await?
             .ok_or_else(|| {
                 ProcessError::Permanent(format!("unknown bucket_config {}", t.bucket_config_id))
@@ -188,13 +267,7 @@ impl S3ScanHandler {
             )));
         }
 
-        let client = s3ops::client_from_credentials(
-            &bucket.endpoint_url,
-            &bucket.access_key_id,
-            &bucket.secret_access_key,
-            &bucket.region,
-            bucket.path_style,
-        );
+        let client = self.client_for_bucket(&bucket).await?;
         let prefix = job
             .prefix_override
             .clone()
@@ -217,11 +290,11 @@ impl S3ScanHandler {
             .saturating_add(skipped);
 
         // All fallible DB work first — dispatch (non-idempotent) happens last.
-        db::set_job_running(&self.pool, job.pk, total)
+        db::set_job_running(&self.pool, job.pk, t.tenant_id, total)
             .await
             .map_err(|e| ProcessError::Transient(e.to_string()))?;
         if skipped > 0 {
-            db::bump_job_skipped(&self.pool, job.pk, skipped)
+            db::bump_job_skipped(&self.pool, job.pk, t.tenant_id, skipped)
                 .await
                 .map_err(|e| ProcessError::Transient(e.to_string()))?;
         }
@@ -237,6 +310,7 @@ impl S3ScanHandler {
                 obj.size,
                 &obj.etag,
                 yara_enabled,
+                t.tenant_id,
             );
             if let Err(e) = self.producer.publish(STREAM_S3_SCAN_TASKS, fields).await {
                 tracing::warn!(object = %obj.key, error = %e, "per-object dispatch failed");
@@ -244,7 +318,7 @@ impl S3ScanHandler {
         }
 
         // Complete immediately when nothing needs scanning (all skipped/empty).
-        if let Err(e) = db::maybe_complete_job(&self.pool, job.pk).await {
+        if let Err(e) = db::maybe_complete_job(&self.pool, job.pk, t.tenant_id).await {
             tracing::warn!(job = %t.job_id, error = %e, "job completion check failed");
         }
         tracing::info!(
@@ -257,22 +331,16 @@ impl S3ScanHandler {
     /// Scans one object addressed by a stored bucket config.
     async fn scan_bucket_object(&self, t: &BucketObjectTask) -> Result<(), ProcessError> {
         let job = self
-            .lookup_job(&t.job_id)
+            .lookup_job(&t.job_id, t.tenant_id)
             .await?
             .ok_or_else(|| ProcessError::Permanent(format!("unknown job {}", t.job_id)))?;
         let bucket = self
-            .lookup_bucket(t.bucket_config_id)
+            .lookup_bucket(t.bucket_config_id, t.tenant_id)
             .await?
             .ok_or_else(|| {
                 ProcessError::Permanent(format!("unknown bucket_config {}", t.bucket_config_id))
             })?;
-        let client = s3ops::client_from_credentials(
-            &bucket.endpoint_url,
-            &bucket.access_key_id,
-            &bucket.secret_access_key,
-            &bucket.region,
-            bucket.path_style,
-        );
+        let client = self.client_for_bucket(&bucket).await?;
         let max_bytes = (bucket.max_file_size_mb.max(0) as u64) * 1024 * 1024;
 
         let start = Instant::now();
@@ -299,13 +367,14 @@ impl S3ScanHandler {
         db::bump_job_counters(
             &self.pool,
             job.pk,
+            t.tenant_id,
             verdict.is_malware,
             verdict.is_pup,
             false,
         )
         .await
         .map_err(|e| ProcessError::Transient(e.to_string()))?;
-        if let Err(e) = db::maybe_complete_job(&self.pool, job.pk).await {
+        if let Err(e) = db::maybe_complete_job(&self.pool, job.pk, t.tenant_id).await {
             tracing::warn!(job = %t.job_id, error = %e, "job completion check failed");
         }
 
@@ -346,7 +415,7 @@ impl S3ScanHandler {
         let verdict = self.scan_content(&bytes).await;
         let duration_ms = i32::try_from(start.elapsed().as_millis()).unwrap_or(i32::MAX);
 
-        if let Some(job) = self.lookup_job(&t.job_id).await? {
+        if let Some(job) = self.lookup_job(&t.job_id, t.tenant_id).await? {
             let bucket_config_id = t.bucket_config_id.unwrap_or(job.bucket_config_id);
             let bo = BucketObjectTask {
                 job_id: t.job_id.clone(),
@@ -355,6 +424,7 @@ impl S3ScanHandler {
                 object_size: t.object_size,
                 object_etag: String::new(),
                 yara_enabled: t.yara_enabled,
+                tenant_id: t.tenant_id,
             };
             let record = self.result_record(
                 job.pk,
@@ -370,13 +440,14 @@ impl S3ScanHandler {
             db::bump_job_counters(
                 &self.pool,
                 job.pk,
+                t.tenant_id,
                 verdict.is_malware,
                 verdict.is_pup,
                 false,
             )
             .await
             .map_err(|e| ProcessError::Transient(e.to_string()))?;
-            let _ = db::maybe_complete_job(&self.pool, job.pk).await;
+            let _ = db::maybe_complete_job(&self.pool, job.pk, t.tenant_id).await;
         }
         self.publish_result_event(&t.task_id, &t.job_id, &t.object_key, &verdict, duration_ms)
             .await;
@@ -389,7 +460,7 @@ impl S3ScanHandler {
     async fn scan_adhoc(&self, t: &AdhocTask) -> Result<(), ProcessError> {
         let Some(bucket) = self.cfg.adhoc_bucket.clone() else {
             tracing::warn!(scan_id = %t.scan_id, "no ad-hoc bucket configured — marking error");
-            db::set_adhoc_error(&self.pool, &t.scan_id)
+            db::set_adhoc_error(&self.pool, &t.scan_id, t.tenant_id)
                 .await
                 .map_err(|e| ProcessError::Transient(e.to_string()))?;
             return Ok(());
@@ -408,7 +479,7 @@ impl S3ScanHandler {
             Ok(Some(b)) => b,
             Ok(None) | Err(_) => {
                 tracing::warn!(scan_id = %t.scan_id, "ad-hoc content unavailable — marking error");
-                db::set_adhoc_error(&self.pool, &t.scan_id)
+                db::set_adhoc_error(&self.pool, &t.scan_id, t.tenant_id)
                     .await
                     .map_err(|e| ProcessError::Transient(e.to_string()))?;
                 return Ok(());
@@ -420,6 +491,7 @@ impl S3ScanHandler {
         db::finish_adhoc(
             &self.pool,
             &t.scan_id,
+            t.tenant_id,
             db::scan_status_for(verdict.is_malware, verdict.is_pup),
             verdict.is_malware,
             verdict.is_pup,
@@ -438,6 +510,7 @@ impl S3ScanHandler {
     async fn record_skipped(&self, job_pk: i32, t: &BucketObjectTask) -> Result<(), ProcessError> {
         let record = db::ResultRecord {
             job_pk,
+            tenant_id: t.tenant_id,
             bucket_config_id: t.bucket_config_id,
             object_key: t.object_key.clone(),
             object_size: i32::try_from(t.object_size).unwrap_or(i32::MAX),
@@ -459,10 +532,10 @@ impl S3ScanHandler {
         db::insert_result(&self.pool, &record)
             .await
             .map_err(|e| ProcessError::Transient(e.to_string()))?;
-        db::bump_job_skipped(&self.pool, job_pk, 1)
+        db::bump_job_skipped(&self.pool, job_pk, t.tenant_id, 1)
             .await
             .map_err(|e| ProcessError::Transient(e.to_string()))?;
-        let _ = db::maybe_complete_job(&self.pool, job_pk).await;
+        let _ = db::maybe_complete_job(&self.pool, job_pk, t.tenant_id).await;
         Ok(())
     }
 
@@ -479,6 +552,7 @@ impl S3ScanHandler {
         let tags = scan::scan_tags(v.is_malware, v.is_pup, &v.file_type, 0);
         db::ResultRecord {
             job_pk,
+            tenant_id: t.tenant_id,
             bucket_config_id,
             object_key: t.object_key.clone(),
             object_size,
@@ -546,13 +620,34 @@ impl S3ScanHandler {
         }
     }
 
-    /// Builds the ad-hoc S3 client from the worker's `S3_*` settings, resolving
-    /// credentials through the AWS provider chain.
+    /// Builds the ad-hoc S3 client from the worker's `S3_*` settings,
+    /// resolving credentials through this worker's own-AWS JWT-SVID
+    /// federation when configured (see [`S3ScanHandler::with_federation`]),
+    /// else the standard AWS provider chain — unchanged from before this
+    /// feature existed when no federation is configured or it fails.
     async fn adhoc_client(&self) -> aws_sdk_s3::Client {
         let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .region(aws_config::Region::new(self.cfg.s3_region.clone()));
         if let Some(ep) = &self.cfg.s3_endpoint_url {
             loader = loader.endpoint_url(ep);
+        }
+        if let Some(federation) = &self.federation {
+            match skauswatch_s3::credentials::federated_base_credentials(
+                federation.identity.as_ref(),
+                &federation.role_arn,
+                &self.cfg.s3_region,
+            )
+            .await
+            {
+                Ok(creds) => loader = loader.credentials_provider(creds),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "own-AWS JWT-SVID federation unavailable for ad-hoc S3 client — \
+                         falling back to the default AWS credential-provider chain"
+                    );
+                }
+            }
         }
         let shared = loader.load().await;
         let s3_cfg = aws_sdk_s3::config::Builder::from(&shared)
@@ -561,16 +656,26 @@ impl S3ScanHandler {
         aws_sdk_s3::Client::from_conf(s3_cfg)
     }
 
-    /// DB job lookup mapping errors to transient failures.
-    async fn lookup_job(&self, job_uuid: &str) -> Result<Option<db::JobRef>, ProcessError> {
-        db::fetch_job(&self.pool, job_uuid)
+    /// DB job lookup mapping errors to transient failures, scoped to
+    /// `tenant_id`.
+    async fn lookup_job(
+        &self,
+        job_uuid: &str,
+        tenant_id: uuid::Uuid,
+    ) -> Result<Option<db::JobRef>, ProcessError> {
+        db::fetch_job(&self.pool, job_uuid, tenant_id)
             .await
             .map_err(|e| ProcessError::Transient(e.to_string()))
     }
 
-    /// DB bucket-config lookup mapping errors to transient failures.
-    async fn lookup_bucket(&self, id: i32) -> Result<Option<db::BucketConfig>, ProcessError> {
-        db::fetch_bucket_config(&self.pool, id)
+    /// DB bucket-config lookup mapping errors to transient failures, scoped
+    /// to `tenant_id`.
+    async fn lookup_bucket(
+        &self,
+        id: i32,
+        tenant_id: uuid::Uuid,
+    ) -> Result<Option<db::BucketConfig>, ProcessError> {
+        db::fetch_bucket_config(&self.pool, id, tenant_id)
             .await
             .map_err(|e| ProcessError::Transient(e.to_string()))
     }
@@ -607,6 +712,7 @@ mod tests {
     use std::collections::HashMap;
 
     use fred::interfaces::{ClientLike, StreamsInterface};
+    use skauswatch_vault::MekVersion;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
     use wiremock::matchers::{method, path};
@@ -627,11 +733,40 @@ mod tests {
         skauswatch_testkit::db::test_pool(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).await
     }
 
+    /// Fixed single-MEK envelope shared by every test in this module (mirrors
+    /// `skauswatch-vault`'s own crypto test fixture) — good enough since
+    /// nothing here tests MEK rotation/mismatch (that's covered in
+    /// `crates/skauswatch-s3/src/credentials.rs` and `skauswatch-vault`).
+    fn test_envelope() -> EnvelopeEncryption {
+        EnvelopeEncryption::new(
+            HashMap::from([(
+                1,
+                MekVersion {
+                    version: 1,
+                    key_bytes: [4u8; 32],
+                },
+            )]),
+            1,
+        )
+    }
+
+    /// Envelope-encrypts `{access_key_id, secret_access_key}` the same way
+    /// `manager`'s bucket-create/update handlers do, for seeding `static`-mode
+    /// bucket rows that resolve to a real (wiremock) S3 client.
+    fn encrypt_static_credential(access_key: &str, secret_key: &str) -> String {
+        test_envelope()
+            .encrypt_json(&serde_json::json!({
+                "access_key_id": access_key,
+                "secret_access_key": secret_key,
+            }))
+            .expect("encrypt static credential")
+    }
+
     async fn build_handler(pool: PgPool, cfg: WorkerConfig, prefix: &str) -> S3ScanHandler {
         let producer = StreamProducer::connect(&redis_url(), None, prefix)
             .await
             .expect("producer connect");
-        S3ScanHandler::new(pool, producer, cfg)
+        S3ScanHandler::new(pool, producer, cfg, test_envelope())
     }
 
     async fn raw_client() -> fred::clients::Client {
@@ -668,8 +803,24 @@ mod tests {
         }
     }
 
-    fn enumerate_entry(job_id: &str, bucket_config_id: i32) -> StreamEntry {
+    /// Fixed tenant for tests that don't specifically exercise cross-tenant
+    /// isolation.
+    fn test_tenant() -> uuid::Uuid {
+        "33333333-3333-3333-3333-333333333333"
+            .parse()
+            .expect("valid uuid literal")
+    }
+
+    /// A second, distinct tenant for cross-tenant-isolation tests.
+    fn other_tenant() -> uuid::Uuid {
+        "44444444-4444-4444-4444-444444444444"
+            .parse()
+            .expect("valid uuid literal")
+    }
+
+    fn enumerate_entry(job_id: &str, bucket_config_id: i32, tenant_id: uuid::Uuid) -> StreamEntry {
         let bcid = bucket_config_id.to_string();
+        let tid = tenant_id.to_string();
         stream_entry(&[
             ("job_id", job_id),
             ("bucket_config_id", &bcid),
@@ -677,11 +828,18 @@ mod tests {
             ("object_size", "0"),
             ("object_etag", ""),
             ("yara_enabled", "False"),
+            ("tenant_id", &tid),
         ])
     }
 
-    fn bucket_object_entry(job_id: &str, bucket_config_id: i32, object_key: &str) -> StreamEntry {
+    fn bucket_object_entry(
+        job_id: &str,
+        bucket_config_id: i32,
+        object_key: &str,
+        tenant_id: uuid::Uuid,
+    ) -> StreamEntry {
         let bcid = bucket_config_id.to_string();
+        let tid = tenant_id.to_string();
         stream_entry(&[
             ("job_id", job_id),
             ("bucket_config_id", &bcid),
@@ -689,9 +847,11 @@ mod tests {
             ("object_size", "5"),
             ("object_etag", "\"etag\""),
             ("yara_enabled", "False"),
+            ("tenant_id", &tid),
         ])
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn inline_object_entry(
         task_id: &str,
         job_id: &str,
@@ -699,8 +859,10 @@ mod tests {
         object_key: &str,
         endpoint_url: &str,
         bucket_name: &str,
+        tenant_id: uuid::Uuid,
     ) -> StreamEntry {
         let bcid = bucket_config_id.map_or_else(String::new, |v| v.to_string());
+        let tid = tenant_id.to_string();
         stream_entry(&[
             ("task_id", task_id),
             ("job_id", job_id),
@@ -715,24 +877,32 @@ mod tests {
             ("use_ssl", "False"),
             ("path_style", "True"),
             ("yara_enabled", "False"),
+            ("tenant_id", &tid),
         ])
     }
 
-    fn adhoc_entry(scan_id: &str, object_key: &str) -> StreamEntry {
+    fn adhoc_entry(scan_id: &str, object_key: &str, tenant_id: uuid::Uuid) -> StreamEntry {
+        let tid = tenant_id.to_string();
         stream_entry(&[
             ("job_id", scan_id),
             ("bucket_config_id", ""),
             ("object_key", object_key),
             ("object_size", "0"),
             ("yara_enabled", "False"),
+            ("tenant_id", &tid),
         ])
     }
 
     /// Seeds one `s3_bucket_configs` row pointed at `endpoint` (typically a
     /// wiremock server URI), path-style always on (matches how the
-    /// `s3ops.rs` mocks are addressed).
+    /// `s3ops.rs` mocks are addressed). `credential_mode='static'` with a
+    /// real envelope-encrypted blob — these tests exercise the actual
+    /// decrypt-and-build-client path (`S3ScanHandler::client_for_bucket`),
+    /// not just a bucket-config field mapping.
+    #[allow(clippy::too_many_arguments)]
     async fn seed_bucket(
         pool: &PgPool,
+        tenant_id: uuid::Uuid,
         endpoint: &str,
         bucket_name: &str,
         max_file_size_mb: i32,
@@ -740,16 +910,20 @@ mod tests {
         yara_enabled: bool,
         prefix_filter: Option<&str>,
     ) -> i32 {
+        let credential_enc = encrypt_static_credential("AKTEST", "SKTEST");
         let row: (i32,) = sqlx::query_as(
             "INSERT INTO s3_bucket_configs \
-             (name, endpoint_url, bucket_name, access_key_id, secret_access_key, region, \
-              path_style, prefix_filter, max_file_size_mb, scan_enabled, yara_enabled, created_by) \
-             VALUES ($1, $2, $3, 'AKTEST', 'SKTEST', 'us-east-1', true, $4, $5, $6, $7, 1) \
+             (name, tenant_id, endpoint_url, bucket_name, credential_mode, credential_enc, \
+              region, path_style, prefix_filter, max_file_size_mb, scan_enabled, yara_enabled, \
+              created_by) \
+             VALUES ($1, $2, $3, $4, 'static', $5, 'us-east-1', true, $6, $7, $8, $9, 1) \
              RETURNING id",
         )
         .bind(format!("bucket-{}", uuid::Uuid::new_v4()))
+        .bind(tenant_id)
         .bind(endpoint)
         .bind(bucket_name)
+        .bind(credential_enc)
         .bind(prefix_filter)
         .bind(max_file_size_mb)
         .bind(scan_enabled)
@@ -763,15 +937,17 @@ mod tests {
     /// Seeds one `s3_scan_jobs` row (`pending`), returning its primary key.
     async fn seed_job(
         pool: &PgPool,
+        tenant_id: uuid::Uuid,
         bucket_config_id: i32,
         job_uuid: &str,
         metadata: serde_json::Value,
     ) -> i32 {
         let row: (i32,) = sqlx::query_as(
-            "INSERT INTO s3_scan_jobs (job_id, bucket_config_id, job_type, status, triggered_by, metadata) \
-             VALUES ($1, $2, 'manual', 'pending', 1, $3) RETURNING id",
+            "INSERT INTO s3_scan_jobs (job_id, tenant_id, bucket_config_id, job_type, status, \
+             triggered_by, metadata) VALUES ($1, $2, $3, 'manual', 'pending', 1, $4) RETURNING id",
         )
         .bind(job_uuid)
+        .bind(tenant_id)
         .bind(bucket_config_id)
         .bind(metadata)
         .fetch_one(pool)
@@ -783,23 +959,32 @@ mod tests {
     /// Seeds a job already transitioned to `running` with the given total.
     async fn seed_running_job(
         pool: &PgPool,
+        tenant_id: uuid::Uuid,
         bucket_config_id: i32,
         job_uuid: &str,
         total: i32,
     ) -> i32 {
-        let pk = seed_job(pool, bucket_config_id, job_uuid, serde_json::json!({})).await;
-        db::set_job_running(pool, pk, total)
+        let pk = seed_job(
+            pool,
+            tenant_id,
+            bucket_config_id,
+            job_uuid,
+            serde_json::json!({}),
+        )
+        .await;
+        db::set_job_running(pool, pk, tenant_id, total)
             .await
             .expect("set running");
         pk
     }
 
-    async fn seed_adhoc(pool: &PgPool, scan_id: &str) {
+    async fn seed_adhoc(pool: &PgPool, tenant_id: uuid::Uuid, scan_id: &str) {
         sqlx::query(
-            "INSERT INTO adhoc_scan_results (scan_id, uploaded_by, original_filename) \
-             VALUES ($1, 1, 'upload.bin')",
+            "INSERT INTO adhoc_scan_results (scan_id, tenant_id, uploaded_by, original_filename) \
+             VALUES ($1, $2, 1, 'upload.bin')",
         )
         .bind(scan_id)
+        .bind(tenant_id)
         .execute(pool)
         .await
         .expect("seed adhoc");
@@ -873,34 +1058,72 @@ mod tests {
         let prefix = unique_prefix();
         let handler = build_handler(pool, WorkerConfig::for_tests(), &prefix).await;
 
-        let result = handler.handle(&enumerate_entry("no-such-job", 1)).await;
+        let result = handler
+            .handle(&enumerate_entry("no-such-job", 1, test_tenant()))
+            .await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn enumerate_unknown_bucket_is_permanent_ack() {
         let pool = db_pool().await;
-        let bucket_id = seed_bucket(&pool, "http://unused", "b", 100, true, false, None).await;
+        let tenant = test_tenant();
+        let bucket_id =
+            seed_bucket(&pool, tenant, "http://unused", "b", 100, true, false, None).await;
         let job_uuid = uuid::Uuid::new_v4().to_string();
-        seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+        seed_job(&pool, tenant, bucket_id, &job_uuid, serde_json::json!({})).await;
         let prefix = unique_prefix();
         let handler = build_handler(pool, WorkerConfig::for_tests(), &prefix).await;
 
         // bucket_config_id on the *task* points at a bucket that doesn't exist.
-        let result = handler.handle(&enumerate_entry(&job_uuid, 999_999)).await;
+        let result = handler
+            .handle(&enumerate_entry(&job_uuid, 999_999, tenant))
+            .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn enumerate_wrong_tenant_bucket_is_permanent_ack() {
+        // Regression: an enumerate task stamped with tenant B must not
+        // resolve tenant A's bucket config, even though the id is real and
+        // the job row (also tenant A's) exists.
+        let pool = db_pool().await;
+        let tenant = test_tenant();
+        let bucket_id =
+            seed_bucket(&pool, tenant, "http://unused", "b", 100, true, false, None).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_job(&pool, tenant, bucket_id, &job_uuid, serde_json::json!({})).await;
+        let prefix = unique_prefix();
+        let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
+
+        // Same job_id/bucket_config_id, but the *task* claims tenant B.
+        let result = handler
+            .handle(&enumerate_entry(&job_uuid, bucket_id, other_tenant()))
+            .await;
+        assert!(result.is_ok(), "expected permanent-ack, got {result:?}");
+
+        let row: (String,) = sqlx::query_as("SELECT status FROM s3_scan_jobs WHERE id = $1")
+            .bind(pk)
+            .fetch_one(&pool)
+            .await
+            .expect("select");
+        assert_eq!(row.0, "pending");
     }
 
     #[tokio::test]
     async fn enumerate_scanning_disabled_is_permanent_ack_and_leaves_job_untouched() {
         let pool = db_pool().await;
-        let bucket_id = seed_bucket(&pool, "http://unused", "b", 100, false, false, None).await;
+        let tenant = test_tenant();
+        let bucket_id =
+            seed_bucket(&pool, tenant, "http://unused", "b", 100, false, false, None).await;
         let job_uuid = uuid::Uuid::new_v4().to_string();
-        let pk = seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+        let pk = seed_job(&pool, tenant, bucket_id, &job_uuid, serde_json::json!({})).await;
         let prefix = unique_prefix();
         let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
 
-        let result = handler.handle(&enumerate_entry(&job_uuid, bucket_id)).await;
+        let result = handler
+            .handle(&enumerate_entry(&job_uuid, bucket_id, tenant))
+            .await;
         assert!(result.is_ok());
 
         let row: (String,) = sqlx::query_as("SELECT status FROM s3_scan_jobs WHERE id = $1")
@@ -929,9 +1152,11 @@ mod tests {
             .await;
 
         let pool = db_pool().await;
+        let tenant = test_tenant();
         // Job metadata prefix override must win over the bucket's own prefix.
         let bucket_id = seed_bucket(
             &pool,
+            tenant,
             &server.uri(),
             "enum-bucket",
             1,
@@ -943,6 +1168,7 @@ mod tests {
         let job_uuid = uuid::Uuid::new_v4().to_string();
         let pk = seed_job(
             &pool,
+            tenant,
             bucket_id,
             &job_uuid,
             serde_json::json!({"prefix_filter": null}),
@@ -951,7 +1177,9 @@ mod tests {
         let prefix = unique_prefix();
         let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
 
-        let result = handler.handle(&enumerate_entry(&job_uuid, bucket_id)).await;
+        let result = handler
+            .handle(&enumerate_entry(&job_uuid, bucket_id, tenant))
+            .await;
         assert!(result.is_ok(), "{result:?}");
 
         let row: (String, i32, i32) = sqlx::query_as(
@@ -977,6 +1205,9 @@ mod tests {
             dispatched[0].1.get("yara_enabled"),
             Some(&"True".to_owned())
         ); // bucket.yara_enabled
+        // The re-dispatched per-object task must carry the same tenant
+        // forward — see enumerate::dispatch_fields.
+        assert_eq!(dispatched[0].1.get("tenant_id"), Some(&tenant.to_string()));
     }
 
     #[tokio::test]
@@ -993,15 +1224,27 @@ mod tests {
             .await;
 
         let pool = db_pool().await;
+        let tenant = test_tenant();
         // max_file_size_mb = 0 ⇒ max_bytes = 0 ⇒ every non-empty object skips.
-        let bucket_id =
-            seed_bucket(&pool, &server.uri(), "tiny-bucket", 0, true, false, None).await;
+        let bucket_id = seed_bucket(
+            &pool,
+            tenant,
+            &server.uri(),
+            "tiny-bucket",
+            0,
+            true,
+            false,
+            None,
+        )
+        .await;
         let job_uuid = uuid::Uuid::new_v4().to_string();
-        let pk = seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+        let pk = seed_job(&pool, tenant, bucket_id, &job_uuid, serde_json::json!({})).await;
         let prefix = unique_prefix();
         let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
 
-        let result = handler.handle(&enumerate_entry(&job_uuid, bucket_id)).await;
+        let result = handler
+            .handle(&enumerate_entry(&job_uuid, bucket_id, tenant))
+            .await;
         assert!(result.is_ok());
 
         let row: (String, Option<chrono::NaiveDateTime>) =
@@ -1033,8 +1276,10 @@ mod tests {
             .await;
 
         let pool = db_pool().await;
+        let tenant = test_tenant();
         let bucket_id = seed_bucket(
             &pool,
+            tenant,
             &server.uri(),
             "broken-bucket",
             100,
@@ -1044,12 +1289,71 @@ mod tests {
         )
         .await;
         let job_uuid = uuid::Uuid::new_v4().to_string();
-        seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+        seed_job(&pool, tenant, bucket_id, &job_uuid, serde_json::json!({})).await;
         let prefix = unique_prefix();
         let handler = build_handler(pool, WorkerConfig::for_tests(), &prefix).await;
 
-        let result = handler.handle(&enumerate_entry(&job_uuid, bucket_id)).await;
+        let result = handler
+            .handle(&enumerate_entry(&job_uuid, bucket_id, tenant))
+            .await;
         assert!(result.is_err());
+    }
+
+    /// Seeds an `assume_role`-mode bucket (no `credential_enc`) at an
+    /// arbitrary S3-compatible `endpoint_url` — used to exercise the
+    /// `AssumeRoleRequiresAwsEndpoint` guard end to end through
+    /// `S3ScanHandler::client_for_bucket`, without any STS network call.
+    async fn seed_assume_role_bucket(
+        pool: &PgPool,
+        tenant_id: uuid::Uuid,
+        endpoint: &str,
+        bucket_name: &str,
+    ) -> i32 {
+        let row: (i32,) = sqlx::query_as(
+            "INSERT INTO s3_bucket_configs \
+             (name, tenant_id, endpoint_url, bucket_name, credential_mode, role_arn, region, \
+              path_style, max_file_size_mb, scan_enabled, yara_enabled, created_by) \
+             VALUES ($1, $2, $3, $4, 'assume_role', 'arn:aws:iam::123456789012:role/test', \
+                     'us-east-1', true, 100, true, false, 1) RETURNING id",
+        )
+        .bind(format!("bucket-{}", uuid::Uuid::new_v4()))
+        .bind(tenant_id)
+        .bind(endpoint)
+        .bind(bucket_name)
+        .fetch_one(pool)
+        .await
+        .expect("seed assume_role bucket");
+        row.0
+    }
+
+    #[tokio::test]
+    async fn enumerate_assume_role_against_non_aws_endpoint_is_permanent_ack() {
+        let pool = db_pool().await;
+        let tenant = test_tenant();
+        // A non-AWS S3-compatible endpoint has no STS — the resolver's guard
+        // must reject this *before* any network call, and the handler must
+        // classify it as a permanent (non-retryable) failure.
+        let bucket_id =
+            seed_assume_role_bucket(&pool, tenant, "http://minio.example:9000", "role-bucket")
+                .await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_job(&pool, tenant, bucket_id, &job_uuid, serde_json::json!({})).await;
+        let prefix = unique_prefix();
+        let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
+
+        let result = handler
+            .handle(&enumerate_entry(&job_uuid, bucket_id, tenant))
+            .await;
+        assert!(result.is_ok(), "expected permanent-ack, got {result:?}");
+
+        // Permanent ack means the job is left untouched (never transitions
+        // to running), same as the scanning-disabled case above.
+        let row: (String,) = sqlx::query_as("SELECT status FROM s3_scan_jobs WHERE id = $1")
+            .bind(pk)
+            .fetch_one(&pool)
+            .await
+            .expect("select");
+        assert_eq!(row.0, "pending");
     }
 
     // ── BucketObject ─────────────────────────────────────────────────────
@@ -1061,7 +1365,12 @@ mod tests {
         let handler = build_handler(pool, WorkerConfig::for_tests(), &prefix).await;
 
         let result = handler
-            .handle(&bucket_object_entry("no-such-job", 1, "a.bin"))
+            .handle(&bucket_object_entry(
+                "no-such-job",
+                1,
+                "a.bin",
+                test_tenant(),
+            ))
             .await;
         assert!(result.is_ok());
     }
@@ -1069,16 +1378,48 @@ mod tests {
     #[tokio::test]
     async fn bucket_object_unknown_bucket_is_permanent_ack() {
         let pool = db_pool().await;
-        let bucket_id = seed_bucket(&pool, "http://unused", "b", 100, true, false, None).await;
+        let tenant = test_tenant();
+        let bucket_id =
+            seed_bucket(&pool, tenant, "http://unused", "b", 100, true, false, None).await;
         let job_uuid = uuid::Uuid::new_v4().to_string();
-        seed_job(&pool, bucket_id, &job_uuid, serde_json::json!({})).await;
+        seed_job(&pool, tenant, bucket_id, &job_uuid, serde_json::json!({})).await;
         let prefix = unique_prefix();
         let handler = build_handler(pool, WorkerConfig::for_tests(), &prefix).await;
 
         let result = handler
-            .handle(&bucket_object_entry(&job_uuid, 999_999, "a.bin"))
+            .handle(&bucket_object_entry(&job_uuid, 999_999, "a.bin", tenant))
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn bucket_object_wrong_tenant_job_is_permanent_ack() {
+        // Regression: a per-object task stamped with tenant B must not
+        // resolve tenant A's job, even with the real job_id/bucket_config_id.
+        let pool = db_pool().await;
+        let tenant = test_tenant();
+        let bucket_id =
+            seed_bucket(&pool, tenant, "http://unused", "b", 100, true, false, None).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        seed_running_job(&pool, tenant, bucket_id, &job_uuid, 1).await;
+        let prefix = unique_prefix();
+        let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
+
+        let result = handler
+            .handle(&bucket_object_entry(
+                &job_uuid,
+                bucket_id,
+                "uploads/a.bin",
+                other_tenant(),
+            ))
+            .await;
+        assert!(result.is_ok(), "expected permanent-ack, got {result:?}");
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM s3_scan_results")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 0);
     }
 
     #[tokio::test]
@@ -1097,21 +1438,37 @@ mod tests {
             .await;
 
         let pool = db_pool().await;
-        let bucket_id =
-            seed_bucket(&pool, &server.uri(), "scan-bucket", 100, true, false, None).await;
+        let tenant = test_tenant();
+        let bucket_id = seed_bucket(
+            &pool,
+            tenant,
+            &server.uri(),
+            "scan-bucket",
+            100,
+            true,
+            false,
+            None,
+        )
+        .await;
         let job_uuid = uuid::Uuid::new_v4().to_string();
-        let pk = seed_running_job(&pool, bucket_id, &job_uuid, 1).await;
+        let pk = seed_running_job(&pool, tenant, bucket_id, &job_uuid, 1).await;
         let prefix = unique_prefix();
         let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
 
         let result = handler
-            .handle(&bucket_object_entry(&job_uuid, bucket_id, "uploads/a.bin"))
+            .handle(&bucket_object_entry(
+                &job_uuid,
+                bucket_id,
+                "uploads/a.bin",
+                tenant,
+            ))
             .await;
         assert!(result.is_ok(), "{result:?}");
 
         let expected_hashes = scan::compute_hashes(&body);
-        let row: (String, bool, Option<String>) = sqlx::query_as(
-            "SELECT scan_status, is_malware, file_sha256 FROM s3_scan_results WHERE job_id = $1",
+        let row: (String, bool, Option<String>, uuid::Uuid) = sqlx::query_as(
+            "SELECT scan_status, is_malware, file_sha256, tenant_id FROM s3_scan_results \
+             WHERE job_id = $1",
         )
         .bind(pk)
         .fetch_one(&pool)
@@ -1120,6 +1477,7 @@ mod tests {
         assert_eq!(row.0, "clean");
         assert!(!row.1);
         assert_eq!(row.2, Some(expected_hashes.sha256.clone()));
+        assert_eq!(row.3, tenant);
 
         let job: (String, i32, i32, i32) = sqlx::query_as(
             "SELECT status, scanned_objects, infected_objects, pup_objects FROM s3_scan_jobs WHERE id = $1",
@@ -1150,9 +1508,11 @@ mod tests {
             .await;
 
         let pool = db_pool().await;
+        let tenant = test_tenant();
         // max_file_size_mb = 0 ⇒ max_bytes = 0 ⇒ any non-empty body skips.
         let bucket_id = seed_bucket(
             &pool,
+            tenant,
             &server.uri(),
             "small-limit-bucket",
             0,
@@ -1162,12 +1522,14 @@ mod tests {
         )
         .await;
         let job_uuid = uuid::Uuid::new_v4().to_string();
-        let pk = seed_running_job(&pool, bucket_id, &job_uuid, 1).await;
+        let pk = seed_running_job(&pool, tenant, bucket_id, &job_uuid, 1).await;
         let prefix = unique_prefix();
         let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
 
         let result = handler
-            .handle(&bucket_object_entry(&job_uuid, bucket_id, "big.bin"))
+            .handle(&bucket_object_entry(
+                &job_uuid, bucket_id, "big.bin", tenant,
+            ))
             .await;
         assert!(result.is_ok(), "{result:?}");
 
@@ -1201,15 +1563,25 @@ mod tests {
             .await;
 
         let pool = db_pool().await;
-        let bucket_id =
-            seed_bucket(&pool, &server.uri(), "err-bucket", 100, true, false, None).await;
+        let tenant = test_tenant();
+        let bucket_id = seed_bucket(
+            &pool,
+            tenant,
+            &server.uri(),
+            "err-bucket",
+            100,
+            true,
+            false,
+            None,
+        )
+        .await;
         let job_uuid = uuid::Uuid::new_v4().to_string();
-        seed_running_job(&pool, bucket_id, &job_uuid, 1).await;
+        seed_running_job(&pool, tenant, bucket_id, &job_uuid, 1).await;
         let prefix = unique_prefix();
         let handler = build_handler(pool, WorkerConfig::for_tests(), &prefix).await;
 
         let result = handler
-            .handle(&bucket_object_entry(&job_uuid, bucket_id, "a.bin"))
+            .handle(&bucket_object_entry(&job_uuid, bucket_id, "a.bin", tenant))
             .await;
         assert!(result.is_err());
     }
@@ -1233,8 +1605,10 @@ mod tests {
         tokio::task::yield_now().await;
 
         let pool = db_pool().await;
+        let tenant = test_tenant();
         let bucket_id = seed_bucket(
             &pool,
+            tenant,
             &server.uri(),
             "malware-bucket",
             100,
@@ -1244,7 +1618,7 @@ mod tests {
         )
         .await;
         let job_uuid = uuid::Uuid::new_v4().to_string();
-        let pk = seed_running_job(&pool, bucket_id, &job_uuid, 1).await;
+        let pk = seed_running_job(&pool, tenant, bucket_id, &job_uuid, 1).await;
         let prefix = unique_prefix();
         let cfg = WorkerConfig {
             clamd_socket: sock.to_str().expect("utf8 path").to_owned(),
@@ -1253,7 +1627,9 @@ mod tests {
         let handler = build_handler(pool.clone(), cfg, &prefix).await;
 
         let result = handler
-            .handle(&bucket_object_entry(&job_uuid, bucket_id, "evil.bin"))
+            .handle(&bucket_object_entry(
+                &job_uuid, bucket_id, "evil.bin", tenant,
+            ))
             .await;
         assert!(result.is_ok(), "{result:?}");
 
@@ -1286,9 +1662,11 @@ mod tests {
             .await;
 
         let pool = db_pool().await;
-        let bucket_id = seed_bucket(&pool, "http://unused", "b", 100, true, false, None).await;
+        let tenant = test_tenant();
+        let bucket_id =
+            seed_bucket(&pool, tenant, "http://unused", "b", 100, true, false, None).await;
         let job_uuid = uuid::Uuid::new_v4().to_string();
-        let pk = seed_running_job(&pool, bucket_id, &job_uuid, 1).await;
+        let pk = seed_running_job(&pool, tenant, bucket_id, &job_uuid, 1).await;
         let prefix = unique_prefix();
         let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
 
@@ -1299,12 +1677,14 @@ mod tests {
             "uploads/i.bin",
             &server.uri(),
             "inline-bucket",
+            tenant,
         );
         let result = handler.handle(&entry).await;
         assert!(result.is_ok(), "{result:?}");
 
-        let row: (i32, String) = sqlx::query_as(
-            "SELECT bucket_config_id, scan_status FROM s3_scan_results WHERE job_id = $1",
+        let row: (i32, String, uuid::Uuid) = sqlx::query_as(
+            "SELECT bucket_config_id, scan_status, tenant_id FROM s3_scan_results \
+             WHERE job_id = $1",
         )
         .bind(pk)
         .fetch_one(&pool)
@@ -1312,11 +1692,52 @@ mod tests {
         .expect("select result");
         assert_eq!(row.0, bucket_id);
         assert_eq!(row.1, "clean");
+        assert_eq!(row.2, tenant);
 
         let client = raw_client().await;
         let published = stream_entries(&client, &prefix, STREAM_S3_SCAN_RESULTS).await;
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].1.get("task_id"), Some(&"task-1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn inline_object_wrong_tenant_job_does_not_persist() {
+        // Regression: an inline task stamped with tenant B must not match
+        // tenant A's job row, even with the real job_id — falls through to
+        // the "no matching job" best-effort publish-only path.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/inline-cross-bucket/x.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"x".to_vec()))
+            .mount(&server)
+            .await;
+
+        let pool = db_pool().await;
+        let tenant = test_tenant();
+        let bucket_id =
+            seed_bucket(&pool, tenant, "http://unused", "b", 100, true, false, None).await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        seed_running_job(&pool, tenant, bucket_id, &job_uuid, 1).await;
+        let prefix = unique_prefix();
+        let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
+
+        let entry = inline_object_entry(
+            "task-cross",
+            &job_uuid,
+            None,
+            "x.bin",
+            &server.uri(),
+            "inline-cross-bucket",
+            other_tenant(),
+        );
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM s3_scan_results")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 0);
     }
 
     #[tokio::test]
@@ -1339,6 +1760,7 @@ mod tests {
             "g.bin",
             &server.uri(),
             "ghost-bucket",
+            test_tenant(),
         );
         let result = handler.handle(&entry).await;
         assert!(result.is_ok(), "{result:?}");
@@ -1382,6 +1804,7 @@ mod tests {
             "big.bin",
             &server.uri(),
             "limit-bucket",
+            test_tenant(),
         );
         let result = handler.handle(&entry).await;
         assert!(result.is_ok(), "{result:?}");
@@ -1416,6 +1839,7 @@ mod tests {
             "a.bin",
             &server.uri(),
             "inline-err-bucket",
+            test_tenant(),
         );
         let result = handler.handle(&entry).await;
         assert!(result.is_err());
@@ -1426,14 +1850,19 @@ mod tests {
     #[tokio::test]
     async fn adhoc_without_configured_bucket_marks_error() {
         let pool = db_pool().await;
+        let tenant = test_tenant();
         let scan_id = uuid::Uuid::new_v4().to_string();
-        seed_adhoc(&pool, &scan_id).await;
+        seed_adhoc(&pool, tenant, &scan_id).await;
         let prefix = unique_prefix();
         // cfg.adhoc_bucket is None by default in for_tests().
         let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
 
         let result = handler
-            .handle(&adhoc_entry(&scan_id, &format!("{scan_id}/upload.bin")))
+            .handle(&adhoc_entry(
+                &scan_id,
+                &format!("{scan_id}/upload.bin"),
+                tenant,
+            ))
             .await;
         assert!(result.is_ok());
 
@@ -1447,8 +1876,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adhoc_wrong_tenant_leaves_row_untouched() {
+        // Regression: a task claiming tenant B for tenant A's scan_id must
+        // not be able to mark that row `error` (or anything else).
+        let pool = db_pool().await;
+        let scan_id = uuid::Uuid::new_v4().to_string();
+        seed_adhoc(&pool, test_tenant(), &scan_id).await;
+        let prefix = unique_prefix();
+        let handler = build_handler(pool.clone(), WorkerConfig::for_tests(), &prefix).await;
+
+        let result = handler
+            .handle(&adhoc_entry(
+                &scan_id,
+                &format!("{scan_id}/upload.bin"),
+                other_tenant(),
+            ))
+            .await;
+        assert!(result.is_ok());
+
+        let row: (Option<String>,) =
+            sqlx::query_as("SELECT scan_status FROM adhoc_scan_results WHERE scan_id = $1")
+                .bind(&scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("select");
+        assert_eq!(row.0, None);
+    }
+
+    #[tokio::test]
     async fn adhoc_content_unavailable_marks_error() {
         let server = MockServer::start().await;
+        let tenant = test_tenant();
         let scan_id = uuid::Uuid::new_v4().to_string();
         Mock::given(method("GET"))
             .and(path(format!("/adhoc-bucket/{scan_id}/upload.bin")))
@@ -1459,7 +1917,7 @@ mod tests {
             .await;
 
         let pool = db_pool().await;
-        seed_adhoc(&pool, &scan_id).await;
+        seed_adhoc(&pool, tenant, &scan_id).await;
         let prefix = unique_prefix();
         let cfg = WorkerConfig {
             adhoc_bucket: Some("adhoc-bucket".to_owned()),
@@ -1470,7 +1928,11 @@ mod tests {
         let handler = build_handler(pool.clone(), cfg, &prefix).await;
 
         let result = handler
-            .handle(&adhoc_entry(&scan_id, &format!("{scan_id}/upload.bin")))
+            .handle(&adhoc_entry(
+                &scan_id,
+                &format!("{scan_id}/upload.bin"),
+                tenant,
+            ))
             .await;
         // Content-unavailable is handled internally (not a ProcessError) —
         // the handler always acks.
@@ -1511,7 +1973,8 @@ mod tests {
             .await;
 
         let pool = db_pool().await;
-        seed_adhoc(&pool, &scan_id).await;
+        let tenant = test_tenant();
+        seed_adhoc(&pool, tenant, &scan_id).await;
         let prefix = unique_prefix();
         let cfg = WorkerConfig {
             adhoc_bucket: Some("adhoc-ok-bucket".to_owned()),
@@ -1522,7 +1985,11 @@ mod tests {
         let handler = build_handler(pool.clone(), cfg, &prefix).await;
 
         let result = handler
-            .handle(&adhoc_entry(&scan_id, &format!("{scan_id}/upload.bin")))
+            .handle(&adhoc_entry(
+                &scan_id,
+                &format!("{scan_id}/upload.bin"),
+                tenant,
+            ))
             .await;
         assert!(result.is_ok(), "{result:?}");
 
@@ -1536,5 +2003,97 @@ mod tests {
         assert_eq!(row.0, "clean");
         assert!(!row.1);
         assert!(row.2.is_some());
+    }
+
+    // ── own-AWS federation (adhoc_client) ───────────────────────────────
+    //
+    // `federated_base_credentials`'s success path (JWT flows through to a
+    // real `sts:AssumeRoleWithWebIdentity` call) is exhaustively covered in
+    // `crates/skauswatch-s3::credentials`'s own tests via its
+    // `sts_endpoint_override` seam, which is private to that crate — the
+    // public `federated_base_credentials` entry point this worker calls
+    // always targets the real STS endpoint, so it can't be hermetically
+    // redirected from here. What *is* this worker's own responsibility to
+    // prove is the fail-safe wiring: a degraded identity source must make
+    // `adhoc_client` fall back to the default AWS credential-provider
+    // chain rather than erroring or hanging.
+
+    /// A [`skauswatch_s3::credentials::JwtSvidSource`] double that always
+    /// reports "no identity held" — mirrors what a degraded/unattested
+    /// `IdentityProvider` (no SPIRE agent reachable) would surface.
+    struct DegradedJwtSource;
+
+    #[async_trait::async_trait]
+    impl skauswatch_s3::credentials::JwtSvidSource for DegradedJwtSource {
+        async fn fetch_jwt_svid_token(
+            &self,
+            _audience: &str,
+        ) -> Result<String, skauswatch_s3::credentials::CredentialError> {
+            Err(skauswatch_s3::credentials::CredentialError::Identity(
+                "no identity held (test double)".to_owned(),
+            ))
+        }
+    }
+
+    /// Same shape as `adhoc_success_scans_and_finishes`, but with
+    /// federation configured against a degraded identity source —
+    /// `adhoc_client` must fall back to the default credential-provider
+    /// chain (same as if federation were never configured at all) and
+    /// still complete the scan, never error or hang on the failed
+    /// federation attempt.
+    #[tokio::test]
+    async fn adhoc_client_falls_back_to_default_chain_when_federation_degraded() {
+        if std::env::var("AWS_ACCESS_KEY_ID").is_err() {
+            eprintln!(
+                "skipping adhoc_client_falls_back_to_default_chain_when_federation_degraded: \
+                 AWS_ACCESS_KEY_ID not set"
+            );
+            return;
+        }
+
+        let server = MockServer::start().await;
+        let scan_id = uuid::Uuid::new_v4().to_string();
+        Mock::given(method("GET"))
+            .and(path(format!("/adhoc-fed-bucket/{scan_id}/upload.bin")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"clean-adhoc-body".to_vec()))
+            .mount(&server)
+            .await;
+
+        let pool = db_pool().await;
+        let tenant = test_tenant();
+        seed_adhoc(&pool, tenant, &scan_id).await;
+        let prefix = unique_prefix();
+        let cfg = WorkerConfig {
+            adhoc_bucket: Some("adhoc-fed-bucket".to_owned()),
+            s3_endpoint_url: Some(server.uri()),
+            s3_force_path_style: true,
+            ..WorkerConfig::for_tests()
+        };
+        let handler = build_handler(pool.clone(), cfg, &prefix)
+            .await
+            .with_federation(
+                std::sync::Arc::new(DegradedJwtSource),
+                "arn:aws:iam::123456789012:role/skauswatch-base".to_owned(),
+            );
+
+        let result = handler
+            .handle(&adhoc_entry(
+                &scan_id,
+                &format!("{scan_id}/upload.bin"),
+                tenant,
+            ))
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let row: (String,) =
+            sqlx::query_as("SELECT scan_status FROM adhoc_scan_results WHERE scan_id = $1")
+                .bind(&scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("select");
+        assert_eq!(
+            row.0, "clean",
+            "degraded federation must fall back to the default credential chain, not fail the scan"
+        );
     }
 }

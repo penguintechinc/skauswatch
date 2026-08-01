@@ -8,11 +8,14 @@
 //! split here: the entire generated spec sits behind the same `AuthedUser`
 //! extractor every authenticated route in this service uses. That's an
 //! independent decision from what the *business* routes themselves require:
-//! most of this service's routes (health/version/dashboard/events/alert
-//! search) are intentionally unauthenticated (matching v1 — see each
-//! module's docs), and their `#[utoipa::path]` annotations correctly omit
-//! `security(...)` to document that accurately. Only the doc route itself,
-//! and `alerts::update_alert_status`, actually require a bearer token.
+//! health/version/dashboard and the alert-search routes are intentionally
+//! unauthenticated (matching v1 — see each module's docs), and their
+//! `#[utoipa::path]` annotations correctly omit `security(...)` to document
+//! that accurately. The doc route itself, `alerts::update_alert_status`, and
+//! — as of the tenant-isolation hardening pass — every `events::*` route
+//! (search/get/stream, gated by `skauswatch_auth::tenant_middleware` rather
+//! than `AuthedUser`; see `events.rs` module docs) all require a bearer
+//! token.
 
 use axum::extract::State;
 use axum::http::StatusCode;

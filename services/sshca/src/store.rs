@@ -6,6 +6,13 @@
 //! database (`_load_existing_data` was a stub and there is no ssh-cert table in
 //! the live schema), so this port preserves the in-memory model exactly. If
 //! durable storage is ever required it needs a new migration in a later phase.
+//!
+//! TENANT ISOLATION (`docs/v2-port/tenancy-model.md` §3): every record
+//! carries the `tenant_id` of the caller that issued it
+//! (`crate::tenant::TenantId`, sourced from the `X-Tenant-ID` header). Every
+//! lookup/list/revoke operation takes a `tenant` filter — this store has no
+//! SQL `WHERE tenant_id = $N` equivalent to lean on, so the filtering has to
+//! happen explicitly in each method below instead.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -13,6 +20,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::NaiveDateTime;
+use uuid::Uuid;
 
 use crate::model::CertificateType;
 
@@ -24,6 +32,9 @@ pub const SERIAL_SEED: u64 = 1_000_000;
 pub struct StoredCert {
     /// Certificate id (equals the issuing request id).
     pub certificate_id: String,
+    /// The tenant that issued this certificate — sourced from the request's
+    /// `X-Tenant-ID` header at issuance time, never from client input.
+    pub tenant_id: Uuid,
     /// User or host.
     pub certificate_type: CertificateType,
     /// Serial number.
@@ -55,6 +66,9 @@ pub struct StoredCert {
 /// One Key Revocation List entry (v1 `KRLEntry`).
 #[derive(Debug, Clone)]
 pub struct KrlEntry {
+    /// The tenant that owned the revoked certificate — [`CertStore::krl_entries`]
+    /// filters on this so one tenant's KRL never lists another's revocations.
+    pub tenant_id: Uuid,
     /// Revoked serial number.
     pub serial_number: u64,
     /// Revocation instant (UTC).
@@ -104,15 +118,22 @@ impl CertStore {
         lock(&self.certs).insert(id, cert);
     }
 
-    /// Fetches a certificate by id.
-    pub fn get(&self, cert_id: &str) -> Option<StoredCert> {
-        lock(&self.certs).get(cert_id).cloned()
+    /// Fetches a certificate by id, scoped to `tenant` — a certificate that
+    /// exists but belongs to a different tenant resolves to `None`, the same
+    /// as a genuinely unknown id (never distinguishable to the caller).
+    pub fn get(&self, cert_id: &str, tenant: Uuid) -> Option<StoredCert> {
+        lock(&self.certs)
+            .get(cert_id)
+            .filter(|c| c.tenant_id == tenant)
+            .cloned()
     }
 
-    /// Lists certificates filtered by type/status, capped at `limit`, oldest
-    /// insertion order not guaranteed (parity with v1's dict iteration).
+    /// Lists `tenant`'s certificates filtered by type/status, capped at
+    /// `limit`, oldest insertion order not guaranteed (parity with v1's
+    /// dict iteration).
     pub fn list(
         &self,
+        tenant: Uuid,
         certificate_type: Option<CertificateType>,
         status: Option<&str>,
         limit: usize,
@@ -120,6 +141,9 @@ impl CertStore {
         let certs = lock(&self.certs);
         let mut out = Vec::new();
         for cert in certs.values() {
+            if cert.tenant_id != tenant {
+                continue;
+            }
             if let Some(t) = certificate_type
                 && cert.certificate_type != t
             {
@@ -138,17 +162,20 @@ impl CertStore {
         out
     }
 
-    /// Revokes a certificate by id, recording a KRL entry. Returns `false` when
-    /// the certificate id is unknown (v1 raised; the handler maps to 404).
-    pub fn revoke(&self, cert_id: &str, reason: &str, at: NaiveDateTime) -> bool {
+    /// Revokes a certificate by id scoped to `tenant`, recording a KRL
+    /// entry. Returns `false` when the certificate id is unknown *or*
+    /// belongs to a different tenant (v1 raised on unknown; the handler
+    /// maps both cases to 404 — never distinguishable to the caller).
+    pub fn revoke(&self, cert_id: &str, tenant: Uuid, reason: &str, at: NaiveDateTime) -> bool {
         let mut certs = lock(&self.certs);
-        let Some(cert) = certs.get_mut(cert_id) else {
+        let Some(cert) = certs.get_mut(cert_id).filter(|c| c.tenant_id == tenant) else {
             return false;
         };
         cert.status = "revoked".to_owned();
         cert.revoked_at = Some(at);
         cert.revocation_reason = Some(reason.to_owned());
         let entry = KrlEntry {
+            tenant_id: tenant,
             serial_number: cert.serial_number,
             revocation_time: at,
             reason: reason.to_owned(),
@@ -158,9 +185,14 @@ impl CertStore {
         true
     }
 
-    /// Snapshot of all revocation entries, ordered by serial.
-    pub fn krl_entries(&self) -> Vec<KrlEntry> {
-        lock(&self.revoked).values().cloned().collect()
+    /// Snapshot of `tenant`'s revocation entries, ordered by serial — never
+    /// includes another tenant's revocations.
+    pub fn krl_entries(&self, tenant: Uuid) -> Vec<KrlEntry> {
+        lock(&self.revoked)
+            .values()
+            .filter(|e| e.tenant_id == tenant)
+            .cloned()
+            .collect()
     }
 }
 
@@ -175,9 +207,16 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 mod tests {
     use super::*;
 
-    fn sample(id: &str, serial: u64, t: CertificateType) -> StoredCert {
+    /// A fixed tenant for tests that don't specifically exercise
+    /// cross-tenant isolation.
+    fn tenant() -> Uuid {
+        Uuid::new_v4()
+    }
+
+    fn sample(id: &str, serial: u64, t: CertificateType, tenant_id: Uuid) -> StoredCert {
         StoredCert {
             certificate_id: id.to_owned(),
+            tenant_id,
             certificate_type: t,
             serial_number: serial,
             key_id: format!("{}-{id}", t.as_str()),
@@ -198,16 +237,17 @@ mod tests {
     fn default_impl_matches_new() {
         let store = CertStore::default();
         assert_eq!(store.next_serial(), SERIAL_SEED + 1);
-        assert!(store.list(None, None, 100).is_empty());
+        assert!(store.list(tenant(), None, None, 100).is_empty());
     }
 
     #[test]
     fn list_stops_once_limit_is_reached() {
         let store = CertStore::new();
+        let t = tenant();
         for (i, serial) in (1_000_001..1_000_004).enumerate() {
-            store.insert(sample(&format!("c{i}"), serial, CertificateType::User));
+            store.insert(sample(&format!("c{i}"), serial, CertificateType::User, t));
         }
-        let limited = store.list(None, None, 1);
+        let limited = store.list(t, None, None, 1);
         assert_eq!(limited.len(), 1);
     }
 
@@ -221,41 +261,99 @@ mod tests {
     #[test]
     fn insert_get_and_list_filters() {
         let store = CertStore::new();
-        store.insert(sample("u1", 1_000_001, CertificateType::User));
-        store.insert(sample("h1", 1_000_002, CertificateType::Host));
+        let t = tenant();
+        store.insert(sample("u1", 1_000_001, CertificateType::User, t));
+        store.insert(sample("h1", 1_000_002, CertificateType::Host, t));
 
-        assert!(store.get("u1").is_some());
-        assert!(store.get("missing").is_none());
+        assert!(store.get("u1", t).is_some());
+        assert!(store.get("missing", t).is_none());
 
-        let users = store.list(Some(CertificateType::User), None, 100);
+        let users = store.list(t, Some(CertificateType::User), None, 100);
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].certificate_id, "u1");
 
-        let all = store.list(None, None, 100);
+        let all = store.list(t, None, None, 100);
         assert_eq!(all.len(), 2);
 
-        let active = store.list(None, Some("active"), 100);
+        let active = store.list(t, None, Some("active"), 100);
         assert_eq!(active.len(), 2);
-        let revoked = store.list(None, Some("revoked"), 100);
+        let revoked = store.list(t, None, Some("revoked"), 100);
         assert_eq!(revoked.len(), 0);
     }
 
     #[test]
     fn revoke_updates_status_and_krl() {
         let store = CertStore::new();
-        store.insert(sample("u1", 1_000_001, CertificateType::User));
+        let t = tenant();
+        store.insert(sample("u1", 1_000_001, CertificateType::User, t));
         let now = NaiveDateTime::default();
 
-        assert!(store.revoke("u1", "keyCompromise", now));
-        assert!(!store.revoke("missing", "x", now));
+        assert!(store.revoke("u1", t, "keyCompromise", now));
+        assert!(!store.revoke("missing", t, "x", now));
 
-        let cert = store.get("u1").expect("cert present");
+        let cert = store.get("u1", t).expect("cert present");
         assert_eq!(cert.status, "revoked");
         assert_eq!(cert.revocation_reason.as_deref(), Some("keyCompromise"));
 
-        let krl = store.krl_entries();
+        let krl = store.krl_entries(t);
         assert_eq!(krl.len(), 1);
         assert_eq!(krl[0].serial_number, 1_000_001);
         assert_eq!(krl[0].reason, "keyCompromise");
+    }
+
+    // ===================== Cross-tenant isolation =====================
+
+    #[test]
+    fn get_cannot_see_another_tenants_certificate() {
+        let store = CertStore::new();
+        let tenant_a = tenant();
+        let tenant_b = tenant();
+        store.insert(sample("u1", 1_000_001, CertificateType::User, tenant_a));
+
+        assert!(store.get("u1", tenant_b).is_none());
+        assert!(store.get("u1", tenant_a).is_some());
+    }
+
+    #[test]
+    fn list_only_returns_the_calling_tenants_rows() {
+        let store = CertStore::new();
+        let tenant_a = tenant();
+        let tenant_b = tenant();
+        store.insert(sample("a1", 1_000_001, CertificateType::User, tenant_a));
+        store.insert(sample("b1", 1_000_002, CertificateType::User, tenant_b));
+
+        let list_a = store.list(tenant_a, None, None, 100);
+        assert_eq!(list_a.len(), 1);
+        assert_eq!(list_a[0].certificate_id, "a1");
+
+        let list_b = store.list(tenant_b, None, None, 100);
+        assert_eq!(list_b.len(), 1);
+        assert_eq!(list_b[0].certificate_id, "b1");
+    }
+
+    #[test]
+    fn revoke_cannot_revoke_another_tenants_certificate() {
+        let store = CertStore::new();
+        let tenant_a = tenant();
+        let tenant_b = tenant();
+        store.insert(sample("u1", 1_000_001, CertificateType::User, tenant_a));
+        let now = NaiveDateTime::default();
+
+        assert!(!store.revoke("u1", tenant_b, "unspecified", now));
+        let still_active = store.get("u1", tenant_a).expect("cert present");
+        assert_eq!(still_active.status, "active");
+    }
+
+    #[test]
+    fn krl_entries_only_lists_the_calling_tenants_revocations() {
+        let store = CertStore::new();
+        let tenant_a = tenant();
+        let tenant_b = tenant();
+        store.insert(sample("u1", 1_000_001, CertificateType::User, tenant_a));
+        let now = NaiveDateTime::default();
+        assert!(store.revoke("u1", tenant_a, "unspecified", now));
+
+        assert!(store.krl_entries(tenant_b).is_empty());
+        assert_eq!(store.krl_entries(tenant_a).len(), 1);
     }
 }

@@ -12,6 +12,7 @@ mod error;
 mod model;
 mod routes;
 mod store;
+mod tenant;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

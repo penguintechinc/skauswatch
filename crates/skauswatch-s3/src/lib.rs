@@ -1,6 +1,13 @@
 //! S3/MinIO client construction shared by the scan pipeline. Supports both
 //! AWS-native endpoints and MinIO via `S3_ENDPOINT_URL` override with
 //! path-style addressing, matching the v1 deployment topology.
+//!
+//! [`credentials`] additionally resolves the hybrid per-bucket credential
+//! model used by `s3_bucket_configs` (manager REST CRUD + s3scan worker):
+//! `sts:AssumeRole` for real-AWS buckets, envelope-encrypted static keys as
+//! the fallback for S3-compatible endpoints with no STS.
+
+pub mod credentials;
 
 use serde::Deserialize;
 

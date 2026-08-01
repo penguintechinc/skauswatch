@@ -44,7 +44,7 @@ fn validation(field: &str, msg: &str) -> ApiError {
 #[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
 pub(crate) struct RepoConfig {
     id: i64,
-    tenant_id: Option<i64>,
+    tenant_id: uuid::Uuid,
     team_id: Option<i64>,
     owner_id: Option<i64>,
     provider: String,
@@ -94,15 +94,18 @@ pub(crate) struct RepoListResponse {
 )]
 pub(crate) async fn list_repos(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
 ) -> Result<Response, ApiError> {
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
 
-    let query =
-        format!("SELECT {REPO_CONFIG_COLUMNS} FROM codescan_repo_configs ORDER BY repo_name");
+    let query = format!(
+        "SELECT {REPO_CONFIG_COLUMNS} FROM codescan_repo_configs \
+         WHERE tenant_id = $1 ORDER BY repo_name"
+    );
     let items = sqlx::query_as::<_, RepoConfig>(sqlx::AssertSqlSafe(query))
+        .bind(user.tenant_id)
         .fetch_all(&state.db)
         .await?;
 
@@ -113,7 +116,15 @@ pub(crate) async fn list_repos(
         .into_response())
 }
 
-/// POST /codescan/repos body.
+/// POST /codescan/repos body. Deliberately has NO `tenant_id` field — the
+/// pre-tenancy-retrofit version of this struct accepted one directly from
+/// the client and stamped it verbatim onto the created row (a live IDOR: any
+/// caller could assign an arbitrary tenant to a repo config, or collide with
+/// another tenant's data). `tenant_id` is now sourced exclusively from the
+/// validated JWT (`CurrentUser::tenant_id`, see `create_repo`) — even if a
+/// caller includes a `tenant_id` key in the request JSON, serde silently
+/// ignores it (no field to deserialize into), which is exactly the intended
+/// behavior per docs/v2-port/tenancy-model.md.
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(crate) struct CreateRepoRequest {
     provider: String,
@@ -141,8 +152,6 @@ pub(crate) struct CreateRepoRequest {
     description: Option<String>,
     #[serde(default)]
     credential_id: Option<i64>,
-    #[serde(default)]
-    tenant_id: Option<i64>,
     #[serde(default)]
     team_id: Option<i64>,
 }
@@ -195,11 +204,20 @@ pub(crate) async fn create_repo(
     }
     validate_create(&body)?;
 
+    // Scoped to the caller's own tenant: a same-named repo already
+    // configured by a *different* tenant must not block this create (nor
+    // leak that it exists) — see docs/v2-port/tenancy-model.md §4. The
+    // table's `UNIQUE (provider, repo_name)` constraint is still global
+    // (unchanged by this pass), so a genuine cross-tenant name collision
+    // surfaces as a 500 from the INSERT below rather than this 409 — a
+    // pre-existing schema property, not introduced by tenant scoping.
     let existing: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM codescan_repo_configs WHERE provider = $1 AND repo_name = $2",
+        "SELECT id FROM codescan_repo_configs WHERE provider = $1 AND repo_name = $2 \
+         AND tenant_id = $3",
     )
     .bind(&body.provider)
     .bind(&body.repo_name)
+    .bind(user.tenant_id)
     .fetch_optional(&state.db)
     .await?;
     if existing.is_some() {
@@ -217,7 +235,7 @@ pub(crate) async fn create_repo(
          RETURNING {REPO_CONFIG_COLUMNS}"
     );
     let created = sqlx::query_as::<_, RepoConfig>(sqlx::AssertSqlSafe(query))
-        .bind(body.tenant_id)
+        .bind(user.tenant_id)
         .bind(body.team_id)
         .bind(user.id)
         .bind(&body.provider)
@@ -263,15 +281,18 @@ pub(crate) async fn create_repo(
 )]
 pub(crate) async fn get_repo(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(repo_id): Path<i64>,
 ) -> Result<Response, ApiError> {
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
-    let query = format!("SELECT {REPO_CONFIG_COLUMNS} FROM codescan_repo_configs WHERE id = $1");
+    let query = format!(
+        "SELECT {REPO_CONFIG_COLUMNS} FROM codescan_repo_configs WHERE id = $1 AND tenant_id = $2"
+    );
     let row = sqlx::query_as::<_, RepoConfig>(sqlx::AssertSqlSafe(query))
         .bind(repo_id)
+        .bind(user.tenant_id)
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| ApiError::NotFound("Configuration not found".to_owned()))?;
@@ -319,7 +340,7 @@ pub(crate) struct RepoUpdateResponse {
 )]
 pub(crate) async fn update_repo(
     State(state): State<AppState>,
-    _admin: AdminOnly,
+    AdminOnly(admin): AdminOnly,
     Path(repo_id): Path<i64>,
     ApiJson(body): ApiJson<UpdateRepoRequest>,
 ) -> Result<Response, ApiError> {
@@ -328,8 +349,9 @@ pub(crate) async fn update_repo(
     }
 
     let exists: Option<(i64,)> =
-        sqlx::query_as("SELECT id FROM codescan_repo_configs WHERE id = $1")
+        sqlx::query_as("SELECT id FROM codescan_repo_configs WHERE id = $1 AND tenant_id = $2")
             .bind(repo_id)
+            .bind(admin.tenant_id)
             .fetch_optional(&state.db)
             .await?;
     if exists.is_none() {
@@ -387,11 +409,16 @@ pub(crate) async fn update_repo(
     }
     qb.push(" WHERE id = ");
     qb.push_bind(repo_id);
+    qb.push(" AND tenant_id = ");
+    qb.push_bind(admin.tenant_id);
     qb.build().execute(&state.db).await?;
 
-    let query = format!("SELECT {REPO_CONFIG_COLUMNS} FROM codescan_repo_configs WHERE id = $1");
+    let query = format!(
+        "SELECT {REPO_CONFIG_COLUMNS} FROM codescan_repo_configs WHERE id = $1 AND tenant_id = $2"
+    );
     let updated = sqlx::query_as::<_, RepoConfig>(sqlx::AssertSqlSafe(query))
         .bind(repo_id)
+        .bind(admin.tenant_id)
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| ApiError::NotFound("Configuration not found".to_owned()))?;
@@ -429,15 +456,16 @@ pub(crate) struct RepoDeleteResponse {
 )]
 pub(crate) async fn delete_repo(
     State(state): State<AppState>,
-    _admin: AdminOnly,
+    AdminOnly(admin): AdminOnly,
     Path(repo_id): Path<i64>,
 ) -> Result<Response, ApiError> {
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
 
-    let result = sqlx::query("DELETE FROM codescan_repo_configs WHERE id = $1")
+    let result = sqlx::query("DELETE FROM codescan_repo_configs WHERE id = $1 AND tenant_id = $2")
         .bind(repo_id)
+        .bind(admin.tenant_id)
         .execute(&state.db)
         .await?;
     if result.rows_affected() == 0 {
@@ -498,7 +526,6 @@ mod tests {
             display_name: None,
             description: None,
             credential_id: None,
-            tenant_id: None,
             team_id: None,
         };
         assert!(validate_create(&body).is_err());
@@ -521,7 +548,6 @@ mod tests {
             display_name: None,
             description: None,
             credential_id: None,
-            tenant_id: None,
             team_id: None,
         };
         assert!(validate_create(&body).is_err());
@@ -675,5 +701,95 @@ mod tests {
             .authorization_bearer(&admin)
             .await
             .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    /// Regression for the tenancy IDOR this service used to have: a
+    /// client-supplied `tenant_id` in the create body must never override
+    /// the tenant derived from the caller's JWT. `CreateRepoRequest` no
+    /// longer even has a `tenant_id` field, so an extra key in the JSON body
+    /// is simply ignored by serde — the created row's tenant must always
+    /// equal the token's tenant claim.
+    #[tokio::test]
+    async fn body_tenant_id_cannot_override_the_jwt_tenant() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+
+        let mut body = create_body("idor-attempt-repo");
+        body["tenant_id"] = serde_json::json!(crate::routes::test_support::OTHER_TENANT_ID);
+
+        let created = server
+            .post("/api/v1/codescan/repos")
+            .authorization_bearer(&admin)
+            .json(&body)
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let created_body: serde_json::Value = created.json();
+        assert_eq!(
+            created_body["config"]["tenant_id"],
+            crate::routes::test_support::TEST_TENANT_ID,
+            "tenant_id must come from the JWT, never the request body"
+        );
+    }
+
+    /// Tenant A cannot list, read, update, or delete tenant B's repo
+    /// configs — the core cross-tenant-isolation invariant this retrofit
+    /// exists to establish.
+    #[tokio::test]
+    async fn tenant_a_cannot_access_tenant_b_repo_configs() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin_a = sign_token(&state, "1", "admin");
+        let admin_b = crate::routes::test_support::sign_token_for_tenant(
+            &state,
+            "2",
+            "admin",
+            crate::routes::test_support::OTHER_TENANT_ID,
+        );
+        let server = test_server(state);
+
+        let created = server
+            .post("/api/v1/codescan/repos")
+            .authorization_bearer(&admin_b)
+            .json(&create_body("tenant-b-repo"))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let repo_id = created.json::<serde_json::Value>()["config"]["id"]
+            .as_i64()
+            .unwrap_or_default();
+
+        // Tenant A's list never sees tenant B's row.
+        let listed = server
+            .get("/api/v1/codescan/repos")
+            .authorization_bearer(&admin_a)
+            .await;
+        listed.assert_status_ok();
+        assert_eq!(listed.json::<serde_json::Value>()["total"], 0);
+
+        // Tenant A's direct GET/PUT/DELETE by id all 404, not 200/403 — this
+        // must not leak that the row exists under a different tenant.
+        server
+            .get(&format!("/api/v1/codescan/repos/{repo_id}"))
+            .authorization_bearer(&admin_a)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        server
+            .put(&format!("/api/v1/codescan/repos/{repo_id}"))
+            .authorization_bearer(&admin_a)
+            .json(&serde_json::json!({"enabled": false}))
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        server
+            .delete(&format!("/api/v1/codescan/repos/{repo_id}"))
+            .authorization_bearer(&admin_a)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+
+        // Tenant B can still see its own row, proving the 404s above are
+        // tenant-scoped rejections, not a broken query.
+        server
+            .get(&format!("/api/v1/codescan/repos/{repo_id}"))
+            .authorization_bearer(&admin_b)
+            .await
+            .assert_status_ok();
     }
 }

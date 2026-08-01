@@ -7,13 +7,17 @@
 //!
 //! Fully ported (real, tested): the ES/OpenSearch + MongoDB event store
 //! (`src/es.rs`, `src/mongo.rs`), the event search/get/stream API
-//! (`src/routes/events.rs`), the alert API (`src/routes/alerts.rs` — a
-//! faithful port of v1's genuinely unbacked stub behavior, not a shortcut;
-//! see that module's docs), the dashboard metrics stub
-//! (`src/routes/dashboard.rs` — same story), health/version
+//! (`src/routes/events.rs` — hardened: every one of these three endpoints
+//! previously had zero authentication and no tenant filter on the
+//! underlying Elasticsearch query, a critical cross-tenant data-exposure
+//! finding; see that module's docs for the fix), the alert API
+//! (`src/routes/alerts.rs` — a faithful port of v1's genuinely unbacked stub
+//! behavior, not a shortcut; see that module's docs), the dashboard metrics
+//! stub (`src/routes/dashboard.rs` — same story), health/version
 //! (`src/routes/health.rs`), house-standard bearer-JWT + tenant-claim auth
-//! (`src/auth.rs`), the data model layer (`src/models.rs`), and OpenAPI 3.x
-//! publication (`src/routes/openapi.rs`, `openapi/v1.yaml`).
+//! (`src/auth.rs`, `skauswatch_auth::tenant_middleware`), the data model
+//! layer (`src/models.rs`), and OpenAPI 3.x publication
+//! (`src/routes/openapi.rs`, `openapi/v1.yaml`).
 //!
 //! ## Tracked follow-ups (deferred, not stubbed-and-claimed-done)
 //!
@@ -117,7 +121,7 @@ async fn serve() -> anyhow::Result<()> {
     let state = state::AppStateInner::from_env().await?;
     let _license_bg = state.license.spawn_refresh();
 
-    let api = routes::router();
+    let api = routes::router(state.clone());
     let app: Router<()> = Router::new()
         .merge(api.clone())
         // The openapi doc route is nested only, not double-mounted flat —

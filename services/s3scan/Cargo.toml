@@ -35,8 +35,11 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 skauswatch-common = { workspace = true }
 skauswatch-db = { workspace = true }
+skauswatch-identity = { workspace = true }
+skauswatch-s3 = { workspace = true }
 skauswatch-streams = { workspace = true }
 skauswatch-telemetry = { workspace = true }
+skauswatch-vault = { workspace = true }
 
 [dev-dependencies]
 fred = { workspace = true }
