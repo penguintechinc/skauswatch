@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use axum::extract::Query;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -131,6 +131,22 @@ pub(crate) async fn siem_health() -> Json<serde_json::Value> {
     Json(health_json(receiver_ok))
 }
 
+/// Extracts the raw `Authorization` header value to forward to
+/// `{LOGS_URL}/ingest` — logs now requires its own JWT+tenant validation on
+/// `/ingest` (`docs/v2-port/logs-contract.md`), a live regression: this hop
+/// used to drop the caller's bearer token entirely and rely on network
+/// reachability as the only "auth", so every ingest call started 401ing the
+/// moment logs began enforcing JWT+tenant. `_user: CurrentUser` below
+/// already proves the header is present and well-formed for *this*
+/// service; logs re-validates it independently rather than trusting an
+/// internal-network shortcut (mirrors `routes/asm.rs::forward`'s identical
+/// forwarding pattern for the scanner proxy).
+fn forwarded_auth(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+}
+
 /// POST /siem/ingest — authenticated proxy to `{LOGS_URL}/ingest`
 /// with the v1 10s timeout. The upstream status code and JSON body pass
 /// through verbatim; transport/parse failures are 500 (v1 uncaught httpx).
@@ -147,14 +163,19 @@ pub(crate) async fn siem_health() -> Json<serde_json::Value> {
     ),
 )]
 pub(crate) async fn proxy_ingest(
+    headers: HeaderMap,
     _user: CurrentUser,
     ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let settings = SiemSettings::from_env();
-    let resp = reqwest::Client::new()
+    let mut req = reqwest::Client::new()
         .post(format!("{}/ingest", settings.logs_url))
         .timeout(Duration::from_secs(10))
-        .json(&body)
+        .json(&body);
+    if let Some(auth) = forwarded_auth(&headers) {
+        req = req.header(reqwest::header::AUTHORIZATION, auth);
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| ApiError::internal("logs ingest", e))?;
@@ -697,6 +718,19 @@ mod tests {
                 "free_tier_user_cap": 5,
             })
         );
+    }
+
+    #[test]
+    fn forwarded_auth_extracts_the_bearer_header_when_present() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer abc.def.ghi"
+                .parse()
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+        assert_eq!(forwarded_auth(&headers), Some("Bearer abc.def.ghi"));
+        assert_eq!(forwarded_auth(&HeaderMap::new()), None);
     }
 
     #[test]

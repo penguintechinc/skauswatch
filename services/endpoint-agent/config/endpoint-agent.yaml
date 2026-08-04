@@ -7,6 +7,12 @@ api_key: ""  # Set via environment variable ENDPOINT_API_KEY
 # Agent identification
 agent_id: ""  # Auto-generated if empty
 
+# Per-tenant EDR enrollment token — required only the first time this
+# agent_id registers with the manager (POST /tenants/{id}/enrollment-tokens
+# mints one). Leave empty for a re-registering agent. Set via environment
+# variable ENDPOINT_ENROLLMENT_TOKEN.
+enrollment_token: ""
+
 # Heartbeat interval in seconds
 heartbeat_interval: 60
 

@@ -10,6 +10,77 @@ info:
     identifier: AGPL-3.0-only
   version: '1'
 paths:
+  /api/v1/admin/svid-ttl:
+    get:
+      tags:
+      - admin
+      summary: |-
+        GET /admin/svid-ttl — super_admin only. Reads the singleton row if one
+        has ever been persisted, else reports the documented defaults without
+        requiring a seed migration to insert one.
+      operationId: get_svid_ttl
+      responses:
+        '200':
+          description: Current SVID TTL policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SvidTtlSettings'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions — super_admin required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    put:
+      tags:
+      - admin
+      summary: |-
+        PUT /admin/svid-ttl — super_admin only; validates both fields, persists
+        the singleton row (insert-or-update), and best-effort applies the change
+        to SPIRE (see [`apply_svid_ttl_to_spire`] — never blocks the response).
+      operationId: update_svid_ttl
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSvidTtlRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated SVID TTL policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SvidTtlSettings'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions — super_admin required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
   /api/v1/alerts:
     get:
       tags:
@@ -2057,9 +2128,12 @@ paths:
       - endpoint
       summary: |-
         POST /endpoint/register — HMAC agent auth. Re-registers (200) when the body's
-        agent_id already exists (full field overwrite, metadata replaced), else
-        inserts a new active agent (201). v1 keys off the BODY agent_id, which
-        need not match the authenticated X-Agent-ID — preserved as-is.
+        agent_id already exists (full field overwrite, metadata replaced, tenant
+        unchanged — `enrollment_token` is ignored on this path), else requires a
+        valid, unexpired, unexhausted `enrollment_token` (§5) to resolve the new
+        agent's tenant and inserts a new active agent (201). v1 keys off the BODY
+        agent_id, which need not match the authenticated X-Agent-ID — preserved
+        as-is.
       operationId: register_agent
       parameters:
       - name: X-Agent-ID
@@ -3719,6 +3793,67 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: Slug already in use
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/tenants/{tenant_id}/enrollment-tokens:
+    post:
+      tags:
+      - tenants
+      summary: |-
+        POST /tenants/{tenant_id}/enrollment-tokens — super_admin only (matching
+        this module's existing tenant-provisioning posture — see the "Decision
+        needing user confirmation" note in `docs/v2-port/service-auth-model.md`
+        §5: a narrower delegated `tenant_admin` role is a v2.1-backlog
+        candidate, not required for v2.0). Mints a token scoped to `tenant_id`;
+        `routes::endpoint::register_agent` resolves a *new* agent's tenant from
+        it instead of the default bootstrap tenant (§5 Option A).
+      operationId: create_enrollment_token
+      parameters:
+      - name: tenant_id
+        in: path
+        description: Tenant the minted token enrolls new agents into
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        description: Optional — a missing/empty body accepts the defaults
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEnrollmentTokenRequest'
+        required: true
+      responses:
+        '201':
+          description: Enrollment token minted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollmentTokenResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions — super_admin required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Tenant not found
           content:
             application/json:
               schema:
@@ -5570,6 +5705,26 @@ components:
           type:
           - string
           - 'null'
+    CreateEnrollmentTokenRequest:
+      type: object
+      description: |-
+        POST /tenants/{tenant_id}/enrollment-tokens body — both fields optional,
+        falling back to the defaults above.
+      properties:
+        expires_in_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Token lifetime in seconds (default 86400).
+        max_uses:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Number of `register_agent` calls the token may resolve before it's
+            exhausted (default 1).
     CreateRequest:
       type: object
       description: POST /users body — mirrors v1 `UserCreateRequest` defaults.
@@ -5675,6 +5830,30 @@ components:
         total_events:
           type: integer
           format: int64
+    EnrollmentTokenResponse:
+      type: object
+      description: Documentation-only mirror of `create_enrollment_token`'s success body.
+      required:
+      - token
+      - tenant_id
+      - expires_at
+      - max_uses
+      properties:
+        expires_at:
+          type: string
+          description: RFC 3339 expiry timestamp.
+        max_uses:
+          type: integer
+          format: int64
+        tenant_id:
+          type: string
+          format: uuid
+        token:
+          type: string
+          description: |-
+            The raw enrollment token — returned exactly once; only its SHA-256
+            hash is ever persisted (same principle as `users.password_hash`), so
+            it can never be retrieved again after this response.
     ErrorResponse:
       type: object
       description: |-
@@ -6347,6 +6526,16 @@ components:
           type:
           - string
           - 'null'
+        enrollment_token:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Per-tenant enrollment token (`docs/v2-port/service-auth-model.md`
+            §5) minted via `POST /tenants/{tenant_id}/enrollment-tokens`.
+            Required only for a *new* agent_id — re-registration of an existing
+            agent keeps its stored tenant and never consults this field (see
+            `register_agent`'s branch split below).
         hostname:
           type:
           - string
@@ -6971,6 +7160,33 @@ components:
           type:
           - string
           - 'null'
+    SvidTtlSettings:
+      type: object
+      description: |-
+        GET/PUT wire shape — identical on both directions per the webui contract
+        (`services/webui/src/client/types/svidTtl.ts::SvidTtlSettings`).
+      required:
+      - x509_ttl_seconds
+      - jwt_ttl_seconds
+      - default_seconds
+      - min_seconds
+      - max_seconds
+      properties:
+        default_seconds:
+          type: integer
+          format: int64
+        jwt_ttl_seconds:
+          type: integer
+          format: int64
+        max_seconds:
+          type: integer
+          format: int64
+        min_seconds:
+          type: integer
+          format: int64
+        x509_ttl_seconds:
+          type: integer
+          format: int64
     TenantCreateResponse:
       type: object
       description: Documentation-only mirror of `create_tenant`'s `serde_json::json!` body.
@@ -7195,6 +7411,22 @@ components:
           type:
           - string
           - 'null'
+    UpdateSvidTtlRequest:
+      type: object
+      description: |-
+        PUT /admin/svid-ttl body — both fields required, each independently
+        bounds-checked against [`MIN_SVID_TTL_SECONDS`, `MAX_SVID_TTL_SECONDS`].
+      properties:
+        jwt_ttl_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        x509_ttl_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
     UploadCreateResponse:
       type: object
       description: Documentation-only mirror of `upload_file`'s `serde_json::json!` body.
@@ -7581,7 +7813,9 @@ tags:
 - name: license
   description: License tier and feature-flag entitlements
 - name: tenants
-  description: Super-admin tenant provisioning
+  description: Super-admin tenant provisioning and EDR enrollment tokens
+- name: admin
+  description: Super-admin operational controls (SPIFFE SVID TTL policy)
 - name: alerts
   description: Security alert lifecycle and AI-assisted review
 - name: threat-intel

@@ -25,6 +25,7 @@
 //!    for it, since `CurrentUser` is also reachable through per-module test
 //!    routers that never mount this middleware.
 
+mod admin;
 mod alerts;
 mod approvals;
 mod asm;
@@ -74,6 +75,7 @@ pub fn router(state: AppState) -> Router {
 
     let protected = auth::protected_router()
         .merge(license::router())
+        .merge(admin::router())
         .merge(gated(users::router(), &state, "skauswatch.users"))
         .merge(tenants::router())
         .merge(gated(alerts::router(), &state, "skauswatch.alerts"))

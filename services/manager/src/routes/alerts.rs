@@ -833,6 +833,14 @@ fn ai_enabled_value(raw: Option<&str>) -> bool {
     raw.is_none_or(|v| v.eq_ignore_ascii_case("true"))
 }
 
+/// The `skauswatch.ai-review` PostHog flag (`crate::flags::CORE_FLAGS`) —
+/// general enablement, layered on top of (never a replacement for) the
+/// `AI_ENABLED` env-var kill-switch above. Both gates must pass; this one
+/// was previously missing entirely, so the feature had no flag-based
+/// staged-rollout/kill-switch of its own (`general.md` Feature Toggling
+/// requires every feature to sit behind one).
+const AI_REVIEW_FLAG: &str = "skauswatch.ai-review";
+
 /// Documentation-only mirror of `request_ai_review`'s success body.
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct AiReviewResponse {
@@ -871,7 +879,7 @@ pub(crate) async fn request_ai_review(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     user.require_role(&["admin", "maintainer"])?;
 
-    if !ai_enabled() {
+    if !ai_enabled() || !state.license.flag_enabled(AI_REVIEW_FLAG).await {
         // v1 returns this bare body; the shared envelope has no 503 variant.
         return Ok((
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1638,6 +1646,33 @@ mod tests {
         assert_eq!(body["provider"], "ollama");
         assert_eq!(body["priority"], 2);
         assert!(body["job_id"].as_str().is_some_and(|s| !s.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn request_ai_review_503s_when_ai_review_flag_is_off() {
+        // Same underlying DB/tenant, but a gated license (skauswatch.ai-review
+        // defaults OFF) instead of the dev bypass — proves the new
+        // flag_enabled(AI_REVIEW_FLAG) check actually gates the route (not
+        // just AI_ENABLED, which the workspace's no-unsafe-env-mutation rule
+        // can't drive from a test — see the note above).
+        let dev_state = db_state(dev_license()).await;
+        let id = seed_alert(&dev_state, "Flagged", "high", "endpoint").await;
+        let pool = dev_state.db.clone();
+        let gated = crate::state::AppStateInner::for_tests_with_db(
+            skauswatch_testkit::license::gated_license("skauswatch"),
+            pool,
+        );
+        let (_, maint_tok) =
+            authed_user(&gated, "air-flagged-maint@example.com", "maintainer").await;
+        let server = server_for(gated).await;
+
+        let res = server
+            .post(&format!("/api/v1/alerts/{id}/ai-review"))
+            .authorization_bearer(&maint_tok)
+            .await;
+        res.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["error"], "AI integration is disabled");
     }
 
     #[tokio::test]

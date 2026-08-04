@@ -60,6 +60,7 @@ pub fn build_register_request(
     os_version: &str,
     agent_version: &str,
     collector_names: &[&str],
+    enrollment_token: &str,
 ) -> RegisterRequest {
     RegisterRequest {
         agent_id: agent_id.to_owned(),
@@ -69,6 +70,7 @@ pub fn build_register_request(
         os_version: os_version.to_owned(),
         agent_version: agent_version.to_owned(),
         metadata: serde_json::json!({ "collectors": collector_names }),
+        enrollment_token: enrollment_token.to_owned(),
     }
 }
 
@@ -111,6 +113,7 @@ pub async fn run(cfg: AgentConfig) -> Result<(), Error> {
         &os_version,
         reporter.agent_version(),
         &collector_names,
+        &cfg.enrollment_token,
     );
     reporter.register(&register_req).await?;
     info!(agent_id, "registered with manager");
@@ -343,6 +346,7 @@ mod tests {
             "6.8.0",
             "2.0.0",
             &["process", "file"],
+            "some-enrollment-token",
         );
         assert_eq!(req.agent_id, "agent-1");
         assert_eq!(req.hostname, "host1");
@@ -353,6 +357,7 @@ mod tests {
         assert_eq!(req.os_type, "linux");
         assert_eq!(req.os_version, "6.8.0");
         assert_eq!(req.agent_version, "2.0.0");
+        assert_eq!(req.enrollment_token, "some-enrollment-token");
         assert_eq!(
             req.metadata["collectors"],
             serde_json::json!(["process", "file"])

@@ -21,7 +21,7 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
-use sqlx::{Postgres, QueryBuilder};
+use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
@@ -320,6 +320,12 @@ pub(crate) struct RegisterBody {
     os_version: Option<String>,
     agent_version: Option<String>,
     metadata: Option<serde_json::Value>,
+    /// Per-tenant enrollment token (`docs/v2-port/service-auth-model.md`
+    /// §5) minted via `POST /tenants/{tenant_id}/enrollment-tokens`.
+    /// Required only for a *new* agent_id — re-registration of an existing
+    /// agent keeps its stored tenant and never consults this field (see
+    /// `register_agent`'s branch split below).
+    enrollment_token: Option<String>,
 }
 
 struct ValidRegister {
@@ -356,10 +362,42 @@ pub(crate) struct RegisterResponse {
     status: String,
 }
 
+/// Resolves and atomically consumes a per-tenant enrollment token for a
+/// *new* agent registration (`docs/v2-port/service-auth-model.md` §5):
+/// looks the token up by its SHA-256 hash and, in the same statement,
+/// requires it to be unexpired, unrevoked, and under `max_uses` before
+/// incrementing `use_count` — a single `UPDATE ... RETURNING` closes the
+/// TOCTOU window a separate check-then-increment pair would leave open
+/// under concurrent registrations. Returns the tenant the token is scoped
+/// to, or 401 if the token is missing, unknown, expired, revoked, or
+/// exhausted (deliberately one generic message — never reveals which
+/// specific condition failed).
+async fn resolve_enrollment_token(db: &PgPool, raw_token: &str) -> Result<uuid::Uuid, ApiError> {
+    const INVALID_TOKEN_MSG: &str = "Invalid or expired enrollment token";
+    if raw_token.is_empty() {
+        return Err(ApiError::Unauthorized(INVALID_TOKEN_MSG.to_owned()));
+    }
+    let hash = crate::auth::token_hash(raw_token);
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+        "UPDATE endpoint_enrollment_tokens SET use_count = use_count + 1 \
+         WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now() \
+           AND use_count < max_uses \
+         RETURNING tenant_id",
+    )
+    .bind(&hash)
+    .fetch_optional(db)
+    .await?;
+    row.map(|(tenant_id,)| tenant_id)
+        .ok_or_else(|| ApiError::Unauthorized(INVALID_TOKEN_MSG.to_owned()))
+}
+
 /// POST /endpoint/register — HMAC agent auth. Re-registers (200) when the body's
-/// agent_id already exists (full field overwrite, metadata replaced), else
-/// inserts a new active agent (201). v1 keys off the BODY agent_id, which
-/// need not match the authenticated X-Agent-ID — preserved as-is.
+/// agent_id already exists (full field overwrite, metadata replaced, tenant
+/// unchanged — `enrollment_token` is ignored on this path), else requires a
+/// valid, unexpired, unexhausted `enrollment_token` (§5) to resolve the new
+/// agent's tenant and inserts a new active agent (201). v1 keys off the BODY
+/// agent_id, which need not match the authenticated X-Agent-ID — preserved
+/// as-is.
 #[utoipa::path(
     post,
     path = "/api/v1/endpoint/register",
@@ -421,12 +459,17 @@ pub(crate) async fn register_agent(
     }
 
     // A brand-new agent has no JWT/tenant claim to derive a tenant from (HMAC
-    // auth, not a bearer token — see the `agent_router` module docs). v2.0's
-    // provisioning model is admin-provisioned, single bootstrap tenant (no
-    // self-serve signup — docs/v2-port/tenancy-model.md §8), so new agents
-    // attach to that tenant, mirroring how `/auth/register` attaches new
-    // users to it. Multi-tenant agent provisioning (e.g. a per-tenant
-    // enrollment token) is out of scope for this fix — flagged for review.
+    // auth, not a bearer token — see the `agent_router` module docs).
+    // Resolves the tenant from the caller-supplied per-tenant enrollment
+    // token (docs/v2-port/service-auth-model.md §5 Option A) instead of the
+    // default bootstrap tenant — closes the "every new agent lands on the
+    // default tenant" gap flagged in docs/v2-port/tenancy-model.md §8.
+    let tenant_id = resolve_enrollment_token(
+        &state.db,
+        body.enrollment_token.as_deref().unwrap_or_default(),
+    )
+    .await?;
+
     sqlx::query(
         "INSERT INTO endpoint_agents (agent_id, hostname, ip_address, os_type, os_version, \
          agent_version, status, last_heartbeat, metadata, tenant_id, created_at, updated_at) \
@@ -439,7 +482,7 @@ pub(crate) async fn register_agent(
     .bind(&v.os_version)
     .bind(&v.agent_version)
     .bind(&v.metadata)
-    .bind(crate::auth::default_tenant_uuid())
+    .bind(tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -1579,6 +1622,7 @@ mod tests {
             os_version: None,
             agent_version: Some("1.2.3".to_owned()),
             metadata: None,
+            enrollment_token: None,
         };
         let v = match validate_register(&body) {
             Ok(v) => v,
@@ -1600,6 +1644,7 @@ mod tests {
             os_version: None,
             agent_version: Some("1.2.3".to_owned()),
             metadata: None,
+            enrollment_token: None,
         };
         let long_id = RegisterBody {
             agent_id: Some("x".repeat(129)),
@@ -1644,6 +1689,7 @@ mod tests {
             os_version: b.os_version.clone(),
             agent_version: b.agent_version.clone(),
             metadata: b.metadata.clone(),
+            enrollment_token: b.enrollment_token.clone(),
         }
     }
 
@@ -1800,9 +1846,57 @@ mod tests {
         id
     }
 
+    /// Seeds an enrollment token scoped to `tenant_id` directly (bypassing
+    /// `POST /tenants/{id}/enrollment-tokens`) and returns the raw token —
+    /// `max_uses`/`expires_in_seconds` (negative for already-expired) let
+    /// tests exercise the exhausted/expired rejection paths deterministically.
+    async fn seed_enrollment_token_with(
+        pool: &PgPool,
+        tenant_id: uuid::Uuid,
+        max_uses: i32,
+        expires_in_seconds: i64,
+    ) -> String {
+        let creator_id = crate::routes::test_support::seed_user_in_tenant(
+            pool,
+            &format!("enrollment-seed-{}@example.com", uuid::Uuid::new_v4()),
+            "super_admin",
+            tenant_id,
+        )
+        .await;
+        let raw = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let hash = crate::auth::token_hash(&raw);
+        sqlx::query(
+            "INSERT INTO endpoint_enrollment_tokens \
+             (tenant_id, token_hash, max_uses, expires_at, created_by) \
+             VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5)",
+        )
+        .bind(tenant_id)
+        .bind(&hash)
+        .bind(max_uses)
+        .bind(expires_in_seconds as f64)
+        .bind(creator_id)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed_enrollment_token_with: {e}"));
+        raw
+    }
+
+    /// [`seed_enrollment_token_with`] with generous defaults (10 uses, 24h)
+    /// — the common case for tests that just need *a* valid token.
+    async fn seed_enrollment_token(pool: &PgPool, tenant_id: uuid::Uuid) -> String {
+        seed_enrollment_token_with(pool, tenant_id, 10, 86_400).await
+    }
+
     #[tokio::test]
     async fn register_agent_inserts_then_reregisters() {
         let state = db_state(dev_license()).await;
+        let token =
+            seed_enrollment_token(&state.db, crate::routes::test_support::default_tenant_id())
+                .await;
         let server = server_for(state).await;
 
         let create = server
@@ -1810,7 +1904,8 @@ mod tests {
             .add_header("X-Agent-ID", "agent-x1")
             .add_header("X-API-Key", valid_key("agent-x1"))
             .json(&serde_json::json!({
-                "agent_id": "agent-x1", "hostname": "h1", "agent_version": "2.0"
+                "agent_id": "agent-x1", "hostname": "h1", "agent_version": "2.0",
+                "enrollment_token": token
             }))
             .await;
         create.assert_status(StatusCode::CREATED);
@@ -1833,6 +1928,9 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_requires_registration_then_merges_metadata() {
         let state = db_state(dev_license()).await;
+        let token =
+            seed_enrollment_token(&state.db, crate::routes::test_support::default_tenant_id())
+                .await;
         let server = server_for(state).await;
 
         let unregistered = server
@@ -1850,7 +1948,8 @@ mod tests {
             .add_header("X-Agent-ID", "agent-hb")
             .add_header("X-API-Key", valid_key("agent-hb"))
             .json(&serde_json::json!({
-                "agent_id": "agent-hb", "hostname": "h", "agent_version": "1"
+                "agent_id": "agent-hb", "hostname": "h", "agent_version": "1",
+                "enrollment_token": token
             }))
             .await
             .assert_status(StatusCode::CREATED);
@@ -1869,13 +1968,17 @@ mod tests {
     #[tokio::test]
     async fn events_are_stored_when_agent_is_registered() {
         let state = db_state(dev_license()).await;
+        let token =
+            seed_enrollment_token(&state.db, crate::routes::test_support::default_tenant_id())
+                .await;
         let server = server_for(state).await;
         server
             .post("/api/v1/endpoint/register")
             .add_header("X-Agent-ID", "agent-ev")
             .add_header("X-API-Key", valid_key("agent-ev"))
             .json(&serde_json::json!({
-                "agent_id": "agent-ev", "hostname": "h", "agent_version": "1"
+                "agent_id": "agent-ev", "hostname": "h", "agent_version": "1",
+                "enrollment_token": token
             }))
             .await
             .assert_status(StatusCode::CREATED);
@@ -1899,6 +2002,9 @@ mod tests {
     #[tokio::test]
     async fn agent_config_reflects_metadata_overrides() {
         let state = db_state(dev_license()).await;
+        let token =
+            seed_enrollment_token(&state.db, crate::routes::test_support::default_tenant_id())
+                .await;
         let server = server_for(state).await;
 
         let missing = server
@@ -1914,7 +2020,8 @@ mod tests {
             .add_header("X-API-Key", valid_key("cfg-agent"))
             .json(&serde_json::json!({
                 "agent_id": "cfg-agent", "hostname": "h", "agent_version": "1",
-                "metadata": {"reporting_interval": 15}
+                "metadata": {"reporting_interval": 15},
+                "enrollment_token": token
             }))
             .await
             .assert_status(StatusCode::CREATED);
@@ -2027,8 +2134,15 @@ mod tests {
     // -- tenant isolation (docs/v2-port/tenancy-model.md) -------------------
 
     #[tokio::test]
-    async fn new_agent_registration_stamps_the_bootstrap_tenant() {
+    async fn new_agent_registration_resolves_tenant_from_enrollment_token_not_the_default() {
+        // Regression for docs/v2-port/tenancy-model.md §8 / service-auth-model.md
+        // §5: a new agent's tenant comes from its presented enrollment
+        // token, never a silent fallback to the bootstrap default — proven
+        // here with a token scoped to a *non-default* tenant.
         let state = db_state(dev_license()).await;
+        let tenant_b =
+            crate::routes::test_support::seed_tenant(&state.db, "enroll-resolve-b").await;
+        let token = seed_enrollment_token(&state.db, tenant_b).await;
         let server = server_for(state.clone()).await;
 
         server
@@ -2036,7 +2150,8 @@ mod tests {
             .add_header("X-Agent-ID", "tenant-check-agent")
             .add_header("X-API-Key", valid_key("tenant-check-agent"))
             .json(&serde_json::json!({
-                "agent_id": "tenant-check-agent", "hostname": "h", "agent_version": "1"
+                "agent_id": "tenant-check-agent", "hostname": "h", "agent_version": "1",
+                "enrollment_token": token
             }))
             .await
             .assert_status(StatusCode::CREATED);
@@ -2047,7 +2162,80 @@ mod tests {
                 .fetch_one(&state.db)
                 .await
                 .unwrap_or_else(|e| panic!("fetch: {e}"));
-        assert_eq!(tenant_id, crate::routes::test_support::default_tenant_id());
+        assert_eq!(tenant_id, tenant_b);
+        assert_ne!(tenant_id, crate::routes::test_support::default_tenant_id());
+    }
+
+    #[tokio::test]
+    async fn register_agent_rejects_missing_or_garbage_enrollment_tokens() {
+        let state = db_state(dev_license()).await;
+        let server = server_for(state).await;
+
+        let missing = server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "no-token-agent")
+            .add_header("X-API-Key", valid_key("no-token-agent"))
+            .json(&serde_json::json!({
+                "agent_id": "no-token-agent", "hostname": "h", "agent_version": "1"
+            }))
+            .await;
+        missing.assert_status(StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = missing.json();
+        assert_eq!(body["error"], "Invalid or expired enrollment token");
+
+        let bad = server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "bad-token-agent")
+            .add_header("X-API-Key", valid_key("bad-token-agent"))
+            .json(&serde_json::json!({
+                "agent_id": "bad-token-agent", "hostname": "h", "agent_version": "1",
+                "enrollment_token": "not-a-real-token"
+            }))
+            .await;
+        bad.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn register_agent_rejects_exhausted_and_expired_enrollment_tokens() {
+        let state = db_state(dev_license()).await;
+        let tenant = crate::routes::test_support::default_tenant_id();
+        let server = server_for(state.clone()).await;
+
+        let single_use = seed_enrollment_token_with(&state.db, tenant, 1, 86_400).await;
+        server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "exhaust-agent-1")
+            .add_header("X-API-Key", valid_key("exhaust-agent-1"))
+            .json(&serde_json::json!({
+                "agent_id": "exhaust-agent-1", "hostname": "h", "agent_version": "1",
+                "enrollment_token": single_use
+            }))
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        // Same token, second new agent — already at max_uses.
+        let reused = server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "exhaust-agent-2")
+            .add_header("X-API-Key", valid_key("exhaust-agent-2"))
+            .json(&serde_json::json!({
+                "agent_id": "exhaust-agent-2", "hostname": "h", "agent_version": "1",
+                "enrollment_token": single_use
+            }))
+            .await;
+        reused.assert_status(StatusCode::UNAUTHORIZED);
+
+        let expired = seed_enrollment_token_with(&state.db, tenant, 10, -3600).await;
+        let expired_res = server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "expired-agent")
+            .add_header("X-API-Key", valid_key("expired-agent"))
+            .json(&serde_json::json!({
+                "agent_id": "expired-agent", "hostname": "h", "agent_version": "1",
+                "enrollment_token": expired
+            }))
+            .await;
+        expired_res.assert_status(StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

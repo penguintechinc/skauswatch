@@ -28,7 +28,7 @@ use axum::{Json, Router};
 use utoipa::OpenApi;
 
 use super::{
-    alerts, approvals, asm, auth, codescan, endpoint, research, s3_scan, siem, tenants,
+    admin, alerts, approvals, asm, auth, codescan, endpoint, research, s3_scan, siem, tenants,
     threat_intel, users,
 };
 use crate::auth::CurrentUser;
@@ -96,6 +96,10 @@ pub(crate) struct PublicApiDoc;
         super::license::license_features,
         // tenants
         tenants::create_tenant,
+        tenants::create_enrollment_token,
+        // admin
+        admin::get_svid_ttl,
+        admin::update_svid_ttl,
         // alerts
         alerts::list_alerts,
         alerts::get_alert,
@@ -226,6 +230,11 @@ pub(crate) struct PublicApiDoc;
         tenants::CreateTenantRequest,
         tenants::TenantSummary,
         tenants::TenantCreateResponse,
+        tenants::CreateEnrollmentTokenRequest,
+        tenants::EnrollmentTokenResponse,
+        // admin
+        admin::SvidTtlSettings,
+        admin::UpdateSvidTtlRequest,
         // alerts
         alerts::AlertItem,
         alerts::AlertSearchItem,
@@ -343,7 +352,8 @@ pub(crate) struct PublicApiDoc;
         (name = "auth", description = "Authentication: login, refresh, logout, register, current user"),
         (name = "users", description = "User account management"),
         (name = "license", description = "License tier and feature-flag entitlements"),
-        (name = "tenants", description = "Super-admin tenant provisioning"),
+        (name = "tenants", description = "Super-admin tenant provisioning and EDR enrollment tokens"),
+        (name = "admin", description = "Super-admin operational controls (SPIFFE SVID TTL policy)"),
         (name = "alerts", description = "Security alert lifecycle and AI-assisted review"),
         (name = "threat-intel", description = "Threat indicator (IOC) CRUD, search, and lookup"),
         (name = "approvals", description = "Multi-approver approval workflow"),

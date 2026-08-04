@@ -48,6 +48,16 @@ pub struct AgentConfig {
     /// Stable agent identifier; auto-generated from hostname/pid/time if
     /// empty (see `crate::agent::finalize_agent_id`).
     pub agent_id: String,
+    /// Per-tenant EDR enrollment token
+    /// (`docs/v2-port/service-auth-model.md` §5), minted by a super-admin
+    /// via `POST /tenants/{tenant_id}/enrollment-tokens` on the manager and
+    /// baked into (or prompted into) this agent's install. Required only
+    /// the first time a given `agent_id` registers — the manager resolves
+    /// this agent's tenant from the token instead of a default; an
+    /// already-registered agent re-registering can leave this empty, since
+    /// the manager keeps its stored tenant unchanged either way. NEVER log
+    /// this value.
+    pub enrollment_token: String,
     /// Heartbeat interval in seconds.
     pub heartbeat_interval: u64,
     /// Capacity of the internal event channel before new events are dropped.
@@ -68,6 +78,7 @@ impl Default for AgentConfig {
             manager_url: "https://manager:5000".to_owned(),
             api_key: String::new(),
             agent_id: String::new(),
+            enrollment_token: String::new(),
             heartbeat_interval: 60,
             event_buffer_size: 1000,
             debug: false,

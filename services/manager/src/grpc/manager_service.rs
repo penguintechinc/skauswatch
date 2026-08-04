@@ -225,9 +225,14 @@ fn lookup_confidence(c: Option<f64>) -> f32 {
 
 #[tonic::async_trait]
 impl ManagerService for ManagerGrpc {
-    /// HealthCheck — v1 parity: `status` depends only on the DB probe;
-    /// `redis` is hardcoded "connected" and `version` "1.0.0" exactly as
-    /// the Python servicer did (it had no stream-manager handle).
+    /// HealthCheck — `version` "1.0.0" is a fixed v1-parity value (the
+    /// Python servicer hardcoded it, never reading `.version` on this
+    /// path). `database`/`redis` are real probes (`SELECT 1` / Redis PING),
+    /// matching the REST `/healthz` handler (`health.rs::healthz`) exactly;
+    /// `status` depends on both — a live regression fix, since v1 (and this
+    /// crate before this fix) hardcoded `redis: "connected"` unconditionally
+    /// and derived `status` from the DB probe alone, so a broken Redis
+    /// stream producer was invisible on this RPC.
     async fn health_check(
         &self,
         _request: Request<()>,
@@ -236,7 +241,14 @@ impl ManagerService for ManagerGrpc {
             Ok(_) => "connected".to_owned(),
             Err(e) => format!("error: {e}"),
         };
-        let status = if database == "connected" {
+        let redis = match &self.state.streams {
+            None => "not initialized".to_owned(),
+            Some(producer) => match producer.ping().await {
+                Ok(()) => "connected".to_owned(),
+                Err(e) => format!("error: {e}"),
+            },
+        };
+        let status = if database == "connected" && redis == "connected" {
             "healthy"
         } else {
             "unhealthy"
@@ -245,7 +257,7 @@ impl ManagerService for ManagerGrpc {
             status: status.to_owned(),
             version: V1_GRPC_VERSION.to_owned(),
             database,
-            redis: "connected".to_owned(),
+            redis,
             timestamp: Some(now_ts()),
         }))
     }
@@ -667,7 +679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_check_reports_v1_hardcoded_fields_and_db_error() {
+    async fn health_check_reports_real_redis_probe_and_db_error() {
         let resp = match svc().health_check(Request::new(())).await {
             Ok(r) => r.into_inner(),
             Err(e) => panic!("health_check must not error: {e}"),
@@ -679,8 +691,12 @@ mod tests {
             "db: {}",
             resp.database
         );
-        // v1 hardcodes: redis "connected", version "1.0.0".
-        assert_eq!(resp.redis, "connected");
+        // Test state has no stream producer wired (see
+        // `state::AppStateInner::for_tests`) — mirrors REST /healthz's
+        // identical "not initialized" degrade, replacing the old hardcoded
+        // "connected" value this RPC used to report regardless of reality.
+        assert_eq!(resp.redis, "not initialized");
+        // version stays v1-parity fixed.
         assert_eq!(resp.version, "1.0.0");
         assert!(resp.timestamp.is_some());
     }

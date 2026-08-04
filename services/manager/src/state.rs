@@ -5,9 +5,29 @@
 use std::sync::Arc;
 
 use penguin_licensing::{LicenseClient, LicenseConfig};
+use skauswatch_identity::IdentityProvider;
 use skauswatch_streams::StreamProducer;
 use skauswatch_vault::EnvelopeEncryption;
 use sqlx::PgPool;
+
+/// Reads an env var, falling back to `default` when unset or empty.
+fn env_or(key: &str, default: &str) -> String {
+    match std::env::var(key) {
+        Ok(v) if !v.is_empty() => v,
+        _ => default.to_owned(),
+    }
+}
+
+/// Deployment environment segment used both in this workload's own SPIFFE
+/// ID and in the peer identities it trusts (`spiffe://penguintech.io/<env>/
+/// ...` — `docs/v2-port/service-auth-model.md` §1). Read from `SPIFFE_ENV`,
+/// defaulting to `"beta"` — mirrors `skauswatch-pki`'s identical
+/// `config::spiffe_env` convention exactly (this crate has no `config.rs`
+/// module of its own, so the helper lives here alongside the other
+/// `from_env()`-adjacent settings).
+pub(crate) fn spiffe_env() -> String {
+    env_or("SPIFFE_ENV", "beta")
+}
 
 /// Auth settings mirroring the v1 `AuthConfig` defaults.
 #[derive(Debug, Clone)]
@@ -83,6 +103,16 @@ pub struct AppStateInner {
     /// `skauswatch_s3::credentials`). Same `VAULT_MEK*` env vars as the
     /// `vault`/`worker-vault-sync`/`s3scan` services.
     pub envelope: EnvelopeEncryption,
+    /// SPIFFE Workload API identity (`docs/v2-port/service-auth-model.md`
+    /// §2) — presents manager's own X.509-SVID for gRPC mTLS (server) and,
+    /// once a real caller lands, as a client dialing pki. `None` only in
+    /// test constructors that don't exercise mTLS at all (`grpc::serve`
+    /// treats that identically to a held-but-degraded provider: fall back
+    /// to the pre-mTLS plaintext+HS256 behavior — see that module's docs).
+    /// Real `from_env()` startup always populates `Some`; production
+    /// hard-fails inside `IdentityProvider::connect` itself before this
+    /// field would ever be `None` in prod.
+    pub identity: Option<Arc<IdentityProvider>>,
 }
 
 /// Cheap-to-clone handle used as axum state.
@@ -128,6 +158,20 @@ impl AppStateInner {
         let envelope = EnvelopeEncryption::from_env()
             .map_err(|e| anyhow::anyhow!("envelope encryption init failed: {e}"))?;
 
+        // SPIFFE Workload API identity for gRPC mTLS
+        // (docs/v2-port/service-auth-model.md §2). Fails fast in production
+        // if no SPIRE agent is attestable — same fail-safe posture as the
+        // JWT secret and license client above. Deliberately `connect()`,
+        // not a domain-gated variant — see `skauswatch_identity`'s
+        // crate-level docs and `skauswatch-pki`'s identical call site for
+        // the full rationale (a deployment-domain bypass is for
+        // license/feature-flag gating only, never authentication).
+        let identity = Arc::new(
+            IdentityProvider::connect()
+                .await
+                .map_err(|e| anyhow::anyhow!("identity provider: {e}"))?,
+        );
+
         // v1 env semantics: REDIS_URL (default redis://redis:6379/0),
         // optional REDIS_PASSWORD, REDIS_KEY_PREFIX (default skauswatch).
         // v1 raises out of startup when the broker is unreachable — match.
@@ -145,6 +189,7 @@ impl AppStateInner {
             auth,
             streams: Some(streams),
             envelope,
+            identity: Some(identity),
         }))
     }
 
@@ -191,6 +236,40 @@ impl AppStateInner {
             },
             streams: None,
             envelope: test_envelope(),
+            identity: None,
+        })
+    }
+
+    /// Like [`Self::for_tests`], but with a caller-supplied
+    /// [`IdentityProvider`] — used by `grpc`/`grpc::pki_client` tests that
+    /// need to exercise the SPIFFE-identity-aware code paths (degraded-
+    /// provider fallback, matcher wiring, real mTLS handshakes) rather than
+    /// the `identity: None` shortcut every other test constructor uses,
+    /// which skips the identity check entirely instead of exercising its
+    /// degraded branch. Mirrors `skauswatch-pki`'s identical
+    /// `for_tests_with_identity` constructor.
+    #[cfg(test)]
+    #[allow(clippy::panic)] // test-only constructor fails loudly by design
+    pub(crate) fn for_tests_with_identity(
+        license: Arc<LicenseClient>,
+        identity: Arc<IdentityProvider>,
+    ) -> AppState {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@127.0.0.1:1/test")
+            .unwrap_or_else(|e| panic!("lazy test pool: {e}"));
+        Arc::new(Self {
+            license,
+            db,
+            auth: AuthSettings {
+                jwt_secret: "test-secret".to_owned(),
+                access_expires_minutes: 30,
+                refresh_expires_days: 7,
+                max_login_attempts: 5,
+                lockout_minutes: 15,
+            },
+            streams: None,
+            envelope: test_envelope(),
+            identity: Some(identity),
         })
     }
 }
@@ -250,5 +329,11 @@ mod tests {
         // doesn't require mutating global env state); this test only
         // exercises that a valid secret is *always* accepted regardless.
         assert!(validate_endpoint_secret_for_production("a-real-random-secret").is_ok());
+    }
+
+    #[test]
+    fn spiffe_env_defaults_to_beta_when_unset() {
+        assert!(std::env::var("SPIFFE_ENV").is_err());
+        assert_eq!(spiffe_env(), "beta");
     }
 }
