@@ -44,6 +44,28 @@ pub struct WorkerConfig {
     pub asm_banner_timeout_sec: u64,
     /// Per-port TLS certificate fetch timeout, in seconds (default 5).
     pub asm_cert_timeout_sec: u64,
+    /// ASM screenshot capture stage enabled (default true) — kept separate
+    /// from `asm_enabled` so operators can run masscan/banner/cert without
+    /// the headless-chromium binary if it isn't provisioned in their image
+    /// yet (see `crate::asm` module docs on the container requirement).
+    pub asm_screenshot_enabled: bool,
+    /// `chromium` binary path/name for headless screenshot capture (default
+    /// `chromium`) — overridable so deployments can point at a wrapper, and
+    /// so tests can substitute a fake executable.
+    pub chromium_bin: String,
+    /// Timeout for one screenshot capture (chromium spawn + navigate +
+    /// render), in seconds (default 15).
+    pub asm_screenshot_timeout_sec: u64,
+    /// Screenshot viewport width in pixels (default 1280).
+    pub asm_screenshot_window_width: u32,
+    /// Screenshot viewport height in pixels (default 800).
+    pub asm_screenshot_window_height: u32,
+    /// S3/MinIO bucket screenshots upload to (`S3_*` env vars configure the
+    /// endpoint/region via `skauswatch_s3::S3Config`). When
+    /// `asm_screenshot_enabled` is true but this is unset, the screenshot
+    /// stage is disabled with a startup warning rather than failing the
+    /// worker — see `crate::asm` module docs.
+    pub asm_screenshot_bucket: Option<String>,
 }
 
 impl WorkerConfig {
@@ -72,6 +94,12 @@ impl WorkerConfig {
         asm_masscan_timeout_sec: Option<&str>,
         asm_banner_timeout_sec: Option<&str>,
         asm_cert_timeout_sec: Option<&str>,
+        asm_screenshot_enabled: Option<&str>,
+        chromium_bin: Option<&str>,
+        asm_screenshot_timeout_sec: Option<&str>,
+        asm_screenshot_window_width: Option<&str>,
+        asm_screenshot_window_height: Option<&str>,
+        asm_screenshot_bucket: Option<&str>,
     ) -> Self {
         Self {
             health_port: health_port.and_then(|v| v.parse().ok()).unwrap_or(8080),
@@ -110,6 +138,20 @@ impl WorkerConfig {
             asm_cert_timeout_sec: asm_cert_timeout_sec
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+            asm_screenshot_enabled: asm_screenshot_enabled
+                .map(|v| v.to_lowercase() != "false")
+                .unwrap_or(true),
+            chromium_bin: chromium_bin.unwrap_or("chromium").to_string(),
+            asm_screenshot_timeout_sec: asm_screenshot_timeout_sec
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(15),
+            asm_screenshot_window_width: asm_screenshot_window_width
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1280),
+            asm_screenshot_window_height: asm_screenshot_window_height
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(800),
+            asm_screenshot_bucket: asm_screenshot_bucket.map(str::to_string),
         }
     }
 
@@ -134,6 +176,12 @@ impl WorkerConfig {
             env::var("ASM_MASSCAN_TIMEOUT_SEC").ok().as_deref(),
             env::var("ASM_BANNER_TIMEOUT_SEC").ok().as_deref(),
             env::var("ASM_CERT_TIMEOUT_SEC").ok().as_deref(),
+            env::var("ASM_SCREENSHOT_ENABLED").ok().as_deref(),
+            env::var("CHROMIUM_BIN").ok().as_deref(),
+            env::var("ASM_SCREENSHOT_TIMEOUT_SEC").ok().as_deref(),
+            env::var("ASM_SCREENSHOT_WINDOW_WIDTH").ok().as_deref(),
+            env::var("ASM_SCREENSHOT_WINDOW_HEIGHT").ok().as_deref(),
+            env::var("ASM_SCREENSHOT_BUCKET").ok().as_deref(),
         ))
     }
 }
@@ -146,7 +194,7 @@ mod tests {
     fn defaults() -> WorkerConfig {
         WorkerConfig::from_values(
             None, None, None, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None,
         )
     }
 
@@ -171,6 +219,12 @@ mod tests {
         assert_eq!(cfg.asm_masscan_timeout_sec, 60);
         assert_eq!(cfg.asm_banner_timeout_sec, 3);
         assert_eq!(cfg.asm_cert_timeout_sec, 5);
+        assert!(cfg.asm_screenshot_enabled);
+        assert_eq!(cfg.chromium_bin, "chromium");
+        assert_eq!(cfg.asm_screenshot_timeout_sec, 15);
+        assert_eq!(cfg.asm_screenshot_window_width, 1280);
+        assert_eq!(cfg.asm_screenshot_window_height, 800);
+        assert_eq!(cfg.asm_screenshot_bucket, None);
     }
 
     #[test]
@@ -201,6 +255,12 @@ mod tests {
             Some("nope"),
             Some("nope"),
             Some("nope"),
+            None,
+            None,
+            Some("nope"),
+            Some("nope"),
+            Some("nope"),
+            None,
         );
         assert_eq!(cfg.health_port, 8080);
         assert_eq!(cfg.max_concurrent_tasks, 5);
@@ -209,6 +269,9 @@ mod tests {
         assert_eq!(cfg.asm_masscan_timeout_sec, 60);
         assert_eq!(cfg.asm_banner_timeout_sec, 3);
         assert_eq!(cfg.asm_cert_timeout_sec, 5);
+        assert_eq!(cfg.asm_screenshot_timeout_sec, 15);
+        assert_eq!(cfg.asm_screenshot_window_width, 1280);
+        assert_eq!(cfg.asm_screenshot_window_height, 800);
     }
 
     #[test]
@@ -232,6 +295,12 @@ mod tests {
             Some("120"),
             Some("7"),
             Some("11"),
+            Some("false"),
+            Some("/opt/bin/chromium"),
+            Some("30"),
+            Some("1920"),
+            Some("1080"),
+            Some("asm-screenshots"),
         );
         assert_eq!(cfg.health_port, 9090);
         assert_eq!(cfg.redis_url, "redis://valkey:6380/1");
@@ -251,6 +320,15 @@ mod tests {
         assert_eq!(cfg.asm_masscan_timeout_sec, 120);
         assert_eq!(cfg.asm_banner_timeout_sec, 7);
         assert_eq!(cfg.asm_cert_timeout_sec, 11);
+        assert!(!cfg.asm_screenshot_enabled);
+        assert_eq!(cfg.chromium_bin, "/opt/bin/chromium");
+        assert_eq!(cfg.asm_screenshot_timeout_sec, 30);
+        assert_eq!(cfg.asm_screenshot_window_width, 1920);
+        assert_eq!(cfg.asm_screenshot_window_height, 1080);
+        assert_eq!(
+            cfg.asm_screenshot_bucket,
+            Some("asm-screenshots".to_owned())
+        );
     }
 
     #[test]
@@ -274,10 +352,17 @@ mod tests {
             None,
             None,
             None,
+            Some("FALSE"),
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert!(!cfg.clamav_enabled);
         assert!(!cfg.yara_enabled);
         assert!(cfg.asm_enabled);
+        assert!(!cfg.asm_screenshot_enabled);
     }
 
     #[test]

@@ -63,6 +63,24 @@ LABEL org.opencontainers.image.title="skauswatch-scanner" \
 
 # ca-certificates: TLS roots for outbound reqwest/sqlx-tls calls.
 # rustls only (workspace deny.toml bans openssl-sys) — nothing else needed.
+#
+# NOT YET DONE HERE, FLAGGED FOR THE DOCKERFILE/CHART OWNER: the ASM
+# screenshot-capture stage (src/asm.rs) shells out to a `chromium` binary
+# (CHROMIUM_BIN, default "chromium") that this image does not install.
+# Until a `chromium`/`chromium-common` (or equivalent headless-capable)
+# package is added here, ASM_SCREENSHOT_ENABLED=true will fail every
+# capture with a `ScreenshotError::Spawn` (logged, non-fatal to the scan —
+# see src/asm.rs module docs) rather than silently doing nothing. Installing
+# it pulls in a large dependency tree (GTK/NSS/X11 libs) and needs
+# `--no-sandbox` at runtime because this container is rootless
+# (capabilities.drop: [ALL], non-root UID — Chromium's own setuid sandbox
+# cannot initialize under that securityContext); this is the standard,
+# narrower trade-off for headless Chromium in containers and does NOT
+# require a `NET CAPABILITY EXCEPTION`-class securityContext change. If any
+# Tetragon (or equivalent eBPF) process-execution policy gates this pod, it
+# must additionally allow `chromium` spawning its own `--type=renderer/
+# zygote/gpu-process` children, or captures will be killed at the LSM/eBPF
+# layer instead of failing through src/asm.rs's own error handling.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \

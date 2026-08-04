@@ -17,11 +17,23 @@ pub struct ScannerHandler {
     producer: StreamProducer,
     config: WorkerConfig,
     yara_scanner: Option<Arc<YaraScanner>>,
+    /// ASM screenshot S3 uploader, or `None` when the screenshot stage is
+    /// disabled/unconfigured (`ASM_SCREENSHOT_ENABLED=false` or no bucket —
+    /// see `crate::config::WorkerConfig`). Built once in `main.rs::serve`
+    /// (needs an `.await` for `skauswatch_s3::client`, so it is constructed
+    /// by the caller rather than here — keeps `new` synchronous, matching
+    /// every other test call site in this module).
+    screenshot_uploader: Option<crate::asm::ScreenshotUploader>,
 }
 
 impl ScannerHandler {
     /// Creates a new scanner handler.
-    pub fn new(pool: PgPool, producer: StreamProducer, config: WorkerConfig) -> Self {
+    pub fn new(
+        pool: PgPool,
+        producer: StreamProducer,
+        config: WorkerConfig,
+        screenshot_uploader: Option<crate::asm::ScreenshotUploader>,
+    ) -> Self {
         let yara_scanner = if config.yara_enabled {
             match futures::executor::block_on(YaraScanner::load(&config.yara_rules_path)) {
                 Ok(scanner) => {
@@ -43,6 +55,7 @@ impl ScannerHandler {
             producer,
             config,
             yara_scanner,
+            screenshot_uploader,
         }
     }
 }
@@ -120,11 +133,28 @@ impl StreamHandler for ScannerHandler {
         // `crate::scan::execute_scan` entirely.
         let mut result = if scan_type == "asm" {
             if self.config.asm_enabled {
+                // Screenshot stage only runs when both this worker enables
+                // it and an uploader was actually built (bucket configured)
+                // at startup — see `screenshot_uploader`'s doc.
+                let screenshot = if self.config.asm_screenshot_enabled {
+                    self.screenshot_uploader.clone().map(|uploader| {
+                        crate::asm::ScreenshotStageConfig {
+                            chromium_bin: self.config.chromium_bin.clone(),
+                            timeout: Duration::from_secs(self.config.asm_screenshot_timeout_sec),
+                            window_width: self.config.asm_screenshot_window_width,
+                            window_height: self.config.asm_screenshot_window_height,
+                            uploader,
+                        }
+                    })
+                } else {
+                    None
+                };
                 let cfg = crate::asm::AsmPipelineConfig {
                     masscan_bin: self.config.masscan_bin.clone(),
                     masscan_timeout: Duration::from_secs(self.config.asm_masscan_timeout_sec),
                     banner_timeout: Duration::from_secs(self.config.asm_banner_timeout_sec),
                     cert_timeout: Duration::from_secs(self.config.asm_cert_timeout_sec),
+                    screenshot,
                 };
                 crate::asm::run_asm_scan(&self.pool, tenant_id, &target, &params, &cfg).await
             } else {
@@ -253,6 +283,15 @@ mod tests {
             asm_masscan_timeout_sec: 5,
             asm_banner_timeout_sec: 1,
             asm_cert_timeout_sec: 1,
+            // Screenshot stage exercised via `screenshot_uploader` passed
+            // directly to `ScannerHandler::new` in the tests that need it —
+            // most tests pass `None` there and never reach this config.
+            asm_screenshot_enabled: true,
+            chromium_bin: "chromium".to_owned(),
+            asm_screenshot_timeout_sec: 1,
+            asm_screenshot_window_width: 1280,
+            asm_screenshot_window_height: 800,
+            asm_screenshot_bucket: None,
         }
     }
 
@@ -334,6 +373,7 @@ mod tests {
             db_pool().await,
             test_producer(&prefix).await,
             test_config(&prefix),
+            None,
         );
         let e = entry(&[("scan_type", "yara"), ("target", "t")]);
         let err = handler
@@ -350,6 +390,7 @@ mod tests {
             db_pool().await,
             test_producer(&prefix).await,
             test_config(&prefix),
+            None,
         );
         let e = entry(&[("job_id", "job-1"), ("target", "t")]);
         let err = handler
@@ -366,6 +407,7 @@ mod tests {
             db_pool().await,
             test_producer(&prefix).await,
             test_config(&prefix),
+            None,
         );
         let e = entry(&[("job_id", "job-1"), ("scan_type", "yara")]);
         let err = handler
@@ -382,6 +424,7 @@ mod tests {
             db_pool().await,
             test_producer(&prefix).await,
             test_config(&prefix),
+            None,
         );
         let e = entry(&[("job_id", ""), ("scan_type", "yara"), ("target", "t")]);
         let err = handler
@@ -398,6 +441,7 @@ mod tests {
             db_pool().await,
             test_producer(&prefix).await,
             test_config(&prefix),
+            None,
         );
         // All other required fields present and valid — only tenant_id is
         // absent — proves the rejection is specifically the tenant check,
@@ -417,6 +461,7 @@ mod tests {
             db_pool().await,
             test_producer(&prefix).await,
             test_config(&prefix),
+            None,
         );
         let e = entry(&[
             ("job_id", "job-1"),
@@ -439,6 +484,7 @@ mod tests {
             db.clone(),
             test_producer(&prefix).await,
             test_config(&prefix),
+            None,
         );
 
         let mut f = tempfile::NamedTempFile::new().expect("tempfile");
@@ -479,7 +525,7 @@ mod tests {
         let db = db_pool().await;
         let mut cfg = test_config(&prefix);
         cfg.yara_enabled = false; // this path never touches yara — keep the test light
-        let handler = ScannerHandler::new(db.clone(), test_producer(&prefix).await, cfg);
+        let handler = ScannerHandler::new(db.clone(), test_producer(&prefix).await, cfg, None);
 
         let e = entry(&[
             ("job_id", "job-bad"),
@@ -519,7 +565,7 @@ mod tests {
         let db = db_pool().await;
         let mut cfg = test_config(&prefix);
         cfg.yara_enabled = false;
-        let handler = ScannerHandler::new(db.clone(), test_producer(&prefix).await, cfg);
+        let handler = ScannerHandler::new(db.clone(), test_producer(&prefix).await, cfg, None);
 
         let mut f = tempfile::NamedTempFile::new().expect("tempfile");
         std::io::Write::write_all(&mut f, b"whatever").expect("write tempfile");
@@ -552,7 +598,7 @@ mod tests {
         let db = db_pool().await;
         let mut cfg = test_config(&prefix);
         cfg.asm_enabled = false;
-        let handler = ScannerHandler::new(db.clone(), test_producer(&prefix).await, cfg);
+        let handler = ScannerHandler::new(db.clone(), test_producer(&prefix).await, cfg, None);
 
         let e = entry(&[
             ("job_id", "job-asm-disabled"),
@@ -635,7 +681,7 @@ mod tests {
 
         let mut cfg = test_config(&prefix);
         cfg.masscan_bin = masscan_bin;
-        let handler = ScannerHandler::new(db.clone(), test_producer(&prefix).await, cfg);
+        let handler = ScannerHandler::new(db.clone(), test_producer(&prefix).await, cfg, None);
 
         let e = entry(&[
             ("job_id", "job-asm-1"),
@@ -673,6 +719,7 @@ mod tests {
             db.clone(),
             test_producer(&prefix).await,
             test_config(&prefix),
+            None,
         );
 
         // Same job_id from two different tenants — proves the row is
@@ -724,7 +771,7 @@ mod tests {
         let prefix = unique_prefix();
         let mut cfg = test_config(&prefix);
         cfg.yara_enabled = false;
-        let handler = ScannerHandler::new(db_pool().await, test_producer(&prefix).await, cfg);
+        let handler = ScannerHandler::new(db_pool().await, test_producer(&prefix).await, cfg, None);
         assert!(handler.yara_scanner.is_none());
     }
 
@@ -733,7 +780,7 @@ mod tests {
         let prefix = unique_prefix();
         let mut cfg = test_config(&prefix);
         cfg.yara_rules_path = "/nonexistent/rules/path".to_owned();
-        let handler = ScannerHandler::new(db_pool().await, test_producer(&prefix).await, cfg);
+        let handler = ScannerHandler::new(db_pool().await, test_producer(&prefix).await, cfg, None);
         assert!(handler.yara_scanner.is_none());
     }
 
@@ -744,6 +791,7 @@ mod tests {
             db_pool().await,
             test_producer(&prefix).await,
             test_config(&prefix),
+            None,
         );
         assert!(handler.yara_scanner.is_some());
     }

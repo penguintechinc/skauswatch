@@ -1003,8 +1003,10 @@ paths:
       - asm
       summary: |-
         GET /asm/scans/{scan_id}/screenshots — screenshots captured for this
-        scan's services. Always empty today (see module doc: capture stage
-        deferred) but the join/read path is real and ready for when it lands.
+        scan's services, tenant-scoped (via `fetch_scan`'s ownership check plus
+        `fetch_screenshots`'s own `tenant_id` filter — defense in depth). Empty
+        until the scanner's screenshot-capture stage lands a matching scan; the
+        join/read path itself is real.
       operationId: get_asm_scan_screenshots
       parameters:
       - name: scan_id
@@ -1019,7 +1021,8 @@ paths:
           description: Screenshots for this scan's services
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/AsmScreenshotsResponse'
         '401':
           description: Missing or invalid authorization header
           content:
@@ -5292,6 +5295,63 @@ components:
         total:
           type: integer
           format: int64
+    AsmScreenshotDto:
+      type: object
+      description: |-
+        One screenshot reference, as returned by the standalone `/screenshots`
+        endpoint. Typed (rather than ad-hoc `serde_json::Value`, unlike the
+        aggregated `/report` endpoint below) so the response shape is explicit
+        in the OpenAPI spec — see `crate::asm` (scanner)'s screenshot-capture
+        stage, which is what populates `asm_screenshots` rows for this to read.
+      required:
+      - id
+      - service_id
+      - s3_key
+      - tool
+      properties:
+        captured_at:
+          type:
+          - string
+          - 'null'
+        file_size_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        id:
+          type: integer
+          format: int64
+        s3_key:
+          type: string
+        service_id:
+          type: integer
+          format: int64
+        tool:
+          type: string
+        url:
+          type:
+          - string
+          - 'null'
+        width:
+          type:
+          - integer
+          - 'null'
+          format: int32
+    AsmScreenshotsResponse:
+      type: object
+      description: Response body for `GET /asm/scans/{scan_id}/screenshots`.
+      required:
+      - screenshots
+      properties:
+        screenshots:
+          type: array
+          items:
+            $ref: '#/components/schemas/AsmScreenshotDto'
     BucketCreateBody:
       type: object
       description: |-

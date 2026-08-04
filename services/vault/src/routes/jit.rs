@@ -16,6 +16,16 @@ use crate::auth::CurrentUser;
 use crate::error::{ApiError, ErrorResponse, InsufficientScopeResponse};
 use crate::state::AppState;
 
+const DEFAULT_PER_PAGE: i64 = 20;
+const MAX_PER_PAGE: i64 = 100;
+
+fn pagination(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
+    (
+        page.unwrap_or(1).max(1),
+        per_page.unwrap_or(DEFAULT_PER_PAGE).clamp(1, MAX_PER_PAGE),
+    )
+}
+
 /// Router for `/api/v1/jit`.
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -154,6 +164,9 @@ pub(crate) struct JitRequestResponse {
 #[derive(Serialize, utoipa::ToSchema)]
 pub(crate) struct JitRequestListResponse {
     requests: Vec<JitRequestResponse>,
+    total: i64,
+    page: i64,
+    per_page: i64,
 }
 
 async fn is_secret_owner(
@@ -181,9 +194,11 @@ async fn is_secret_owner(
     security(("bearer_jwt" = [])),
     params(
         ("status" = Option<Vec<String>>, Query, description = "Filter by request status; repeatable (?status=pending&status=approved). Manually declared (not an IntoParams struct) because the handler extracts raw query pairs — see the comment on the `raw_query` parameter below."),
+        ("page" = Option<i64>, Query, description = "Page number (1-indexed, default 1)"),
+        ("per_page" = Option<i64>, Query, description = "Items per page (default 20, max 100)"),
     ),
     responses(
-        (status = 200, description = "Requestor's own requests, plus (for jit:approve callers) requests against secrets they own", body = JitRequestListResponse),
+        (status = 200, description = "Paginated: requestor's own requests, plus (for jit:approve callers) requests against secrets they own", body = JitRequestListResponse),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "Missing both jit:request and jit:approve scopes", body = ErrorResponse),
     ),
@@ -199,7 +214,9 @@ pub(crate) async fn list_jit_requests(
     // carries). `Query<Vec<(String, String)>>` sidesteps that: serde_urlencoded
     // deserializes the whole query string as an ordered sequence of raw pairs
     // just fine, so every occurrence of `status` is preserved and filtered
-    // out here instead of relying on struct-field deserialization.
+    // out here instead of relying on struct-field deserialization. `page`/
+    // `per_page` ride along in the same raw pair list for the same reason
+    // this handler never adopted an `IntoParams` struct.
     Query(raw_query): Query<Vec<(String, String)>>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_any_scope(&["jit:request", "jit:approve"])?;
@@ -209,46 +226,85 @@ pub(crate) async fn list_jit_requests(
         .filter(|(k, _)| k == "status")
         .map(|(_, v)| v.clone())
         .collect();
+    let page_raw = raw_query
+        .iter()
+        .find(|(k, _)| k == "page")
+        .and_then(|(_, v)| v.parse::<i64>().ok());
+    let per_page_raw = raw_query
+        .iter()
+        .find(|(k, _)| k == "per_page")
+        .and_then(|(_, v)| v.parse::<i64>().ok());
+    let (page, per_page) = pagination(page_raw, per_page_raw);
+    let offset = (page - 1) * per_page;
     let has_approve = user.scopes.contains("jit:approve");
 
-    let rows = if has_approve {
-        sqlx::query_as::<_, RequestRow>(
-            "SELECT r.id, r.secret_id, r.requestor_id, r.reason, r.requested_duration_seconds, \
-             r.approved_duration_seconds, r.status, r.approved_by, r.approved_at, \
-             r.access_expires_at, r.created_at FROM vault_jit_requests r \
-             WHERE r.tenant_id = $1 \
-               AND (r.requestor_id = $2 \
-                OR r.secret_id IN (SELECT secret_id FROM vault_secret_owners \
-                                   WHERE tenant_id = $1 AND owner_type = 'user' AND owner_id = $2)) \
-             ORDER BY r.created_at DESC",
-        )
-        .bind(tenant_id)
-        .bind(&user.user_id)
-        .fetch_all(&state.db)
-        .await?
+    // Status filtering and the requestor/owner visibility rule both have to
+    // live in SQL (not applied after `fetch_all` like the pre-pagination
+    // version did) — otherwise LIMIT/OFFSET would page over the unfiltered
+    // set and both `total` and the returned page would be wrong.
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT id, secret_id, requestor_id, reason, requested_duration_seconds, \
+         approved_duration_seconds, status, approved_by, approved_at, access_expires_at, \
+         created_at FROM vault_jit_requests WHERE tenant_id = ",
+    );
+    qb.push_bind(tenant_id);
+    if has_approve {
+        qb.push(" AND (requestor_id = ")
+            .push_bind(user.user_id.clone())
+            .push(" OR secret_id IN (SELECT secret_id FROM vault_secret_owners WHERE tenant_id = ")
+            .push_bind(tenant_id)
+            .push(" AND owner_type = 'user' AND owner_id = ")
+            .push_bind(user.user_id.clone())
+            .push("))");
     } else {
-        sqlx::query_as::<_, RequestRow>(
-            "SELECT id, secret_id, requestor_id, reason, requested_duration_seconds, \
-             approved_duration_seconds, status, approved_by, approved_at, access_expires_at, \
-             created_at FROM vault_jit_requests WHERE tenant_id = $1 AND requestor_id = $2 \
-             ORDER BY created_at DESC",
-        )
-        .bind(tenant_id)
-        .bind(&user.user_id)
+        qb.push(" AND requestor_id = ")
+            .push_bind(user.user_id.clone());
+    }
+    if !status_filter.is_empty() {
+        qb.push(" AND status = ANY(")
+            .push_bind(status_filter.clone())
+            .push(")");
+    }
+    qb.push(" ORDER BY created_at DESC LIMIT ")
+        .push_bind(per_page)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let rows = qb
+        .build_query_as::<RequestRow>()
         .fetch_all(&state.db)
-        .await?
-    };
+        .await?;
 
-    let filtered: Vec<&RequestRow> = if status_filter.is_empty() {
-        rows.iter().collect()
+    let mut count_qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT count(*) FROM vault_jit_requests WHERE tenant_id = ",
+    );
+    count_qb.push_bind(tenant_id);
+    if has_approve {
+        count_qb
+            .push(" AND (requestor_id = ")
+            .push_bind(user.user_id.clone())
+            .push(" OR secret_id IN (SELECT secret_id FROM vault_secret_owners WHERE tenant_id = ")
+            .push_bind(tenant_id)
+            .push(" AND owner_type = 'user' AND owner_id = ")
+            .push_bind(user.user_id.clone())
+            .push("))");
     } else {
-        rows.iter()
-            .filter(|r| status_filter.contains(&r.status))
-            .collect()
-    };
+        count_qb
+            .push(" AND requestor_id = ")
+            .push_bind(user.user_id.clone());
+    }
+    if !status_filter.is_empty() {
+        count_qb
+            .push(" AND status = ANY(")
+            .push_bind(status_filter)
+            .push(")");
+    }
+    let total: i64 = count_qb.build_query_scalar().fetch_one(&state.db).await?;
 
     Ok(Json(json!({
-        "requests": filtered.iter().map(|r| r.to_json()).collect::<Vec<_>>(),
+        "requests": rows.iter().map(RequestRow::to_json).collect::<Vec<_>>(),
+        "total": total,
+        "page": page,
+        "per_page": per_page,
     })))
 }
 
@@ -537,6 +593,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pagination_defaults_and_clamps() {
+        assert_eq!(pagination(None, None), (1, 20));
+        assert_eq!(pagination(Some(2), Some(500)), (2, 100));
+    }
+
+    #[test]
     fn jit_token_format_matches_v1() {
         let token = generate_jit_token("g-1", "user-1", 1234567890);
         assert_eq!(token, "jit:g-1:user-1:1234567890");
@@ -807,6 +869,67 @@ mod tests {
                 .map(Vec::len),
             Some(1)
         );
+    }
+
+    /// `per_page` is capped and `page` offsets correctly against the SQL
+    /// query directly — this pass moved the requestor/owner visibility rule
+    /// and status filter into SQL specifically so LIMIT/OFFSET wouldn't page
+    /// over an unfiltered set (see the comment above `list_jit_requests`).
+    #[tokio::test]
+    async fn list_jit_requests_respects_pagination_bounds() {
+        let state = db_state(dev_license("skauswatch")).await;
+        let requestor_token = sign_token(&state, "requestor-1", "jit:request");
+        let server = test_server_with_state(state.clone());
+
+        for i in 0..3 {
+            let secret_id = seed_secret(&state, &format!("owner-{i}")).await;
+            server
+                .post("/api/v1/jit/requests")
+                .authorization_bearer(&requestor_token)
+                .json(&serde_json::json!({"secret_id": secret_id, "reason": "need it"}))
+                .await
+                .assert_status(axum::http::StatusCode::CREATED);
+        }
+
+        let default_page = server
+            .get("/api/v1/jit/requests")
+            .authorization_bearer(&requestor_token)
+            .await;
+        default_page.assert_status_ok();
+        let default_body: Value = default_page.json();
+        assert_eq!(default_body["total"], 3);
+        assert_eq!(default_body["page"], 1);
+        assert_eq!(default_body["per_page"], 20);
+        assert_eq!(default_body["requests"].as_array().map(Vec::len), Some(3));
+
+        let paged = server
+            .get("/api/v1/jit/requests?page=1&per_page=2")
+            .authorization_bearer(&requestor_token)
+            .await;
+        paged.assert_status_ok();
+        let paged_body: Value = paged.json();
+        assert_eq!(paged_body["total"], 3);
+        assert_eq!(paged_body["per_page"], 2);
+        assert_eq!(paged_body["requests"].as_array().map(Vec::len), Some(2));
+
+        let second_page = server
+            .get("/api/v1/jit/requests?page=2&per_page=2")
+            .authorization_bearer(&requestor_token)
+            .await;
+        second_page.assert_status_ok();
+        assert_eq!(
+            second_page.json::<Value>()["requests"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let over_cap = server
+            .get("/api/v1/jit/requests?per_page=500")
+            .authorization_bearer(&requestor_token)
+            .await;
+        over_cap.assert_status_ok();
+        assert_eq!(over_cap.json::<Value>()["per_page"], 100);
     }
 
     #[tokio::test]

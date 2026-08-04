@@ -164,8 +164,25 @@ paths:
     get:
       tags:
       - codescan
-      summary: GET /codescan/repos — list repository configurations.
+      summary: GET /codescan/repos — paginated list of repository configurations.
       operationId: list_repos
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: per_page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
       responses:
         '200':
           description: Repository configurations
@@ -551,7 +568,7 @@ paths:
     get:
       tags:
       - credentials
-      summary: GET /credentials — admin only; never includes token material.
+      summary: GET /credentials — admin only, paginated; never includes token material.
       operationId: list_credentials
       parameters:
       - name: platform
@@ -561,6 +578,22 @@ paths:
           type:
           - string
           - 'null'
+      - name: page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: per_page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
       responses:
         '200':
           description: Git credential summaries (no token material)
@@ -803,8 +836,8 @@ paths:
       tags:
       - license-policies
       summary: |-
-        GET /license-policies — list configured license policies, optionally
-        filtered by `policy` (allowed/review_required/blocked).
+        GET /license-policies — paginated list of configured license policies,
+        optionally filtered by `policy` (allowed/review_required/blocked).
       operationId: list_policies
       parameters:
       - name: policy
@@ -814,6 +847,22 @@ paths:
           type:
           - string
           - 'null'
+      - name: page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: per_page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
       responses:
         '200':
           description: License policies
@@ -1228,14 +1277,22 @@ components:
       required:
       - data
       - total
+      - page
+      - per_page
       properties:
         data:
           type: array
           items:
             $ref: '#/components/schemas/CredentialSummary'
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
         total:
           type: integer
-          minimum: 0
+          format: int64
     CredentialSummary:
       type: object
       description: Response shape — deliberately excludes `encrypted_token`.
@@ -1472,14 +1529,22 @@ components:
       required:
       - data
       - total
+      - page
+      - per_page
       properties:
         data:
           type: array
           items:
             $ref: '#/components/schemas/LicensePolicy'
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
         total:
           type: integer
-          minimum: 0
+          format: int64
     PolicyUpdateResponse:
       type: object
       description: Documentation-only mirror of `update_policy`'s `serde_json::json!` body.
@@ -1596,14 +1661,22 @@ components:
       required:
       - data
       - total
+      - page
+      - per_page
       properties:
         data:
           type: array
           items:
             $ref: '#/components/schemas/RepoConfig'
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
         total:
           type: integer
-          minimum: 0
+          format: int64
     RepoUpdateResponse:
       type: object
       description: Documentation-only mirror of `update_repo`'s `serde_json::json!` body.

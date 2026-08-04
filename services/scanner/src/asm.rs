@@ -10,13 +10,55 @@
 //! migrations in via `skauswatch_testkit::db::test_pool_multi` (see the
 //! `tests` module below).
 //!
-//! **Screenshot capture is NOT implemented in this pass.** v1's stage
-//! shells out to `gowitness`/`xfreerdp`/`vncsnapshot` and uploads to S3 —
-//! none of those binaries or the upload plumbing are wired here (flagged,
-//! not silently dropped — see
-//! `docs/v2-port/phase12-scope-scan-monitor.md` §1). `asm_screenshots`
-//! stays empty; `routes/asm.rs`'s screenshot/report routes already read it
-//! correctly and will show real data once this stage lands.
+//! **Screenshot capture** (this pass): for each discovered HTTP(S) service
+//! ([`HTTP_PORTS`]) a headless `chromium` subprocess renders the page and
+//! writes a PNG (`capture_screenshot`); the bytes upload to S3/MinIO via
+//! [`ScreenshotUploader`] (built on `crates/skauswatch-s3`'s standard
+//! AWS-provider-chain client — this is an internal artifact bucket, not a
+//! customer-owned one, so it does not need `skauswatch_s3::credentials`'
+//! per-tenant STS/envelope-key resolution) and a row lands in
+//! `asm_screenshots`, tenant-stamped and keyed
+//! `asm/{tenant_id}/{scan_id}/{service_id}.png`. **v1's `xfreerdp`/
+//! `vncsnapshot` stages for RDP/VNC (ports 3389/5900) are intentionally
+//! out of scope here** — the task scope is HTTP(S) only; those two
+//! protocols stay unimplemented (no `asm_screenshots` rows for them),
+//! consistent with the "don't build unreachable/out-of-scope code" posture
+//! already applied to nuclei/zap/openvas below.
+//!
+//! Screenshot capture is **fail-safe per host**: a `chromium` spawn/exit/
+//! timeout failure, or an S3 upload failure, is logged and the pipeline
+//! moves on to the next service — it never fails the enclosing scan (which
+//! is already fully useful from masscan/banner/cert alone). The stage is
+//! entirely optional at the pipeline level too: `AsmPipelineConfig.
+//! screenshot` is `None` whenever `ASM_SCREENSHOT_ENABLED=false` or
+//! `ASM_SCREENSHOT_BUCKET` is unset (see `crate::config::WorkerConfig`),
+//! in which case no screenshot is attempted and `asm_screenshots` simply
+//! stays empty for that scan — the same graceful-skip behavior this file
+//! had before this stage existed.
+//!
+//! **Container/runtime requirement, flagged not silently assumed**: this
+//! stage requires a `chromium` (or `chromium-browser`) binary in the
+//! scanner image — not present in `services/scanner/Dockerfile` as of this
+//! change, and not yet installed by any Helm chart. Headless Chromium
+//! launches its own sandboxed renderer process tree; under this workspace's
+//! rootless-by-default `securityContext` (`capabilities.drop: [ALL]`,
+//! non-root UID, no `CAP_SYS_ADMIN`) Chromium's own setuid sandbox cannot
+//! initialize, so this code invokes it with `--no-sandbox` — a deliberate,
+//! narrower trade-off than granting a Linux capability: the *contained*
+//! renderer process (which parses attacker-influenced, scan-discovered web
+//! content) loses its own internal sandbox layer, but the outer container
+//! boundary (non-root, dropped capabilities, read-only rootfs) is
+//! unchanged and unaffected — this is the standard posture for headless
+//! Chromium in containers and is not a `NET CAPABILITY EXCEPTION`-class
+//! change. Any Tetragon (or equivalent eBPF) process-execution allowlist
+//! gating this pod must additionally admit `chromium` spawning its own
+//! child renderer/GPU/zygote processes (`chromium --type=renderer/zygote/
+//! gpu-process ...`) or every screenshot will be silently killed at the
+//! LSM/eBPF layer instead of failing through this module's own error
+//! handling — flagging both the Dockerfile binary install and the
+//! Tetragon allowlist update for the chart/Dockerfile owner; neither is
+//! done in this change (out of this task's `services/scanner` +
+//! `services/manager` scope).
 //!
 //! **`masscan` requires `CAP_NET_RAW` (or root)** to send raw SYN packets.
 //! This module never escalates privileges to compensate for a missing
@@ -34,6 +76,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aws_sdk_s3::Client as S3Client;
+use aws_sdk_s3::primitives::ByteStream;
 use chrono::{NaiveDateTime, Utc};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -60,17 +104,87 @@ const DEFAULT_PORTS: &[u16] = &[
 /// matches v1 `inspect_cert`'s explicit list.
 const TLS_PORTS: &[u16] = &[443, 465, 636, 993, 995, 8443, 9443];
 
+/// Ports treated as HTTP(S) endpoints eligible for the screenshot stage —
+/// the web-serving subset of [`DEFAULT_PORTS`], matching the ports
+/// [`guess_service_name`] maps to `"http"`/`"https"`/`"http-alt"`/
+/// `"https-alt"`. RDP (3389) and VNC (5900) are deliberately excluded — see
+/// the module doc's "Screenshot capture" section.
+const HTTP_PORTS: &[u16] = &[80, 443, 8080, 8443, 9443];
+
 /// Explicit per-pipeline-stage timeouts and the resolved `masscan` binary
 /// path, threaded in from `crate::config::WorkerConfig` by `handler.rs`.
 /// Kept as a small owned struct (rather than passing `&WorkerConfig`
 /// directly) so this module stays decoupled from the rest of the worker's
-/// config surface and is trivially constructible in tests.
-#[derive(Debug, Clone)]
+/// config surface and is trivially constructible in tests. Not `Debug`
+/// (unlike most config structs in this workspace): [`ScreenshotStageConfig`]
+/// carries a live `aws_sdk_s3::Client` handle and this struct deliberately
+/// doesn't depend on that type's `Debug` impl staying stable across SDK
+/// versions; nothing in this codebase formats an `AsmPipelineConfig` with
+/// `{:?}`.
+#[derive(Clone)]
 pub struct AsmPipelineConfig {
     pub masscan_bin: String,
     pub masscan_timeout: Duration,
     pub banner_timeout: Duration,
     pub cert_timeout: Duration,
+    /// Screenshot capture stage config, or `None` to skip it entirely
+    /// (`ASM_SCREENSHOT_ENABLED=false` or no bucket configured — see
+    /// `crate::config::WorkerConfig`).
+    pub screenshot: Option<ScreenshotStageConfig>,
+}
+
+/// Screenshot-stage settings: the `chromium` binary/timeout/viewport plus
+/// the [`ScreenshotUploader`] that puts captured bytes in S3.
+#[derive(Clone)]
+pub struct ScreenshotStageConfig {
+    pub chromium_bin: String,
+    pub timeout: Duration,
+    pub window_width: u32,
+    pub window_height: u32,
+    pub uploader: ScreenshotUploader,
+}
+
+/// Wraps an `aws_sdk_s3::Client` + target bucket for screenshot uploads.
+/// The client is built once at worker startup (`main.rs::serve`, via
+/// `skauswatch_s3::client`) and cloned per-task — `aws_sdk_s3::Client` is a
+/// cheap `Arc`-backed handle, matching how `s3ops`/`s3scan` already reuse
+/// clients across calls.
+#[derive(Clone)]
+pub struct ScreenshotUploader {
+    client: S3Client,
+    bucket: String,
+}
+
+impl ScreenshotUploader {
+    /// Builds an uploader targeting `bucket` via `client`.
+    #[must_use]
+    pub fn new(client: S3Client, bucket: String) -> Self {
+        Self { client, bucket }
+    }
+
+    /// Uploads `bytes` as `image/png` at `key`. Best-effort — the caller
+    /// (`persist_findings`) logs and continues on error rather than failing
+    /// the scan; see the module doc's fail-safe note.
+    async fn upload(&self, key: &str, bytes: Vec<u8>) -> Result<(), ScreenshotUploadError> {
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .content_type("image/png")
+            .body(ByteStream::from(bytes))
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| ScreenshotUploadError::Put(e.to_string()))
+    }
+}
+
+/// Error uploading a captured screenshot to S3 — always non-fatal to the
+/// enclosing scan (see module doc).
+#[derive(Debug, thiserror::Error)]
+pub enum ScreenshotUploadError {
+    #[error("s3 put_object failed: {0}")]
+    Put(String),
 }
 
 // ============================================
@@ -457,16 +571,141 @@ async fn fetch_cert_info(ip: &str, port: u16, timeout: Duration) -> Option<CertI
 }
 
 // ============================================
+// Screenshot capture (headless chromium)
+// ============================================
+
+/// Errors from the screenshot-capture stage. Every variant is fail-safe at
+/// the call site — never propagated as a scan-level error, only logged.
+#[derive(Debug, thiserror::Error)]
+pub enum ScreenshotError {
+    #[error("chromium binary '{bin}' unavailable: {source}")]
+    Spawn {
+        bin: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("chromium exited with status {status}: {stderr}")]
+    Exit { status: i32, stderr: String },
+    #[error("chromium screenshot capture timed out after {0:?}")]
+    Timeout(Duration),
+    #[error("failed to read captured screenshot file: {0}")]
+    Read(#[source] std::io::Error),
+    #[error("chromium produced an empty screenshot file")]
+    Empty,
+}
+
+/// Maps an HTTP(S) [`HTTP_PORTS`] port to the URL chromium should load.
+/// Uses the bare IP as host (masscan discovers IPs, not hostnames) with
+/// `https://` for the TLS-coded ports and `http://` otherwise. Returns
+/// `None` for any port outside [`HTTP_PORTS`].
+fn http_url_for_port(ip: &str, port: u16) -> Option<String> {
+    if !HTTP_PORTS.contains(&port) {
+        return None;
+    }
+    // Reuses [`TLS_PORTS`] (already the source of truth for "does this port
+    // speak TLS" via the cert-inspection stage above) rather than defining a
+    // third ports list for the same 443/8443/9443 subset.
+    let scheme = if TLS_PORTS.contains(&port) {
+        "https"
+    } else {
+        "http"
+    };
+    Some(format!("{scheme}://{ip}:{port}"))
+}
+
+/// Runs headless `chromium` against `url` and returns the captured PNG
+/// bytes. `bin` is caller-resolved (never read from the environment here)
+/// so tests can point it at a fake executable — see the `tests` module.
+///
+/// `--no-sandbox` is required under this workspace's rootless container
+/// posture (see module doc); `--ignore-certificate-errors` because ASM
+/// targets are arbitrary discovered hosts, frequently self-signed or
+/// expired (same posture as [`AcceptAllVerifier`] above — capture is
+/// inspection, not a trust decision); `--virtual-time-budget` bounds how
+/// long chromium waits for the page to settle before capturing, deriving
+/// from `timeout` so the two never disagree.
+async fn capture_screenshot(
+    bin: &str,
+    url: &str,
+    width: u32,
+    height: u32,
+    timeout: Duration,
+) -> Result<Vec<u8>, ScreenshotError> {
+    let out_file = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .map_err(ScreenshotError::Read)?;
+    let out_path = out_file.path().to_path_buf();
+
+    let budget_ms = timeout.as_millis().min(u128::from(u32::MAX)) as u64;
+    let args = vec![
+        "--headless".to_owned(),
+        "--disable-gpu".to_owned(),
+        "--no-sandbox".to_owned(),
+        "--disable-dev-shm-usage".to_owned(),
+        "--hide-scrollbars".to_owned(),
+        "--disable-extensions".to_owned(),
+        "--ignore-certificate-errors".to_owned(),
+        format!("--window-size={width},{height}"),
+        format!("--virtual-time-budget={budget_ms}"),
+        format!("--screenshot={}", out_path.display()),
+        url.to_owned(),
+    ];
+
+    let run = async {
+        let output = Command::new(bin)
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .output()
+            .await
+            .map_err(|source| ScreenshotError::Spawn {
+                bin: bin.to_owned(),
+                source,
+            })?;
+        if !output.status.success() {
+            return Err(ScreenshotError::Exit {
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+        let bytes = tokio::fs::read(&out_path)
+            .await
+            .map_err(ScreenshotError::Read)?;
+        if bytes.is_empty() {
+            return Err(ScreenshotError::Empty);
+        }
+        Ok(bytes)
+    };
+    match tokio::time::timeout(timeout, run).await {
+        Ok(res) => res,
+        Err(_) => Err(ScreenshotError::Timeout(timeout)),
+    }
+}
+
+// ============================================
 // Pipeline orchestration
 // ============================================
 
-/// One target-port's full findings — a service row plus its cert, if any.
+/// One target-port's full findings — a service row plus its cert and
+/// screenshot, if any.
 struct ServiceFinding {
     ip: String,
     port: u16,
     protocol: String,
     banner: Option<String>,
     cert: Option<CertInfo>,
+    screenshot: Option<ScreenshotCapture>,
+}
+
+/// A successfully captured screenshot, pending upload — mirrors
+/// `asm_screenshots`' columns not already implied by the owning service row.
+struct ScreenshotCapture {
+    bytes: Vec<u8>,
+    tool: String,
+    width: u32,
+    height: u32,
 }
 
 /// Resolves the effective port list: [`DEFAULT_PORTS`] plus any
@@ -576,17 +815,49 @@ pub async fn run_asm_scan(
             } else {
                 None
             };
+            let screenshot = match (&cfg.screenshot, http_url_for_port(&op.ip, op.port)) {
+                (Some(sc), Some(url)) => {
+                    match capture_screenshot(
+                        &sc.chromium_bin,
+                        &url,
+                        sc.window_width,
+                        sc.window_height,
+                        sc.timeout,
+                    )
+                    .await
+                    {
+                        Ok(bytes) => Some(ScreenshotCapture {
+                            bytes,
+                            tool: "chromium-headless".to_owned(),
+                            width: sc.window_width,
+                            height: sc.window_height,
+                        }),
+                        Err(e) => {
+                            // Fail-safe: one host's screenshot failure never
+                            // aborts the scan — log and keep going with no
+                            // screenshot for this service.
+                            tracing::warn!(
+                                ip = %op.ip, port = op.port, error = %e,
+                                "asm screenshot capture failed, continuing scan"
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
             findings.push(ServiceFinding {
                 ip: op.ip.clone(),
                 port: op.port,
                 protocol: op.protocol.clone(),
                 banner,
                 cert,
+                screenshot,
             });
         }
     }
 
-    if let Err(e) = persist_findings(pool, tenant_id, scan_id, &ips, &findings).await {
+    if let Err(e) = persist_findings(pool, tenant_id, scan_id, &ips, &findings, cfg).await {
         let msg = format!("failed to persist asm findings: {e}");
         let _ = sqlx::query(
             "UPDATE asm_scans SET status = 'failed', completed_at = now(), error_message = $3 \
@@ -646,13 +917,14 @@ fn error_result(target: &str, message: &str, start: std::time::Instant) -> Scann
 }
 
 /// Writes one `asm_hosts` row per unique IP and one `asm_services`/
-/// `asm_certs` row per discovered open port.
+/// `asm_certs`/`asm_screenshots` row per discovered open port.
 async fn persist_findings(
     pool: &PgPool,
     tenant_id: Uuid,
     scan_id: i64,
     ips: &[String],
     findings: &[ServiceFinding],
+    cfg: &AsmPipelineConfig,
 ) -> Result<(), sqlx::Error> {
     for ip in ips {
         let host_id: i64 = sqlx::query_scalar(
@@ -699,6 +971,44 @@ async fn persist_findings(
                 .bind(&cert.fingerprint_sha256)
                 .execute(pool)
                 .await?;
+            }
+
+            // Screenshot upload is best-effort: an S3 failure here logs and
+            // moves on (no `asm_screenshots` row for this service) rather
+            // than failing the whole scan — the primary findings above are
+            // already persisted. Only reachable when both a screenshot was
+            // actually captured (`f.screenshot`) and the stage is
+            // configured (`cfg.screenshot`) — the latter is always `Some`
+            // whenever the former is, since capture only runs under
+            // `cfg.screenshot.is_some()`, but checked again here defensively
+            // rather than assumed.
+            if let (Some(shot), Some(stage)) = (&f.screenshot, &cfg.screenshot) {
+                let key = format!("asm/{tenant_id}/{scan_id}/{service_id}.png");
+                match stage.uploader.upload(&key, shot.bytes.clone()).await {
+                    Ok(()) => {
+                        sqlx::query(
+                            "INSERT INTO asm_screenshots \
+                             (service_id, tenant_id, s3_key, tool, width, height, \
+                              file_size_bytes, captured_at, created_at) \
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())",
+                        )
+                        .bind(service_id)
+                        .bind(tenant_id)
+                        .bind(&key)
+                        .bind(&shot.tool)
+                        .bind(shot.width as i32)
+                        .bind(shot.height as i32)
+                        .bind(shot.bytes.len() as i32)
+                        .execute(pool)
+                        .await?;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            service_id, error = %e,
+                            "asm screenshot upload failed, continuing scan"
+                        );
+                    }
+                }
             }
         }
     }
@@ -815,6 +1125,8 @@ mod tests {
 
     use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
     use tokio::net::TcpListener;
+    use wiremock::matchers::{method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     // ---------- pure parsing/arg-building ----------
 
@@ -1118,6 +1430,148 @@ mod tests {
         assert!(parse_cert_der(b"not a certificate").is_none());
     }
 
+    // ---------- screenshot capture (fake chromium — real chromium needs
+    // to be installed in the image, unavailable in CI) ----------
+
+    #[test]
+    fn http_url_for_port_maps_known_ports_and_rejects_others() {
+        assert_eq!(
+            http_url_for_port("203.0.113.5", 443),
+            Some("https://203.0.113.5:443".to_owned())
+        );
+        assert_eq!(
+            http_url_for_port("203.0.113.5", 8443),
+            Some("https://203.0.113.5:8443".to_owned())
+        );
+        assert_eq!(
+            http_url_for_port("203.0.113.5", 80),
+            Some("http://203.0.113.5:80".to_owned())
+        );
+        assert_eq!(http_url_for_port("203.0.113.5", 22), None);
+    }
+
+    #[tokio::test]
+    async fn capture_screenshot_parses_fake_binary_output() {
+        let script = fake_chromium_binary("fake-png-bytes", 0);
+        let bin = script.to_str().expect("utf8 path").to_owned();
+        let bytes = capture_screenshot(
+            &bin,
+            "http://example.invalid",
+            1280,
+            800,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("capture succeeds");
+        assert_eq!(bytes, b"fake-png-bytes");
+    }
+
+    #[tokio::test]
+    async fn capture_screenshot_missing_binary_is_spawn_error() {
+        let err = capture_screenshot(
+            "/nonexistent/definitely-not-chromium",
+            "http://example.invalid",
+            1280,
+            800,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("spawn must fail");
+        assert!(matches!(err, ScreenshotError::Spawn { .. }));
+    }
+
+    #[tokio::test]
+    async fn capture_screenshot_nonzero_exit_is_reported() {
+        let script = fake_chromium_binary("irrelevant", 1);
+        let bin = script.to_str().expect("utf8 path").to_owned();
+        let err = capture_screenshot(
+            &bin,
+            "http://example.invalid",
+            1280,
+            800,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("nonzero exit must fail");
+        assert!(matches!(err, ScreenshotError::Exit { status: 1, .. }));
+    }
+
+    #[tokio::test]
+    async fn capture_screenshot_empty_output_file_is_error() {
+        let script = fake_chromium_binary("", 0);
+        let bin = script.to_str().expect("utf8 path").to_owned();
+        let err = capture_screenshot(
+            &bin,
+            "http://example.invalid",
+            1280,
+            800,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect_err("empty file must fail");
+        assert!(matches!(err, ScreenshotError::Empty));
+    }
+
+    #[tokio::test]
+    async fn capture_screenshot_times_out() {
+        let path = fake_chromium_binary("irrelevant", 0);
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .expect("open for write");
+            writeln!(file, "#!/bin/sh\nsleep 5\n").expect("write");
+            file.sync_all().expect("sync");
+        }
+        let bin = path.to_str().expect("utf8 path").to_owned();
+        let err = capture_screenshot(
+            &bin,
+            "http://example.invalid",
+            1280,
+            800,
+            Duration::from_millis(100),
+        )
+        .await
+        .expect_err("must time out");
+        assert!(matches!(err, ScreenshotError::Timeout(_)));
+    }
+
+    #[tokio::test]
+    async fn screenshot_uploader_upload_succeeds_on_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(wm_path("/asm-shots/asm/tenant/1/2.png"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let uploader =
+            ScreenshotUploader::new(mock_s3_client(&server.uri()), "asm-shots".to_owned());
+        uploader
+            .upload("asm/tenant/1/2.png", b"fake-png-bytes".to_vec())
+            .await
+            .expect("upload succeeds");
+    }
+
+    #[tokio::test]
+    async fn screenshot_uploader_upload_returns_err_on_http_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(wm_path("/asm-shots/asm/tenant/1/2.png"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let uploader =
+            ScreenshotUploader::new(mock_s3_client(&server.uri()), "asm-shots".to_owned());
+        let err = uploader
+            .upload("asm/tenant/1/2.png", b"fake-png-bytes".to_vec())
+            .await
+            .expect_err("upload must fail on 5xx");
+        assert!(matches!(err, ScreenshotUploadError::Put(_)));
+    }
+
     // ---------- full pipeline (real Postgres; manager's asm_* migrations
     // layered in — this crate has no local migration for them) ----------
 
@@ -1169,7 +1623,81 @@ mod tests {
             masscan_timeout: Duration::from_secs(10),
             banner_timeout: Duration::from_millis(300),
             cert_timeout: Duration::from_millis(300),
+            screenshot: None,
         }
+    }
+
+    /// Like [`test_cfg`] but with the screenshot stage enabled, pointed at
+    /// `chromium_bin` and uploading through `uploader`.
+    fn test_cfg_with_screenshot(
+        masscan_bin: &str,
+        chromium_bin: &str,
+        uploader: ScreenshotUploader,
+    ) -> AsmPipelineConfig {
+        AsmPipelineConfig {
+            screenshot: Some(ScreenshotStageConfig {
+                chromium_bin: chromium_bin.to_owned(),
+                timeout: Duration::from_secs(5),
+                window_width: 1280,
+                window_height: 800,
+                uploader,
+            }),
+            ..test_cfg(masscan_bin)
+        }
+    }
+
+    /// Builds an `aws_sdk_s3::Client` pointed at a mock server — same
+    /// construction as `services/s3scan/src/s3ops.rs`'s `mock_client` test
+    /// helper (dummy static credentials, path-style addressing, no real
+    /// AWS calls).
+    fn mock_s3_client(uri: &str) -> S3Client {
+        let creds =
+            aws_sdk_s3::config::Credentials::new("AKTEST", "SKTEST", None, None, "asm-test");
+        let cfg = aws_sdk_s3::config::Builder::new()
+            .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .endpoint_url(uri)
+            .force_path_style(true)
+            .credentials_provider(creds)
+            .build();
+        S3Client::from_conf(cfg)
+    }
+
+    /// Writes an executable shell script that scans its args for
+    /// `--screenshot=<path>` and writes `contents` there (a stand-in for
+    /// real PNG bytes — this module never decodes the file, only reads its
+    /// bytes and records the configured viewport as width/height), then
+    /// exits with `code`. Same write-then-close-then-chmod sequence as
+    /// [`fake_binary`] (avoids the `ETXTBSY` race documented there).
+    fn fake_chromium_binary(contents: &str, code: i32) -> tempfile::TempPath {
+        let path = tempfile::NamedTempFile::new()
+            .expect("tempfile")
+            .into_temp_path();
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("open for write");
+            writeln!(file, "#!/bin/sh").expect("write");
+            writeln!(file, "for arg in \"$@\"; do").expect("write");
+            writeln!(file, "  case \"$arg\" in").expect("write");
+            writeln!(
+                file,
+                "    --screenshot=*) path=\"${{arg#--screenshot=}}\" ;;"
+            )
+            .expect("write");
+            writeln!(file, "  esac").expect("write");
+            writeln!(file, "done").expect("write");
+            writeln!(file, "if [ -n \"$path\" ]; then").expect("write");
+            writeln!(file, "  printf '{contents}' > \"$path\"").expect("write");
+            writeln!(file, "fi").expect("write");
+            writeln!(file, "exit {code}").expect("write");
+            file.sync_all().expect("sync");
+        }
+        let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod");
+        path
     }
 
     #[tokio::test]
@@ -1372,5 +1900,187 @@ mod tests {
                 .await
                 .expect("count");
         assert_eq!(diff_count, 0);
+    }
+
+    #[tokio::test]
+    async fn run_asm_scan_captures_and_uploads_screenshot_for_http_port() {
+        let pool = db_pool().await;
+        let tenant = tenant_uuid(TENANT_A);
+        let scan_id = seed_pending_scan(&pool, tenant, "198.51.100.30").await;
+
+        let masscan = fake_binary(
+            r#"[
+{ "ip": "198.51.100.30", "ports": [ {"port": 80, "proto": "tcp", "status": "open"} ] }
+]"#,
+            0,
+        );
+        let masscan_bin = masscan.to_str().expect("utf8 path").to_owned();
+        let chromium = fake_chromium_binary("fake-png-bytes", 0);
+        let chromium_bin = chromium.to_str().expect("utf8 path").to_owned();
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let uploader =
+            ScreenshotUploader::new(mock_s3_client(&server.uri()), "asm-shots".to_owned());
+        let cfg = test_cfg_with_screenshot(&masscan_bin, &chromium_bin, uploader);
+
+        let result = run_asm_scan(
+            &pool,
+            tenant,
+            "198.51.100.30",
+            &serde_json::json!({"scan_id": scan_id}),
+            &cfg,
+        )
+        .await;
+        assert_eq!(result.status, "success");
+
+        let row: (String, String, i32, i32, i32) = sqlx::query_as(
+            "SELECT sc.s3_key, sc.tool, sc.width, sc.height, sc.file_size_bytes \
+             FROM asm_screenshots sc \
+             JOIN asm_services sv ON sv.id = sc.service_id \
+             JOIN asm_hosts h ON h.id = sv.host_id \
+             WHERE h.scan_id = $1 AND sc.tenant_id = $2",
+        )
+        .bind(scan_id)
+        .bind(tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("screenshot row persisted, tenant-scoped");
+        assert!(row.0.starts_with(&format!("asm/{tenant}/{scan_id}/")));
+        assert_eq!(row.1, "chromium-headless");
+        assert_eq!(row.2, 1280);
+        assert_eq!(row.3, 800);
+        assert_eq!(row.4, "fake-png-bytes".len() as i32);
+    }
+
+    #[tokio::test]
+    async fn run_asm_scan_screenshot_capture_failure_for_one_host_does_not_abort_scan() {
+        let pool = db_pool().await;
+        let tenant = tenant_uuid(TENANT_A);
+        let scan_id = seed_pending_scan(&pool, tenant, "198.51.100.31").await;
+
+        let masscan = fake_binary(
+            r#"[
+{ "ip": "198.51.100.31", "ports": [ {"port": 80, "proto": "tcp", "status": "open"} ] }
+]"#,
+            0,
+        );
+        let masscan_bin = masscan.to_str().expect("utf8 path").to_owned();
+
+        // chromium binary that always fails to spawn — screenshot capture
+        // fails for this (only) host, but the scan must still persist the
+        // service row and complete successfully.
+        let server = MockServer::start().await;
+        let uploader =
+            ScreenshotUploader::new(mock_s3_client(&server.uri()), "asm-shots".to_owned());
+        let cfg = test_cfg_with_screenshot(
+            &masscan_bin,
+            "/nonexistent/definitely-not-chromium",
+            uploader,
+        );
+
+        let result = run_asm_scan(
+            &pool,
+            tenant,
+            "198.51.100.31",
+            &serde_json::json!({"scan_id": scan_id}),
+            &cfg,
+        )
+        .await;
+        assert_eq!(result.status, "success");
+
+        let scan_status: String = sqlx::query_scalar("SELECT status FROM asm_scans WHERE id = $1")
+            .bind(scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("scan row");
+        assert_eq!(scan_status, "completed");
+
+        let service_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM asm_services sv JOIN asm_hosts h ON h.id = sv.host_id \
+             WHERE h.scan_id = $1 AND sv.tenant_id = $2",
+        )
+        .bind(scan_id)
+        .bind(tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("count services");
+        assert_eq!(service_count, 1, "service row still persisted");
+
+        let screenshot_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM asm_screenshots sc \
+             JOIN asm_services sv ON sv.id = sc.service_id \
+             JOIN asm_hosts h ON h.id = sv.host_id \
+             WHERE h.scan_id = $1 AND sc.tenant_id = $2",
+        )
+        .bind(scan_id)
+        .bind(tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("count screenshots");
+        assert_eq!(
+            screenshot_count, 0,
+            "no screenshot row for the failed capture"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_asm_scan_screenshot_upload_failure_for_one_host_does_not_abort_scan() {
+        let pool = db_pool().await;
+        let tenant = tenant_uuid(TENANT_A);
+        let scan_id = seed_pending_scan(&pool, tenant, "198.51.100.32").await;
+
+        let masscan = fake_binary(
+            r#"[
+{ "ip": "198.51.100.32", "ports": [ {"port": 80, "proto": "tcp", "status": "open"} ] }
+]"#,
+            0,
+        );
+        let masscan_bin = masscan.to_str().expect("utf8 path").to_owned();
+        let chromium = fake_chromium_binary("fake-png-bytes", 0);
+        let chromium_bin = chromium.to_str().expect("utf8 path").to_owned();
+
+        // Mock S3 server with no mounted route — every PUT 404s, so the
+        // capture succeeds but the upload fails.
+        let server = MockServer::start().await;
+        let uploader =
+            ScreenshotUploader::new(mock_s3_client(&server.uri()), "asm-shots".to_owned());
+        let cfg = test_cfg_with_screenshot(&masscan_bin, &chromium_bin, uploader);
+
+        let result = run_asm_scan(
+            &pool,
+            tenant,
+            "198.51.100.32",
+            &serde_json::json!({"scan_id": scan_id}),
+            &cfg,
+        )
+        .await;
+        assert_eq!(result.status, "success");
+
+        let scan_status: String = sqlx::query_scalar("SELECT status FROM asm_scans WHERE id = $1")
+            .bind(scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("scan row");
+        assert_eq!(scan_status, "completed");
+
+        let screenshot_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM asm_screenshots sc \
+             JOIN asm_services sv ON sv.id = sc.service_id \
+             JOIN asm_hosts h ON h.id = sv.host_id \
+             WHERE h.scan_id = $1 AND sc.tenant_id = $2",
+        )
+        .bind(scan_id)
+        .bind(tenant)
+        .fetch_one(&pool)
+        .await
+        .expect("count screenshots");
+        assert_eq!(
+            screenshot_count, 0,
+            "no screenshot row for the failed upload"
+        );
     }
 }

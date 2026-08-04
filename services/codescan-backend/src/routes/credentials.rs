@@ -36,6 +36,8 @@ use crate::state::AppState;
 
 const VALID_PLATFORMS: [&str; 2] = ["github", "gitlab"];
 const VALID_CREDENTIAL_TYPES: [&str; 2] = ["token", "ssh_key"];
+const DEFAULT_PER_PAGE: i64 = 20;
+const MAX_PER_PAGE: i64 = 100;
 
 /// Router for /api/v1/credentials.
 pub fn router() -> Router<AppState> {
@@ -57,6 +59,13 @@ fn validation(field: &str, msg: &str) -> ApiError {
     ApiError::Validation(vec![serde_json::json!({
         "loc": [field], "msg": msg, "type": "value_error"
     })])
+}
+
+fn pagination(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
+    (
+        page.unwrap_or(1).max(1),
+        per_page.unwrap_or(DEFAULT_PER_PAGE).clamp(1, MAX_PER_PAGE),
+    )
 }
 
 /// Response shape — deliberately excludes `encrypted_token`.
@@ -82,16 +91,20 @@ const SUMMARY_COLUMNS: &str = "id, user_id, name, platform, credential_type, tok
 #[derive(Deserialize, utoipa::IntoParams)]
 pub(crate) struct ListQuery {
     platform: Option<String>,
+    page: Option<i64>,
+    per_page: Option<i64>,
 }
 
 /// Documentation-only mirror of `list_credentials`'s `serde_json::json!` body.
 #[derive(Serialize, utoipa::ToSchema)]
 pub(crate) struct CredentialListResponse {
     data: Vec<CredentialSummary>,
-    total: usize,
+    total: i64,
+    page: i64,
+    per_page: i64,
 }
 
-/// GET /credentials — admin only; never includes token material.
+/// GET /credentials — admin only, paginated; never includes token material.
 #[utoipa::path(
     get,
     path = "/api/v1/credentials",
@@ -109,6 +122,9 @@ pub(crate) async fn list_credentials(
     AdminOnly(admin): AdminOnly,
     Query(q): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
+    let (page, per_page) = pagination(q.page, q.per_page);
+    let offset = (page - 1) * per_page;
+
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(format!(
         "SELECT {SUMMARY_COLUMNS} FROM codescan_git_credentials WHERE tenant_id = "
     ));
@@ -116,14 +132,34 @@ pub(crate) async fn list_credentials(
     if let Some(platform) = &q.platform {
         qb.push(" AND platform = ").push_bind(platform.clone());
     }
-    qb.push(" ORDER BY created_at DESC");
+    qb.push(" ORDER BY created_at DESC LIMIT ")
+        .push_bind(per_page)
+        .push(" OFFSET ")
+        .push_bind(offset);
     let items = qb
         .build_query_as::<CredentialSummary>()
         .fetch_all(&state.db)
         .await?;
+
+    let mut count_qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT count(*) FROM codescan_git_credentials WHERE tenant_id = ",
+    );
+    count_qb.push_bind(admin.tenant_id);
+    if let Some(platform) = &q.platform {
+        count_qb
+            .push(" AND platform = ")
+            .push_bind(platform.clone());
+    }
+    let total: i64 = count_qb.build_query_scalar().fetch_one(&state.db).await?;
+
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({ "data": items, "total": items.len() })),
+        Json(serde_json::json!({
+            "data": items,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+        })),
     )
         .into_response())
 }
@@ -597,6 +633,12 @@ mod tests {
         assert_eq!(body["valid"], false);
     }
 
+    #[test]
+    fn pagination_defaults_and_clamps() {
+        assert_eq!(pagination(None, None), (1, 20));
+        assert_eq!(pagination(Some(2), Some(500)), (2, 100));
+    }
+
     #[tokio::test]
     async fn list_is_empty_against_a_fresh_db() {
         let state = crate::routes::test_support::db_state(dev_license()).await;
@@ -609,6 +651,54 @@ mod tests {
         resp.assert_status_ok();
         let body: serde_json::Value = resp.json();
         assert_eq!(body["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn list_respects_pagination_bounds() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+
+        for i in 0..3 {
+            server
+                .post("/api/v1/credentials")
+                .authorization_bearer(&admin)
+                .json(&serde_json::json!({
+                    "platform": "github",
+                    "token": format!("ghp_pagetoken{i}aaaaaaaa"),
+                }))
+                .await
+                .assert_status(StatusCode::CREATED);
+        }
+
+        let paged = server
+            .get("/api/v1/credentials?page=1&per_page=2")
+            .authorization_bearer(&admin)
+            .await;
+        paged.assert_status_ok();
+        let paged_body: serde_json::Value = paged.json();
+        assert_eq!(paged_body["total"], 3);
+        assert_eq!(paged_body["per_page"], 2);
+        assert_eq!(paged_body["data"].as_array().map(Vec::len), Some(2));
+
+        let second_page = server
+            .get("/api/v1/credentials?page=2&per_page=2")
+            .authorization_bearer(&admin)
+            .await;
+        second_page.assert_status_ok();
+        assert_eq!(
+            second_page.json::<serde_json::Value>()["data"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let over_cap = server
+            .get("/api/v1/credentials?per_page=500")
+            .authorization_bearer(&admin)
+            .await;
+        over_cap.assert_status_ok();
+        assert_eq!(over_cap.json::<serde_json::Value>()["per_page"], 100);
     }
 
     #[tokio::test]

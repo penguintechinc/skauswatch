@@ -6243,6 +6243,7 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aws-sdk-s3",
  "axum",
  "bytes",
  "chrono",
@@ -6259,6 +6260,7 @@ dependencies = [
  "sha2 0.10.9",
  "skauswatch-common",
  "skauswatch-db",
+ "skauswatch-s3",
  "skauswatch-streams",
  "skauswatch-telemetry",
  "skauswatch-testkit",
@@ -6272,6 +6274,7 @@ dependencies = [
  "tower-http 0.7.0",
  "tracing",
  "uuid",
+ "wiremock",
  "x509-parser",
  "yara-x",
 ]

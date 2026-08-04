@@ -24,6 +24,8 @@ use crate::routes::license_denied;
 use crate::state::AppState;
 
 const VALID_POLICIES: [&str; 3] = ["allowed", "review_required", "blocked"];
+const DEFAULT_PER_PAGE: i64 = 20;
+const MAX_PER_PAGE: i64 = 100;
 
 /// Router for /api/v1/license-policies.
 pub fn router() -> Router<AppState> {
@@ -39,6 +41,13 @@ fn validation(field: &str, msg: &str) -> ApiError {
     ApiError::Validation(vec![serde_json::json!({
         "loc": [field], "msg": msg, "type": "value_error"
     })])
+}
+
+fn pagination(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
+    (
+        page.unwrap_or(1).max(1),
+        per_page.unwrap_or(DEFAULT_PER_PAGE).clamp(1, MAX_PER_PAGE),
+    )
 }
 
 /// License-policy row shape returned by list/get/create/update.
@@ -62,17 +71,21 @@ const POLICY_COLUMNS: &str =
 #[derive(Deserialize, utoipa::IntoParams)]
 pub(crate) struct ListQuery {
     policy: Option<String>,
+    page: Option<i64>,
+    per_page: Option<i64>,
 }
 
 /// Documentation-only mirror of `list_policies`'s `serde_json::json!` body.
 #[derive(Serialize, utoipa::ToSchema)]
 pub(crate) struct PolicyListResponse {
     data: Vec<LicensePolicy>,
-    total: usize,
+    total: i64,
+    page: i64,
+    per_page: i64,
 }
 
-/// GET /license-policies — list configured license policies, optionally
-/// filtered by `policy` (allowed/review_required/blocked).
+/// GET /license-policies — paginated list of configured license policies,
+/// optionally filtered by `policy` (allowed/review_required/blocked).
 #[utoipa::path(
     get,
     path = "/api/v1/license-policies",
@@ -93,6 +106,9 @@ pub(crate) async fn list_policies(
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
+    let (page, per_page) = pagination(q.page, q.per_page);
+    let offset = (page - 1) * per_page;
+
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(format!(
         "SELECT {POLICY_COLUMNS} FROM codescan_license_policies WHERE tenant_id = "
     ));
@@ -100,15 +116,32 @@ pub(crate) async fn list_policies(
     if let Some(policy) = &q.policy {
         qb.push(" AND policy = ").push_bind(policy.clone());
     }
-    qb.push(" ORDER BY license_name");
+    qb.push(" ORDER BY license_name LIMIT ")
+        .push_bind(per_page)
+        .push(" OFFSET ")
+        .push_bind(offset);
     let items = qb
         .build_query_as::<LicensePolicy>()
         .fetch_all(&state.db)
         .await?;
 
+    let mut count_qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT count(*) FROM codescan_license_policies WHERE tenant_id = ",
+    );
+    count_qb.push_bind(user.tenant_id);
+    if let Some(policy) = &q.policy {
+        count_qb.push(" AND policy = ").push_bind(policy.clone());
+    }
+    let total: i64 = count_qb.build_query_scalar().fetch_one(&state.db).await?;
+
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({ "data": items, "total": items.len() })),
+        Json(serde_json::json!({
+            "data": items,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+        })),
     )
         .into_response())
 }
@@ -433,6 +466,57 @@ mod tests {
             description: None,
         };
         assert!(validate_create(&body).is_err());
+    }
+
+    #[test]
+    fn pagination_defaults_and_clamps() {
+        assert_eq!(pagination(None, None), (1, 20));
+        assert_eq!(pagination(Some(2), Some(500)), (2, 100));
+    }
+
+    #[tokio::test]
+    async fn list_respects_pagination_bounds() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+
+        for name in ["MIT", "GPL-3.0", "Apache-2.0"] {
+            server
+                .post("/api/v1/license-policies")
+                .authorization_bearer(&admin)
+                .json(&serde_json::json!({"license_name": name, "policy": "allowed"}))
+                .await
+                .assert_status(StatusCode::CREATED);
+        }
+
+        let paged = server
+            .get("/api/v1/license-policies?page=1&per_page=2")
+            .authorization_bearer(&admin)
+            .await;
+        paged.assert_status_ok();
+        let paged_body: serde_json::Value = paged.json();
+        assert_eq!(paged_body["total"], 3);
+        assert_eq!(paged_body["per_page"], 2);
+        assert_eq!(paged_body["data"].as_array().map(Vec::len), Some(2));
+
+        let second_page = server
+            .get("/api/v1/license-policies?page=2&per_page=2")
+            .authorization_bearer(&admin)
+            .await;
+        second_page.assert_status_ok();
+        assert_eq!(
+            second_page.json::<serde_json::Value>()["data"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let over_cap = server
+            .get("/api/v1/license-policies?per_page=500")
+            .authorization_bearer(&admin)
+            .await;
+        over_cap.assert_status_ok();
+        assert_eq!(over_cap.json::<serde_json::Value>()["per_page"], 100);
     }
 
     #[tokio::test]

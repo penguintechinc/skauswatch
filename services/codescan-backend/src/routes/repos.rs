@@ -10,7 +10,7 @@
 //! admin+maintainer split — kept consistent with the one contract callers
 //! actually exercise today.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -33,11 +33,20 @@ pub fn router() -> Router<AppState> {
 }
 
 const VALID_PROVIDERS: [&str; 2] = ["github", "gitlab"];
+const DEFAULT_PER_PAGE: i64 = 20;
+const MAX_PER_PAGE: i64 = 100;
 
 fn validation(field: &str, msg: &str) -> ApiError {
     ApiError::Validation(vec![serde_json::json!({
         "loc": [field], "msg": msg, "type": "value_error"
     })])
+}
+
+fn pagination(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
+    (
+        page.unwrap_or(1).max(1),
+        per_page.unwrap_or(DEFAULT_PER_PAGE).clamp(1, MAX_PER_PAGE),
+    )
 }
 
 /// Repo-config row shape returned by list/get/create/update.
@@ -77,15 +86,24 @@ const REPO_CONFIG_COLUMNS: &str = "id, tenant_id, team_id, owner_id, provider, r
 #[derive(Serialize, utoipa::ToSchema)]
 pub(crate) struct RepoListResponse {
     data: Vec<RepoConfig>,
-    total: usize,
+    total: i64,
+    page: i64,
+    per_page: i64,
 }
 
-/// GET /codescan/repos — list repository configurations.
+#[derive(Deserialize, utoipa::IntoParams)]
+pub(crate) struct ListQuery {
+    page: Option<i64>,
+    per_page: Option<i64>,
+}
+
+/// GET /codescan/repos — paginated list of repository configurations.
 #[utoipa::path(
     get,
     path = "/api/v1/codescan/repos",
     tag = "codescan",
     security(("bearer_jwt" = [])),
+    params(ListQuery),
     responses(
         (status = 200, description = "Repository configurations", body = RepoListResponse),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
@@ -95,23 +113,39 @@ pub(crate) struct RepoListResponse {
 pub(crate) async fn list_repos(
     State(state): State<AppState>,
     user: CurrentUser,
+    Query(q): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
+    let (page, per_page) = pagination(q.page, q.per_page);
+    let offset = (page - 1) * per_page;
 
     let query = format!(
         "SELECT {REPO_CONFIG_COLUMNS} FROM codescan_repo_configs \
-         WHERE tenant_id = $1 ORDER BY repo_name"
+         WHERE tenant_id = $1 ORDER BY repo_name LIMIT $2 OFFSET $3"
     );
     let items = sqlx::query_as::<_, RepoConfig>(sqlx::AssertSqlSafe(query))
         .bind(user.tenant_id)
+        .bind(per_page)
+        .bind(offset)
         .fetch_all(&state.db)
         .await?;
 
+    let total: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM codescan_repo_configs WHERE tenant_id = $1")
+            .bind(user.tenant_id)
+            .fetch_one(&state.db)
+            .await?;
+
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({ "data": items, "total": items.len() })),
+        Json(serde_json::json!({
+            "data": items,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+        })),
     )
         .into_response())
 }
@@ -582,6 +616,12 @@ mod tests {
         assert_eq!(body["error"], "Insufficient permissions");
     }
 
+    #[test]
+    fn pagination_defaults_and_clamps() {
+        assert_eq!(pagination(None, None), (1, 20));
+        assert_eq!(pagination(Some(2), Some(500)), (2, 100));
+    }
+
     fn create_body(repo_name: &str) -> serde_json::Value {
         serde_json::json!({
             "provider": "github",
@@ -603,6 +643,76 @@ mod tests {
         let body: serde_json::Value = resp.json();
         assert_eq!(body["total"], 0);
         assert_eq!(body["data"], serde_json::json!([]));
+    }
+
+    /// `per_page` is capped and `page` offsets correctly, and tenant
+    /// isolation still holds while paginating.
+    #[tokio::test]
+    async fn list_respects_pagination_bounds() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let other_admin = crate::routes::test_support::sign_token_for_tenant(
+            &state,
+            "2",
+            "admin",
+            crate::routes::test_support::OTHER_TENANT_ID,
+        );
+        let server = test_server(state);
+
+        for i in 0..3 {
+            server
+                .post("/api/v1/codescan/repos")
+                .authorization_bearer(&admin)
+                .json(&create_body(&format!("page-repo-{i}")))
+                .await
+                .assert_status(StatusCode::CREATED);
+        }
+        // A different tenant's rows must never count toward this tenant's
+        // total/page results.
+        server
+            .post("/api/v1/codescan/repos")
+            .authorization_bearer(&other_admin)
+            .json(&create_body("other-tenant-repo"))
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        let default_page = server
+            .get("/api/v1/codescan/repos")
+            .authorization_bearer(&admin)
+            .await;
+        default_page.assert_status_ok();
+        let default_body: serde_json::Value = default_page.json();
+        assert_eq!(default_body["total"], 3);
+        assert_eq!(default_body["page"], 1);
+        assert_eq!(default_body["per_page"], 20);
+        assert_eq!(default_body["data"].as_array().map(Vec::len), Some(3));
+
+        let paged = server
+            .get("/api/v1/codescan/repos?page=1&per_page=2")
+            .authorization_bearer(&admin)
+            .await;
+        paged.assert_status_ok();
+        let paged_body: serde_json::Value = paged.json();
+        assert_eq!(paged_body["total"], 3);
+        assert_eq!(paged_body["per_page"], 2);
+        assert_eq!(paged_body["data"].as_array().map(Vec::len), Some(2));
+
+        let second_page = server
+            .get("/api/v1/codescan/repos?page=2&per_page=2")
+            .authorization_bearer(&admin)
+            .await;
+        second_page.assert_status_ok();
+        let second_body: serde_json::Value = second_page.json();
+        assert_eq!(second_body["total"], 3);
+        assert_eq!(second_body["data"].as_array().map(Vec::len), Some(1));
+
+        // per_page above MAX_PER_PAGE is clamped, not honored verbatim.
+        let over_cap = server
+            .get("/api/v1/codescan/repos?per_page=500")
+            .authorization_bearer(&admin)
+            .await;
+        over_cap.assert_status_ok();
+        assert_eq!(over_cap.json::<serde_json::Value>()["per_page"], 100);
     }
 
     #[tokio::test]

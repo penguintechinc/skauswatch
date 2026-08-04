@@ -497,9 +497,51 @@ struct ScreenshotRow {
     captured_at: Option<NaiveDateTime>,
 }
 
+/// One screenshot reference, as returned by the standalone `/screenshots`
+/// endpoint. Typed (rather than ad-hoc `serde_json::Value`, unlike the
+/// aggregated `/report` endpoint below) so the response shape is explicit
+/// in the OpenAPI spec — see `crate::asm` (scanner)'s screenshot-capture
+/// stage, which is what populates `asm_screenshots` rows for this to read.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AsmScreenshotDto {
+    id: i64,
+    service_id: i64,
+    s3_key: String,
+    url: Option<String>,
+    tool: String,
+    width: Option<i32>,
+    height: Option<i32>,
+    file_size_bytes: Option<i32>,
+    captured_at: Option<String>,
+}
+
+impl From<&ScreenshotRow> for AsmScreenshotDto {
+    fn from(s: &ScreenshotRow) -> Self {
+        Self {
+            id: s.id,
+            service_id: s.service_id,
+            s3_key: s.s3_key.clone(),
+            url: s.url.clone(),
+            tool: s.tool.clone(),
+            width: s.width,
+            height: s.height,
+            file_size_bytes: s.file_size_bytes,
+            captured_at: skauswatch_streams::py_isoformat_opt(s.captured_at),
+        }
+    }
+}
+
+/// Response body for `GET /asm/scans/{scan_id}/screenshots`.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub(crate) struct AsmScreenshotsResponse {
+    screenshots: Vec<AsmScreenshotDto>,
+}
+
 /// GET /asm/scans/{scan_id}/screenshots — screenshots captured for this
-/// scan's services. Always empty today (see module doc: capture stage
-/// deferred) but the join/read path is real and ready for when it lands.
+/// scan's services, tenant-scoped (via `fetch_scan`'s ownership check plus
+/// `fetch_screenshots`'s own `tenant_id` filter — defense in depth). Empty
+/// until the scanner's screenshot-capture stage lands a matching scan; the
+/// join/read path itself is real.
 #[utoipa::path(
     get,
     path = "/api/v1/asm/scans/{scan_id}/screenshots",
@@ -507,7 +549,7 @@ struct ScreenshotRow {
     security(("bearer_jwt" = [])),
     params(("scan_id" = i64, Path, description = "ASM scan id")),
     responses(
-        (status = 200, description = "Screenshots for this scan's services", body = serde_json::Value),
+        (status = 200, description = "Screenshots for this scan's services", body = AsmScreenshotsResponse),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 404, description = "Scan not found", body = ErrorResponse),
     ),
@@ -516,12 +558,12 @@ pub(crate) async fn get_asm_scan_screenshots(
     State(state): State<AppState>,
     user: CurrentUser,
     Path(scan_id): Path<i64>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<AsmScreenshotsResponse>, ApiError> {
     fetch_scan(&state.db, user.tenant_id, scan_id).await?;
     let rows = fetch_screenshots(&state.db, user.tenant_id, scan_id).await?;
-    Ok(Json(serde_json::json!({
-        "screenshots": rows.iter().map(screenshot_json).collect::<Vec<_>>(),
-    })))
+    Ok(Json(AsmScreenshotsResponse {
+        screenshots: rows.iter().map(AsmScreenshotDto::from).collect(),
+    }))
 }
 
 async fn fetch_screenshots(
@@ -1127,6 +1169,40 @@ mod tests {
         let body: serde_json::Value = res.json();
         assert_eq!(body["screenshots"][0]["s3_key"], "asm/shot.png");
         assert_eq!(body["screenshots"][0]["tool"], "gowitness");
+    }
+
+    #[tokio::test]
+    async fn screenshots_endpoint_isolated_by_tenant() {
+        let (server, state) = server_and_state().await;
+        let (uid, token_a) =
+            test_support::authed_user(&state, "shot-tena@example.com", "admin").await;
+        let tenant_a = test_support::default_tenant_id();
+        let (scan_id, _) =
+            seed_full_scan_tree(&state.db, tenant_a, uid, "screenshot-isolation.example").await;
+
+        let tenant_b = test_support::seed_tenant(&state.db, "asm-screenshot-tenant-b").await;
+        let (_, token_b) =
+            test_support::authed_user_in_tenant(&state, "shot-tenb@example.com", "admin", tenant_b)
+                .await;
+
+        // Tenant B cannot see tenant A's screenshot through the dedicated
+        // endpoint — `fetch_scan`'s ownership check 404s before the
+        // screenshot query ever runs.
+        let cross_res = server
+            .get(&format!("/api/v1/asm/scans/{scan_id}/screenshots"))
+            .authorization_bearer(&token_b)
+            .await;
+        cross_res.assert_status(StatusCode::NOT_FOUND);
+
+        // Tenant A still sees its own screenshot, unaffected by tenant B's
+        // scan being seeded in the same server/table.
+        let own_res = server
+            .get(&format!("/api/v1/asm/scans/{scan_id}/screenshots"))
+            .authorization_bearer(&token_a)
+            .await;
+        own_res.assert_status_ok();
+        let body: serde_json::Value = own_res.json();
+        assert_eq!(body["screenshots"][0]["s3_key"], "asm/shot.png");
     }
 
     #[tokio::test]

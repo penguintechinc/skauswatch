@@ -167,9 +167,23 @@ paths:
           type: array
           items:
             type: string
+      - name: page
+        in: query
+        description: Page number (1-indexed, default 1)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: per_page
+        in: query
+        description: Items per page (default 20, max 100)
+        required: false
+        schema:
+          type: integer
+          format: int64
       responses:
         '200':
-          description: Requestor's own requests, plus (for jit:approve callers) requests against secrets they own
+          description: 'Paginated: requestor''s own requests, plus (for jit:approve callers) requests against secrets they own'
           content:
             application/json:
               schema:
@@ -1173,11 +1187,23 @@ components:
       description: Documentation-only mirror of `list_jit_requests`'s response envelope.
       required:
       - requests
+      - total
+      - page
+      - per_page
       properties:
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
         requests:
           type: array
           items:
             $ref: '#/components/schemas/JitRequestResponse'
+        total:
+          type: integer
+          format: int64
     JitRequestResponse:
       type: object
       description: Documentation-only mirror of `RequestRow::to_json`'s wire shape.

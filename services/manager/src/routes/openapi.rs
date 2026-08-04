@@ -347,6 +347,8 @@ pub(crate) struct PublicApiDoc;
         // asm
         asm::AsmScanCreateBody,
         asm::AsmScanListResponse,
+        asm::AsmScreenshotDto,
+        asm::AsmScreenshotsResponse,
         asm::PortSettingsBody,
         // scanner
         scanner::ScannerScanBody,
