@@ -102,6 +102,19 @@ pub enum CredentialError {
     /// credential-provider chain, never as fatal.
     #[error("failed to fetch JWT-SVID for AWS federation: {0}")]
     Identity(String),
+    /// `assume_role` was requested on a deployment explicitly configured
+    /// with `AWS_IDENTITY_MODE=static` (`AwsIdentityModeKind::Static`) — no
+    /// STS/federation route exists for this service's own base identity by
+    /// design (S3-compatible-only deployments), so the request is rejected
+    /// immediately rather than falling through to the default AWS
+    /// credential-provider chain, which would silently attempt to resolve
+    /// ambient credentials on a cluster that is not expected to have any.
+    #[error(
+        "assume_role requires a base AWS identity, but this deployment is configured with \
+         AWS_IDENTITY_MODE=static (no own-AWS federation route) — use static bucket credentials \
+         instead"
+    )]
+    AssumeRoleUnavailableStaticIdentity,
 }
 
 impl CredentialError {
@@ -114,6 +127,97 @@ impl CredentialError {
             self,
             CredentialError::AssumeRole(_) | CredentialError::Identity(_)
         )
+    }
+}
+
+/// The `awsIdentity.mode` value as loaded from config/env
+/// (`AWS_IDENTITY_MODE` / Helm `awsIdentity.mode`) — see
+/// `docs/v2-port/aws-identity-runbook.md` §0. Selected explicitly once per
+/// deployment; never inferred from whether a federation role ARN happens to
+/// be configured (that was the previous, implicit-fallback behavior this
+/// type replaces).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AwsIdentityModeKind {
+    /// dal2/on-prem (no EKS/IRSA control plane): resolve this service's own
+    /// base AWS identity via JWT-SVID -> `sts:AssumeRoleWithWebIdentity`
+    /// federation ([`federated_base_credentials`]).
+    Spire,
+    /// EKS: rely on the default AWS credential-provider chain — IRSA
+    /// discovers the projected service-account token itself, no
+    /// application-level federation needed.
+    Irsa,
+    /// S3-compatible-only deployments with no STS at all (MinIO, Wasabi,
+    /// B2, ...): never attempt to resolve a base AWS identity for this
+    /// service — only customer-supplied `static` bucket credentials are
+    /// expected to exist.
+    Static,
+}
+
+impl AwsIdentityModeKind {
+    /// Reads `AWS_IDENTITY_MODE` (case-insensitive `"spire"`/`"irsa"`/
+    /// `"static"`); unset or unrecognized falls back to [`Self::Spire`],
+    /// matching the Helm charts' base `values.yaml` default (skauswatch's
+    /// current on-prem clusters have no IRSA to fall back to).
+    pub fn from_env() -> Self {
+        Self::parse(std::env::var("AWS_IDENTITY_MODE").ok().as_deref())
+    }
+
+    /// Pure parsing logic behind [`Self::from_env`].
+    fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::to_ascii_lowercase).as_deref() {
+            Some("irsa") => Self::Irsa,
+            Some("static") => Self::Static,
+            _ => Self::Spire,
+        }
+    }
+}
+
+/// Explicit, deployment-configured selection of how [`resolve_client`]
+/// resolves this service's own base AWS identity before layering a
+/// customer's `sts:AssumeRole` on top — only consulted for
+/// `credential_mode = "assume_role"` bucket rows; `static`-mode rows never
+/// touch this at all. Built from [`AwsIdentityModeKind`] plus (for
+/// [`Self::Spire`]) the identity source/role ARN needed to actually
+/// federate — see [`Self::from_kind`].
+pub enum AwsIdentityMode<'a> {
+    /// Resolve via JWT-SVID -> `sts:AssumeRoleWithWebIdentity`
+    /// ([`federated_base_credentials`]) before the customer's `AssumeRole`
+    /// hop.
+    Spire {
+        /// SPIFFE identity source used to fetch this service's own JWT-SVID.
+        identity: &'a dyn JwtSvidSource,
+        /// This service's own federation IAM role ARN — never a customer's.
+        own_role_arn: &'a str,
+    },
+    /// Defer to the default AWS credential-provider chain (IRSA or no
+    /// override at all) — equivalent to today's implicit fallback.
+    Irsa,
+    /// No base-identity route exists on this deployment; `assume_role`
+    /// bucket rows are rejected immediately (see
+    /// [`CredentialError::AssumeRoleUnavailableStaticIdentity`]).
+    Static,
+}
+
+impl<'a> AwsIdentityMode<'a> {
+    /// Builds the runtime mode from a configured `kind` plus an optional
+    /// `(identity, own_role_arn)` federation pair. `Spire` with no
+    /// federation pair available degrades to `Irsa` rather than erroring —
+    /// fail-safe: a deployment configured for SPIRE federation but missing
+    /// its role ARN/identity still has the default credential chain as a
+    /// last resort, matching the "no identity -> default chain, never
+    /// crash" policy used throughout this module.
+    pub fn from_kind(
+        kind: AwsIdentityModeKind,
+        federation: Option<(&'a dyn JwtSvidSource, &'a str)>,
+    ) -> Self {
+        match (kind, federation) {
+            (AwsIdentityModeKind::Static, _) => Self::Static,
+            (AwsIdentityModeKind::Spire, Some((identity, own_role_arn))) => Self::Spire {
+                identity,
+                own_role_arn,
+            },
+            (AwsIdentityModeKind::Spire, None) | (AwsIdentityModeKind::Irsa, _) => Self::Irsa,
+        }
     }
 }
 
@@ -325,23 +429,32 @@ fn static_credentials(
 /// client. Preferred entry point for production code — see
 /// [`resolve_client_inner`] for the test-only override seam.
 ///
+/// `identity_mode` deterministically selects how this service's own base
+/// AWS identity is resolved for `credential_mode = "assume_role"` rows (see
+/// [`AwsIdentityMode`]); `static`-mode rows never consult it.
+///
 /// # Errors
 /// See [`CredentialError`] variants.
 pub async fn resolve_client(
     envelope: &EnvelopeEncryption,
     cfg: &BucketCredentialConfig,
+    identity_mode: &AwsIdentityMode<'_>,
 ) -> Result<Client, CredentialError> {
-    resolve_client_inner(envelope, cfg, None, None).await
+    resolve_client_inner(envelope, cfg, identity_mode, None, None).await
 }
 
 /// Full implementation behind [`resolve_client`]; `sts_endpoint_override`/
 /// `base_credentials_override` let tests exercise the `assume_role` branch
 /// against a wiremock STS server without depending on ambient AWS
-/// credentials or network-reachable IMDS. Not part of the public API surface
-/// beyond the crate (tests live in this same module).
+/// credentials or network-reachable IMDS — when `base_credentials_override`
+/// is `Some`, it wins outright and `identity_mode` is not consulted at all
+/// (the test-only escape hatch pre-dating `AwsIdentityMode`). Not part of
+/// the public API surface beyond the crate (tests live in this same
+/// module).
 async fn resolve_client_inner(
     envelope: &EnvelopeEncryption,
     cfg: &BucketCredentialConfig,
+    identity_mode: &AwsIdentityMode<'_>,
     sts_endpoint_override: Option<&str>,
     base_credentials_override: Option<Credentials>,
 ) -> Result<Client, CredentialError> {
@@ -356,12 +469,45 @@ async fn resolve_client_inner(
                 .role_arn
                 .as_deref()
                 .ok_or(CredentialError::MissingRoleArn)?;
+            let resolved_base = match base_credentials_override {
+                Some(creds) => Some(creds),
+                None => match identity_mode {
+                    AwsIdentityMode::Static => {
+                        return Err(CredentialError::AssumeRoleUnavailableStaticIdentity);
+                    }
+                    AwsIdentityMode::Irsa => None,
+                    AwsIdentityMode::Spire {
+                        identity,
+                        own_role_arn,
+                    } => {
+                        match federated_base_credentials_inner(
+                            *identity,
+                            own_role_arn,
+                            &cfg.region,
+                            sts_endpoint_override,
+                        )
+                        .await
+                        {
+                            Ok(creds) => Some(creds),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "own-AWS JWT-SVID federation unavailable for customer \
+                                     assume_role base identity — falling back to the default \
+                                     AWS credential-provider chain"
+                                );
+                                None
+                            }
+                        }
+                    }
+                },
+            };
             assume_role_credentials(
                 role_arn,
                 cfg.external_id.as_deref(),
                 &cfg.region,
                 sts_endpoint_override,
-                base_credentials_override,
+                resolved_base,
             )
             .await?
         }
@@ -493,7 +639,9 @@ mod tests {
             .expect("encrypt_json");
         let cfg = static_cfg(&server.uri(), blob);
 
-        let client = resolve_client(&envelope, &cfg).await.expect("resolve");
+        let client = resolve_client(&envelope, &cfg, &AwsIdentityMode::Irsa)
+            .await
+            .expect("resolve");
         let result = client.head_bucket().bucket("static-bucket").send().await;
         assert!(result.is_ok(), "{result:?}");
     }
@@ -504,7 +652,7 @@ mod tests {
         let mut cfg = static_cfg("https://s3.example", String::new());
         cfg.credential_enc = None;
         assert!(matches!(
-            resolve_client(&envelope, &cfg).await,
+            resolve_client(&envelope, &cfg, &AwsIdentityMode::Irsa).await,
             Err(CredentialError::MissingStaticCredential)
         ));
     }
@@ -532,7 +680,7 @@ mod tests {
         let cfg = static_cfg("https://s3.example", blob);
 
         assert!(matches!(
-            resolve_client(&wrong_envelope, &cfg).await,
+            resolve_client(&wrong_envelope, &cfg, &AwsIdentityMode::Irsa).await,
             Err(CredentialError::Decrypt(_))
         ));
     }
@@ -547,7 +695,7 @@ mod tests {
         let cfg = static_cfg("https://s3.example", blob);
 
         assert!(matches!(
-            resolve_client(&envelope, &cfg).await,
+            resolve_client(&envelope, &cfg, &AwsIdentityMode::Irsa).await,
             Err(CredentialError::MalformedStaticCredential)
         ));
     }
@@ -561,7 +709,7 @@ mod tests {
             "https://minio.example.com:9000",
             "arn:aws:iam::123456789012:role/skauswatch-scan",
         );
-        let result = resolve_client(&envelope, &cfg).await;
+        let result = resolve_client(&envelope, &cfg, &AwsIdentityMode::Irsa).await;
         assert!(matches!(
             result,
             Err(CredentialError::AssumeRoleRequiresAwsEndpoint(ref e))
@@ -575,7 +723,7 @@ mod tests {
         let mut cfg = assume_role_cfg("https://s3.amazonaws.com", "unused");
         cfg.role_arn = None;
         assert!(matches!(
-            resolve_client(&envelope, &cfg).await,
+            resolve_client(&envelope, &cfg, &AwsIdentityMode::Irsa).await,
             Err(CredentialError::MissingRoleArn)
         ));
     }
@@ -633,6 +781,7 @@ mod tests {
         let client = resolve_client_inner(
             &envelope,
             &cfg,
+            &AwsIdentityMode::Irsa,
             Some(&sts_server.uri()),
             Some(hermetic_base_creds()),
         )
@@ -679,6 +828,7 @@ mod tests {
         assert!(CredentialError::AssumeRoleEmptyResponse.is_permanent());
         assert!(!CredentialError::AssumeRole("timeout".to_owned()).is_permanent());
         assert!(!CredentialError::Identity("degraded".to_owned()).is_permanent());
+        assert!(CredentialError::AssumeRoleUnavailableStaticIdentity.is_permanent());
     }
 
     #[tokio::test]
@@ -687,9 +837,207 @@ mod tests {
         let mut cfg = static_cfg("https://s3.example", String::new());
         cfg.credential_mode = "bogus".to_owned();
         assert!(matches!(
-            resolve_client(&envelope, &cfg).await,
+            resolve_client(&envelope, &cfg, &AwsIdentityMode::Irsa).await,
             Err(CredentialError::UnknownMode(ref m)) if m == "bogus"
         ));
+    }
+
+    // ── AwsIdentityModeKind / AwsIdentityMode ───────────────────────────────
+
+    #[test]
+    fn aws_identity_mode_kind_parses_case_insensitively_and_defaults_to_spire() {
+        assert_eq!(
+            AwsIdentityModeKind::parse(Some("irsa")),
+            AwsIdentityModeKind::Irsa
+        );
+        assert_eq!(
+            AwsIdentityModeKind::parse(Some("IRSA")),
+            AwsIdentityModeKind::Irsa
+        );
+        assert_eq!(
+            AwsIdentityModeKind::parse(Some("static")),
+            AwsIdentityModeKind::Static
+        );
+        assert_eq!(
+            AwsIdentityModeKind::parse(Some("STATIC")),
+            AwsIdentityModeKind::Static
+        );
+        assert_eq!(
+            AwsIdentityModeKind::parse(Some("spire")),
+            AwsIdentityModeKind::Spire
+        );
+        // Unset/unrecognized both fall back to Spire — dal2's on-prem
+        // clusters have no IRSA, so this must never silently become Irsa.
+        assert_eq!(AwsIdentityModeKind::parse(None), AwsIdentityModeKind::Spire);
+        assert_eq!(
+            AwsIdentityModeKind::parse(Some("bogus")),
+            AwsIdentityModeKind::Spire
+        );
+    }
+
+    #[test]
+    fn aws_identity_mode_from_kind_static_ignores_federation_pair() {
+        let identity = FakeJwtSource::Token("unused");
+        assert!(matches!(
+            AwsIdentityMode::from_kind(AwsIdentityModeKind::Static, Some((&identity, "arn"))),
+            AwsIdentityMode::Static
+        ));
+        assert!(matches!(
+            AwsIdentityMode::from_kind(AwsIdentityModeKind::Static, None),
+            AwsIdentityMode::Static
+        ));
+    }
+
+    #[test]
+    fn aws_identity_mode_from_kind_irsa_ignores_federation_pair() {
+        let identity = FakeJwtSource::Token("unused");
+        assert!(matches!(
+            AwsIdentityMode::from_kind(AwsIdentityModeKind::Irsa, Some((&identity, "arn"))),
+            AwsIdentityMode::Irsa
+        ));
+        assert!(matches!(
+            AwsIdentityMode::from_kind(AwsIdentityModeKind::Irsa, None),
+            AwsIdentityMode::Irsa
+        ));
+    }
+
+    #[test]
+    fn aws_identity_mode_from_kind_spire_uses_pair_when_present() {
+        let identity = FakeJwtSource::Token("unused");
+        match AwsIdentityMode::from_kind(AwsIdentityModeKind::Spire, Some((&identity, "arn:role")))
+        {
+            AwsIdentityMode::Spire { own_role_arn, .. } => assert_eq!(own_role_arn, "arn:role"),
+            AwsIdentityMode::Irsa | AwsIdentityMode::Static => {
+                panic!("expected Spire variant")
+            }
+        }
+    }
+
+    #[test]
+    fn aws_identity_mode_from_kind_spire_degrades_to_irsa_without_pair() {
+        // Fail-safe: SPIRE configured but no identity/role available yet
+        // (startup ordering, degraded provider) must never error — it falls
+        // back to the default AWS credential-provider chain.
+        assert!(matches!(
+            AwsIdentityMode::from_kind(AwsIdentityModeKind::Spire, None),
+            AwsIdentityMode::Irsa
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_client_assume_role_static_identity_mode_is_rejected_without_network() {
+        let envelope = test_envelope();
+        let cfg = assume_role_cfg(
+            "https://s3.amazonaws.com",
+            "arn:aws:iam::123456789012:role/demo",
+        );
+        let result = resolve_client(&envelope, &cfg, &AwsIdentityMode::Static).await;
+        assert!(matches!(
+            result,
+            Err(CredentialError::AssumeRoleUnavailableStaticIdentity)
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolve_client_assume_role_spire_mode_federates_base_identity_then_assumes_customer_role()
+     {
+        let sts_server = MockServer::start().await;
+        // Two hops against the same mocked STS endpoint: the service's own
+        // AssumeRoleWithWebIdentity (federation), then the customer's
+        // AssumeRole — both must be observed.
+        Mock::given(method("POST"))
+            .and(body_string_contains("Action=AssumeRoleWithWebIdentity"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                assume_role_with_web_identity_success_xml(
+                    "AKIAOWNBASE",
+                    "ownBaseSecret",
+                    "own-base-session-token",
+                ),
+                "text/xml",
+            ))
+            .mount(&sts_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("Action=AssumeRole&"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                assume_role_success_xml("AKIACUSTOMER", "customerSecret", "customer-session"),
+                "text/xml",
+            ))
+            .mount(&sts_server)
+            .await;
+
+        let envelope = test_envelope();
+        let cfg = assume_role_cfg(
+            "https://s3.amazonaws.com",
+            "arn:aws:iam::123456789012:role/customer",
+        );
+        let identity = FakeJwtSource::Token("fake-spiffe-jwt-token");
+        let mode = AwsIdentityMode::Spire {
+            identity: &identity,
+            own_role_arn: TEST_ROLE_ARN,
+        };
+
+        let client = resolve_client_inner(&envelope, &cfg, &mode, Some(&sts_server.uri()), None)
+            .await
+            .expect("resolve_client_inner");
+        drop(client);
+
+        let requests = sts_server
+            .received_requests()
+            .await
+            .expect("request recording enabled");
+        assert_eq!(
+            requests.len(),
+            2,
+            "expected both the own-base federation hop and the customer AssumeRole hop"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_client_assume_role_spire_mode_falls_back_to_default_chain_when_identity_degraded()
+     {
+        let sts_server = MockServer::start().await;
+        // Only the customer AssumeRole route is mocked — if the code
+        // incorrectly attempted AssumeRoleWithWebIdentity despite the
+        // degraded identity, the default credential-provider chain (never
+        // touched by this test's mock) would be the only thing left able to
+        // sign the customer AssumeRole call.
+        Mock::given(method("POST"))
+            .and(body_string_contains("Action=AssumeRole&"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                assume_role_success_xml("AKIACUSTOMER2", "customerSecret2", "customer-session-2"),
+                "text/xml",
+            ))
+            .mount(&sts_server)
+            .await;
+
+        let envelope = test_envelope();
+        let cfg = assume_role_cfg(
+            "https://s3.amazonaws.com",
+            "arn:aws:iam::123456789012:role/customer",
+        );
+        let identity = FakeJwtSource::Degraded;
+        let mode = AwsIdentityMode::Spire {
+            identity: &identity,
+            own_role_arn: TEST_ROLE_ARN,
+        };
+
+        let result =
+            resolve_client_inner(&envelope, &cfg, &mode, Some(&sts_server.uri()), None).await;
+        // Degraded federation must never surface as a crash or a permanent
+        // config error — it degrades to the default AWS credential-provider
+        // chain (Irsa-equivalent). In a hermetic test environment with no
+        // ambient AWS identity that chain has nothing to resolve to and the
+        // customer AssumeRole call fails to sign — exactly what a real dal2
+        // deployment with degraded SPIRE federation and no IRSA would see
+        // too — which must be a *transient* `CredentialError::AssumeRole`,
+        // never a hard failure/panic and never misclassified as permanent.
+        // An environment that happens to have real ambient credentials
+        // (e.g. a developer's own AWS-configured shell) succeeds instead.
+        match result {
+            Ok(client) => drop(client),
+            Err(e) => assert!(!e.is_permanent(), "expected a transient error, got {e:?}"),
+        }
     }
 
     // ── federated_base_credentials (JWT-SVID -> sts:AssumeRoleWithWebIdentity) ──

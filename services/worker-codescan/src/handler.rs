@@ -8,8 +8,9 @@ use skauswatch_ai::{
 use skauswatch_streams::{StreamEntry, StreamHandler, StreamProducer};
 use sqlx::PgPool;
 
+use skauswatch_vault::CredentialCipher;
+
 use crate::config::WorkerConfig;
-use crate::crypto::CredentialCipher;
 use crate::db::{self, RepoConfigRecord};
 use crate::detection;
 use crate::git_provider::{self, GitCredentials};
@@ -1151,9 +1152,11 @@ mod tests {
         token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
         plaintext_token: &str,
     ) -> (i64, i64) {
-        let cipher = crate::crypto::CredentialCipher::from_base64_key(&test_encryption_key())
+        let cipher = skauswatch_vault::CredentialCipher::from_base64_key(&test_encryption_key())
             .unwrap_or_else(|e| panic!("cipher: {e:?}"));
-        let encrypted = cipher.encrypt(plaintext_token);
+        let encrypted = cipher
+            .encrypt(plaintext_token)
+            .unwrap_or_else(|e| panic!("encrypt: {e:?}"));
         let cred_row = sqlx::query(
             "INSERT INTO codescan_git_credentials \
              (user_id, tenant_id, platform, credential_type, encrypted_token, is_active, token_expires_at) \
@@ -1431,9 +1434,11 @@ mod tests {
         // Credential is a gitlab token, but the repo config's own `provider`
         // column is github — a data inconsistency (misconfigured
         // credential_id) that must never be used to auth a github API call.
-        let cipher = crate::crypto::CredentialCipher::from_base64_key(&test_encryption_key())
+        let cipher = skauswatch_vault::CredentialCipher::from_base64_key(&test_encryption_key())
             .unwrap_or_else(|e| panic!("cipher: {e:?}"));
-        let encrypted = cipher.encrypt("glpat_mismatched_platform");
+        let encrypted = cipher
+            .encrypt("glpat_mismatched_platform")
+            .unwrap_or_else(|e| panic!("encrypt: {e:?}"));
         let cred_row = sqlx::query(
             "INSERT INTO codescan_git_credentials \
              (user_id, tenant_id, platform, credential_type, encrypted_token, is_active) \

@@ -5934,7 +5934,6 @@ dependencies = [
 name = "skauswatch-codescan-backend"
 version = "2.0.0"
 dependencies = [
- "aes-gcm",
  "anyhow",
  "axum",
  "axum-test",
@@ -5951,6 +5950,7 @@ dependencies = [
  "skauswatch-streams",
  "skauswatch-telemetry",
  "skauswatch-testkit",
+ "skauswatch-vault",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
@@ -6074,6 +6074,7 @@ dependencies = [
  "skauswatch-identity",
  "skauswatch-proto",
  "skauswatch-s3",
+ "skauswatch-spire-entry",
  "skauswatch-streams",
  "skauswatch-telemetry",
  "skauswatch-testkit",
@@ -6196,6 +6197,7 @@ dependencies = [
  "skauswatch-vault",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "url",
  "wiremock",
 ]
@@ -6272,6 +6274,26 @@ dependencies = [
  "uuid",
  "x509-parser",
  "yara-x",
+]
+
+[[package]]
+name = "skauswatch-spire-entry"
+version = "2.0.0"
+dependencies = [
+ "http 1.4.2",
+ "hyper-util",
+ "prost",
+ "protox",
+ "rustls",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tracing",
 ]
 
 [[package]]
@@ -6391,7 +6413,6 @@ dependencies = [
 name = "skauswatch-worker-codescan"
 version = "2.0.0"
 dependencies = [
- "aes-gcm",
  "anyhow",
  "async-trait",
  "axum",
@@ -6408,6 +6429,7 @@ dependencies = [
  "skauswatch-streams",
  "skauswatch-telemetry",
  "skauswatch-testkit",
+ "skauswatch-vault",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",

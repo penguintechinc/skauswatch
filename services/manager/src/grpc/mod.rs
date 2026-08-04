@@ -44,6 +44,7 @@
 mod manager_service;
 mod pki_client;
 mod s3_scan_service;
+pub(crate) mod spire_entry;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

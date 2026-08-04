@@ -1343,52 +1343,63 @@ pub(crate) async fn test_bucket_connection(
     let bucket = fetch_bucket(&state.db, user.tenant_id, bucket_id)
         .await?
         .ok_or_else(|| ApiError::NotFound("Bucket configuration not found".to_owned()))?;
-    Ok(run_head_bucket(&bucket, &state.envelope)
-        .await
-        .into_response())
+    Ok(
+        run_head_bucket(&bucket, &state.envelope, &state.aws_identity_mode())
+            .await
+            .into_response(),
+    )
 }
 
 /// Resolves the bucket's hybrid credentials (`assume_role`/`static` — see
 /// `skauswatch_s3::credentials`) into an S3 client and issues HeadBucket,
 /// mapping outcomes onto the v1 boto3 response shapes. Credential
 /// resolution failures (bad config shape, decrypt failure, STS error) map
-/// onto the same failure shapes as a live S3 call would.
+/// onto the same failure shapes as a live S3 call would. `identity_mode`
+/// deterministically selects how the `assume_role` branch resolves
+/// manager's own base AWS identity — see
+/// `docs/v2-port/aws-identity-runbook.md` §0.
 async fn run_head_bucket(
     b: &BucketRow,
     envelope: &EnvelopeEncryption,
+    identity_mode: &skauswatch_s3::credentials::AwsIdentityMode<'_>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 
-    let client =
-        match skauswatch_s3::credentials::resolve_client(envelope, &b.credential_config()).await {
-            Ok(c) => c,
-            Err(
-                e @ (CredentialError::AssumeRoleRequiresAwsEndpoint(_)
-                | CredentialError::MissingRoleArn
-                | CredentialError::MissingStaticCredential
-                | CredentialError::MalformedStaticCredential
-                | CredentialError::UnknownMode(_)),
-            ) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": "Connection failed: invalid credential configuration",
-                        "details": e.to_string(),
-                    })),
-                );
-            }
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "success": false,
-                        "error": "Connection failed",
-                        "details": e.to_string(),
-                    })),
-                );
-            }
-        };
+    let client = match skauswatch_s3::credentials::resolve_client(
+        envelope,
+        &b.credential_config(),
+        identity_mode,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(
+            e @ (CredentialError::AssumeRoleRequiresAwsEndpoint(_)
+            | CredentialError::MissingRoleArn
+            | CredentialError::MissingStaticCredential
+            | CredentialError::MalformedStaticCredential
+            | CredentialError::UnknownMode(_)),
+        ) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Connection failed: invalid credential configuration",
+                    "details": e.to_string(),
+                })),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Connection failed",
+                    "details": e.to_string(),
+                })),
+            );
+        }
+    };
 
     match client.head_bucket().bucket(&b.bucket_name).send().await {
         Ok(_) => (

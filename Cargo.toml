@@ -23,6 +23,7 @@ skauswatch-streams = { path = "crates/skauswatch-streams" }
 skauswatch-proto = { path = "crates/skauswatch-proto" }
 skauswatch-ai = { path = "crates/skauswatch-ai" }
 skauswatch-s3 = { path = "crates/skauswatch-s3" }
+skauswatch-spire-entry = { path = "crates/skauswatch-spire-entry" }
 # Test-only harness (isolated-schema DB pools, JWT minting, LicenseClient
 # builders) — see docs/v2-port/testing-pattern.md. Added as a dev-dependency
 # by service crates, never a runtime dependency.
@@ -51,6 +52,12 @@ prost = "=0.14.4"
 prost-types = "=0.14.4"
 tonic-prost-build = "=0.14.6"
 protox = "=0.9.1"
+# TokioIo: bridges a manually-built tokio_rustls::TlsStream into hyper's
+# rt::Read/Write for tonic::transport::Endpoint::connect_with_connector — see
+# crates/skauswatch-spire-entry, the first manager-as-gRPC-client mTLS
+# transport in this workspace (server side already does the mirror-image
+# TlsAcceptor wiring in services/manager/src/grpc/mod.rs::mtls_incoming).
+hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
 
 # Database
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "chrono", "uuid", "json", "macros", "migrate"] }

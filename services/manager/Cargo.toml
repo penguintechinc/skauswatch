@@ -47,6 +47,7 @@ skauswatch-common = { workspace = true }
 skauswatch-identity = { workspace = true }
 skauswatch-proto = { workspace = true }
 skauswatch-s3 = { workspace = true }
+skauswatch-spire-entry = { workspace = true }
 skauswatch-streams = { workspace = true }
 skauswatch-telemetry = { workspace = true }
 skauswatch-vault = { workspace = true }

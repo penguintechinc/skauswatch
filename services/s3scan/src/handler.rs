@@ -146,21 +146,31 @@ impl S3ScanHandler {
         &self,
         bucket: &db::BucketConfig,
     ) -> Result<aws_sdk_s3::Client, ProcessError> {
-        skauswatch_s3::credentials::resolve_client(&self.envelope, &bucket.credential_config())
-            .await
-            .map_err(|e| {
-                if e.is_permanent() {
-                    ProcessError::Permanent(format!(
-                        "bucket {} credential resolution failed: {e}",
-                        bucket.id
-                    ))
-                } else {
-                    ProcessError::Transient(format!(
-                        "bucket {} credential resolution failed: {e}",
-                        bucket.id
-                    ))
-                }
-            })
+        let identity_mode = skauswatch_s3::credentials::AwsIdentityMode::from_kind(
+            self.cfg.aws_identity_mode,
+            self.federation
+                .as_ref()
+                .map(|f| (f.identity.as_ref(), f.role_arn.as_str())),
+        );
+        skauswatch_s3::credentials::resolve_client(
+            &self.envelope,
+            &bucket.credential_config(),
+            &identity_mode,
+        )
+        .await
+        .map_err(|e| {
+            if e.is_permanent() {
+                ProcessError::Permanent(format!(
+                    "bucket {} credential resolution failed: {e}",
+                    bucket.id
+                ))
+            } else {
+                ProcessError::Transient(format!(
+                    "bucket {} credential resolution failed: {e}",
+                    bucket.id
+                ))
+            }
+        })
     }
 
     /// Runs the content pipeline (file type, hashes, ClamAV, TI) over `data`.

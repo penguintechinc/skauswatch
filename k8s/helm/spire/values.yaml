@@ -1,6 +1,12 @@
 spire:
   enabled: false
 
+  # Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml) for
+  # every enabled spire component. Requires the Tetragon agent DaemonSet
+  # in-cluster -- set false to render without it.
+  tetragon:
+    enabled: true
+
   trustDomain: "penguintech.io"
   environment: "alpha"
 
@@ -189,6 +195,10 @@ spire:
       runAsNonRoot: true
       runAsUser: 1000
       fsGroup: 1000
+      # PSA "restricted" compliant -- see k8s/helm/README.md "Cluster
+      # security baseline".
+      seccompProfile:
+        type: RuntimeDefault
 
     securityContext:
       allowPrivilegeEscalation: false
@@ -236,9 +246,19 @@ spire:
         cpu: 250m
         memory: 256Mi
 
+    # Runs as root: the agent must chown/create the SPIFFE Workload API
+    # socket directory (hostPath, shared with every workload pod on the
+    # node) at startup -- a common, documented SPIRE agent requirement.
+    # NOT compatible with Pod Security Admission "restricted" (which
+    # requires runAsNonRoot); this workload needs PSA "baseline" or looser.
+    # No added Linux capabilities and not privileged, unlike the disabled-
+    # by-default csi-driver below. See k8s/helm/README.md "spire-agent:
+    # baseline, not restricted".
     podSecurityContext:
       runAsUser: 0
       runAsGroup: 0
+      seccompProfile:
+        type: RuntimeDefault
 
     securityContext:
       readOnlyRootFilesystem: true

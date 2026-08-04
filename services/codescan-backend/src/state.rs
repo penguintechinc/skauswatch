@@ -6,9 +6,8 @@ use std::sync::Arc;
 
 use penguin_licensing::{LicenseClient, LicenseConfig};
 use skauswatch_streams::StreamProducer;
+use skauswatch_vault::CredentialCipher;
 use sqlx::PgPool;
-
-use crate::crypto::CredentialCipher;
 
 /// JWT settings — this service only verifies tokens issued by the manager,
 /// so only the shared signing secret is needed (no issuance/expiry config).

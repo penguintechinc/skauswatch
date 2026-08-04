@@ -31,6 +31,12 @@ securityContext:
       - SYS_PTRACE
       - NET_ADMIN
 
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml) is the
+# PRIMARY control for this pod -- see k8s/helm/README.md "endpoint-agent:
+# CNP does not apply". Requires the Tetragon agent DaemonSet in-cluster.
+tetragon:
+  enabled: true
+
 # No service - agent reports to manager, never receives inbound traffic
 service:
   enabled: false

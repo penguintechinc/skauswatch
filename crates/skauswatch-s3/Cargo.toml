@@ -20,6 +20,7 @@ skauswatch-common = { workspace = true }
 skauswatch-identity = { workspace = true }
 skauswatch-vault = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]

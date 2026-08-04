@@ -4,7 +4,6 @@
 //! probe (no curl in images, per container standards).
 
 mod config;
-mod crypto;
 mod db;
 mod detection;
 mod git_provider;

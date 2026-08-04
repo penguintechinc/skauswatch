@@ -113,6 +113,18 @@ pub struct AppStateInner {
     /// hard-fails inside `IdentityProvider::connect` itself before this
     /// field would ever be `None` in prod.
     pub identity: Option<Arc<IdentityProvider>>,
+    /// Explicit `awsIdentity.mode` selection (`AWS_IDENTITY_MODE`) —
+    /// deterministically selects how manager resolves its own base AWS
+    /// identity for `assume_role`-mode S3 bucket credentials (the
+    /// `/buckets/{id}/test` connection check); see
+    /// `docs/v2-port/aws-identity-runbook.md` §0.
+    pub aws_identity_mode: skauswatch_s3::credentials::AwsIdentityModeKind,
+    /// This service's own federation IAM role ARN (`AWS_FEDERATION_ROLE_ARN`)
+    /// — never a customer's `role_arn`. `None` disables federation
+    /// regardless of `aws_identity_mode` (see
+    /// `skauswatch_s3::credentials::AwsIdentityMode::from_kind`'s fail-safe
+    /// degrade-to-`Irsa` behavior).
+    pub aws_federation_role_arn: Option<String>,
 }
 
 /// Cheap-to-clone handle used as axum state.
@@ -190,7 +202,32 @@ impl AppStateInner {
             streams: Some(streams),
             envelope,
             identity: Some(identity),
+            aws_identity_mode: skauswatch_s3::credentials::AwsIdentityModeKind::from_env(),
+            aws_federation_role_arn: std::env::var("AWS_FEDERATION_ROLE_ARN")
+                .ok()
+                .filter(|v| !v.is_empty()),
         }))
+    }
+
+    /// Builds the explicit [`skauswatch_s3::credentials::AwsIdentityMode`]
+    /// manager should resolve `assume_role`-mode S3 base credentials with,
+    /// from the held `identity`/`aws_identity_mode`/
+    /// `aws_federation_role_arn` — see `docs/v2-port/aws-identity-runbook.md`
+    /// §0. `Spire` degrades to `Irsa` (never errors) when either the
+    /// identity or the role ARN is unavailable — same fail-safe posture as
+    /// every other identity-adjacent fallback in this service.
+    pub fn aws_identity_mode(&self) -> skauswatch_s3::credentials::AwsIdentityMode<'_> {
+        let federation = self
+            .identity
+            .as_deref()
+            .zip(self.aws_federation_role_arn.as_deref())
+            .map(|(identity, role_arn)| {
+                (
+                    identity as &dyn skauswatch_s3::credentials::JwtSvidSource,
+                    role_arn,
+                )
+            });
+        skauswatch_s3::credentials::AwsIdentityMode::from_kind(self.aws_identity_mode, federation)
     }
 
     /// Publishes ordered fields to a `skauswatch:*` stream, swallowing every
@@ -237,6 +274,8 @@ impl AppStateInner {
             streams: None,
             envelope: test_envelope(),
             identity: None,
+            aws_identity_mode: skauswatch_s3::credentials::AwsIdentityModeKind::Irsa,
+            aws_federation_role_arn: None,
         })
     }
 
@@ -270,6 +309,8 @@ impl AppStateInner {
             streams: None,
             envelope: test_envelope(),
             identity: Some(identity),
+            aws_identity_mode: skauswatch_s3::credentials::AwsIdentityModeKind::Irsa,
+            aws_federation_role_arn: None,
         })
     }
 }

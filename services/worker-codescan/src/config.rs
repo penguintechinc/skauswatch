@@ -55,7 +55,8 @@ pub struct WorkerConfig {
     /// Base64-encoded AES-256-GCM key (`CREDENTIAL_ENCRYPTION_KEY`) used to
     /// decrypt `codescan_git_credentials.encrypted_token` rows — must match
     /// the key codescan-backend encrypted with (same env var name, same
-    /// format; see `crate::crypto`). `None` means per-repo credential
+    /// format; see `skauswatch_vault::CredentialCipher`). `None` means
+    /// per-repo credential
     /// resolution is disabled; the worker falls back to `git_token`.
     pub credential_encryption_key: Option<String>,
     /// npm registry base URL override for license lookups (`NPM_REGISTRY_URL`);

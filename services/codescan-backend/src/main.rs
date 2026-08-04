@@ -5,7 +5,6 @@
 //! `darwin/services/flask-backend`.
 
 mod auth;
-mod crypto;
 mod dt;
 mod error;
 mod health;

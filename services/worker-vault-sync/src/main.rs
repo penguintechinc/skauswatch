@@ -152,6 +152,15 @@ async fn own_aws_federation() -> Option<(
     let role_arn = std::env::var("AWS_FEDERATION_ROLE_ARN")
         .ok()
         .filter(|v| !v.is_empty())?;
+    if skauswatch_s3::credentials::AwsIdentityModeKind::from_env()
+        != skauswatch_s3::credentials::AwsIdentityModeKind::Spire
+    {
+        tracing::info!(
+            "AWS_FEDERATION_ROLE_ARN is set but AWS_IDENTITY_MODE is not \"spire\" — own-AWS \
+             federation skipped, deferring to the default AWS credential-provider chain"
+        );
+        return None;
+    }
     match skauswatch_identity::IdentityProvider::connect().await {
         Ok(identity) => {
             tracing::info!(

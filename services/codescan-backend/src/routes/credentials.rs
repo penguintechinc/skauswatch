@@ -7,7 +7,8 @@
 //! `encrypted_credential` vs. the live `user_id`/`platform`/
 //! `credential_type`/`encrypted_token`). Admin-only, matching v1.
 //!
-//! Tokens are encrypted at rest with AES-256-GCM (`crate::crypto`) and are
+//! Tokens are encrypted at rest with AES-256-GCM
+//! (`skauswatch_vault::CredentialCipher`) and are
 //! NEVER returned in a response body or written to a log line — every
 //! response shape below omits `encrypted_token` entirely.
 //!

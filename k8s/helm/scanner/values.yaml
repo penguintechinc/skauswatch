@@ -22,13 +22,36 @@ podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
   fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and
+  # good practice under "baseline") -- see k8s/helm/README.md "Cluster
+  # security baseline".
+  seccompProfile:
+    type: RuntimeDefault
 
+# NET CAPABILITY EXCEPTION (approved): masscan (services/scanner/src/asm.rs
+# run_masscan) requires CAP_NET_RAW to send raw SYN packets for ASM port
+# discovery. services/scanner/src/asm.rs's own module doc names this
+# requirement explicitly and instructs cluster operators to grant it via an
+# approved exception rather than escalate to root -- this is that grant.
+# NOT compatible with Pod Security Admission "restricted" (which forbids
+# adding any capability beyond NET_BIND_SERVICE) -- this chart's namespace
+# must run at PSA "baseline" or looser. See k8s/helm/README.md "PSA
+# namespace baseline" and devops-containers.md's Rootless Containers
+# exception process.
 securityContext:
   allowPrivilegeEscalation: false
   capabilities:
     drop:
       - ALL
+    add:
+      - NET_RAW
   readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
 
 healthPort: 8080
 metricsPort: 9090

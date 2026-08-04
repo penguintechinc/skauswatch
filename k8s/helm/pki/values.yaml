@@ -22,6 +22,11 @@ podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
   fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and
+  # good practice under "baseline") -- see k8s/helm/README.md "Cluster
+  # security baseline".
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false
@@ -29,6 +34,12 @@ securityContext:
     drop:
       - ALL
   readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
 
 # REST (API_PORT), gRPC (GRPC_PORT), Prometheus metrics.
 httpPort: 8001
@@ -82,6 +93,16 @@ affinity: {}
 # /etc/pki (see services/pki/src/config.rs CA_KEY_PATH/CA_CERT_PATH) — this
 # is the one skauswatch service that genuinely needs a writable, persistent
 # volume; readOnlyRootFilesystem stays true everywhere else in the container.
+#
+# AT-REST ENCRYPTION (see k8s/helm/README.md "At-rest encryption
+# baseline"): this is the only Kubernetes-native volume in the whole
+# product (every other service's storage is an external Postgres/S3
+# dependency this chart set doesn't own). storageClassName MUST resolve to
+# an encryption-at-rest-capable StorageClass in beta/gamma/production —
+# left empty (cluster default) here since the real class name is
+# cluster-specific and unknown to this chart; k8s-ops sets it per
+# environment values file before first deploy. Holds the CA root private
+# key, so this is not optional.
 persistence:
   enabled: true
   size: 1Gi

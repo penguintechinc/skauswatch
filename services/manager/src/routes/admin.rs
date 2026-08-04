@@ -118,35 +118,56 @@ fn validate_ttl(v: Option<i64>, field: &str) -> Result<i64, ApiError> {
 }
 
 /// Applies newly-persisted SVID TTLs to SPIRE's Server Entry API
-/// (`UpdateEntry` `x509SvidTtl`/`jwtSvidTtl`) — the seam a future pass wires
-/// a real SPIRE Server API client into. No such client exists in this repo
-/// today (the Server API is an upstream SPIRE surface, not one skauswatch
-/// defines itself, and building/vendoring its proto is out of scope here);
-/// this deliberately never blocks or fails the request that already
-/// persisted the setting to the database (the source of truth for GET going
-/// forward regardless of whether SPIRE's own registration entries have been
-/// updated to match yet) — same fail-safe posture as every other
-/// SPIRE/identity-adjacent fallback in this crate: log a warning, never
-/// crash or 500 on an unreachable/unimplemented control plane.
+/// (`ListEntries`/`BatchUpdateEntry` — see `crate::grpc::spire_entry`),
+/// replacing the earlier persist+log-only seam. Deliberately never blocks
+/// or fails the request that already persisted the setting to the database
+/// (the source of truth for GET going forward regardless of whether
+/// SPIRE's own registration entries have been updated to match yet) — same
+/// fail-safe posture as every other SPIRE/identity-adjacent fallback in
+/// this crate: log a warning on any failure (unreachable server, no
+/// identity held, per-entry error), never crash or 500.
 async fn apply_svid_ttl_to_spire(state: &AppState, x509_ttl_seconds: i64, jwt_ttl_seconds: i64) {
-    match &state.identity {
-        Some(identity) if identity.has_identity() => {
-            tracing::warn!(
+    let Some(identity) = &state.identity else {
+        tracing::warn!(
+            x509_ttl_seconds,
+            jwt_ttl_seconds,
+            "no SPIFFE workload identity held — skipping SPIRE Server Entry API apply \
+             (dev/test only; production hard-fails at startup before ever reaching this \
+             fallback)"
+        );
+        return;
+    };
+
+    match crate::grpc::spire_entry::apply_svid_ttl(identity, x509_ttl_seconds, jwt_ttl_seconds)
+        .await
+    {
+        crate::grpc::spire_entry::ApplyStatus::Applied { updated, failed: 0 } => {
+            tracing::info!(
                 x509_ttl_seconds,
                 jwt_ttl_seconds,
-                "SVID TTL settings persisted to the database; SPIRE Server Entry \
-                 API UpdateEntry apply is not yet implemented (no in-repo SPIRE \
-                 Server API client) — update SPIRE's registration entries out of \
-                 band until this seam is wired to a real client"
+                updated,
+                "SVID TTL settings persisted and applied to every SPIRE registration entry"
             );
         }
-        _ => {
+        crate::grpc::spire_entry::ApplyStatus::Applied { updated, failed } => {
             tracing::warn!(
                 x509_ttl_seconds,
                 jwt_ttl_seconds,
-                "no SPIFFE workload identity held — skipping SPIRE Server API apply \
-                 (dev/test only; production hard-fails at startup before ever \
-                 reaching this fallback)"
+                updated,
+                failed,
+                "SVID TTL settings persisted; SPIRE Server Entry API applied the change to \
+                 some but not all registration entries — see the per-entry BatchUpdateEntry \
+                 failures on the SPIRE server side"
+            );
+        }
+        crate::grpc::spire_entry::ApplyStatus::PersistedNotApplied { reason } => {
+            tracing::warn!(
+                x509_ttl_seconds,
+                jwt_ttl_seconds,
+                reason,
+                "SVID TTL settings persisted to the database but NOT YET applied to SPIRE — \
+                 will take effect once this seam succeeds on a future PUT, or once SPIRE's \
+                 registration entries are updated out of band"
             );
         }
     }
@@ -334,6 +355,19 @@ mod tests {
         // that already committed the DB write above.
         let state = db_state(dev_license()).await;
         assert!(state.identity.is_none());
+        apply_svid_ttl_to_spire(&state, 300, 300).await;
+    }
+
+    #[tokio::test]
+    async fn apply_to_spire_never_panics_when_identity_is_held_but_degraded() {
+        // A held-but-unattested identity (SPIRE agent unreachable) must
+        // delegate into `grpc::spire_entry::apply_svid_ttl` and degrade to
+        // `PersistedNotApplied`, not panic or hang — `apply_svid_ttl_to_spire`
+        // only reads `state.identity`, so the lazy/unconnected pool from
+        // `for_tests_with_identity` is fine here.
+        let identity =
+            std::sync::Arc::new(skauswatch_identity::IdentityProvider::degraded_for_test());
+        let state = crate::state::AppStateInner::for_tests_with_identity(dev_license(), identity);
         apply_svid_ttl_to_spire(&state, 300, 300).await;
     }
 }
