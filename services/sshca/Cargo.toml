@@ -22,6 +22,7 @@ penguin-licensing = { workspace = true, features = ["axum"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sqlx = { workspace = true }
 ssh-key = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -30,11 +31,17 @@ utoipa = { workspace = true, features = ["yaml"] }
 uuid = { workspace = true }
 skauswatch-auth = { workspace = true }
 skauswatch-common = { workspace = true }
+skauswatch-db = { workspace = true }
 skauswatch-streams = { workspace = true }
 skauswatch-telemetry = { workspace = true }
 
 [dev-dependencies]
 axum-test = { workspace = true }
+# Real Postgres schema for DB-backed store tests — applies pki's
+# `ssh_certificates`/`crl_entries` migrations into an isolated schema (see
+# src/store.rs's consolidation decision doc comment). sshca ships no
+# migrations of its own; schema authority stays with services/pki.
+skauswatch-testkit = { workspace = true }
 
 [lints]
 workspace = true

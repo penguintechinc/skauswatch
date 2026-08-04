@@ -295,6 +295,154 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/threat-intel/feeds:
+    get:
+      tags:
+      - threat-intel
+      operationId: list_feeds
+      responses:
+        '200':
+          description: Configured TAXII feeds and their poll status
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ThreatFeed'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing tenant claim, or threat-intel not enabled for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Threat-intel database not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/threat-intel/indicators:
+    get:
+      tags:
+      - threat-intel
+      operationId: search_indicators
+      parameters:
+      - name: q
+        in: query
+        description: Free-text match against value/description.
+        required: false
+        schema:
+          type: string
+      - name: type
+        in: query
+        description: Restrict to one IOC kind (`ip`, `domain`, `hash`, ...).
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: threat_level
+        in: query
+        description: Restrict to one threat level.
+        required: false
+        schema:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/ThreatLevel'
+      - name: limit
+        in: query
+        description: Page size (default 50).
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: offset
+        in: query
+        description: Page offset (default 0).
+        required: false
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Matching threat indicators
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IndicatorSearchResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing tenant claim, or threat-intel not enabled for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Threat-intel database not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/threat-intel/indicators/{id}:
+    get:
+      tags:
+      - threat-intel
+      operationId: get_indicator
+      parameters:
+      - name: id
+        in: path
+        description: Indicator id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The indicator
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ioc'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing tenant claim, or threat-intel not enabled for this deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Indicator not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Threat-intel database not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
   /api/v1/version:
     get:
       tags:
@@ -671,6 +819,96 @@ components:
         version:
           type: string
           description: Service version string.
+    IndicatorSearchResponse:
+      type: object
+      description: Response for `GET /threat-intel/indicators`.
+      required:
+      - indicators
+      - total
+      - limit
+      - offset
+      properties:
+        indicators:
+          type: array
+          items:
+            $ref: '#/components/schemas/Ioc'
+          description: Matching indicators.
+        limit:
+          type: integer
+          format: int64
+          description: Echoed page size.
+        offset:
+          type: integer
+          format: int64
+          description: Echoed page offset.
+        total:
+          type: integer
+          format: int64
+          description: Total match count (before pagination).
+    Ioc:
+      type: object
+      description: |-
+        Indicator of Compromise. v1 `IOC`. Backed by `crate::threat_intel::
+        store::ThreatStore` (Postgres `threat_iocs`), returned by
+        `crate::threat_intel::routes`.
+      required:
+      - type
+      properties:
+        confidence:
+          type: number
+          format: double
+          description: Confidence score (0.0-1.0).
+        created_at:
+          type: string
+          format: date-time
+          description: Creation time.
+        description:
+          type: string
+          description: Human description.
+        expiration:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Optional expiration.
+        id:
+          type: string
+          description: IOC id.
+        kill_chain_phases:
+          type: array
+          items:
+            type: string
+          description: MITRE-style kill-chain phases.
+        malware_families:
+          type: array
+          items:
+            type: string
+          description: Associated malware family names.
+        metadata:
+          description: Free-form metadata.
+        source_feed:
+          type:
+          - string
+          - 'null'
+          description: Source feed id/name.
+        tags:
+          type: array
+          items:
+            type: string
+          description: Free-form tags.
+        threat_level:
+          $ref: '#/components/schemas/ThreatLevel'
+          description: Assessed threat level.
+        type:
+          type: string
+          description: Indicator type (ip, domain, hash, ...).
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update time.
+        value:
+          type: string
+          description: Indicator value.
     LogSource:
       type: string
       description: Origin of a collected log/event. v1 `LogSource`.
@@ -689,6 +927,73 @@ components:
       - medium
       - low
       - info
+    ThreatFeed:
+      type: object
+      description: |-
+        Threat intelligence feed configuration. v1 `ThreatFeed`. Backed by
+        `crate::threat_intel::store::ThreatStore` (Postgres `threat_feeds`),
+        seeded from `MONITOR_TAXII_FEED_URLS` by `crate::threat_intel::taxii`.
+      required:
+      - name
+      - url
+      properties:
+        certificate_verification:
+          type: boolean
+          description: Whether TLS certificates are verified.
+        credentials:
+          description: Optional auth credentials.
+        enabled:
+          type: boolean
+          description: Whether the feed is actively polled.
+        feed_type:
+          type: string
+          description: Feed protocol (taxii, csv, stix, ...).
+        headers:
+          description: Optional extra HTTP headers.
+        id:
+          type: string
+          description: Feed id.
+        ioc_count:
+          type: integer
+          format: int64
+          description: Number of IOCs currently sourced from this feed.
+        last_updated:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Last successful update time.
+        metadata:
+          description: Free-form metadata.
+        name:
+          type: string
+          description: Display name.
+        proxy_url:
+          type:
+          - string
+          - 'null'
+          description: Optional outbound proxy.
+        status:
+          type: string
+          description: Feed status string.
+        update_frequency:
+          type: integer
+          format: int64
+          description: Poll frequency in seconds.
+        url:
+          type: string
+          description: Feed URL.
+    ThreatLevel:
+      type: string
+      description: |-
+        Threat intelligence confidence/impact level. v1 `ThreatLevel`. Wired up
+        by the phase-12 TAXII threat-intel engine (`crate::threat_intel`).
+      enum:
+      - critical
+      - high
+      - medium
+      - low
+      - unknown
     UpdateAlertStatusRequest:
       type: object
       description: |-
@@ -744,3 +1049,5 @@ components:
 tags:
 - name: monitor
   description: Health/version, dashboard metrics, event search, and alert management
+- name: threat-intel
+  description: TAXII feed status and threat indicator search — see crate::threat_intel::mod for how this differs from manager's IOC CRUD

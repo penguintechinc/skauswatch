@@ -206,6 +206,35 @@ impl SshCa {
     }
 }
 
+/// Detects the subject key algorithm from its OpenSSH public-key line
+/// prefix — used only to populate the durable `ssh_certificates.key_type`
+/// column (`crate::store`). Signing itself derives the real algorithm from
+/// the parsed key inside [`SshCa::sign`]; this is a cheap, independent
+/// classification for storage/display, not part of the signing path.
+pub fn detect_key_type(public_key_line: &str) -> String {
+    if public_key_line.starts_with("ssh-ed25519") {
+        "ed25519".to_owned()
+    } else if public_key_line.starts_with("ssh-rsa") {
+        "rsa".to_owned()
+    } else if public_key_line.starts_with("ecdsa-sha2") {
+        "ecdsa".to_owned()
+    } else {
+        "unknown".to_owned()
+    }
+}
+
+/// Recomputes a subject public key's SHA256 OpenSSH fingerprint from its
+/// stored OpenSSH line. `ssh_certificates` (the pki-owned schema this
+/// service now persists into, see `crate::store`) has no dedicated
+/// fingerprint column — the fingerprint is a pure, deterministic function
+/// of the stored `public_key` text, so nothing is lost by recomputing it on
+/// read instead of persisting it separately.
+pub fn public_key_fingerprint(public_key_line: &str) -> Result<String, SignError> {
+    let key = PublicKey::from_openssh(public_key_line)
+        .map_err(|e| SignError::InvalidSubjectKey(e.to_string()))?;
+    Ok(key.fingerprint(HashAlg::Sha256).to_string())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -512,6 +541,25 @@ mod tests {
         let ca = SshCa::load_or_generate(&path)?;
         assert!(ca.fingerprint().starts_with("SHA256:"));
         assert!(!ca.public_key_openssh().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn detect_key_type_covers_all_prefixes() {
+        assert_eq!(detect_key_type("ssh-ed25519 AAA"), "ed25519");
+        assert_eq!(detect_key_type("ssh-rsa AAA"), "rsa");
+        assert_eq!(detect_key_type("ecdsa-sha2-nistp256 AAA"), "ecdsa");
+        assert_eq!(detect_key_type("weird-type AAA"), "unknown");
+    }
+
+    #[test]
+    fn public_key_fingerprint_matches_the_signing_path_and_rejects_garbage() -> anyhow::Result<()> {
+        let subject = gen_subject();
+        let fp = public_key_fingerprint(&subject).map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert!(fp.starts_with("SHA256:"));
+
+        let err = public_key_fingerprint("not-a-key");
+        assert!(matches!(err, Err(SignError::InvalidSubjectKey(_))));
         Ok(())
     }
 

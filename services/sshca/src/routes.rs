@@ -158,10 +158,18 @@ pub(crate) async fn issue_certificate(
         ));
     }
 
+    // The durable store's `ssh_certificates.id` primary key (shared with
+    // pki, see `crate::store`'s module doc) requires a UUID: a
+    // caller-supplied `request_id` is honoured only when it already parses
+    // as one, otherwise a fresh UUID is generated — a documented,
+    // deliberate narrowing from the pre-persistence contract, which
+    // accepted (and echoed back verbatim) an arbitrary caller string.
     let request_id = req
         .request_id
-        .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .as_deref()
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+        .unwrap_or_else(uuid::Uuid::new_v4)
+        .to_string();
     // v1 key_id format: "{type}-{request_id}".
     let key_id = req
         .key_id
@@ -190,6 +198,12 @@ pub(crate) async fn issue_certificate(
     if let Some(cmd) = req.force_command.as_ref().filter(|s| !s.is_empty()) {
         critical_options.insert("force-command".to_owned(), cmd.clone());
     }
+
+    // Kept separately from `critical_options` (which folds it in for
+    // signing) to populate the durable store's dedicated `source_address`
+    // column — see `crate::store::StoredCert`.
+    let source_addresses: Vec<String> = req.source_address.iter().cloned().collect();
+    let key_type = crate::ca::detect_key_type(&req.public_key);
 
     let valid_after = Utc::now().timestamp();
     let valid_before = valid_after.saturating_add(validity as i64);
@@ -226,18 +240,26 @@ pub(crate) async fn issue_certificate(
         certificate_type: req.certificate_type,
         serial_number: serial,
         key_id: key_id.clone(),
+        key_type,
         principals: req.principals.clone(),
         status: "active".to_owned(),
         signed_certificate: signed.signed_certificate.clone(),
-        public_key_fingerprint: signed.public_key_fingerprint.clone(),
-        ca_fingerprint: state.ca.fingerprint().to_owned(),
+        public_key: req.public_key.clone(),
+        extensions: extensions.clone(),
+        critical_options: critical_options.clone(),
+        source_addresses,
+        force_command: req.force_command.clone(),
         valid_after: to_naive(valid_after),
         valid_before: to_naive(valid_before),
         revoked_at: None,
         revocation_reason: None,
         metadata: metadata.clone(),
     };
-    state.store.insert(stored);
+    state
+        .store
+        .insert(stored)
+        .await
+        .map_err(|e| ApiError::internal("ssh certificate store insert", e))?;
 
     let resp = IssueCertificateResponse {
         certificate_id: request_id,
@@ -255,7 +277,18 @@ pub(crate) async fn issue_certificate(
     Ok((StatusCode::CREATED, Json(resp)).into_response())
 }
 
-fn stored_to_json(c: &StoredCert) -> serde_json::Value {
+/// Renders a stored record as the v1-parity response dict. `ca_fingerprint`
+/// is supplied by the caller (`state.ca.fingerprint()`) rather than
+/// round-tripped through storage — it is the CA's own identity, constant
+/// across every certificate, so persisting a copy per row would be pure
+/// duplication. `public_key_fingerprint` is recomputed from the stored
+/// subject `public_key` line (`crate::ca::public_key_fingerprint`) for the
+/// same reason: it is a pure function of already-stored data, and the
+/// shared schema (`ssh_certificates`, owned by `services/pki`) has no
+/// dedicated fingerprint column.
+fn stored_to_json(c: &StoredCert, ca_fingerprint: &str) -> serde_json::Value {
+    let public_key_fingerprint =
+        crate::ca::public_key_fingerprint(&c.public_key).unwrap_or_default();
     serde_json::json!({
         "certificate_id": c.certificate_id,
         "certificate_type": c.certificate_type,
@@ -264,8 +297,8 @@ fn stored_to_json(c: &StoredCert) -> serde_json::Value {
         "principals": c.principals,
         "status": c.status,
         "signed_certificate": c.signed_certificate,
-        "public_key_fingerprint": c.public_key_fingerprint,
-        "ca_fingerprint": c.ca_fingerprint,
+        "public_key_fingerprint": public_key_fingerprint,
+        "ca_fingerprint": ca_fingerprint,
         "valid_after": skauswatch_streams::py_isoformat(c.valid_after),
         "valid_before": skauswatch_streams::py_isoformat(c.valid_before),
         "revoked_at": skauswatch_streams::py_isoformat_opt(c.revoked_at),
@@ -308,8 +341,14 @@ pub(crate) async fn list_certificates(
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let certs = state
         .store
-        .list(tenant, q.certificate_type, q.status.as_deref(), limit);
-    let items: Vec<serde_json::Value> = certs.iter().map(stored_to_json).collect();
+        .list(tenant, q.certificate_type, q.status.as_deref(), limit)
+        .await
+        .map_err(|e| ApiError::internal("ssh certificate store list", e))?;
+    let ca_fingerprint = state.ca.fingerprint();
+    let items: Vec<serde_json::Value> = certs
+        .iter()
+        .map(|c| stored_to_json(c, ca_fingerprint))
+        .collect();
     let total = items.len();
     Ok(Json(serde_json::json!({ "certificates": items, "total": total })).into_response())
 }
@@ -332,8 +371,13 @@ pub(crate) async fn get_certificate(
     TenantId(tenant): TenantId,
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
-    match state.store.get(&id, tenant) {
-        Some(c) => Ok(Json(stored_to_json(&c)).into_response()),
+    let found = state
+        .store
+        .get(&id, tenant)
+        .await
+        .map_err(|e| ApiError::internal("ssh certificate store get", e))?;
+    match found {
+        Some(c) => Ok(Json(stored_to_json(&c, state.ca.fingerprint())).into_response()),
         None => Err(ApiError::NotFound("Certificate not found".to_owned())),
     }
 }
@@ -360,10 +404,12 @@ pub(crate) async fn revoke_certificate(
     ApiJson(req): ApiJson<RevokeCertificateRequest>,
 ) -> Result<Response, ApiError> {
     let reason = req.reason.unwrap_or_else(|| "unspecified".to_owned());
-    if state
+    let revoked = state
         .store
         .revoke(&id, tenant, &reason, Utc::now().naive_utc())
-    {
+        .await
+        .map_err(|e| ApiError::internal("ssh certificate store revoke", e))?;
+    if revoked {
         Ok(Json(serde_json::json!({
             "message": "Certificate revoked",
             "certificate_id": id,
@@ -389,16 +435,24 @@ pub(crate) async fn get_krl(
     State(state): State<AppState>,
     TenantId(tenant): TenantId,
 ) -> Result<Response, ApiError> {
-    let revoked: Vec<serde_json::Value> = state
+    let entries = state
         .store
         .krl_entries(tenant)
+        .await
+        .map_err(|e| ApiError::internal("ssh certificate store krl", e))?;
+    // No per-entry fingerprint: pki's `crl_entries` table (the schema this
+    // now reads from, see `crate::store`'s module doc) carries no
+    // fingerprint column, matching pki's own `generate_ssh_krl` output
+    // shape — a documented, minor wire-shape change from the
+    // pre-persistence in-memory KRL.
+    let revoked: Vec<serde_json::Value> = entries
         .iter()
         .map(|e| {
             serde_json::json!({
                 "serial_number": e.serial_number,
                 "revocation_time": skauswatch_streams::py_isoformat(e.revocation_time),
                 "reason": e.reason,
-                "fingerprint": e.certificate_fingerprint,
+                "fingerprint": Option::<String>::None,
             })
         })
         .collect();
@@ -467,13 +521,31 @@ mod tests {
         }
     }
 
+    /// Lazy (unreachable) store pool — for tests that only exercise
+    /// validation/auth/CA-signing paths that fail (or short-circuit)
+    /// before ever touching the durable store (see `crate::store`'s
+    /// consolidation decision doc comment).
     fn test_state() -> AppState {
         // Missing path → ephemeral CA key (fine for tests).
         let ca = SshCa::load_or_generate(Path::new("/nonexistent-skauswatch-sshca-key"))
             .expect("ephemeral ca");
         AppState {
             ca: Arc::new(ca),
-            store: Arc::new(CertStore::new()),
+            store: Arc::new(CertStore::new(crate::test_support::lazy_pool())),
+            jwt_secret: TEST_JWT_SECRET.into(),
+            license: dev_license(),
+        }
+    }
+
+    /// Real, migrated Postgres-backed store (pki's `ssh_certificates`/
+    /// `crl_entries` schema) — for tests that exercise a genuine
+    /// issue/get/list/revoke/KRL round trip.
+    async fn db_state() -> AppState {
+        let ca = SshCa::load_or_generate(Path::new("/nonexistent-skauswatch-sshca-key-db"))
+            .expect("ephemeral ca");
+        AppState {
+            ca: Arc::new(ca),
+            store: Arc::new(CertStore::new(crate::test_support::db_pool().await)),
             jwt_secret: TEST_JWT_SECRET.into(),
             license: dev_license(),
         }
@@ -508,7 +580,7 @@ mod tests {
 
     #[tokio::test]
     async fn issue_get_list_revoke_flow() {
-        let server = axum_test::TestServer::new(router(test_state()));
+        let server = axum_test::TestServer::new(router(db_state().await));
         let (hdr, val) = auth_header();
         let (thdr, tval) = tenant_header();
         let body = serde_json::json!({
@@ -668,7 +740,7 @@ mod tests {
     /// user-cert permit set).
     #[tokio::test]
     async fn explicit_extensions_are_used_verbatim() {
-        let server = axum_test::TestServer::new(router(test_state()));
+        let server = axum_test::TestServer::new(router(db_state().await));
         let (hdr, val) = auth_header();
         let (thdr, tval) = tenant_header();
         let resp = server
@@ -693,7 +765,7 @@ mod tests {
     /// default permit set).
     #[tokio::test]
     async fn host_certificate_defaults_to_no_extensions() {
-        let server = axum_test::TestServer::new(router(test_state()));
+        let server = axum_test::TestServer::new(router(db_state().await));
         let (hdr, val) = auth_header();
         let (thdr, tval) = tenant_header();
         let resp = server
@@ -719,7 +791,7 @@ mod tests {
     /// them).
     #[tokio::test]
     async fn source_address_and_force_command_become_critical_options() {
-        let server = axum_test::TestServer::new(router(test_state()));
+        let server = axum_test::TestServer::new(router(db_state().await));
         let (hdr, val) = auth_header();
         let (thdr, tval) = tenant_header();
         let resp = server
@@ -771,7 +843,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_respects_limit_clamp() {
-        let server = axum_test::TestServer::new(router(test_state()));
+        let server = axum_test::TestServer::new(router(db_state().await));
         let (hdr, val) = auth_header();
         let (thdr, tval) = tenant_header();
         for _ in 0..3 {
@@ -856,7 +928,7 @@ mod tests {
     /// visibility here is a severe bug.
     #[tokio::test]
     async fn tenant_b_cannot_get_list_or_revoke_tenant_as_certificate() {
-        let server = axum_test::TestServer::new(router(test_state()));
+        let server = axum_test::TestServer::new(router(db_state().await));
         let (hdr, val) = auth_header();
         let tenant_a = uuid::Uuid::new_v4().to_string();
         let tenant_b = uuid::Uuid::new_v4().to_string();
@@ -927,9 +999,12 @@ mod tests {
     async fn issuance_is_denied_when_the_flag_is_disabled() {
         let ca = SshCa::load_or_generate(Path::new("/nonexistent-skauswatch-sshca-key-2"))
             .expect("ephemeral ca");
+        // Uses a real DB-backed store, not the lazy pool: the read route
+        // exercised below (`list_certificates`) always queries the store,
+        // even for an empty result.
         let state = AppState {
             ca: Arc::new(ca),
-            store: Arc::new(CertStore::new()),
+            store: Arc::new(CertStore::new(crate::test_support::db_pool().await)),
             jwt_secret: TEST_JWT_SECRET.into(),
             license: gated_license(),
         };

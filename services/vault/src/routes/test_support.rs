@@ -117,3 +117,24 @@ pub(crate) async fn db_state_with_envelope(
         skauswatch_testkit::db::test_pool(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).await;
     AppStateInner::for_tests_with_db(license, envelope, pool)
 }
+
+/// Like [`db_state`], but wired to a caller-supplied real `StreamProducer`
+/// instead of `None` — for tests that must verify what `trigger_sync`
+/// actually publishes to Redis (`routes::sync`'s payload-plumbing
+/// regression tests), not just what it writes to Postgres.
+pub(crate) async fn db_state_with_streams(
+    license: Arc<LicenseClient>,
+    streams: skauswatch_streams::StreamProducer,
+) -> AppState {
+    let pool =
+        skauswatch_testkit::db::test_pool(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).await;
+    std::sync::Arc::new(AppStateInner {
+        license,
+        db: pool,
+        auth: crate::state::AuthSettings {
+            jwt_secret: "test-secret".to_owned(),
+        },
+        envelope: tokio::sync::RwLock::new(test_envelope()),
+        streams: Some(streams),
+    })
+}

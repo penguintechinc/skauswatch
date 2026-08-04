@@ -28,8 +28,8 @@ use axum::{Json, Router};
 use utoipa::OpenApi;
 
 use super::{
-    admin, alerts, approvals, asm, auth, codescan, endpoint, research, s3_scan, siem, tenants,
-    threat_intel, users,
+    admin, alerts, approvals, asm, auth, codescan, endpoint, research, s3_scan, scanner, siem,
+    tenants, threat_intel, users,
 };
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ErrorResponse, ValidationErrorResponse};
@@ -179,6 +179,8 @@ pub(crate) struct PublicApiDoc;
         asm::get_asm_scan_report,
         asm::get_port_settings,
         asm::update_port_settings,
+        // scanner
+        scanner::trigger_scanner_task,
         // codescan
         codescan::codescan_status,
         codescan::list_repos,
@@ -342,6 +344,13 @@ pub(crate) struct PublicApiDoc;
         siem::SiemStatsResponse,
         siem::SiemConfigResponse,
         siem::SiemConfigUpdateResponse,
+        // asm
+        asm::AsmScanCreateBody,
+        asm::AsmScanListResponse,
+        asm::PortSettingsBody,
+        // scanner
+        scanner::ScannerScanBody,
+        scanner::ScannerScanResponse,
         // research
         research::LookupBody,
         research::QueryTypeBody,
@@ -360,7 +369,8 @@ pub(crate) struct PublicApiDoc;
         (name = "s3-scan", description = "S3 bucket malware scanning: buckets, jobs, results, ad-hoc uploads"),
         (name = "endpoint", description = "ENDPOINT agent fleet: registration, heartbeat, events, operator views"),
         (name = "siem", description = "Log-pipeline health, ingest proxy, OpenSearch search/stats, configuration"),
-        (name = "asm", description = "Attack surface management — authenticated proxy to the scanner service"),
+        (name = "asm", description = "Attack surface management: masscan/banner/cert scan orchestration, hosts, certs, diffs"),
+        (name = "scanner", description = "Ad-hoc malware scan triggers (YARA/ClamAV) — publishes to the scanner:tasks queue"),
         (name = "codescan", description = "AI code review — authenticated proxy to worker-codescan"),
         (name = "research", description = "Threat-research lookups: whois, dns, asn, shodan, maltego"),
     ),

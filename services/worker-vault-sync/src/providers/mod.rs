@@ -1,10 +1,60 @@
 //! Cloud provider abstraction for Vault↔cloud secret sync. Rust port of
 //! `icebox/services/sync-worker/providers/__init__.py`.
+//!
+//! **Phase 12 parity restoration** (see
+//! `docs/v2-port/phase12-scope-infra.md` §1): v1 shipped five fully working,
+//! symmetric providers. Only AWS was ported in v2.0.0; azure/gcp/oracle/
+//! kubernetes were placeholder `NotImplementedProvider` stand-ins (removed
+//! by this restoration — nothing dispatches to a stub anymore). All four
+//! are now real:
+//!
+//! - `azure` — [`azure_security_keyvault_secrets`] (the actively developed
+//!   replacement for the legacy, `azure-sdk-for-rust`-"legacy"-branch
+//!   `azure_security_keyvault` crate named in the original scoping doc).
+//! - `gcp` — [`google_cloud_secretmanager_v1`], Google's own generated client.
+//! - `kubernetes` — [`kube`]/[`k8s_openapi`], the standard Rust k8s client.
+//! - `oracle` (OCI) — no mature Rust SDK exists for OCI Vault, so this is
+//!   `reqwest` plus hand-rolled RSA-SHA256 request signing (see
+//!   `oracle::signing`) — the one provider that is not a straightforward
+//!   SDK swap.
 
 pub mod aws;
-pub mod not_implemented;
+pub mod azure;
+pub mod gcp;
+pub mod kubernetes;
+pub mod oracle;
 
 use serde_json::Value;
+
+/// Reads a string field out of a `credentials`/`config` JSON blob — shared
+/// helper for the non-AWS providers (`aws.rs` keeps its own pre-existing
+/// copy rather than being refactored to share this, to avoid touching
+/// already-stable, already-tested code for this restoration).
+pub(crate) fn str_field(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// Installs `aws-lc-rs` as the process-wide default `rustls` crypto
+/// provider, exactly once — required before building any `azure_core` or
+/// `kube` HTTPS(-capable) client. Neither crate's builder accepts an
+/// explicit provider, and this workspace resolves *both* `ring` and
+/// `aws-lc-rs` into the dependency graph (`rcgen` pins `aws_lc_rs`
+/// explicitly — see the workspace `Cargo.toml` — while other crates default
+/// to `ring`), so `rustls` can't auto-select one and panics/errors instead
+/// (`Could not automatically determine the process-level CryptoProvider`).
+/// AWS's SDK clients and `reqwest`/OCI's plain HTTP client are unaffected —
+/// they pin their own provider internally rather than relying on this
+/// process-global default. `aws-lc-rs` matches the backend this workspace
+/// already standardized on for `rcgen`.
+pub(crate) fn ensure_default_crypto_provider() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        // Ignore the `Err` (returns the already-installed provider) — a
+        // race with another caller installing first is fine, we only care
+        // that *some* default ends up installed before first use.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
 
 /// Result of a single secret sync operation — matches v1 `SyncResult`.
 #[derive(Debug, Clone)]
@@ -28,12 +78,6 @@ pub enum ProviderError {
     /// The provider rejected the request or the transport failed.
     #[error("{0}")]
     Failed(String),
-    /// This provider is not yet implemented in the v2 Rust port.
-    #[error(
-        "cloud provider {0} sync is not yet implemented in the v2 Rust port \
-         (tracked in docs/v2-port/v2.1-backlog.md)"
-    )]
-    NotImplemented(&'static str),
 }
 
 /// Common interface for all cloud secret providers, matching v1
@@ -68,7 +112,14 @@ pub trait CloudProvider: Send + Sync {
 /// the `"aws"` arm (see [`aws::AwsProvider::with_federated_fallback`]) —
 /// every other provider ignores it; pass `None` when own-AWS federation
 /// isn't configured or wasn't attempted.
-pub fn get_provider(
+///
+/// `async` (unlike v1's synchronous factory) because building a real GCP or
+/// Kubernetes client is itself an async operation — `SecretManagerService::
+/// builder().build()` resolves credentials (ADC/Workload Identity) and
+/// `kube::Client`/`Config::infer()` probe in-cluster vs kubeconfig, both
+/// over I/O. AWS/Azure/OCI construction stays synchronous internally but is
+/// wrapped the same way for a uniform call site.
+pub async fn get_provider(
     provider_name: &str,
     credentials: &Value,
     config: &Value,
@@ -80,18 +131,12 @@ pub fn get_provider(
             config,
             federated_credentials,
         ))),
-        "azure" => Ok(Box::new(not_implemented::NotImplementedProvider::new(
-            "azure",
-        ))),
-        "gcp" => Ok(Box::new(not_implemented::NotImplementedProvider::new(
-            "gcp",
-        ))),
-        "oracle" => Ok(Box::new(not_implemented::NotImplementedProvider::new(
-            "oracle",
-        ))),
-        "kubernetes" => Ok(Box::new(not_implemented::NotImplementedProvider::new(
-            "kubernetes",
-        ))),
+        "azure" => Ok(Box::new(azure::AzureProvider::new(credentials, config)?)),
+        "gcp" => Ok(Box::new(gcp::GcpProvider::new(credentials, config).await?)),
+        "oracle" => Ok(Box::new(oracle::OracleProvider::new(credentials, config)?)),
+        "kubernetes" => Ok(Box::new(
+            kubernetes::KubernetesProvider::new(credentials, config).await?,
+        )),
         other => Err(ProviderError::Failed(format!(
             "Unknown provider '{other}'. Valid options: aws, azure, gcp, oracle, kubernetes"
         ))),
@@ -127,8 +172,9 @@ mod tests {
             serde_json::json!({"access_key_id": "AKIATEST", "secret_access_key": "secret"});
         let config = serde_json::json!({"endpoint_url": server.uri()});
 
-        let provider =
-            get_provider("aws", &credentials, &config, None).expect("aws provider construction");
+        let provider = get_provider("aws", &credentials, &config, None)
+            .await
+            .expect("aws provider construction");
         let result = provider.push_secret("dispatch-check", "v", "id-1").await;
 
         assert!(result.success);
@@ -164,6 +210,7 @@ mod tests {
         );
 
         let provider = get_provider("aws", &Value::Null, &config, Some(federated))
+            .await
             .expect("aws provider construction");
         let result = provider
             .push_secret("fed-dispatch-check", "v", "id-fed")
@@ -173,36 +220,104 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_provider_dispatches_each_not_implemented_target() {
-        for name in ["azure", "gcp", "oracle", "kubernetes"] {
-            let provider = get_provider(name, &Value::Null, &Value::Null, None)
-                .unwrap_or_else(|e| panic!("{name} provider construction: {e}"));
-            let result = provider.push_secret("n", "v", "id").await;
-            assert!(!result.success, "{name} push_secret should fail");
-            let error = result
-                .error
-                .unwrap_or_else(|| panic!("{name} push_secret should carry an error"));
-            assert!(
-                error.contains(name),
-                "{name} error message should name the provider: {error}"
-            );
+    async fn get_provider_azure_dispatches_and_constructs_a_real_client() {
+        // `AzureProvider::new` performs no network I/O at construction —
+        // only `push_secret`/etc. do — so this proves real dispatch (a
+        // genuine `SecretClient` gets built from `credentials.vault_url`)
+        // without needing a mock server here. The full authenticated
+        // round-trip against a mock Key Vault endpoint (using a
+        // `TokenCredential` test double, since a real `ClientSecretCredential`
+        // would try to reach Azure AD) is `azure.rs`'s own test module.
+        let credentials = serde_json::json!({
+            "vault_url": "https://example.vault.azure.net",
+            "tenant_id": "t", "client_id": "c", "client_secret": "s",
+        });
+        let provider = get_provider("azure", &credentials, &Value::Null, None).await;
+        if let Err(e) = &provider {
+            panic!("expected azure provider construction to succeed: {e}");
+        }
+    }
 
-            assert!(provider.pull_secret("ref").await.is_err());
-            assert!(provider.delete_secret("ref").await.is_err());
-            assert!(provider.list_secrets().await.is_err());
+    #[tokio::test]
+    async fn get_provider_gcp_dispatches_and_constructs_a_real_client() {
+        // A service-account credential builds the client without any
+        // network I/O (no ADC/metadata-server lookup, unlike the
+        // no-credentials branch) — proves real dispatch to `gcp.rs` the
+        // same way the azure test above does. `gcp.rs`'s own tests use
+        // `SecretManagerService::from_stub` for the full request/response
+        // round trip (this SDK's first-class mock support — see that
+        // module's doc comment for why not wiremock).
+        let sa_key: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/gcp_test_sa_key.json"))
+                .expect("valid fixture json");
+        let credentials = serde_json::json!({
+            "project_id": "test-project",
+            "service_account_json": sa_key,
+        });
+        let provider = get_provider("gcp", &credentials, &Value::Null, None).await;
+        if let Err(e) = &provider {
+            panic!("expected gcp provider construction to succeed: {e}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_provider_kubernetes_dispatches_and_constructs_a_real_client() {
+        // `credentials.api_server_url` skips `Config::infer()` (which would
+        // try to read a real kubeconfig/in-cluster config this sandboxed
+        // test environment doesn't have) and builds a `kube::Client`
+        // directly — construction itself performs no network I/O, proving
+        // real dispatch to `kubernetes.rs` the same way the azure/gcp tests
+        // above do. `kubernetes.rs`'s own tests do the full wiremock
+        // request/response round trip.
+        let credentials = serde_json::json!({"api_server_url": "http://127.0.0.1:1"});
+        let provider = get_provider("kubernetes", &credentials, &Value::Null, None).await;
+        if let Err(e) = &provider {
+            panic!("expected kubernetes provider construction to succeed: {e}");
+        }
+    }
+
+    #[tokio::test]
+    async fn get_provider_oracle_dispatches_and_constructs_a_real_client() {
+        // Oracle's constructor is fully synchronous/offline (parses the PEM
+        // key, builds the `keyId`) — proves real dispatch to `oracle.rs`.
+        // `oracle.rs`'s own tests do the full wiremock request/response
+        // round trip, including the actual signed `Authorization` header.
+        let credentials = serde_json::json!({
+            "user": "u", "private_key_pem": include_str!("../../tests/fixtures/oci_test_key.pem"),
+            "fingerprint": "fp", "tenancy": "t", "compartment_id": "c",
+            "vault_id": "v", "vault_key_id": "k",
+        });
+        let provider = get_provider("oracle", &credentials, &Value::Null, None).await;
+        if let Err(e) = &provider {
+            panic!("expected oracle provider construction to succeed: {e}");
         }
     }
 
     #[test]
     fn get_provider_rejects_unknown_provider_name() {
-        let result = get_provider("not-a-real-provider", &Value::Null, &Value::Null, None);
+        let result = tokio_test_block_on(get_provider(
+            "not-a-real-provider",
+            &Value::Null,
+            &Value::Null,
+            None,
+        ));
         match result {
             Err(ProviderError::Failed(msg)) => {
                 assert!(msg.contains("not-a-real-provider"));
                 assert!(msg.contains("aws, azure, gcp, oracle, kubernetes"));
             }
-            Err(other) => panic!("expected ProviderError::Failed, got {other:?}"),
             Ok(_) => panic!("expected an error for an unknown provider name"),
         }
+    }
+
+    /// Tiny inline `#[test]`-compatible executor for the one synchronous
+    /// test above — avoids promoting it to `#[tokio::test]` purely to await
+    /// a future that (for the `Err` arm it exercises) never actually
+    /// suspends.
+    fn tokio_test_block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("build current-thread runtime")
+            .block_on(fut)
     }
 }

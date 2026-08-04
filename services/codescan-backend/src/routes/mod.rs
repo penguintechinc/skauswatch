@@ -2,7 +2,9 @@
 //! upstream target the manager proxies to at
 //! `{WORKER_CODESCAN_URL}/api/v1/codescan{path}` (services/manager/src/routes/codescan.rs)
 //! plus the git-credential CRUD surface at `/api/v1/credentials`
-//! (darwin/services/flask-backend/app/api/v1/credentials.py).
+//! (darwin/services/flask-backend/app/api/v1/credentials.py) and the
+//! license-compliance policy CRUD surface at `/api/v1/license-policies`
+//! (net-new — see `license_policies` module docs).
 //!
 //! Tenant-isolation layering (docs/v2-port/tenancy-model.md): unlike the
 //! manager, this service has no public (unauthenticated) or agent-HMAC
@@ -18,6 +20,7 @@
 //! `routes/*.rs` tests, which never mount it.
 
 mod credentials;
+mod license_policies;
 pub(crate) mod openapi;
 mod plans;
 mod repos;
@@ -46,6 +49,7 @@ pub fn router(state: AppState) -> Router {
         .merge(reviews::router())
         .merge(plans::router())
         .merge(credentials::router())
+        .merge(license_policies::router())
         .merge(openapi::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

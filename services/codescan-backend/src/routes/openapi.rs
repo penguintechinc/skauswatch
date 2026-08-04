@@ -18,7 +18,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use utoipa::OpenApi;
 
-use super::{credentials, plans, repos, reviews, status};
+use super::{credentials, license_policies, plans, repos, reviews, status};
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
@@ -62,6 +62,11 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         credentials::update_credential,
         credentials::delete_credential,
         credentials::test_credential,
+        license_policies::list_policies,
+        license_policies::create_policy,
+        license_policies::get_policy,
+        license_policies::update_policy,
+        license_policies::delete_policy,
     ),
     components(schemas(
         ErrorResponse,
@@ -76,6 +81,8 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         repos::RepoDeleteResponse,
         reviews::ReviewRow,
         reviews::ReviewComment,
+        reviews::ReviewDetection,
+        reviews::ReviewLicenseViolation,
         reviews::ReviewDetailResponse,
         reviews::PaginationMeta,
         reviews::ReviewListResponse,
@@ -92,10 +99,18 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         credentials::CredentialDeleteResponse,
         credentials::TestCredentialRequest,
         credentials::TestCredentialResponse,
+        license_policies::LicensePolicy,
+        license_policies::PolicyListResponse,
+        license_policies::CreatePolicyRequest,
+        license_policies::PolicyCreateResponse,
+        license_policies::UpdatePolicyRequest,
+        license_policies::PolicyUpdateResponse,
+        license_policies::PolicyDeleteResponse,
     )),
     tags(
         (name = "codescan", description = "Repo configs, AI code reviews, and issue plans"),
         (name = "credentials", description = "Git credential storage for private repo access"),
+        (name = "license-policies", description = "OSS license-compliance policy configuration"),
     ),
     modifiers(&SecurityAddon),
 )]

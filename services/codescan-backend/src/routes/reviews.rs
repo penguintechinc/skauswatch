@@ -393,16 +393,53 @@ pub(crate) struct ReviewComment {
     created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// One `codescan_review_detections` row (language/framework detected in the
+/// review's diff — see `services/worker-codescan/src/detection.rs`, the
+/// writer for this table). Net-new reader (Phase 12): v1's own reader for
+/// this table was wired to a GET endpoint that therefore always returned
+/// empty, since v1's writer had zero callers either — see
+/// docs/v2-port/phase12-scope-codeai.md row 2.
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct ReviewDetection {
+    id: i64,
+    detection_type: Option<String>,
+    name: Option<String>,
+    confidence: Option<f64>,
+    file_count: Option<i32>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One `codescan_license_violations` row (policy-flagged dependency license
+/// — see `services/worker-codescan/src/license_scan.rs`, the scanner, and
+/// `handler.rs`, the policy-evaluation writer for this table). Net-new
+/// reader (Phase 12) — no v1 equivalent ever wired the scanner to the
+/// review pipeline (docs/v2-port/phase12-scope-codeai.md row 3).
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct ReviewLicenseViolation {
+    id: i64,
+    license_name: Option<String>,
+    package_name: Option<String>,
+    policy: Option<String>,
+    severity: Option<String>,
+    status: String,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Documentation-only mirror of `get_review`'s merged JSON body — the
-/// handler builds this shape by hand (`ReviewRow` fields flattened, plus a
-/// `comments` array) via `serde_json::Value` manipulation rather than
-/// deriving `Serialize` on a single struct, so this type exists solely to
-/// describe the wire shape to `utoipa`.
+/// handler builds this shape by hand (`ReviewRow` fields flattened, plus
+/// `comments`/`detections`/`license_violations` arrays) via
+/// `serde_json::Value` manipulation rather than deriving `Serialize` on a
+/// single struct, so this type exists solely to describe the wire shape to
+/// `utoipa`.
 #[derive(Serialize, utoipa::ToSchema)]
 pub(crate) struct ReviewDetailResponse {
     #[serde(flatten)]
     review: ReviewRow,
     comments: Vec<ReviewComment>,
+    detections: Vec<ReviewDetection>,
+    license_violations: Vec<ReviewLicenseViolation>,
 }
 
 /// GET /codescan/reviews/{review_id} — review detail enriched with comments.
@@ -446,6 +483,26 @@ pub(crate) async fn get_review(
     .fetch_all(&state.db)
     .await?;
 
+    let detections = sqlx::query_as::<_, ReviewDetection>(
+        "SELECT id, detection_type, name, confidence, file_count, created_at \
+         FROM codescan_review_detections WHERE review_id = $1 AND tenant_id = $2 \
+         ORDER BY created_at",
+    )
+    .bind(review_id)
+    .bind(user.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let license_violations = sqlx::query_as::<_, ReviewLicenseViolation>(
+        "SELECT id, license_name, package_name, policy, severity, status, created_at \
+         FROM codescan_license_violations WHERE review_id = $1 AND tenant_id = $2 \
+         ORDER BY created_at",
+    )
+    .bind(review_id)
+    .bind(user.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
+
     let mut payload = match serde_json::to_value(&review) {
         Ok(v) => v,
         Err(e) => return Err(ApiError::internal("serialize review", e)),
@@ -454,6 +511,14 @@ pub(crate) async fn get_review(
         map.insert(
             "comments".to_owned(),
             serde_json::to_value(&comments).unwrap_or(serde_json::Value::Array(vec![])),
+        );
+        map.insert(
+            "detections".to_owned(),
+            serde_json::to_value(&detections).unwrap_or(serde_json::Value::Array(vec![])),
+        );
+        map.insert(
+            "license_violations".to_owned(),
+            serde_json::to_value(&license_violations).unwrap_or(serde_json::Value::Array(vec![])),
         );
     }
     Ok((StatusCode::OK, Json(payload)).into_response())
@@ -755,6 +820,89 @@ mod tests {
         listed.assert_status_ok();
         let listed_body: serde_json::Value = listed.json();
         assert_eq!(listed_body["pagination"]["total"], 1);
+    }
+
+    /// The `detections`/`license_violations` readers Phase 12 adds to this
+    /// endpoint — both tables are written by worker-codescan (a separate
+    /// process this test doesn't run), so rows are seeded directly, mirroring
+    /// `create_list_and_get_round_trip_with_comments`'s pattern for comments.
+    #[tokio::test]
+    async fn get_review_includes_detections_and_license_violations() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let repo_config_id = seed_repo_config(&state, "detections-repo").await;
+        let maintainer = sign_token(&state, "1", "maintainer");
+        let server = test_server(state.clone());
+
+        let created = server
+            .post("/api/v1/codescan/reviews")
+            .authorization_bearer(&maintainer)
+            .json(&serde_json::json!({
+                "repo_config_id": repo_config_id,
+                "pr_url": "https://github.com/a/detections-repo/pull/1",
+            }))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let review_id = created.json::<serde_json::Value>()["id"]
+            .as_i64()
+            .unwrap_or_default();
+
+        let tenant_uuid: uuid::Uuid = crate::routes::test_support::TEST_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("uuid: {e}"));
+        if let Err(e) = sqlx::query(
+            "INSERT INTO codescan_review_detections \
+             (review_id, tenant_id, detection_type, name, confidence, file_count) \
+             VALUES ($1, $2, 'language', 'Rust', 1.0, 3)",
+        )
+        .bind(review_id)
+        .bind(tenant_uuid)
+        .execute(&state.db)
+        .await
+        {
+            panic!("seed detection: {e}");
+        }
+
+        let detection_id: (i64,) = match sqlx::query_as(
+            "INSERT INTO codescan_license_detections \
+             (review_id, tenant_id, package_name, package_version, license_name, license_source, \
+              file_path, confidence, policy_violation) \
+             VALUES ($1, $2, 'left-pad', '1.3.0', 'GPL-3.0', 'npm_registry', 'package.json', 0.9, true) \
+             RETURNING id",
+        )
+        .bind(review_id)
+        .bind(tenant_uuid)
+        .fetch_one(&state.db)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => panic!("seed license detection: {e}"),
+        };
+
+        if let Err(e) = sqlx::query(
+            "INSERT INTO codescan_license_violations \
+             (review_id, tenant_id, detection_id, license_name, package_name, policy, severity) \
+             VALUES ($1, $2, $3, 'GPL-3.0', 'left-pad', 'blocked', 'critical')",
+        )
+        .bind(review_id)
+        .bind(tenant_uuid)
+        .bind(detection_id.0)
+        .execute(&state.db)
+        .await
+        {
+            panic!("seed license violation: {e}");
+        }
+
+        let fetched = server
+            .get(&format!("/api/v1/codescan/reviews/{review_id}"))
+            .authorization_bearer(&maintainer)
+            .await;
+        fetched.assert_status_ok();
+        let body: serde_json::Value = fetched.json();
+        assert_eq!(body["detections"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["detections"][0]["name"], "Rust");
+        assert_eq!(body["license_violations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["license_violations"][0]["license_name"], "GPL-3.0");
+        assert_eq!(body["license_violations"][0]["status"], "open");
     }
 
     #[tokio::test]

@@ -18,11 +18,27 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 aws-sdk-secretsmanager = { workspace = true }
 axum = { workspace = true }
+azure_core = { workspace = true }
+azure_identity = { workspace = true }
+azure_security_keyvault_secrets = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
+google-cloud-auth = { workspace = true }
+google-cloud-gax = { workspace = true }
+google-cloud-secretmanager-v1 = { workspace = true }
+http = { workspace = true }
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
 reqwest = { workspace = true }
+rsa = { workspace = true }
+rustls = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 skauswatch-db = { workspace = true }
 skauswatch-identity = { workspace = true }
 skauswatch-s3 = { workspace = true }
@@ -37,6 +53,8 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 skauswatch-testkit = { workspace = true }
+time = { workspace = true }
+typespec_client_core = { workspace = true }
 wiremock = { workspace = true }
 
 [lints]

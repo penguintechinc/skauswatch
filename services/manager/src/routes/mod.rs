@@ -36,6 +36,7 @@ mod license;
 pub(crate) mod openapi;
 mod research;
 mod s3_scan;
+mod scanner;
 mod siem;
 mod tenants;
 #[cfg(test)]
@@ -93,6 +94,7 @@ pub fn router(state: AppState) -> Router {
         ))
         .merge(gated(siem::router(), &state, "skauswatch.siem"))
         .merge(gated(asm::router(), &state, "skauswatch.asm"))
+        .merge(gated(scanner::router(), &state, "skauswatch.scanner"))
         .merge(codescan::router())
         .merge(gated(research::router(), &state, "skauswatch.research"))
         .merge(openapi::protected_router())
@@ -210,6 +212,7 @@ mod tests {
             ("GET /api/v1/endpoint/agents", "skauswatch.endpoint"),
             ("GET /api/v1/siem/config", "skauswatch.siem"),
             ("GET /api/v1/asm/scans", "skauswatch.asm"),
+            ("POST /api/v1/scanner/scan", "skauswatch.scanner"),
             ("GET /api/v1/research/config", "skauswatch.research"),
         ] {
             let path = method_path.split_once(' ').map_or(method_path, |(_, p)| p);

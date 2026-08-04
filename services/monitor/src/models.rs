@@ -86,10 +86,8 @@ pub enum Severity {
 }
 
 /// Threat intelligence confidence/impact level. v1 `ThreatLevel`. Wired up
-/// once the threat-intel follow-up lands (see crate root docs) — not
-/// constructed by any ported route today.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// by the phase-12 TAXII threat-intel engine (`crate::threat_intel`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreatLevel {
     /// Confirmed, severe threat.
@@ -238,10 +236,10 @@ fn new_uuid() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-/// Indicator of Compromise. v1 `IOC`. Modeled for contract completeness;
-/// wired up once the threat-intel subsystem port lands (tracked follow-up).
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Indicator of Compromise. v1 `IOC`. Backed by `crate::threat_intel::
+/// store::ThreatStore` (Postgres `threat_iocs`), returned by
+/// `crate::threat_intel::routes`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Ioc {
     /// IOC id.
     #[serde(default = "new_uuid")]
@@ -277,24 +275,28 @@ pub struct Ioc {
     #[serde(default = "Utc::now")]
     pub updated_at: DateTime<Utc>,
     /// Optional expiration.
+    // See `AlertSearchRequest::severity` (below) for why this carries a
+    // bare `#[schema(default)]` instead of letting utoipa auto-derive
+    // `default: null` from `#[serde(default)]` on an `Option<T>` field.
     #[serde(default)]
+    #[schema(default)]
     pub expiration: Option<DateTime<Utc>>,
     /// Source feed id/name.
     #[serde(default)]
+    #[schema(default)]
     pub source_feed: Option<String>,
     /// Free-form metadata.
     #[serde(default)]
     pub metadata: serde_json::Value,
 }
 
-#[allow(dead_code)] // referenced by the deferred Ioc/ThreatMatch models
 fn unknown_threat_level() -> ThreatLevel {
     ThreatLevel::Unknown
 }
 
 /// Result of matching an event against threat intelligence. v1
-/// `ThreatMatch`. Follow-up group (see [`Ioc`]).
-#[allow(dead_code)]
+/// `ThreatMatch`. Backed by `crate::threat_intel::store::ThreatStore`
+/// (Postgres `threat_matches`), recorded by `crate::threat_intel::matcher`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreatMatch {
     /// Matched event id.
@@ -321,9 +323,10 @@ pub struct ThreatMatch {
     pub metadata: serde_json::Value,
 }
 
-/// Threat intelligence feed configuration. v1 `ThreatFeed`. Follow-up group.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Threat intelligence feed configuration. v1 `ThreatFeed`. Backed by
+/// `crate::threat_intel::store::ThreatStore` (Postgres `threat_feeds`),
+/// seeded from `MONITOR_TAXII_FEED_URLS` by `crate::threat_intel::taxii`.
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ThreatFeed {
     /// Feed id.
     #[serde(default = "new_uuid")]
@@ -343,18 +346,22 @@ pub struct ThreatFeed {
     pub update_frequency: i64,
     /// Optional auth credentials.
     #[serde(default)]
+    #[schema(default)]
     pub credentials: Option<serde_json::Value>,
     /// Optional extra HTTP headers.
     #[serde(default)]
+    #[schema(default)]
     pub headers: Option<serde_json::Value>,
     /// Whether TLS certificates are verified.
     #[serde(default = "default_true")]
     pub certificate_verification: bool,
     /// Optional outbound proxy.
     #[serde(default)]
+    #[schema(default)]
     pub proxy_url: Option<String>,
     /// Last successful update time.
     #[serde(default)]
+    #[schema(default)]
     pub last_updated: Option<DateTime<Utc>>,
     /// Number of IOCs currently sourced from this feed.
     #[serde(default)]
@@ -367,19 +374,15 @@ pub struct ThreatFeed {
     pub metadata: serde_json::Value,
 }
 
-#[allow(dead_code)] // referenced by the deferred ThreatFeed model
 fn default_feed_type() -> String {
     "taxii".to_owned()
 }
-#[allow(dead_code)] // referenced by the deferred ThreatFeed model
 fn default_true() -> bool {
     true
 }
-#[allow(dead_code)] // referenced by the deferred ThreatFeed model
 fn default_update_frequency() -> i64 {
     3600
 }
-#[allow(dead_code)] // referenced by the deferred ThreatFeed model
 fn default_unknown_status() -> String {
     "unknown".to_owned()
 }

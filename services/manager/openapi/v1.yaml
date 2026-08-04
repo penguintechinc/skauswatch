@@ -741,28 +741,38 @@ paths:
     get:
       tags:
       - asm
-      summary: GET /asm/scans — list ASM scans; query params forward first-value-wins.
+      summary: GET /asm/scans — paginated, tenant-scoped; optional `target` filter.
       operationId: list_asm_scans
+      parameters:
+      - name: page
+        in: query
+        description: 1-based page number (default 1)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: per_page
+        in: query
+        description: Page size, capped at 100 (default 20)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: target
+        in: query
+        description: Filter by exact target value
+        required: false
+        schema:
+          type: string
       responses:
         '200':
-          description: Proxied scanner response
+          description: Paginated ASM scan list
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/AsmScanListResponse'
         '401':
           description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
           content:
             application/json:
               schema:
@@ -772,349 +782,30 @@ paths:
     post:
       tags:
       - asm
-      summary: POST /asm/scans — trigger a new ASM scan (proxied; body forwarded).
-      description: |-
-        This whole router is a thin authenticated proxy to the scanner service —
-        every response body below is documented as a generic JSON object
-        (`serde_json::Value`) rather than a fixed schema, since the wire shape is
-        whatever the upstream scanner returns, not something this service
-        defines. See `docs/v2-port/openapi-pattern.md`.
+      summary: |-
+        POST /asm/scans — admin/maintainer. Inserts the `asm_scans` row and
+        publishes one `scanner:tasks` message (`scan_type: "asm"`); the scanner
+        worker picks it up, runs the pipeline, and writes hosts/services/certs/
+        diff rows back tenant-stamped.
       operationId: create_asm_scan
       requestBody:
         content:
           application/json:
-            schema: {}
+            schema:
+              $ref: '#/components/schemas/AsmScanCreateBody'
         required: true
       responses:
-        '200':
-          description: Proxied scanner response
+        '201':
+          description: ASM scan created and queued
           content:
             application/json:
               schema: {}
         '400':
-          description: Invalid JSON body
+          description: Validation error
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}:
-    get:
-      tags:
-      - asm
-      summary: GET /asm/scans/{scan_id} — ASM scan detail (proxied).
-      operationId: get_asm_scan
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}/certs:
-    get:
-      tags:
-      - asm
-      summary: GET /asm/scans/{scan_id}/certs — TLS certificate findings (proxied).
-      operationId: get_asm_scan_certs
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}/diff:
-    get:
-      tags:
-      - asm
-      summary: GET /asm/scans/{scan_id}/diff — diff vs the previous scan (proxied).
-      operationId: get_asm_scan_diff
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}/hosts:
-    get:
-      tags:
-      - asm
-      summary: GET /asm/scans/{scan_id}/hosts — discovered hosts and services (proxied).
-      operationId: get_asm_scan_hosts
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}/report:
-    get:
-      tags:
-      - asm
-      summary: |-
-        GET /asm/scans/{scan_id}/report — presigned URL for the full scan report
-        (proxied).
-      operationId: get_asm_scan_report
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}/screenshots:
-    get:
-      tags:
-      - asm
-      summary: |-
-        GET /asm/scans/{scan_id}/screenshots — screenshots with presigned URLs
-        (proxied).
-      operationId: get_asm_scan_screenshots
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/settings/ports:
-    get:
-      tags:
-      - asm
-      summary: GET /asm/settings/ports — port configuration (proxied; any role).
-      operationId: get_port_settings
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-    put:
-      tags:
-      - asm
-      summary: PUT /asm/settings/ports — update port settings (admin only; proxied).
-      operationId: update_port_settings
-      requestBody:
-        content:
-          application/json:
-            schema: {}
-        required: true
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '400':
-          description: Invalid JSON body
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/ValidationErrorResponse'
         '401':
           description: Missing or invalid authorization header
           content:
@@ -1127,14 +818,275 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}:
+    get:
+      tags:
+      - asm
+      summary: GET /asm/scans/{scan_id} — scan detail.
+      operationId: get_asm_scan
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: ASM scan detail
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}/certs:
+    get:
+      tags:
+      - asm
+      summary: GET /asm/scans/{scan_id}/certs — TLS certificate findings.
+      operationId: get_asm_scan_certs
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: TLS certificate findings for this scan
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}/diff:
+    get:
+      tags:
+      - asm
+      summary: |-
+        GET /asm/scans/{scan_id}/diff — diff vs the previous completed scan for
+        the same target (written by `services/scanner/src/asm.rs`).
+      operationId: get_asm_scan_diff
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Diff vs the previous scan (null if none computed yet)
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}/hosts:
+    get:
+      tags:
+      - asm
+      summary: GET /asm/scans/{scan_id}/hosts — discovered hosts nested with services.
+      operationId: get_asm_scan_hosts
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Discovered hosts and services
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}/report:
+    get:
+      tags:
+      - asm
+      summary: |-
+        GET /asm/scans/{scan_id}/report — on-the-fly summary (hosts, services,
+        certs, diff). v1 generated a presigned URL to an S3-uploaded report
+        artifact; this deviates deliberately (no report-generation/upload
+        pipeline exists in v2) and returns the equivalent data inline as JSON
+        instead of a document to fetch.
+      operationId: get_asm_scan_report
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Full scan report (hosts, certs, diff summary)
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}/screenshots:
+    get:
+      tags:
+      - asm
+      summary: |-
+        GET /asm/scans/{scan_id}/screenshots — screenshots captured for this
+        scan's services. Always empty today (see module doc: capture stage
+        deferred) but the join/read path is real and ready for when it lands.
+      operationId: get_asm_scan_screenshots
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Screenshots for this scan's services
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/settings/ports:
+    get:
+      tags:
+      - asm
+      summary: |-
+        GET /asm/settings/ports — any authenticated role; per-tenant, defaults
+        to `{extra_ports: [], masscan_rate: 1000}` when unset.
+      operationId: get_port_settings
+      responses:
+        '200':
+          description: Port configuration settings
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    put:
+      tags:
+      - asm
+      summary: PUT /asm/settings/ports — admin only.
+      operationId: update_port_settings
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PortSettingsBody'
+        required: true
+      responses:
+        '200':
+          description: Updated port configuration settings
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions
           content:
             application/json:
               schema:
@@ -3527,6 +3479,51 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
       security:
       - bearer_jwt: []
+  /api/v1/scanner/scan:
+    post:
+      tags:
+      - scanner
+      summary: |-
+        POST /scanner/scan — admin/maintainer. Queues one YARA/ClamAV scan task
+        on `scanner:tasks`, tenant-stamped from the caller's JWT (never from the
+        request body — `docs/v2-port/tenancy-model.md` §3/§4). Publish failures
+        are swallowed with a warning (`AppState::publish_stream`), matching
+        every other producer in this service — the response always reflects
+        "queued", not delivery confirmation, same as `s3_scan.rs::trigger_scan`.
+      operationId: trigger_scanner_task
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScannerScanBody'
+        required: true
+      responses:
+        '202':
+          description: Scan task queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScannerScanResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
   /api/v1/siem/config:
     get:
       tags:
@@ -5252,6 +5249,49 @@ components:
         total:
           type: integer
           format: int64
+    AsmScanCreateBody:
+      type: object
+      properties:
+        extra_ports:
+          type:
+          - array
+          - 'null'
+          items:
+            type: integer
+            format: int64
+        mode:
+          type:
+          - string
+          - 'null'
+        rate:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        target:
+          type:
+          - string
+          - 'null'
+    AsmScanListResponse:
+      type: object
+      required:
+      - scans
+      - total
+      - page
+      - per_page
+      properties:
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        scans:
+          type: array
+          items: {}
+        total:
+          type: integer
+          format: int64
     BucketCreateBody:
       type: object
       description: |-
@@ -6473,6 +6513,21 @@ components:
           type: boolean
         role:
           type: string
+    PortSettingsBody:
+      type: object
+      properties:
+        extra_ports:
+          type:
+          - array
+          - 'null'
+          items:
+            type: integer
+            format: int64
+        masscan_rate:
+          type:
+          - integer
+          - 'null'
+          format: int64
     QueryTypeBody:
       type: object
       description: POST /research/whois + /research/asn body — `query` and `indicator_type`.
@@ -6901,6 +6956,40 @@ components:
         total_skipped:
           type: integer
           format: int64
+    ScannerScanBody:
+      type: object
+      description: |-
+        ScannerScanRequest — `target` is a free-form label for the item being
+        scanned (filename, description, ...); `file_path` is the path the
+        scanner worker should read (must be reachable from the scanner pod —
+        shared volume or an already-resolved local path; this route does no
+        file transport of its own). `params` is opaque, scan-type-specific
+        configuration forwarded verbatim to the worker.
+      properties:
+        file_path:
+          type:
+          - string
+          - 'null'
+        params: {}
+        scan_type:
+          type:
+          - string
+          - 'null'
+        target:
+          type:
+          - string
+          - 'null'
+    ScannerScanResponse:
+      type: object
+      description: Documentation-only mirror of `trigger_scanner_task`'s response body.
+      required:
+      - job_id
+      - status
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
     ScheduleBody:
       type: object
       description: ScheduleSetRequest body.
@@ -7829,7 +7918,9 @@ tags:
 - name: siem
   description: Log-pipeline health, ingest proxy, OpenSearch search/stats, configuration
 - name: asm
-  description: Attack surface management — authenticated proxy to the scanner service
+  description: 'Attack surface management: masscan/banner/cert scan orchestration, hosts, certs, diffs'
+- name: scanner
+  description: Ad-hoc malware scan triggers (YARA/ClamAV) — publishes to the scanner:tasks queue
 - name: codescan
   description: AI code review — authenticated proxy to worker-codescan
 - name: research

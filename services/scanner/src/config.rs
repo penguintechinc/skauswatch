@@ -31,8 +31,19 @@ pub struct WorkerConfig {
     pub yara_rules_path: String,
     /// YARA enabled (default true).
     pub yara_enabled: bool,
-    /// ASM (Nuclei/ZAP/OpenVAS) enabled (default true).
+    /// ASM (masscan/banner/cert pipeline) enabled (default true).
     pub asm_enabled: bool,
+    /// `masscan` binary path/name (default `masscan`) — overridable so
+    /// deployments can point at a wrapper, and so tests can substitute a
+    /// fake executable (real masscan needs `NET_RAW`/root, unavailable in
+    /// CI — see `crate::asm` module docs).
+    pub masscan_bin: String,
+    /// Timeout for the whole `masscan` invocation, in seconds (default 60).
+    pub asm_masscan_timeout_sec: u64,
+    /// Per-port banner-grab timeout, in seconds (default 3).
+    pub asm_banner_timeout_sec: u64,
+    /// Per-port TLS certificate fetch timeout, in seconds (default 5).
+    pub asm_cert_timeout_sec: u64,
 }
 
 impl WorkerConfig {
@@ -57,6 +68,10 @@ impl WorkerConfig {
         yara_rules_path: Option<&str>,
         yara_enabled: Option<&str>,
         asm_enabled: Option<&str>,
+        masscan_bin: Option<&str>,
+        asm_masscan_timeout_sec: Option<&str>,
+        asm_banner_timeout_sec: Option<&str>,
+        asm_cert_timeout_sec: Option<&str>,
     ) -> Self {
         Self {
             health_port: health_port.and_then(|v| v.parse().ok()).unwrap_or(8080),
@@ -85,6 +100,16 @@ impl WorkerConfig {
             asm_enabled: asm_enabled
                 .map(|v| v.to_lowercase() != "false")
                 .unwrap_or(true),
+            masscan_bin: masscan_bin.unwrap_or("masscan").to_string(),
+            asm_masscan_timeout_sec: asm_masscan_timeout_sec
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            asm_banner_timeout_sec: asm_banner_timeout_sec
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3),
+            asm_cert_timeout_sec: asm_cert_timeout_sec
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
         }
     }
 
@@ -105,6 +130,10 @@ impl WorkerConfig {
             env::var("YARA_RULES_PATH").ok().as_deref(),
             env::var("YARA_ENABLED").ok().as_deref(),
             env::var("ASM_ENABLED").ok().as_deref(),
+            env::var("MASSCAN_BIN").ok().as_deref(),
+            env::var("ASM_MASSCAN_TIMEOUT_SEC").ok().as_deref(),
+            env::var("ASM_BANNER_TIMEOUT_SEC").ok().as_deref(),
+            env::var("ASM_CERT_TIMEOUT_SEC").ok().as_deref(),
         ))
     }
 }
@@ -117,6 +146,7 @@ mod tests {
     fn defaults() -> WorkerConfig {
         WorkerConfig::from_values(
             None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None,
         )
     }
 
@@ -137,6 +167,10 @@ mod tests {
         assert_eq!(cfg.yara_rules_path, "/etc/yara/rules");
         assert!(cfg.yara_enabled);
         assert!(cfg.asm_enabled);
+        assert_eq!(cfg.masscan_bin, "masscan");
+        assert_eq!(cfg.asm_masscan_timeout_sec, 60);
+        assert_eq!(cfg.asm_banner_timeout_sec, 3);
+        assert_eq!(cfg.asm_cert_timeout_sec, 5);
     }
 
     #[test]
@@ -163,11 +197,18 @@ mod tests {
             None,
             None,
             None,
+            None,
+            Some("nope"),
+            Some("nope"),
+            Some("nope"),
         );
         assert_eq!(cfg.health_port, 8080);
         assert_eq!(cfg.max_concurrent_tasks, 5);
         assert_eq!(cfg.clamav_port, 3310);
         assert_eq!(cfg.clamav_timeout_sec, 30);
+        assert_eq!(cfg.asm_masscan_timeout_sec, 60);
+        assert_eq!(cfg.asm_banner_timeout_sec, 3);
+        assert_eq!(cfg.asm_cert_timeout_sec, 5);
     }
 
     #[test]
@@ -187,6 +228,10 @@ mod tests {
             Some("/opt/rules"),
             Some("false"),
             Some("false"),
+            Some("/opt/bin/masscan"),
+            Some("120"),
+            Some("7"),
+            Some("11"),
         );
         assert_eq!(cfg.health_port, 9090);
         assert_eq!(cfg.redis_url, "redis://valkey:6380/1");
@@ -202,6 +247,10 @@ mod tests {
         assert_eq!(cfg.yara_rules_path, "/opt/rules");
         assert!(!cfg.yara_enabled);
         assert!(!cfg.asm_enabled);
+        assert_eq!(cfg.masscan_bin, "/opt/bin/masscan");
+        assert_eq!(cfg.asm_masscan_timeout_sec, 120);
+        assert_eq!(cfg.asm_banner_timeout_sec, 7);
+        assert_eq!(cfg.asm_cert_timeout_sec, 11);
     }
 
     #[test]
@@ -221,6 +270,10 @@ mod tests {
             None,
             Some("False"),
             Some("anything-else-is-truthy"),
+            None,
+            None,
+            None,
+            None,
         );
         assert!(!cfg.clamav_enabled);
         assert!(!cfg.yara_enabled);

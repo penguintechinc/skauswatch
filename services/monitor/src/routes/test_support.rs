@@ -35,6 +35,7 @@ fn build_state(
         event_store,
         event_bus,
         jwt_secret: TEST_JWT_SECRET.to_owned(),
+        threat_store: None,
     })
 }
 

@@ -205,7 +205,9 @@ impl SyncHandler {
             &integration.credentials,
             &integration.config,
             federated_credentials,
-        ) {
+        )
+        .await
+        {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(provider = %self.provider, error = %e, "failed to build provider client");
@@ -250,7 +252,9 @@ impl SyncHandler {
             &integration.credentials,
             &integration.config,
             federated_credentials,
-        ) {
+        )
+        .await
+        {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(provider = %self.provider, error = %e, "failed to build provider client");

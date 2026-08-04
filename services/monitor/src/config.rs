@@ -65,6 +65,29 @@ pub struct ElasticsearchConfig {
     pub password: Option<String>,
 }
 
+/// Owning tenant for every event this deployment's log collectors produce
+/// (`MONITOR_TENANT_ID`) — added in the phase-12 collector port, not part of
+/// v1 (v1 had no tenancy concept). Log collectors are host/cluster-level
+/// integrations (auditd/journald/syslog/file/kubernetes/lxc/database) with
+/// no per-request caller to derive a trusted tenant from the way REST routes
+/// do via `tenant_middleware` — a monitor deployment instead *is* deployed
+/// into exactly one tenant's infrastructure (its own cluster/hosts), so the
+/// tenant is a server-side deployment-time fact, analogous to how
+/// `endpoint-agent`'s enrollment token resolves a tenant server-side rather
+/// than trusting anything the collected data itself claims (see
+/// `docs/v2-port/tenancy-model.md` §3's "never accepted from a field the
+/// remote party fully controls" rule — collected log/audit content is
+/// exactly such a field, so it is never consulted for tenant identity).
+/// Empty by default: collectors refuse to start without it (`collectors::
+/// spawn_enabled`) rather than stamping events with an empty tenant that can
+/// never match a real caller's filter (mirrors `BaseEvent::tenant_id`'s
+/// documented empty-is-unreachable default).
+#[derive(Debug, Clone)]
+pub struct TenancyConfig {
+    /// This deployment's tenant id (`MONITOR_TENANT_ID`).
+    pub tenant_id: String,
+}
+
 /// Top-level service configuration, loaded once at startup from env vars.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -74,6 +97,8 @@ pub struct Config {
     pub security: SecurityConfig,
     /// Elasticsearch/OpenSearch settings.
     pub elasticsearch: ElasticsearchConfig,
+    /// This deployment's tenant, stamped onto every collector-produced event.
+    pub tenancy: TenancyConfig,
 }
 
 /// Parses common truthy spellings (`true`/`1`/`yes`, case-insensitive);
@@ -98,6 +123,7 @@ impl Config {
         es_index_pattern: Option<&str>,
         es_username: Option<&str>,
         es_password: Option<&str>,
+        tenant_id: Option<&str>,
     ) -> Self {
         Self {
             api: ApiConfig {
@@ -113,6 +139,9 @@ impl Config {
                 index_pattern: es_index_pattern.unwrap_or("aaa-events-*").to_owned(),
                 username: es_username.map(str::to_owned),
                 password: es_password.map(str::to_owned),
+            },
+            tenancy: TenancyConfig {
+                tenant_id: tenant_id.unwrap_or("").to_owned(),
             },
         }
     }
@@ -131,6 +160,7 @@ impl Config {
             env::var("MONITOR_ES_INDEX_PATTERN").ok().as_deref(),
             env::var("MONITOR_ES_USERNAME").ok().as_deref(),
             env::var("MONITOR_ES_PASSWORD").ok().as_deref(),
+            env::var("MONITOR_TENANT_ID").ok().as_deref(),
         )
     }
 }
@@ -152,12 +182,13 @@ mod tests {
 
     #[test]
     fn defaults_match_v1_when_unset() {
-        let cfg = Config::from_values(None, None, None, None, None, None, None, None);
+        let cfg = Config::from_values(None, None, None, None, None, None, None, None, None);
         assert_eq!(cfg.api.host, "0.0.0.0");
         assert_eq!(cfg.api.port, 8003);
         assert!(!cfg.elasticsearch.enabled);
         assert_eq!(cfg.elasticsearch.index_pattern, "aaa-events-*");
         assert!(cfg.security.auth_enabled);
+        assert_eq!(cfg.tenancy.tenant_id, "");
     }
 
     #[test]
@@ -171,6 +202,7 @@ mod tests {
             Some("custom-*"),
             Some("user"),
             Some("pass"),
+            Some("tenant-a"),
         );
         assert_eq!(cfg.api.host, "127.0.0.1");
         assert_eq!(cfg.api.port, 9999);
@@ -178,5 +210,6 @@ mod tests {
         assert!(cfg.elasticsearch.enabled);
         assert_eq!(cfg.elasticsearch.url, "http://es:9200");
         assert_eq!(cfg.elasticsearch.index_pattern, "custom-*");
+        assert_eq!(cfg.tenancy.tenant_id, "tenant-a");
     }
 }

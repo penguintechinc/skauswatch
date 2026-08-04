@@ -29,8 +29,9 @@ pub fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .merge(health::router())
         .merge(dashboard::router())
-        .merge(events::router(state))
+        .merge(events::router(state.clone()))
         .merge(alerts::router())
+        .merge(crate::threat_intel::routes::router(state))
 }
 
 #[cfg(test)]
