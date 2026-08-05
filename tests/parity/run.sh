@@ -35,9 +35,10 @@ JWT_SECRET=parity-jwt-secret
 ENDPOINT_API_SECRET=parity-endpoint-secret
 export ENDPOINT_API_SECRET
 
-# Cargo caches live in the session scratchpad (fall back to /tmp for
-# standalone runs).
-SCRATCH="${PARITY_SCRATCH:-/tmp/claude-1000/-home-penguin-code-skauswatch/1f7aef20-b887-40e5-9822-90f00d5419c0/scratchpad}"
+# Cargo/pip caches + build scratch dir. Override with PARITY_SCRATCH (CI
+# sets this to a runner-temp path); defaults to a fixed /tmp dir for
+# standalone local runs.
+SCRATCH="${PARITY_SCRATCH:-/tmp/skauswatch-parity-scratch}"
 mkdir -p "$SCRATCH/cargo-cache" "$SCRATCH/cargo-git" "$SCRATCH/target-parity" "$SCRATCH/pip-cache"
 
 RUST_IMG=rust:1.97-slim-bookworm
@@ -108,11 +109,22 @@ up() {
   echo "== v1 manager (Quart) =="
   # services/manager on this branch is the v2 Rust service; the v1 Python
   # source lives frozen on release/v1.0.x. Extract a pristine snapshot from
-  # git history for the container mount.
+  # git history for the container mount. Resolve the ref defensively: a
+  # local dev clone has a local `release/v1.0.x` branch, but a CI checkout
+  # (actions/checkout, even with fetch-depth:0) only creates the
+  # remote-tracking ref `origin/release/v1.0.x` — no local branch.
+  V1_REF="$(git -C "$REPO" rev-parse --verify --quiet release/v1.0.x || true)"
+  if [ -z "$V1_REF" ]; then
+    V1_REF="$(git -C "$REPO" rev-parse --verify --quiet origin/release/v1.0.x || true)"
+  fi
+  if [ -z "$V1_REF" ]; then
+    echo "release/v1.0.x not found (checked local branch and origin/release/v1.0.x)" >&2
+    exit 1
+  fi
   V1_SRC="$SCRATCH/v1-manager-src"
   rm -rf "$V1_SRC"
   mkdir -p "$V1_SRC"
-  git -C "$REPO" archive release/v1.0.x services/manager | tar -x -C "$V1_SRC"
+  git -C "$REPO" archive "$V1_REF" services/manager | tar -x -C "$V1_SRC"
   # Dependencies install once into a persistent PYTHONUSERBASE volume so the
   # runner's poisoned-connection recovery (docker restart) reboots in
   # seconds instead of re-running pip (see README: v1 defect — a SQL error

@@ -3,8 +3,8 @@
 # Docker Compose is deprecated for all environments; deployment is Helm v4 -> Kubernetes only.
 
 .PHONY: help build lint format test test-unit test-integration test-e2e test-security \
-	test-functional smoke-test coverage test-coverage db-test-up db-test-down seed-mock-data \
-	docker-build docker-push dev deploy-alpha deploy-beta clean version-update \
+	test-functional test-parity smoke-test coverage test-coverage db-test-up db-test-down \
+	seed-mock-data docker-build docker-push dev deploy-alpha deploy-beta clean version-update \
 	version-update-minor version-update-major version-show license-validate \
 	license-check-features pre-commit info env
 
@@ -81,6 +81,12 @@ test-e2e: ## Testing - Run end-to-end tests (webui Playwright)
 	@cd services/webui && npm run test:e2e
 	@echo "$(YELLOW)Note: tests/e2e (legacy pytest, pre-Rust-migration) is stale and not wired in — pending its own cleanup.$(RESET)"
 
+test-parity: ## Testing - Run golden parity harness (manager v1 vs v2; needs docker + release/v1.0.x)
+	@echo "$(BLUE)Running v1/v2 manager parity harness...$(RESET)"
+	@tests/parity/run.sh
+	@echo "$(YELLOW)tests/smoke/s3_scan is NOT covered here — it needs a live deployed alpha/beta$(RESET)"
+	@echo "$(YELLOW)stack (MinIO, WebUI, seeded auth user); run manually: tests/smoke/s3_scan/run_all.sh <alpha|beta>$(RESET)"
+
 smoke-test: ## Testing - Build + quick workspace test pass (run before every commit)
 	@echo "$(BLUE)Running smoke tests...$(RESET)"
 	cargo build --workspace --locked
@@ -123,13 +129,14 @@ seed-mock-data: ## Testing - Seed services with mock data for development
 	@echo "$(BLUE)Seeding mock data...$(RESET)"
 	@echo "$(YELLOW)TODO: implement seed-mock-data (no seed script exists yet)$(RESET)"
 
-pre-commit: ## Testing - Run pre-commit checks (lint, security, build, smoke-test, test)
+pre-commit: ## Testing - Run pre-commit checks (lint, security, build, smoke-test, test, parity)
 	@echo "$(BLUE)=== Pre-commit checks ===$(RESET)"
 	@$(MAKE) lint
 	@$(MAKE) test-security
 	@$(MAKE) build
 	@$(MAKE) smoke-test
 	@$(MAKE) test
+	@$(MAKE) test-parity
 	@echo "$(GREEN)=== Pre-commit complete ===$(RESET)"
 
 # === Build Commands ===
@@ -143,6 +150,7 @@ build: ## Build - Build the Rust workspace (release) + webui
 lint: ## Code Quality - Run all linters (cargo, webui, Docker, shell, OpenAPI)
 	@echo "$(BLUE)Linting all code...$(RESET)"
 	cargo fmt --all --check
+	cargo check --workspace --locked
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	@cd services/webui && npm run lint
 	@if command -v hadolint >/dev/null 2>&1; then \

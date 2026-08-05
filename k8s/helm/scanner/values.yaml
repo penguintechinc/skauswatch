@@ -144,6 +144,18 @@ env:
       configMapKeyRef:
         name: skauswatch-scanner-config
         key: asm-enabled
+  # ASM screenshot stage (services/scanner/src/asm.rs capture_screenshot).
+  # CHROMIUM_BIN points directly at Debian's real chromium ELF binary,
+  # bypassing the /usr/bin/chromium shell-script launcher (which execs
+  # grep/uname/find internally) -- keeps templates/tracingpolicy.yaml's
+  # exec-allowlist to exactly one added path; see services/scanner/Dockerfile.
+  # HOME=/tmp gives Chromium's own default profile/cache dirs a writable
+  # home under the tmp emptyDir below (readOnlyRootFilesystem: true blocks
+  # writes anywhere else, including the tempfile crate's screenshot output).
+  - name: CHROMIUM_BIN
+    value: "/usr/lib/chromium/chromium"
+  - name: HOME
+    value: "/tmp"
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
@@ -190,11 +202,21 @@ volumeMounts:
   - name: yara-rules
     mountPath: /etc/yara/rules
     readOnly: true
+  # Writable scratch space required under readOnlyRootFilesystem: true --
+  # ASM screenshot capture's tempfile PNG write (src/asm.rs
+  # capture_screenshot) and Chromium's own HOME=/tmp profile/cache dirs
+  # both land here. sizeLimit bounds node ephemeral-storage usage; PNG
+  # captures + Chromium's small on-disk cache comfortably fit well under it.
+  - name: tmp
+    mountPath: /tmp
 
 volumes:
   - name: yara-rules
     configMap:
       name: skauswatch-scanner-yara-rules
+  - name: tmp
+    emptyDir:
+      sizeLimit: 512Mi
 
 configMapData:
   log-level: "info"

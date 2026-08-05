@@ -64,25 +64,34 @@ LABEL org.opencontainers.image.title="skauswatch-scanner" \
 # ca-certificates: TLS roots for outbound reqwest/sqlx-tls calls.
 # rustls only (workspace deny.toml bans openssl-sys) — nothing else needed.
 #
-# NOT YET DONE HERE, FLAGGED FOR THE DOCKERFILE/CHART OWNER: the ASM
-# screenshot-capture stage (src/asm.rs) shells out to a `chromium` binary
-# (CHROMIUM_BIN, default "chromium") that this image does not install.
-# Until a `chromium`/`chromium-common` (or equivalent headless-capable)
-# package is added here, ASM_SCREENSHOT_ENABLED=true will fail every
-# capture with a `ScreenshotError::Spawn` (logged, non-fatal to the scan —
-# see src/asm.rs module docs) rather than silently doing nothing. Installing
-# it pulls in a large dependency tree (GTK/NSS/X11 libs) and needs
-# `--no-sandbox` at runtime because this container is rootless
-# (capabilities.drop: [ALL], non-root UID — Chromium's own setuid sandbox
-# cannot initialize under that securityContext); this is the standard,
-# narrower trade-off for headless Chromium in containers and does NOT
-# require a `NET CAPABILITY EXCEPTION`-class securityContext change. If any
-# Tetragon (or equivalent eBPF) process-execution policy gates this pod, it
-# must additionally allow `chromium` spawning its own `--type=renderer/
-# zygote/gpu-process` children, or captures will be killed at the LSM/eBPF
-# layer instead of failing through src/asm.rs's own error handling.
+# chromium: headless screenshot capture for the ASM pipeline's screenshot
+# stage (src/asm.rs `capture_screenshot`). `--no-install-recommends` still
+# pulls every runtime lib chromium needs (GTK/NSS/X11/etc. are Depends, not
+# Recommends, in Debian's package) — only optional integration bits (desktop
+# entries, xdg helpers) are skipped. This is by far the largest package in
+# this image (~275MiB installed, dominated by the single ELF binary at
+# /usr/lib/chromium/chromium) — expected and required, not a bloat regression.
+#
+# Runs `--no-sandbox` (see src/asm.rs args) because this container is
+# rootless (capabilities.drop: [ALL], non-root UID — Chromium's own setuid
+# sandbox cannot initialize under that securityContext); this is the
+# standard, narrower trade-off for headless Chromium in containers (the
+# *contained* renderer process loses its own internal sandbox layer, but the
+# outer container boundary — non-root, dropped capabilities, read-only
+# rootfs — is unchanged) and is NOT a `NET CAPABILITY EXCEPTION`-class
+# securityContext change.
+#
+# k8s/helm/scanner/values.yaml sets CHROMIUM_BIN to the real ELF binary path
+# below directly (bypassing Debian's `/usr/bin/chromium` `#!/bin/sh` launcher
+# wrapper, which would itself exec `grep`/`uname`/`find` for CPU-feature and
+# crash-report housekeeping we don't need) — keeps the Tetragon exec-allowlist
+# in templates/tracingpolicy.yaml to exactly one added binary path. That
+# same values.yaml also mounts a writable emptyDir at /tmp (HOME=/tmp) since
+# `readOnlyRootFilesystem: true` would otherwise block both the screenshot
+# tempfile write and Chromium's own default profile/cache directories.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        chromium \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 appuser \
     && useradd --system --uid 10001 --gid appuser --no-create-home --shell /usr/sbin/nologin appuser

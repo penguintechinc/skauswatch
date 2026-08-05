@@ -16,9 +16,14 @@ tests/parity/run.sh replay   # replay corpus against running managers
 tests/parity/run.sh down     # remove every harness container + network
 ```
 
-Requirements: docker, python3 + `requests` on the host. Reports land in
-`tests/parity/reports/` (`report.md` human, `report.json` full). Exit code
-is non-zero when any **finding** (non-allowlisted diff) remains.
+Requirements: docker, python3.13, and `pip install --require-hashes -r
+requirements.txt` on the host. Reports land in `tests/parity/reports/`
+(`report.md` human, `report.json` full). Exit code is non-zero when any
+**finding** (non-allowlisted diff) remains.
+
+Wired into CI as the `parity` job in `.github/workflows/rust.yml` (runs
+`up`+`replay`+`down` end to end, after `lint`/`test` pass); the report is
+uploaded as a build artifact on every run, pass or fail.
 
 `replay` is only valid once per fresh `up` — the corpus mutates state, and
 both sides must start from the seeded snapshot to stay in lockstep.
