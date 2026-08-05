@@ -194,6 +194,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Fetch release/v1.0.x
+        # actions/checkout only fetches the ref that triggered this workflow
+        # — even with fetch-depth: 0 that's the *full history of that one
+        # ref*, not other branches, so origin/release/v1.0.x is never
+        # present locally without this. Full (non-shallow) fetch: `git
+        # archive` in run.sh needs the tree, not just the commit.
+        run: git fetch --no-tags --prune origin +refs/heads/release/v1.0.x:refs/remotes/origin/release/v1.0.x
       - name: Verify release/v1.0.x is reachable
         # run.sh resolves local-branch-or-origin/ itself; fail fast here
         # with a clear message rather than 20 minutes into the harness.

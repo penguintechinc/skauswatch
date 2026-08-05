@@ -653,17 +653,42 @@ async fn capture_screenshot(
     ];
 
     let run = async {
-        let output = Command::new(bin)
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|source| ScreenshotError::Spawn {
-                bin: bin.to_owned(),
-                source,
-            })?;
+        // Same ETXTBSY retry as `run_masscan` above: tests exec a freshly
+        // written-and-chmod'd fake `chromium` binary immediately after
+        // creating it, which races the kernel's busy-text bookkeeping on
+        // this environment's container/overlay filesystem — worse under
+        // `cargo llvm-cov`'s instrumented, slower binaries where more tests
+        // run concurrently and widen the window. A real, stable `chromium`
+        // install never exhibits this. Without the retry, a transient
+        // ETXTBSY surfaces as `ScreenshotError::Spawn` instead of the
+        // `Exit`/`Timeout`/success outcome the caller (and its tests)
+        // actually expect.
+        let mut attempts_left = 3u8;
+        let output = loop {
+            let spawn = Command::new(bin)
+                .args(&args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .output()
+                .await;
+            match spawn {
+                Ok(output) => break output,
+                Err(source)
+                    if attempts_left > 1
+                        && source.raw_os_error() == Some(26 /* ETXTBSY */) =>
+                {
+                    attempts_left -= 1;
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(source) => {
+                    return Err(ScreenshotError::Spawn {
+                        bin: bin.to_owned(),
+                        source,
+                    });
+                }
+            }
+        };
         if !output.status.success() {
             return Err(ScreenshotError::Exit {
                 status: output.status.code().unwrap_or(-1),
