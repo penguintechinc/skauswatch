@@ -23,10 +23,35 @@ const RETENTION_MSG: &str = "retention_days must be an integer 1–400";
 /// v1 OpenSearch index pattern for SIEM logs.
 const LOG_INDEX: &str = "skauswatch-logs-*";
 
-/// Router for /api/v1/siem.
+/// Router for /api/v1/siem — merges [`public_router`] and
+/// [`protected_router`]. Used as-is by this module's own tests; the app-wide
+/// assembly (`routes/mod.rs`) mounts the two halves separately so
+/// `tenant_middleware` (and the `skauswatch.siem` flag gate) wraps only the
+/// protected half — see [`public_router`] for why health must never sit
+/// behind either.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn router() -> Router<AppState> {
+    public_router().merge(protected_router())
+}
+
+/// The unauthenticated SIEM endpoint: `GET /siem/health` is a liveness
+/// probe (v1 `services/manager/api/v1/siem.py::siem_health` carries no
+/// `@auth_required`) — always 200, body degrades to `"unavailable"`/
+/// `"degraded"` rather than erroring. It has no bearer token to derive a
+/// `tenant` claim from, so `tenant_middleware` must never wrap it (same
+/// reasoning as `auth::public_router`), and monitoring must be able to
+/// reach it regardless of the `skauswatch.siem` flag, so it is not passed
+/// through `gated()` either — mirrors the root `/healthz`/`/readyz` bypass
+/// pattern (see docs/v2-port/feature-flags.md).
+pub fn public_router() -> Router<AppState> {
+    Router::new().route("/siem/health", get(siem_health))
+}
+
+/// The bearer-JWT-gated SIEM endpoints — wrapped in `tenant_middleware` and
+/// the `skauswatch.siem` flag gate like every other authenticated route in
+/// `routes/mod.rs`'s app-wide assembly.
+pub fn protected_router() -> Router<AppState> {
     Router::new()
-        .route("/siem/health", get(siem_health))
         .route("/siem/ingest", post(proxy_ingest))
         .route("/siem/search", get(search_logs))
         .route("/siem/stats", get(siem_stats))

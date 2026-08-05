@@ -443,5 +443,223 @@
     ],
     "ref": "manager-contract.md \u2014 Error body shapes (validation details decision)",
     "reason": "Per-item errors[].error strings: v1 embeds str(ValidationError) multi-line pydantic dumps; v2 renders 'field: message'. Counts and statuses must still match."
+  },
+  {
+    "id": "decision-darwin-codescan-rename",
+    "case_glob": "darwin.*",
+    "paths": [
+      "path"
+    ],
+    "ref": "docs/MIGRATION.md \u2014 module rename map (darwin -> codescan)",
+    "reason": "v1's \"darwin\" module and its /api/v1/darwin/* REST base were renamed to \"codescan\"/\"/api/v1/codescan/*\" as part of the v2 module rename (docs/MIGRATION.md \u00a7Module rename map) -- both sides are still a pure proxy to the same stub upstream (manager-contract.md \u00a7codescan), so the only byte-for-byte difference is the forwarded/echoed request path itself."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.create",
+    "case": "asm.scans.create",
+    "expect_status": [
+      200,
+      201
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.create-empty-body",
+    "case": "asm.scans.create-empty-body",
+    "expect_status": [
+      200,
+      400
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.list",
+    "case": "asm.scans.list",
+    "expect_status": [
+      200,
+      200
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.get",
+    "case": "asm.scans.get",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.hosts",
+    "case": "asm.scans.hosts",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.screenshots",
+    "case": "asm.scans.screenshots",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.certs",
+    "case": "asm.scans.certs",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.diff",
+    "case": "asm.scans.diff",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.report",
+    "case": "asm.scans.report",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.settings.ports.get",
+    "case": "asm.settings.ports.get",
+    "expect_status": [
+      200,
+      200
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.settings.ports.put.admin",
+    "case": "asm.settings.ports.put.admin",
+    "expect_status": [
+      200,
+      200
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-siem-config-logs-rename",
+    "case": "siem.config.get",
+    "expect_status": [
+      200,
+      200
+    ],
+    "paths": [
+      "log_receiver_url",
+      "logs_url"
+    ],
+    "ref": "docs/MIGRATION.md \u2014 module rename map (log-receiver -> logs)",
+    "reason": "v1's SIEMConfig.log_receiver_url field name predates the log-receiver -> logs service rename (docs/MIGRATION.md); v2 renames the config field to logs_url for consistency with LOGS_URL/the renamed service. Same value, renamed key only."
+  },
+  {
+    "id": "decision-siem-health-logs-rename",
+    "case": "siem.health",
+    "expect_status": [
+      200,
+      200
+    ],
+    "paths": [
+      "log_receiver",
+      "logs"
+    ],
+    "ref": "docs/MIGRATION.md \u2014 module rename map (log-receiver -> logs)",
+    "reason": "Same log-receiver -> logs rename as siem.config.get, applied to the health payload's key instead of the config field: v1 GET /siem/health returns {log_receiver, status}, v2 returns {logs, status}. Only surfaced once routes/mod.rs wiring was fixed to route this handler into the public (unauthenticated) tier matching its own doc/test -- previously masked by an unrelated 401."
+  },
+  {
+    "id": "decision-s3-hash-lookup-case-normalization",
+    "case": "s3.hash-lookup.miss",
+    "expect_status": [
+      200,
+      200
+    ],
+    "paths": [
+      "hash"
+    ],
+    "ref": "manager-contract.md \u00a7threat-intel (IndicatorType hash) / s3-scan hash-lookup",
+    "reason": "v2's HashLookupRequest lowercases the hash before comparing/echoing it back (case-insensitive hex lookup); v1 echoes the caller's casing verbatim. Same hash, normalized case only -- a miss on both sides either way."
+  },
+  {
+    "id": "decision-auth-me-refresh-as-access-wording",
+    "case": "auth.me.refresh-as-access",
+    "expect_status": [
+      401,
+      401
+    ],
+    "paths": [
+      "error"
+    ],
+    "ref": "manager-contract.md \u00a7Auth (auth_required)",
+    "reason": "Both sides correctly reject a refresh token presented as an access token token with 401, but v1's error string is the generic \"Invalid token type\" while v2 uses a more specific message (\"Invalid token\"). Cosmetic wording only -- status and envelope shape match."
+  },
+  {
+    "id": "decision-auth-refresh-access-as-refresh-wording",
+    "case": "auth.refresh.access-as-refresh",
+    "expect_status": [
+      401,
+      401
+    ],
+    "paths": [
+      "error"
+    ],
+    "ref": "manager-contract.md \u00a7Auth (auth_required)",
+    "reason": "Both sides correctly reject a access token presented as a refresh token token with 401, but v1's error string is the generic \"Invalid token type\" while v2 uses a more specific message (\"Invalid refresh token\"). Cosmetic wording only -- status and envelope shape match."
+  },
+  {
+    "id": "decision-s3-buckets-new-credential-fields",
+    "paths": [
+      "items[0].credential_mode",
+      "items[0].role_arn",
+      "items[1].credential_mode",
+      "items[1].role_arn",
+      "items[2].credential_mode",
+      "items[2].role_arn"
+    ],
+    "ref": "docs/v2-port/aws-identity-runbook.md \u00a7hybrid credential model (security finding #2)",
+    "reason": "v1 predates the hybrid static/assume_role credential model (services/s3scan/migrations/0002_s3scan_tenancy.sql) entirely, so it never had credential_mode/role_arn fields at all. v2 adds credential_mode (always present) and role_arn (present, null for static-mode buckets) to the bucket list/get response -- new, intentional fields, not a behavior mismatch. external_id is deliberately NOT among them: it is the AssumeRole confused-deputy shared secret and is stripped from the response DTO entirely (write-only), so it is never a source of diff on either side.",
+    "case": "s3.buckets.list",
+    "expect_status": [
+      200,
+      200
+    ]
+  },
+  {
+    "id": "decision-s3-buckets-get-new-credential-fields",
+    "case": "s3.buckets.get",
+    "expect_status": [
+      200,
+      200
+    ],
+    "paths": [
+      "credential_mode",
+      "role_arn"
+    ],
+    "ref": "docs/v2-port/aws-identity-runbook.md \u00a7hybrid credential model (security finding #2)",
+    "reason": "Same as decision-s3-buckets-new-credential-fields, for the single-bucket GET response: v2 adds credential_mode/role_arn (new, intentional fields absent from v1's pre-hybrid-credential schema). external_id is stripped from the response entirely on the v2 side, so it never appears here as a diff at all."
   }
 ]

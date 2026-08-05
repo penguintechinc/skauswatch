@@ -119,11 +119,13 @@ pre-created schema untouched.
 
 Each entry names the corpus case (exact `case` or `case_glob`), optionally
 pins the exact `[v1, v2]` status pair (`expect_status`), optionally
-restricts which diff `paths` it excuses, and always carries a `ref` into
-`docs/v2-port/manager-contract.md` plus a `reason`. A case counts as
-ALLOWLISTED only if **every** diff (including a status mismatch, modeled as
-path `$status`) is excused; anything left over is a FINDING and fails the
-run. Rationale per family:
+restricts which diff `paths` it excuses, and always carries a `ref` (into
+`docs/v2-port/manager-contract.md` or another `docs/v2-port/`/`docs/`
+document — module renames live in `docs/MIGRATION.md`, the ASM
+re-architecture in `docs/v2-port/phase12-scope-scan-monitor.md`) plus a
+`reason`. A case counts as ALLOWLISTED only if **every** diff (including a
+status mismatch, modeled as path `$status`) is excused; anything left over
+is a FINDING and fails the run. Rationale per family:
 
 - **defect #1** (s3-scan schema drift): v1's jobs/results/statistics/
   schedule-get/upload/create-indicator/ti-enrichment routes were
@@ -151,6 +153,35 @@ run. Rationale per family:
   `{loc,msg,type}` entries. The allowlist excuses only the `details`
   payload (and ENDPOINT batch `errors[].error` strings) — the 400/202 status
   and envelope keys must still match.
+- **darwin → codescan rename** (`docs/MIGRATION.md` module rename map): both
+  sides still pure-proxy identically to the shared stub; only the
+  echoed/forwarded request `path` differs (`/api/v1/darwin/*` vs
+  `/api/v1/codescan/*`). All `darwin.*` cases, one glob entry.
+- **ASM real implementation** (`docs/v2-port/phase12-scope-scan-monitor.md`
+  §1): v1's asm router proxied to a scanner HTTP server that never actually
+  existed at runtime — the harness's "v1 response" is just the shared stub's
+  echo, not a real result. v2 DECISION: re-architect as a DB-backed manager
+  router (migration 0006) instead of porting the broken proxy, so every
+  `asm.scans.*`/`asm.settings.ports.*` response is intentionally a different
+  shape, not just a different value.
+- **log-receiver → logs rename** (`docs/MIGRATION.md` module rename map):
+  v1's `log_receiver_url` config field and `log_receiver` health-payload key
+  predate the `services/logs` rename; v2 renames both to `logs_url`/`logs`
+  for consistency with `LOGS_URL`. `siem.config.get` and `siem.health`.
+- **s3 hash-lookup case normalization**: v2's hash-lookup echoes the queried
+  hash lowercased; v1 echoes the caller's original casing. Same hash, either
+  way a miss.
+- **auth error wording**: v1's generic `"Invalid token type"` vs v2's more
+  specific `"Invalid token"` / `"Invalid refresh token"` for a
+  refresh-as-access / access-as-refresh token swap. Cosmetic message only —
+  both sides correctly 401.
+- **s3 bucket hybrid credential fields** (`docs/v2-port/aws-identity-runbook.md`,
+  security finding #2): v1 predates the `credential_mode`/`role_arn` hybrid
+  credential schema entirely, so list/get responses gain two new,
+  intentional fields in v2. `external_id` (the AssumeRole confused-deputy
+  shared secret) is excluded from this allowlist on purpose — it is stripped
+  from the response DTO entirely (write-only) rather than masked, so it
+  never appears as a diff on either side.
 
 ## Coverage notes / honest gaps
 

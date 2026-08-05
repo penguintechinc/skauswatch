@@ -19,7 +19,7 @@ Toggling & License Enforcement.
 | `skauswatch.codescan` | Yes (`MODULE_FLAGS`) | manager, codescan-backend | manager: `/api/v1/codescan/*` + deprecated `/api/v1/darwin/*` alias (in-handler `license_denied` check, not a router layer). codescan-backend: its own `/api/v1/codescan/*` surface. Same key, two independent enforcement points. | OFF | Licensed module (flag-only) |
 | `skauswatch.s3-scan` | Yes (`CORE_FLAGS`) | manager | `s3_scan::router()` — `/api/v1/s3-scan/*` | OFF | — |
 | `skauswatch.threat-intel` | Yes (`CORE_FLAGS`) | manager | `threat_intel::router()` — `/api/v1/threat-intel/*` | OFF | — |
-| `skauswatch.siem` | Yes (`CORE_FLAGS`) | manager | `siem::router()` — `/api/v1/siem/*` | OFF | — |
+| `skauswatch.siem` | Yes (`CORE_FLAGS`) | manager | `siem::protected_router()` — `/api/v1/siem/{ingest,search,stats,config}`. `GET /siem/health` (`siem::public_router()`) bypasses this flag and `tenant_middleware` — v1 carries no `@auth_required` on it either; same bypass reasoning as root `/healthz`/`/readyz` (harness-found: `docs/v2-port/manager-contract.md` §siem). | OFF | — |
 | `skauswatch.alerts` | Yes (`CORE_FLAGS`) | manager | `alerts::router()` — `/api/v1/alerts/*` (including `/ai-review` sub-route — see gap below) | OFF | — |
 | `skauswatch.approvals` | Yes (`CORE_FLAGS`) | manager | `approvals::router()` — `/api/v1/approvals/*` | OFF | — |
 | `skauswatch.asm` | Yes (`CORE_FLAGS`) | manager | `asm::router()` — `/api/v1/asm/*` | OFF | — |

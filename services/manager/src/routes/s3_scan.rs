@@ -335,8 +335,13 @@ impl BucketRow {
 /// Documentation-only mirror of `bucket_json`'s wire shape (list items and
 /// GET detail share this shape) — credentials are masked, never raw.
 /// `access_key_id`/`secret_access_key` are populated (masked) for `static`
-/// mode only; `role_arn` (shown in full — ARNs aren't secret) and
-/// `external_id` (masked) for `assume_role` mode only.
+/// mode only; `role_arn` (shown in full — ARNs aren't secret) for
+/// `assume_role` mode only. `external_id` is the cross-account AssumeRole
+/// shared secret (confused-deputy protection, AWS IAM docs) — write-only:
+/// accepted on create/update, used server-side to call AssumeRole, but
+/// never rendered back in any response, masked or otherwise (unlike
+/// `secret_access_key`, a masked prefix/suffix of `external_id` is often
+/// enough to reconstruct it since it need not be high-entropy).
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct BucketItem {
     id: i32,
@@ -347,7 +352,6 @@ pub(crate) struct BucketItem {
     access_key_id: Option<String>,
     secret_access_key: Option<String>,
     role_arn: Option<String>,
-    external_id: Option<String>,
     region: Option<String>,
     use_ssl: Option<bool>,
     path_style: Option<bool>,
@@ -361,19 +365,21 @@ pub(crate) struct BucketItem {
 }
 
 /// Masked credential display fields for one row (see [`credential_display`]).
+/// Deliberately has no `external_id` field — see [`BucketItem`]'s doc for
+/// why that value is write-only and never rendered back, masked or not.
 struct CredentialDisplay {
     access_key_id: Option<String>,
     secret_access_key: Option<String>,
     role_arn: Option<String>,
-    external_id: Option<String>,
 }
 
 /// Masked credential display fields for one row, mode-aware (security
 /// finding #2): `static` mode decrypts `credential_enc` to mask the real
 /// access-key-id/secret-access-key (the decrypted plaintext never leaves
 /// this function); `assume_role` mode shows `role_arn` in full (ARNs
-/// aren't secret) and a masked `external_id`. Shared by [`bucket_json`]
-/// (GET/list) and `update_bucket`'s response summary.
+/// aren't secret) — `external_id` is intentionally omitted entirely, not
+/// masked (see [`BucketItem`]'s doc). Shared by [`bucket_json`] (GET/list)
+/// and `update_bucket`'s response summary.
 fn credential_display(
     b: &BucketRow,
     envelope: &EnvelopeEncryption,
@@ -396,14 +402,12 @@ fn credential_display(
                 access_key_id: Some(mask_access_key(ak)),
                 secret_access_key: Some(mask_secret_key(sk)),
                 role_arn: None,
-                external_id: None,
             })
         }
         "assume_role" => Ok(CredentialDisplay {
             access_key_id: None,
             secret_access_key: None,
             role_arn: b.role_arn.clone(),
-            external_id: b.external_id.as_deref().map(mask_secret_key),
         }),
         other => Err(ApiError::internal(
             "credential mode",
@@ -413,6 +417,8 @@ fn credential_display(
 }
 
 /// v1 full bucket shape (list items + GET detail) with masked credentials.
+/// `external_id` is deliberately never a key in this body — see
+/// [`BucketItem`]'s doc comment.
 fn bucket_json(
     b: &BucketRow,
     envelope: &EnvelopeEncryption,
@@ -427,7 +433,6 @@ fn bucket_json(
         "access_key_id": cred.access_key_id,
         "secret_access_key": cred.secret_access_key,
         "role_arn": cred.role_arn,
-        "external_id": cred.external_id,
         "region": b.region,
         "use_ssl": b.use_ssl,
         "path_style": b.path_style,
@@ -4636,10 +4641,39 @@ mod tests {
         assert_eq!(fetched["credential_mode"], "assume_role");
         assert!(fetched["access_key_id"].is_null());
         assert!(fetched["secret_access_key"].is_null());
-        // external_id is masked, never returned in full.
-        let external_id = fetched["external_id"].as_str().unwrap_or_default();
-        assert_ne!(external_id, "customer-secret-ext-id");
-        assert!(external_id.contains('*'));
+        // external_id is the cross-account AssumeRole shared secret
+        // (confused-deputy protection) — write-only, never rendered back at
+        // all (not even masked: unlike secret_access_key it need not be
+        // high-entropy, so a masked prefix/suffix can be enough to
+        // reconstruct it). Regression coverage: the key itself must be
+        // absent from both the create response and the GET/list bodies.
+        assert!(
+            !created["bucket"]
+                .as_object()
+                .is_some_and(|m| m.contains_key("external_id")),
+            "create response must never expose external_id: {created}"
+        );
+        assert!(
+            !fetched
+                .as_object()
+                .is_some_and(|m| m.contains_key("external_id")),
+            "GET bucket response must never expose external_id: {fetched}"
+        );
+
+        let list = server
+            .get("/api/v1/s3-scan/buckets")
+            .authorization_bearer(&admin_tok)
+            .await;
+        list.assert_status_ok();
+        let listed: serde_json::Value = list.json();
+        for item in listed["items"].as_array().into_iter().flatten() {
+            assert!(
+                !item
+                    .as_object()
+                    .is_some_and(|m| m.contains_key("external_id")),
+                "list bucket item must never expose external_id: {item}"
+            );
+        }
 
         // The row itself never persists a credential_enc blob for
         // assume_role mode — check the raw DB row, not just the API surface.

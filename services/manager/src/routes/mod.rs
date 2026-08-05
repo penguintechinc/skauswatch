@@ -6,9 +6,13 @@
 //! than one non-bearer-JWT auth surface:
 //!
 //! 1. **Public** — no credential of any kind: `auth::login`/`refresh`/
-//!    `register`, `openapi::public_router` (the login-only doc). None of
-//!    these can carry a `tenant` claim (there's no token yet), so none may
-//!    sit behind `tenant_middleware`.
+//!    `register`, `openapi::public_router` (the login-only doc),
+//!    `siem::public_router` (the `/siem/health` liveness probe — v1 carries
+//!    no `@auth_required` on it either). None of these can carry a `tenant`
+//!    claim (there's no token yet), so none may sit behind
+//!    `tenant_middleware`; `/siem/health` additionally skips the
+//!    `skauswatch.siem` flag gate so monitoring stays reachable regardless
+//!    of that flag's state (same bypass reasoning as root `/healthz`).
 //! 2. **Agent (HMAC)** — `endpoint::agent_router`: ENDPOINT agents
 //!    authenticate via `X-API-Key`/`X-Agent-ID`, never a bearer JWT. Their
 //!    tenant is resolved server-side from `endpoint_agents.tenant_id`
@@ -68,7 +72,9 @@ fn gated(router: Router<AppState>, state: &AppState, flag: &'static str) -> Rout
 
 /// Builds the full /api/v1 application router.
 pub fn router(state: AppState) -> Router {
-    let public = auth::public_router().merge(openapi::public_router());
+    let public = auth::public_router()
+        .merge(openapi::public_router())
+        .merge(siem::public_router());
 
     // Gated on the same flag as the operator half — see `flags::CORE_FLAGS`
     // `skauswatch.endpoint` and the module docs above (HMAC agent tier).
@@ -92,7 +98,7 @@ pub fn router(state: AppState) -> Router {
             &state,
             "skauswatch.endpoint",
         ))
-        .merge(gated(siem::router(), &state, "skauswatch.siem"))
+        .merge(gated(siem::protected_router(), &state, "skauswatch.siem"))
         .merge(gated(asm::router(), &state, "skauswatch.asm"))
         .merge(gated(scanner::router(), &state, "skauswatch.scanner"))
         .merge(codescan::router())
