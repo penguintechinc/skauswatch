@@ -143,6 +143,32 @@ pub async fn get_provider(
     }
 }
 
+/// Test-only helpers shared across provider test modules.
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+pub(crate) mod test_support {
+    use rsa::RsaPrivateKey;
+    use rsa::pkcs1::EncodeRsaPrivateKey as _;
+    use rsa::pkcs8::LineEnding;
+
+    /// Generates a fresh, throwaway 2048-bit RSA private key and returns its
+    /// PKCS#1 PEM encoding.
+    ///
+    /// The OCI provider's tests need *some* RSA private key to exercise the
+    /// request-signing path, but a fixed key checked into the repo (even a
+    /// "test-only" one) is exactly the shape secret scanners (and real
+    /// attackers) look for, so it can't be committed — see `oracle.rs`'s
+    /// test module. Generating a new key per test run costs a few
+    /// milliseconds and needs nothing checked in.
+    pub(crate) fn generate_rsa_private_key_pem() -> String {
+        let key = RsaPrivateKey::new(&mut rsa::rand_core::OsRng, 2048)
+            .expect("generate 2048-bit RSA test key");
+        key.to_pkcs1_pem(LineEnding::LF)
+            .expect("encode RSA test key to PKCS#1 PEM")
+            .to_string()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -283,7 +309,7 @@ mod tests {
         // `oracle.rs`'s own tests do the full wiremock request/response
         // round trip, including the actual signed `Authorization` header.
         let credentials = serde_json::json!({
-            "user": "u", "private_key_pem": include_str!("../../tests/fixtures/oci_test_key.pem"),
+            "user": "u", "private_key_pem": test_support::generate_rsa_private_key_pem(),
             "fingerprint": "fp", "tenancy": "t", "compartment_id": "c",
             "vault_id": "v", "vault_key_id": "k",
         });

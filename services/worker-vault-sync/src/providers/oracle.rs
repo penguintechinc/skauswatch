@@ -123,15 +123,22 @@ pub mod signing {
     #[cfg(test)]
     #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     mod tests {
+        use rsa::pkcs1v15::{Signature, VerifyingKey};
+        use rsa::signature::Verifier as _;
+        use std::sync::LazyLock;
+
         use super::*;
 
-        // A fixed, throwaway 2048-bit test key (not used anywhere real) —
-        // generated once for this test suite. PKCS#1 form.
-        const TEST_KEY_PEM: &str = include_str!("../../tests/fixtures/oci_test_key.pem");
+        // A fresh, throwaway 2048-bit RSA key generated once per test-binary
+        // run (not committed — see `providers::test_support`, and the doc
+        // comment on `signature_verifies_against_an_independently_derived_public_key`
+        // below for why generated-and-verified replaced a fixed known-vector).
+        static TEST_KEY_PEM: LazyLock<String> =
+            LazyLock::new(crate::providers::test_support::generate_rsa_private_key_pem);
 
         #[test]
         fn sign_produces_a_well_formed_authorization_header() {
-            let identity = SigningIdentity::new(TEST_KEY_PEM, "tenancy1", "user1", "fp:1:2:3")
+            let identity = SigningIdentity::new(&TEST_KEY_PEM, "tenancy1", "user1", "fp:1:2:3")
                 .expect("parse key");
             let headers = identity.sign(
                 "get",
@@ -155,7 +162,7 @@ pub mod signing {
 
         #[test]
         fn sign_includes_body_headers_for_a_request_with_a_payload() {
-            let identity = SigningIdentity::new(TEST_KEY_PEM, "t", "u", "fp").expect("parse key");
+            let identity = SigningIdentity::new(&TEST_KEY_PEM, "t", "u", "fp").expect("parse key");
             let body = br#"{"hello":"world"}"#;
             let headers = identity.sign(
                 "post",
@@ -179,24 +186,27 @@ pub mod signing {
             ));
         }
 
-        /// Known-vector test: cross-validates this module's signature bytes
-        /// against an independent implementation (`openssl dgst -sha256
-        /// -sign` over the identical signing-string, against the identical
-        /// fixed test key) rather than only checking self-consistency. This
-        /// is what actually proves the PKCS#1v1.5/SHA-256 signing path and
-        /// the `\n`-joined, no-trailing-newline signing-string
-        /// canonicalization are byte-correct — two self-consistent-but-wrong
-        /// runs of this module's own code would never catch a
-        /// canonicalization bug the way an independent oracle does.
+        /// Round-trip test: verifies the signature `sign()` produces is a
+        /// valid RSA-SHA256/PKCS#1v1.5 signature over the OCI canonical
+        /// signing string, using a public key independently derived from
+        /// the (freshly generated, per-run) private key and a *different*
+        /// code path than the one that produced it — [`VerifyingKey`]
+        /// instead of the [`SigningKey`] `sign()` uses internally.
         ///
-        /// Reproduce: `printf '(request-target): get
-        /// /20180608/secrets?compartmentId=c1\ndate: Thu, 05 Jan 2023
-        /// 22:57:22 GMT\nhost: vaults.us-ashburn-1.oci.oraclecloud.com' |
-        /// openssl dgst -sha256 -sign oci_test_key.pem | base64 -w0` against
-        /// `tests/fixtures/oci_test_key.pem`.
+        /// This replaces a fixed-key/fixed-expected-signature vector
+        /// cross-checked against `openssl dgst -sha256 -sign`: that
+        /// approach required a private key fixed enough to commit to the
+        /// repo, which a secret scanner (rightly) treats as a live RSA key
+        /// regardless of "test-only" intent. A per-run generated key can't
+        /// be pinned to a precomputed expected signature, so verification
+        /// against an independently-derived public key is what proves
+        /// correctness instead — the expected signing string below is
+        /// written out per the OCI signing spec directly (not read out of
+        /// `sign()`'s internals), so a canonicalization bug in `sign()`
+        /// still fails this test rather than trivially self-validating.
         #[test]
-        fn signature_matches_an_independent_openssl_computation() {
-            let identity = SigningIdentity::new(TEST_KEY_PEM, "tenancy1", "user1", "fp:1:2:3")
+        fn signature_verifies_against_an_independently_derived_public_key() {
+            let identity = SigningIdentity::new(&TEST_KEY_PEM, "tenancy1", "user1", "fp:1:2:3")
                 .expect("parse key");
             let headers = identity.sign(
                 "get",
@@ -215,9 +225,24 @@ pub mod signing {
                 .nth(1)
                 .and_then(|s| s.strip_suffix('"'))
                 .expect("signature field present");
+            let signature_bytes = base64::engine::general_purpose::STANDARD
+                .decode(signature_b64)
+                .expect("signature is valid base64");
+            let signature = Signature::try_from(signature_bytes.as_slice())
+                .expect("valid PKCS#1v1.5 signature");
 
-            const EXPECTED_SIGNATURE_B64: &str = "LopXsm7Wv5Hsl/sdQBnpIJDsfVWYJSWLE8KqmZoklv8JZb5MGA07tJu1R0Ys6q7g8r/QNoY9jOuMDo3Det2gI0yEJ/xHxowasOxec6M3Ih4YIIkwL9q6imRhfHKBmZ+ysdKjVN2bUw5iegfDBO54fUOSAsZK8pN7AyqLICNR3ww7uoVrs3pPcMXky89n0/ASHoAwbpNIEfhWkc4vXFOM3E/z6jpGUnETkmt7XQPN1eTXM5S9sWc6iq1HIBfQfMlBffL7qqnRbWeRqC9sNEnTQJVVdLLTVCdL+36NNcpL4ASNu3BGYogjwUVeNS2J2xJ2DHDiRFM3pu2V6dmv2grLXA==";
-            assert_eq!(signature_b64, EXPECTED_SIGNATURE_B64);
+            // Independently reconstructed per the OCI signing spec — same
+            // string the reproduction snippet this test used to hand to
+            // `openssl dgst` before the fixture was removed.
+            let signing_string = "(request-target): get /20180608/secrets?compartmentId=c1\n\
+                date: Thu, 05 Jan 2023 22:57:22 GMT\n\
+                host: vaults.us-ashburn-1.oci.oraclecloud.com";
+
+            let private_key = RsaPrivateKey::from_pkcs1_pem(&TEST_KEY_PEM).expect("parse test key");
+            let verifying_key = VerifyingKey::<Sha256>::new(private_key.to_public_key());
+            verifying_key
+                .verify(signing_string.as_bytes(), &signature)
+                .expect("signature verifies against independently derived public key");
         }
     }
 }
@@ -663,18 +688,24 @@ impl CloudProvider for OracleProvider {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    use std::sync::LazyLock;
+
     use serde_json::json;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
 
-    const TEST_KEY_PEM: &str = include_str!("../../tests/fixtures/oci_test_key.pem");
+    // Fresh, throwaway 2048-bit RSA key generated once per test-binary run
+    // — see `providers::test_support` for why this isn't a checked-in
+    // fixture.
+    static TEST_KEY_PEM: LazyLock<String> =
+        LazyLock::new(crate::providers::test_support::generate_rsa_private_key_pem);
 
     fn test_credentials() -> Value {
         json!({
             "user": "ocid1.user.oc1..u1",
-            "private_key_pem": TEST_KEY_PEM,
+            "private_key_pem": TEST_KEY_PEM.as_str(),
             "fingerprint": "aa:bb:cc",
             "tenancy": "ocid1.tenancy.oc1..t1",
             "compartment_id": "ocid1.compartment.oc1..c1",

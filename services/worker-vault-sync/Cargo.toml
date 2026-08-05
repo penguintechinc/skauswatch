@@ -52,6 +52,11 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+# `rsa`'s "getrandom" feature (not enabled by the `[dependencies]` entry
+# above) is needed only by the test-only runtime key generator in
+# `providers::test_support` — scoping it to `[dev-dependencies]` keeps it out
+# of the release binary's feature set entirely.
+rsa = { workspace = true, features = ["getrandom"] }
 skauswatch-testkit = { workspace = true }
 time = { workspace = true }
 typespec_client_core = { workspace = true }
