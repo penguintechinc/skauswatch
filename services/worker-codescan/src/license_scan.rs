@@ -9,11 +9,13 @@
 //! docs/v2-port/phase12-scope-codeai.md row 3) — there is no working
 //! behavior to port, and this worker never clones a full repo (only diffs,
 //! see `git_provider`). This scans added dependency-manifest lines in the
-//! diff (npm `package.json`, Python `requirements.txt`, Rust `Cargo.toml`)
-//! and resolves each package's license via the ecosystem's public registry
-//! API. Go (`go.mod`) is intentionally out of scope: unlike the other three,
-//! there is no registry endpoint that returns a per-module license field —
-//! flagged as a follow-up.
+//! diff (npm `package.json`, Python `requirements.txt`, Rust `Cargo.toml`,
+//! Go `go.mod`) and resolves each package's license via the ecosystem's
+//! public registry API. Go has no registry endpoint of its own that returns
+//! a per-module license field (unlike npm/PyPI/crates.io), so it resolves
+//! via [deps.dev](https://deps.dev) (Google's open-source insights API,
+//! `GET /v3/systems/GO/packages/{module}/versions/{version}`), which
+//! aggregates license data it already extracted from the module source.
 //!
 //! Registry lookups are best-effort and non-fatal: a slow/unreachable/
 //! rate-limited registry must never fail the review pipeline, mirroring how
@@ -37,7 +39,7 @@ pub struct LicenseFinding {
     /// field — still recorded (see module docs), just unresolved.
     pub license_name: Option<String>,
     /// Which registry resolved (or attempted to resolve) `license_name`:
-    /// `"npm_registry"`, `"pypi"`, or `"crates_io"`.
+    /// `"npm_registry"`, `"pypi"`, `"crates_io"`, or `"deps_dev"` (Go).
     pub license_source: &'static str,
     /// Manifest file this dependency was found in.
     pub file_path: String,
@@ -50,6 +52,7 @@ enum Ecosystem {
     Npm,
     PyPi,
     Crates,
+    Go,
 }
 
 fn ecosystem_for_file(path: &str) -> Option<Ecosystem> {
@@ -60,6 +63,8 @@ fn ecosystem_for_file(path: &str) -> Option<Ecosystem> {
         Some(Ecosystem::PyPi)
     } else if lower.ends_with("cargo.toml") {
         Some(Ecosystem::Crates)
+    } else if lower.ends_with("go.mod") {
+        Some(Ecosystem::Go)
     } else {
         None
     }
@@ -197,6 +202,57 @@ fn parse_cargo_dep_line(line: &str) -> Option<(String, String)> {
     Some((key.to_owned(), version))
 }
 
+/// True for a plausible Go module path: `/`-separated segments of
+/// alphanumerics/`-`/`_`, containing at least one `.` (every real module
+/// path is rooted at a domain, e.g. `github.com/...`, `golang.org/x/...`) —
+/// this is what lets a bare two-token line like `go 1.21` or
+/// `module example.com/foo` fall through to the version-shape check below
+/// instead of needing an explicit directive-keyword denylist.
+fn is_valid_go_module_path(s: &str) -> bool {
+    s.contains('.')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '-' | '_'))
+}
+
+/// True for a Go module version: `v` followed by a digit — covers plain
+/// semver (`v1.2.3`), pseudo-versions
+/// (`v0.0.0-20200101000000-abcdef123456`), and `+incompatible` suffixes.
+/// Deliberately loose (no full semver validation) since go.mod versions are
+/// always toolchain-generated, never hand-typed ranges like npm/PyPI.
+fn is_valid_go_module_version(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some('v')) && matches!(chars.next(), Some(c) if c.is_ascii_digit())
+}
+
+/// Parses one added `go.mod` line into `(module_path, version)`. Handles
+/// both the single-line form (`require github.com/pkg/errors v0.9.1`) and
+/// bare lines inside a `require ( ... )` block (`github.com/pkg/errors
+/// v0.9.1 // indirect`) — indirect dependencies are parsed the same as
+/// direct ones (mirrors how the npm parser doesn't distinguish
+/// `dependencies` from `devDependencies`). `module`/`go`/`toolchain`/
+/// `replace`/`exclude`/`retract` directives and the block delimiters
+/// (`require (`, `)`) are rejected by the module-path/version shape checks
+/// below rather than an explicit keyword list.
+fn parse_go_mod_dep_line(line: &str) -> Option<(String, String)> {
+    let content = match line.trim().split_once("//") {
+        Some((before, _comment)) => before.trim(),
+        None => line.trim(),
+    };
+    let mut fields = content.split_whitespace().peekable();
+    if fields.peek() == Some(&"require") {
+        fields.next();
+    }
+    let module = fields.next()?;
+    let version = fields.next()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    if !is_valid_go_module_path(module) || !is_valid_go_module_version(version) {
+        return None;
+    }
+    Some((module.to_owned(), version.to_owned()))
+}
+
 #[derive(Debug, Clone)]
 struct DependencyRef {
     ecosystem: Ecosystem,
@@ -232,6 +288,7 @@ fn extract_dependencies(diff: &str) -> Vec<DependencyRef> {
             Ecosystem::Npm => parse_npm_dep_line(body),
             Ecosystem::PyPi => parse_pypi_dep_line(body),
             Ecosystem::Crates => parse_cargo_dep_line(body),
+            Ecosystem::Go => parse_go_mod_dep_line(body),
         };
         if let Some((name, version)) = parsed {
             deps.push(DependencyRef {
@@ -322,6 +379,44 @@ async fn lookup_crates_license(client: &reqwest::Client, base: &str, pkg: &str) 
         .map(str::to_owned)
 }
 
+/// Resolves a Go module's license via deps.dev, which indexes it out of the
+/// module source itself (there is no per-module license field in the Go
+/// module proxy protocol the way npm/PyPI/crates.io registries expose one).
+/// `licenses` can hold more than one SPDX id for a dual-licensed module
+/// (e.g. `["MIT", "Apache-2.0"]`); joined with `" OR "` to keep a single
+/// `license_name` string, consistent with how an npm/crates.io SPDX
+/// expression like `"MIT OR Apache-2.0"` already arrives as one string.
+async fn lookup_go_license(
+    client: &reqwest::Client,
+    base: &str,
+    module: &str,
+    version: &str,
+) -> Option<String> {
+    let url = format!(
+        "{}/v3/systems/GO/packages/{}/versions/{}",
+        base.trim_end_matches('/'),
+        urlencoding::encode(module),
+        urlencoding::encode(version)
+    );
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let licenses: Vec<&str> = json
+        .get("licenses")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if licenses.is_empty() {
+        None
+    } else {
+        Some(licenses.join(" OR "))
+    }
+}
+
 /// Resolves dependency licenses against the public npm/PyPI/crates.io
 /// registries (or test doubles, via the base-URL overrides). One instance is
 /// built once at worker startup (`handler::CodeScanReviewHandler::new`) and
@@ -331,6 +426,7 @@ pub struct RegistryClient {
     npm_base: String,
     pypi_base: String,
     crates_base: String,
+    go_base: String,
 }
 
 impl RegistryClient {
@@ -339,6 +435,7 @@ impl RegistryClient {
         npm_base: Option<String>,
         pypi_base: Option<String>,
         crates_base: Option<String>,
+        go_base: Option<String>,
     ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
@@ -352,6 +449,7 @@ impl RegistryClient {
             npm_base: npm_base.unwrap_or_else(|| "https://registry.npmjs.org".to_owned()),
             pypi_base: pypi_base.unwrap_or_else(|| "https://pypi.org".to_owned()),
             crates_base: crates_base.unwrap_or_else(|| "https://crates.io".to_owned()),
+            go_base: go_base.unwrap_or_else(|| "https://api.deps.dev".to_owned()),
         }
     }
 
@@ -378,6 +476,10 @@ impl RegistryClient {
                 Ecosystem::Crates => (
                     lookup_crates_license(&self.http, &self.crates_base, &dep.name).await,
                     "crates_io",
+                ),
+                Ecosystem::Go => (
+                    lookup_go_license(&self.http, &self.go_base, &dep.name, &dep.version).await,
+                    "deps_dev",
                 ),
             };
             let confidence = if license.is_some() { 0.85 } else { 0.0 };
@@ -474,6 +576,49 @@ mod tests {
         assert_eq!(deps[0].name, deps[1].name);
     }
 
+    #[test]
+    fn extracts_go_mod_single_line_require() {
+        let diff = "--- a/go.mod\n+++ b/go.mod\n@@ -1 +1 @@\n-x\n\
+                     +require github.com/pkg/errors v0.9.1\n";
+        let deps = extract_dependencies(diff);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].name, "github.com/pkg/errors");
+        assert_eq!(deps[0].version, "v0.9.1");
+        assert_eq!(deps[0].file_path, "go.mod");
+    }
+
+    #[test]
+    fn extracts_go_mod_require_block_direct_and_indirect() {
+        let diff = "--- a/go.mod\n+++ b/go.mod\n@@ -1,2 +1,4 @@\n \
+                     require (\n+\tgithub.com/pkg/errors v0.9.1\n\
+                     +\tgolang.org/x/sync v0.5.0 // indirect\n )\n";
+        let deps = extract_dependencies(diff);
+        assert_eq!(deps.len(), 2);
+        assert!(
+            deps.iter()
+                .any(|d| d.name == "github.com/pkg/errors" && d.version == "v0.9.1")
+        );
+        assert!(
+            deps.iter()
+                .any(|d| d.name == "golang.org/x/sync" && d.version == "v0.5.0")
+        );
+    }
+
+    #[test]
+    fn skips_go_mod_module_go_and_toolchain_directives() {
+        let diff = "--- a/go.mod\n+++ b/go.mod\n@@ -1,3 +1,3 @@\n-x\n\
+                     +module github.com/acme/widgets\n+go 1.21\n+toolchain go1.21.5\n";
+        assert!(extract_dependencies(diff).is_empty());
+    }
+
+    #[test]
+    fn skips_go_mod_replace_and_exclude_directives() {
+        let diff = "--- a/go.mod\n+++ b/go.mod\n@@ -1,2 +1,2 @@\n-x\n\
+                     +replace github.com/foo/bar => github.com/fork/bar v1.0.0\n\
+                     +exclude github.com/broken/pkg v0.1.0\n";
+        assert!(extract_dependencies(diff).is_empty());
+    }
+
     #[tokio::test]
     async fn scan_diff_resolves_npm_license_via_registry() {
         let mock = MockServer::start().await;
@@ -485,7 +630,7 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let client = RegistryClient::new(Some(mock.uri()), None, None);
+        let client = RegistryClient::new(Some(mock.uri()), None, None, None);
         let diff = "--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-x\n+  \"left-pad\": \"^1.3.0\"\n";
         let findings = client.scan_diff(diff).await;
         assert_eq!(findings.len(), 1);
@@ -505,7 +650,7 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let client = RegistryClient::new(Some(mock.uri()), None, None);
+        let client = RegistryClient::new(Some(mock.uri()), None, None, None);
         let diff = "--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-x\n+  \"old-style-pkg\": \"1.0.0\"\n";
         let findings = client.scan_diff(diff).await;
         assert_eq!(findings[0].license_name.as_deref(), Some("ISC"));
@@ -528,7 +673,7 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let client = RegistryClient::new(None, Some(mock.uri()), None);
+        let client = RegistryClient::new(None, Some(mock.uri()), None, None);
         let diff =
             "--- a/requirements.txt\n+++ b/requirements.txt\n@@ -1 +1 @@\n-x\n+django==4.2\n";
         let findings = client.scan_diff(diff).await;
@@ -546,11 +691,79 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let client = RegistryClient::new(None, None, Some(mock.uri()));
+        let client = RegistryClient::new(None, None, Some(mock.uri()), None);
         let diff = "--- a/Cargo.toml\n+++ b/Cargo.toml\n@@ -1 +1 @@\n-x\n+axum = \"0.8.9\"\n";
         let findings = client.scan_diff(diff).await;
         assert_eq!(findings[0].license_name.as_deref(), Some("MIT"));
         assert_eq!(findings[0].license_source, "crates_io");
+    }
+
+    #[tokio::test]
+    async fn scan_diff_resolves_go_license_via_deps_dev() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/v3/systems/GO/packages/github.com%2Fpkg%2Ferrors/versions/v0.9.1",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "licenses": ["BSD-2-Clause"]
+            })))
+            .mount(&mock)
+            .await;
+
+        let client = RegistryClient::new(None, None, None, Some(mock.uri()));
+        let diff = "--- a/go.mod\n+++ b/go.mod\n@@ -1 +1 @@\n-x\n\
+                     +require github.com/pkg/errors v0.9.1\n";
+        let findings = client.scan_diff(diff).await;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].package_name, "github.com/pkg/errors");
+        assert_eq!(findings[0].license_name.as_deref(), Some("BSD-2-Clause"));
+        assert_eq!(findings[0].license_source, "deps_dev");
+        assert!((findings[0].confidence - 0.85).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn scan_diff_joins_dual_licenses_for_a_go_module() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/v3/systems/GO/packages/gopkg.in%2Fyaml.v3/versions/v3.0.1",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "licenses": ["MIT", "Apache-2.0"]
+            })))
+            .mount(&mock)
+            .await;
+
+        let client = RegistryClient::new(None, None, None, Some(mock.uri()));
+        let diff = "--- a/go.mod\n+++ b/go.mod\n@@ -1 +1 @@\n-x\n\
+                     +require gopkg.in/yaml.v3 v3.0.1\n";
+        let findings = client.scan_diff(diff).await;
+        assert_eq!(
+            findings[0].license_name.as_deref(),
+            Some("MIT OR Apache-2.0")
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_diff_flags_go_module_unknown_when_deps_dev_has_no_record() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/v3/systems/GO/packages/github.com%2Fghost%2Fmodule/versions/v1.0.0",
+            ))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        let client = RegistryClient::new(None, None, None, Some(mock.uri()));
+        let diff = "--- a/go.mod\n+++ b/go.mod\n@@ -1 +1 @@\n-x\n\
+                     +require github.com/ghost/module v1.0.0\n";
+        let findings = client.scan_diff(diff).await;
+        assert_eq!(findings.len(), 1, "a lookup failure must still be recorded");
+        assert_eq!(findings[0].license_name, None);
+        assert_eq!(findings[0].license_source, "deps_dev");
+        assert!((findings[0].confidence - 0.0).abs() < f64::EPSILON);
     }
 
     #[tokio::test]
@@ -562,7 +775,7 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let client = RegistryClient::new(Some(mock.uri()), None, None);
+        let client = RegistryClient::new(Some(mock.uri()), None, None, None);
         let diff = "--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-x\n+  \"mystery-pkg\": \"1.0.0\"\n";
         let findings = client.scan_diff(diff).await;
         assert_eq!(findings.len(), 1);
@@ -586,7 +799,7 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let client = RegistryClient::new(None, Some(mock.uri()), None);
+        let client = RegistryClient::new(None, Some(mock.uri()), None, None);
         let diff = "--- a/requirements.txt\n+++ b/requirements.txt\n@@ -1 +1 @@\n-x\n+flask==2.0.0\n\
                      --- a/requirements.txt\n+++ b/requirements.txt\n@@ -2 +2 @@\n-y\n+flask==2.0.0\n";
         let findings = client.scan_diff(diff).await;
@@ -599,7 +812,7 @@ mod tests {
 
     #[tokio::test]
     async fn scan_diff_is_empty_for_a_diff_with_no_manifest_changes() {
-        let client = RegistryClient::new(None, None, None);
+        let client = RegistryClient::new(None, None, None, None);
         let diff = "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-x\n+y\n";
         assert!(client.scan_diff(diff).await.is_empty());
     }

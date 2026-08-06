@@ -358,3 +358,315 @@ impl StreamConsumer {
         Ok(())
     }
 }
+
+/// Real-Valkey integration tests for the consumer-group harness — mirrors
+/// this workspace's "do not mock the DB layer, test against a real Postgres"
+/// convention (`docs/v2-port/testing-pattern.md`) applied to the Streams
+/// broker: every test here talks to a real Valkey/Redis instance
+/// (`REDIS_URL`, defaulting to `redis://127.0.0.1:6379/0` for local runs
+/// outside the CI service-container network) rather than mocking `fred`.
+/// Each test uses a UUID-suffixed stream name so parallel test threads never
+/// collide on the same consumer group.
+#[cfg(test)]
+#[allow(clippy::panic)] // tests fail loudly by design
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use tokio::sync::Mutex as AsyncMutex;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::StreamProducer;
+
+    fn redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_owned())
+    }
+
+    /// A bare, unshared fred client used only to inspect broker state
+    /// directly (e.g. DLQ stream length) that `StreamConsumer`'s API
+    /// deliberately doesn't expose.
+    async fn raw_client(url: &str) -> fred::clients::Client {
+        let config =
+            fred::types::config::Config::from_url(url).unwrap_or_else(|e| panic!("config: {e}"));
+        let client = fred::types::Builder::from_config(config)
+            .build()
+            .unwrap_or_else(|e| panic!("build: {e}"));
+        client.init().await.unwrap_or_else(|e| panic!("init: {e}"));
+        client
+    }
+
+    /// Records every delivered entry and returns a caller-controlled
+    /// success/failure outcome — lets a single handler type stand in for
+    /// both the happy path and the retry/DLQ paths across these tests.
+    struct RecordingHandler {
+        calls: Arc<AsyncMutex<Vec<StreamEntry>>>,
+        fail: Arc<AtomicBool>,
+    }
+
+    impl RecordingHandler {
+        fn new(fail: bool) -> Self {
+            Self {
+                calls: Arc::new(AsyncMutex::new(Vec::new())),
+                fail: Arc::new(AtomicBool::new(fail)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StreamHandler for RecordingHandler {
+        async fn handle(&self, entry: &StreamEntry) -> Result<(), HandlerError> {
+            self.calls.lock().await.push(entry.clone());
+            if self.fail.load(Ordering::SeqCst) {
+                Err("simulated handler failure".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_group_is_idempotent_and_a_second_create_hits_busygroup() {
+        let stream = format!("streams-test-{}", Uuid::new_v4());
+        let prefix = "skauswatch-test".to_owned();
+        // Exercises `from_client` (as opposed to `connect`, covered by the
+        // other tests below) — both must build an equally usable consumer.
+        let client = raw_client(&redis_url()).await;
+        let consumer = StreamConsumer::from_client(client, &prefix);
+
+        consumer
+            .ensure_group(&stream, "group-a")
+            .await
+            .unwrap_or_else(|e| panic!("first ensure_group: {e}"));
+        // Second call hits Valkey's BUSYGROUP reply for an already-existing
+        // group — v1 `_ensure_group` parity requires this still return Ok.
+        consumer
+            .ensure_group(&stream, "group-a")
+            .await
+            .unwrap_or_else(|e| panic!("second ensure_group (BUSYGROUP): {e}"));
+    }
+
+    /// Documents a real gap found while writing this suite (2026-08-06), not
+    /// the intended behavior: when `XREADGROUP` genuinely has nothing to
+    /// deliver (block times out with zero new entries), Valkey/Redis replies
+    /// with a bare nil. `fred`'s generic map decode only treats nil as an
+    /// empty map when the crate's `default-nil-types` feature is enabled —
+    /// this workspace's `fred = "=10.1.0"` dependency (`Cargo.toml`) does not
+    /// enable it, so `read_new` currently surfaces this as a transport error
+    /// instead of a clean `Ok(())`. In production this routes through
+    /// `run()`'s `Err(e) => { warn!(...); sleep(block_ms) }` arm, so a worker
+    /// never crashes, but every idle poll cycle logs a spurious warning and
+    /// sleeps an extra `block_ms` — this is a real behavior gap, not a test
+    /// bug, and out of scope for this test-coverage pass to fix (a
+    /// `default-nil-types` feature flip is a workspace-wide `fred` behavior
+    /// change, not a test-only tweak). Tracked as a follow-up rather than
+    /// silently fixed or silently ignored.
+    #[tokio::test]
+    async fn read_new_currently_errors_when_no_new_entries_are_pending() {
+        let stream = format!("streams-test-{}", Uuid::new_v4());
+        let prefix = "skauswatch-test".to_owned();
+        let consumer = StreamConsumer::connect(&redis_url(), None, &prefix)
+            .await
+            .unwrap_or_else(|e| panic!("connect: {e}"));
+        consumer
+            .ensure_group(&stream, "empty-group")
+            .await
+            .unwrap_or_else(|e| panic!("ensure_group: {e}"));
+
+        let mut cfg =
+            ConsumerConfig::new(stream, "empty-group".to_owned(), "consumer-a".to_owned());
+        cfg.block_ms = 50; // keep the XREADGROUP block short — nothing will arrive
+
+        let handler = RecordingHandler::new(false);
+        let result = consumer.read_new(&cfg, &handler).await;
+        assert!(
+            result.is_err(),
+            "expected the known nil-decode gap (see doc comment); read_new returned {result:?} — \
+             if this now passes, fred's default-nil-types behavior changed and this test (and its \
+             doc comment) should be updated to assert Ok(()) instead"
+        );
+        assert!(handler.calls.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_dispatches_a_published_entry_acks_it_then_stops_on_shutdown() {
+        let stream = format!("streams-test-{}", Uuid::new_v4());
+        let prefix = "skauswatch-test".to_owned();
+        let group = "run-group".to_owned();
+
+        let producer = StreamProducer::connect(&redis_url(), None, &prefix)
+            .await
+            .unwrap_or_else(|e| panic!("producer connect: {e}"));
+        producer
+            .publish(&stream, vec![("kind".to_owned(), "unit-test".to_owned())])
+            .await
+            .unwrap_or_else(|e| panic!("publish: {e}"));
+
+        let consumer = StreamConsumer::connect(&redis_url(), None, &prefix)
+            .await
+            .unwrap_or_else(|e| panic!("consumer connect: {e}"));
+        let mut cfg = ConsumerConfig::new(stream, group, "consumer-a".to_owned());
+        cfg.block_ms = 200;
+
+        let handler = RecordingHandler::new(false);
+        let calls = handler.calls.clone();
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let run_consumer = consumer.clone();
+        let run_cfg = cfg.clone();
+        let join = tokio::spawn(async move { run_consumer.run(&run_cfg, &handler, rx).await });
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if !calls.lock().await.is_empty() {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("handler was never invoked within the timeout");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        tx.send(true)
+            .unwrap_or_else(|e| panic!("shutdown send: {e}"));
+        let run_result = tokio::time::timeout(std::time::Duration::from_secs(10), join)
+            .await
+            .unwrap_or_else(|_| panic!("consumer task did not stop after shutdown"))
+            .unwrap_or_else(|e| panic!("consumer task panicked: {e}"));
+        assert!(
+            run_result.is_ok(),
+            "run() must exit cleanly: {run_result:?}"
+        );
+
+        let recorded = calls.lock().await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].get("kind"), Some("unit-test"));
+        drop(recorded);
+
+        let pending = consumer
+            .pending_counts(&cfg)
+            .await
+            .unwrap_or_else(|e| panic!("pending_counts: {e}"));
+        assert!(
+            pending.is_empty(),
+            "acked entry must not remain pending: {pending:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_stale_redispatches_a_failed_entry_within_the_delivery_limit() {
+        let stream = format!("streams-test-{}", Uuid::new_v4());
+        let prefix = "skauswatch-test".to_owned();
+        let group = "recover-group".to_owned();
+
+        let producer = StreamProducer::connect(&redis_url(), None, &prefix)
+            .await
+            .unwrap_or_else(|e| panic!("producer connect: {e}"));
+        producer
+            .publish(&stream, vec![("k".to_owned(), "v".to_owned())])
+            .await
+            .unwrap_or_else(|e| panic!("publish: {e}"));
+
+        let consumer = StreamConsumer::connect(&redis_url(), None, &prefix)
+            .await
+            .unwrap_or_else(|e| panic!("consumer connect: {e}"));
+        consumer
+            .ensure_group(&stream, &group)
+            .await
+            .unwrap_or_else(|e| panic!("ensure_group: {e}"));
+        let mut cfg = ConsumerConfig::new(stream, group, "consumer-a".to_owned());
+        cfg.block_ms = 100;
+        cfg.min_idle_ms = 0; // reclaim immediately — no need to wait out a real idle window
+
+        // First delivery: the handler fails, so the entry stays pending
+        // (dispatch's Err branch — never acked).
+        let failing = RecordingHandler::new(true);
+        consumer
+            .read_new(&cfg, &failing)
+            .await
+            .unwrap_or_else(|e| panic!("read_new: {e}"));
+        assert_eq!(failing.calls.lock().await.len(), 1);
+
+        // A second consumer in the same group reclaims the stale entry via
+        // XAUTOCLAIM; this time the handler succeeds and it gets acked.
+        let mut cfg2 = cfg.clone();
+        cfg2.consumer = "consumer-b".to_owned();
+        let succeeding = RecordingHandler::new(false);
+        consumer
+            .recover_stale(&cfg2, &succeeding)
+            .await
+            .unwrap_or_else(|e| panic!("recover_stale: {e}"));
+        assert_eq!(
+            succeeding.calls.lock().await.len(),
+            1,
+            "recover_stale must redispatch the stale entry to the new consumer"
+        );
+
+        let pending = consumer
+            .pending_counts(&cfg)
+            .await
+            .unwrap_or_else(|e| panic!("pending_counts: {e}"));
+        assert!(
+            pending.is_empty(),
+            "entry must be acked after a successful redispatch: {pending:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_stale_dead_letters_an_entry_past_the_delivery_limit() {
+        let stream = format!("streams-test-{}", Uuid::new_v4());
+        let prefix = "skauswatch-test".to_owned();
+        let group = "dlq-group".to_owned();
+
+        let producer = StreamProducer::connect(&redis_url(), None, &prefix)
+            .await
+            .unwrap_or_else(|e| panic!("producer connect: {e}"));
+        producer
+            .publish(&stream, vec![("k".to_owned(), "v".to_owned())])
+            .await
+            .unwrap_or_else(|e| panic!("publish: {e}"));
+
+        let consumer = StreamConsumer::connect(&redis_url(), None, &prefix)
+            .await
+            .unwrap_or_else(|e| panic!("consumer connect: {e}"));
+        consumer
+            .ensure_group(&stream, &group)
+            .await
+            .unwrap_or_else(|e| panic!("ensure_group: {e}"));
+        let mut cfg = ConsumerConfig::new(stream.clone(), group, "consumer-a".to_owned());
+        cfg.block_ms = 100;
+        cfg.min_idle_ms = 0;
+        cfg.max_deliveries = 0; // any single delivery already exceeds the limit
+
+        let failing = RecordingHandler::new(true);
+        consumer
+            .read_new(&cfg, &failing)
+            .await
+            .unwrap_or_else(|e| panic!("read_new: {e}"));
+
+        let never_called = RecordingHandler::new(false);
+        consumer
+            .recover_stale(&cfg, &never_called)
+            .await
+            .unwrap_or_else(|e| panic!("recover_stale: {e}"));
+        assert!(
+            never_called.calls.lock().await.is_empty(),
+            "an over-limit entry must be dead-lettered, not redispatched to the handler"
+        );
+
+        let pending = consumer
+            .pending_counts(&cfg)
+            .await
+            .unwrap_or_else(|e| panic!("pending_counts: {e}"));
+        assert!(
+            pending.is_empty(),
+            "dead-lettered entry must be acked off the original PEL: {pending:?}"
+        );
+
+        let raw = raw_client(&redis_url()).await;
+        let dlq_len: i64 = raw
+            .xlen(consumer.dlq_key(&stream))
+            .await
+            .unwrap_or_else(|e| panic!("xlen: {e}"));
+        assert_eq!(dlq_len, 1, "entry must land on the DLQ stream exactly once");
+    }
+}

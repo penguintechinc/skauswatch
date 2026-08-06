@@ -1215,10 +1215,11 @@ paths:
       operationId: list_plans
       responses:
         '200':
-          description: Proxied worker-codescan response
+          description: Paginated issue-plan list
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/PlanListResponse'
         '401':
           description: Missing or invalid authorization header
           content:
@@ -1259,10 +1260,11 @@ paths:
         required: true
       responses:
         '201':
-          description: Proxied worker-codescan response
+          description: Issue plan created
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/PlanRow'
         '400':
           description: Invalid JSON body
           content:
@@ -1311,10 +1313,11 @@ paths:
           format: int32
       responses:
         '200':
-          description: Proxied worker-codescan response
+          description: Issue plan detail
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/PlanRow'
         '401':
           description: Missing or invalid authorization header
           content:
@@ -1351,10 +1354,11 @@ paths:
       operationId: list_repos
       responses:
         '200':
-          description: Proxied worker-codescan response
+          description: Repository configurations
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/RepoListResponse'
         '401':
           description: Missing or invalid authorization header
           content:
@@ -1395,10 +1399,11 @@ paths:
         required: true
       responses:
         '201':
-          description: Proxied worker-codescan response
+          description: Repository configuration created
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/RepoCreateResponse'
         '400':
           description: Invalid JSON body
           content:
@@ -1447,10 +1452,11 @@ paths:
           format: int32
       responses:
         '200':
-          description: Proxied worker-codescan response
+          description: Repository configuration
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/RepoConfig'
         '401':
           description: Missing or invalid authorization header
           content:
@@ -1499,10 +1505,11 @@ paths:
         required: true
       responses:
         '200':
-          description: Proxied worker-codescan response
+          description: Repository configuration updated
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/RepoUpdateResponse'
         '400':
           description: Invalid JSON body
           content:
@@ -1552,10 +1559,11 @@ paths:
           format: int32
       responses:
         '200':
-          description: Proxied worker-codescan response
+          description: Repository configuration deleted
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/RepoDeleteResponse'
         '401':
           description: Missing or invalid authorization header
           content:
@@ -1590,10 +1598,11 @@ paths:
       operationId: list_reviews
       responses:
         '200':
-          description: Proxied worker-codescan response
+          description: Paginated review list
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/ReviewListResponse'
         '401':
           description: Missing or invalid authorization header
           content:
@@ -1635,10 +1644,11 @@ paths:
         required: true
       responses:
         '201':
-          description: Proxied worker-codescan response
+          description: Review created and enqueued
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/ReviewRow'
         '400':
           description: Invalid JSON body
           content:
@@ -1687,10 +1697,11 @@ paths:
           format: int32
       responses:
         '200':
-          description: Proxied worker-codescan response
+          description: Review detail with comments
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/ReviewDetailResponse'
         '401':
           description: Missing or invalid authorization header
           content:
@@ -1725,16 +1736,19 @@ paths:
       description: |-
         This whole router is a thin authenticated proxy to worker-codescan — only
         the canonical `/codescan/*` paths are documented here (the deprecated
-        `/darwin/*` aliases mount the same handlers, see `legacy_router`).
-        Response bodies are generic JSON objects (`serde_json::Value`) since the
-        wire shape is whatever worker-codescan returns.
+        `/darwin/*` aliases mount the same handlers, see `legacy_router`). Every
+        successful response is re-serialized through an explicit DTO (see
+        [`allowlist`]) before it reaches the caller — defense-in-depth so a field
+        upstream never intended to expose is dropped rather than forwarded, even
+        though `codescan-backend` is audit-clean today.
       operationId: codescan_status
       responses:
         '200':
-          description: Proxied worker-codescan response
+          description: Service status and review queue depth
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
         '401':
           description: Missing or invalid authorization header
           content:
@@ -5486,8 +5500,13 @@ components:
         Documentation-only mirror of `bucket_json`'s wire shape (list items and
         GET detail share this shape) — credentials are masked, never raw.
         `access_key_id`/`secret_access_key` are populated (masked) for `static`
-        mode only; `role_arn` (shown in full — ARNs aren't secret) and
-        `external_id` (masked) for `assume_role` mode only.
+        mode only; `role_arn` (shown in full — ARNs aren't secret) for
+        `assume_role` mode only. `external_id` is the cross-account AssumeRole
+        shared secret (confused-deputy protection, AWS IAM docs) — write-only:
+        accepted on create/update, used server-side to call AssumeRole, but
+        never rendered back in any response, masked or otherwise (unlike
+        `secret_access_key`, a masked prefix/suffix of `external_id` is often
+        enough to reconstruct it since it need not be high-entropy).
       required:
       - id
       - name
@@ -5510,10 +5529,6 @@ components:
           type: string
         endpoint_url:
           type: string
-        external_id:
-          type:
-          - string
-          - 'null'
         file_types_filter: {}
         id:
           type: integer
@@ -6573,6 +6588,114 @@ components:
           type: boolean
         role:
           type: string
+    PaginationMeta:
+      type: object
+      description: Shared pagination envelope — mirrors `reviews.rs::PaginationMeta`.
+      required:
+      - page
+      - per_page
+      - total
+      - pages
+      properties:
+        page:
+          type: integer
+          format: int64
+        pages:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
+    PlanListResponse:
+      type: object
+      description: GET /codescan/plans — mirrors `plans.rs::PlanListResponse`.
+      required:
+      - plans
+      - total
+      - page
+      - per_page
+      properties:
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        plans:
+          type: array
+          items:
+            $ref: '#/components/schemas/PlanRow'
+        total:
+          type: integer
+          format: int64
+    PlanRow:
+      type: object
+      description: |-
+        One `codescan_issue_plans` row — mirrors `plans.rs::PlanRow`. Deliberately
+        has no `tenant_id` field: upstream never exposes it in the plan response
+        (see `plans.rs`'s own `NOTE` on `PlanRow`), so it isn't part of this
+        allowlist either.
+      required:
+      - id
+      - external_id
+      - platform
+      - repository
+      - issue_number
+      - status
+      - comment_posted
+      properties:
+        ai_model:
+          type:
+          - string
+          - 'null'
+        ai_provider:
+          type:
+          - string
+          - 'null'
+        comment_posted:
+          type: boolean
+        created_at:
+          type:
+          - string
+          - 'null'
+        error_message:
+          type:
+          - string
+          - 'null'
+        external_id:
+          type: string
+        id:
+          type: integer
+          format: int64
+        issue_number:
+          type: integer
+          format: int32
+        issue_title:
+          type:
+          - string
+          - 'null'
+        issue_url:
+          type:
+          - string
+          - 'null'
+        plan_content:
+          type:
+          - string
+          - 'null'
+        plan_steps: {}
+        platform:
+          type: string
+        repository:
+          type: string
+        status:
+          type: string
+        updated_at:
+          type:
+          - string
+          - 'null'
     PortSettingsBody:
       type: object
       properties:
@@ -6714,6 +6837,138 @@ components:
           type: integer
           format: int32
         role:
+          type: string
+    RepoConfig:
+      type: object
+      description: |-
+        One `codescan_repo_configs` row — mirrors
+        `services/codescan-backend/src/routes/repos.rs::RepoConfig`.
+      required:
+      - id
+      - tenant_id
+      - provider
+      - repo_url
+      - repo_name
+      - enabled
+      - auto_review
+      - review_on_open
+      - review_on_sync
+      - is_active
+      properties:
+        auto_review:
+          type: boolean
+        created_at:
+          type:
+          - string
+          - 'null'
+        credential_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        custom_rules: {}
+        default_ai_provider:
+          type:
+          - string
+          - 'null'
+        default_categories: {}
+        description:
+          type:
+          - string
+          - 'null'
+        display_name:
+          type:
+          - string
+          - 'null'
+        enabled:
+          type: boolean
+        id:
+          type: integer
+          format: int64
+        ignored_paths: {}
+        is_active:
+          type: boolean
+        owner_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        provider:
+          type: string
+        repo_name:
+          type: string
+        repo_url:
+          type: string
+        review_on_open:
+          type: boolean
+        review_on_sync:
+          type: boolean
+        team_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        tenant_id:
+          type: string
+          format: uuid
+        updated_at:
+          type:
+          - string
+          - 'null'
+    RepoCreateResponse:
+      type: object
+      description: POST /codescan/repos — mirrors `repos.rs::RepoCreateResponse`.
+      required:
+      - message
+      - config
+      properties:
+        config:
+          $ref: '#/components/schemas/RepoConfig'
+        message:
+          type: string
+    RepoDeleteResponse:
+      type: object
+      description: DELETE /codescan/repos/{repo_id} — mirrors `repos.rs::RepoDeleteResponse`.
+      required:
+      - message
+      - deleted
+      properties:
+        deleted:
+          type: boolean
+        message:
+          type: string
+    RepoListResponse:
+      type: object
+      description: GET /codescan/repos — mirrors `repos.rs::RepoListResponse`.
+      required:
+      - data
+      - total
+      - page
+      - per_page
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepoConfig'
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
+    RepoUpdateResponse:
+      type: object
+      description: PUT /codescan/repos/{repo_id} — mirrors `repos.rs::RepoUpdateResponse`.
+      required:
+      - message
+      - config
+      properties:
+        config:
+          $ref: '#/components/schemas/RepoConfig'
+        message:
           type: string
     ReportEventsResponse:
       type: object
@@ -6961,6 +7216,244 @@ components:
         total:
           type: integer
           format: int64
+    ReviewComment:
+      type: object
+      description: One `codescan_review_comments` row — mirrors `reviews.rs::ReviewComment`.
+      required:
+      - id
+      properties:
+        category:
+          type:
+          - string
+          - 'null'
+        comment:
+          type:
+          - string
+          - 'null'
+        created_at:
+          type:
+          - string
+          - 'null'
+        file_path:
+          type:
+          - string
+          - 'null'
+        id:
+          type: integer
+          format: int64
+        line_number:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        severity:
+          type:
+          - string
+          - 'null'
+    ReviewDetailResponse:
+      allOf:
+      - $ref: '#/components/schemas/ReviewRow'
+      - type: object
+        required:
+        - comments
+        - detections
+        - license_violations
+        properties:
+          comments:
+            type: array
+            items:
+              $ref: '#/components/schemas/ReviewComment'
+          detections:
+            type: array
+            items:
+              $ref: '#/components/schemas/ReviewDetection'
+          license_violations:
+            type: array
+            items:
+              $ref: '#/components/schemas/ReviewLicenseViolation'
+      description: |-
+        GET /codescan/reviews/{review_id} — mirrors
+        `reviews.rs::ReviewDetailResponse` (the review row flattened, plus
+        `comments`/`detections`/`license_violations` arrays).
+    ReviewDetection:
+      type: object
+      description: |-
+        One `codescan_review_detections` row — mirrors
+        `reviews.rs::ReviewDetection`.
+      required:
+      - id
+      properties:
+        confidence:
+          type:
+          - number
+          - 'null'
+          format: double
+        created_at:
+          type:
+          - string
+          - 'null'
+        detection_type:
+          type:
+          - string
+          - 'null'
+        file_count:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        id:
+          type: integer
+          format: int64
+        name:
+          type:
+          - string
+          - 'null'
+    ReviewLicenseViolation:
+      type: object
+      description: |-
+        One `codescan_license_violations` row — mirrors
+        `reviews.rs::ReviewLicenseViolation`.
+      required:
+      - id
+      - status
+      properties:
+        created_at:
+          type:
+          - string
+          - 'null'
+        id:
+          type: integer
+          format: int64
+        license_name:
+          type:
+          - string
+          - 'null'
+        package_name:
+          type:
+          - string
+          - 'null'
+        policy:
+          type:
+          - string
+          - 'null'
+        severity:
+          type:
+          - string
+          - 'null'
+        status:
+          type: string
+    ReviewListResponse:
+      type: object
+      description: GET /codescan/reviews — mirrors `reviews.rs::ReviewListResponse`.
+      required:
+      - data
+      - pagination
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReviewRow'
+        pagination:
+          $ref: '#/components/schemas/PaginationMeta'
+    ReviewRow:
+      type: object
+      description: One `codescan_reviews` row — mirrors `reviews.rs::ReviewRow`.
+      required:
+      - id
+      - tenant_id
+      - repo_config_id
+      - review_type
+      - status
+      - files_reviewed
+      - comments_count
+      properties:
+        ai_model:
+          type:
+          - string
+          - 'null'
+        ai_provider:
+          type:
+          - string
+          - 'null'
+        base_sha:
+          type:
+          - string
+          - 'null'
+        categories: {}
+        comments_count:
+          type: integer
+          format: int32
+        completed_at:
+          type:
+          - string
+          - 'null'
+        created_at:
+          type:
+          - string
+          - 'null'
+        error_message:
+          type:
+          - string
+          - 'null'
+        external_id:
+          type:
+          - string
+          - 'null'
+        files_reviewed:
+          type: integer
+          format: int32
+        head_sha:
+          type:
+          - string
+          - 'null'
+        id:
+          type: integer
+          format: int64
+        pr_number:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        pr_title:
+          type:
+          - string
+          - 'null'
+        pr_url:
+          type:
+          - string
+          - 'null'
+        repo_config_id:
+          type: integer
+          format: int64
+        review_type:
+          type: string
+        started_at:
+          type:
+          - string
+          - 'null'
+        status:
+          type: string
+        summary:
+          type:
+          - string
+          - 'null'
+        team_id:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        tenant_id:
+          type: string
+          format: uuid
+        triggered_by:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        updated_at:
+          type:
+          - string
+          - 'null'
     S3ScanStatisticsResponse:
       type: object
       description: Documentation-only mirror of `get_statistics`'s `serde_json::json!` body.
@@ -7309,6 +7802,21 @@ components:
           type:
           - string
           - 'null'
+    StatusResponse:
+      type: object
+      description: |-
+        `{status, queue_depth}` — mirrors
+        `services/codescan-backend/src/routes/status.rs::StatusResponse`; also the
+        field allowlist [`allowlist`] enforces on the proxied response.
+      required:
+      - status
+      - queue_depth
+      properties:
+        queue_depth:
+          type: integer
+          format: int64
+        status:
+          type: string
     SvidTtlSettings:
       type: object
       description: |-

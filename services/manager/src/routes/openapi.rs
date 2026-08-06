@@ -353,6 +353,22 @@ pub(crate) struct PublicApiDoc;
         // scanner
         scanner::ScannerScanBody,
         scanner::ScannerScanResponse,
+        // codescan
+        codescan::StatusResponse,
+        codescan::RepoConfig,
+        codescan::RepoListResponse,
+        codescan::RepoCreateResponse,
+        codescan::RepoUpdateResponse,
+        codescan::RepoDeleteResponse,
+        codescan::ReviewRow,
+        codescan::PaginationMeta,
+        codescan::ReviewListResponse,
+        codescan::ReviewComment,
+        codescan::ReviewDetection,
+        codescan::ReviewLicenseViolation,
+        codescan::ReviewDetailResponse,
+        codescan::PlanRow,
+        codescan::PlanListResponse,
         // research
         research::LookupBody,
         research::QueryTypeBody,
