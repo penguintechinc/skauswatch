@@ -154,12 +154,14 @@ mod tests {
     }
 
     fn test_state(license: Arc<LicenseClient>) -> AppState {
-        // Missing path → ephemeral CA key (fine for tests).
+        // Missing path → ephemeral CA key (fine for tests). Lazy pool: none
+        // of these tests reach the durable store (see `crate::store`'s
+        // consolidation decision doc comment).
         let ca = SshCa::load_or_generate(Path::new("/nonexistent-skauswatch-sshca-key"))
             .expect("ephemeral ca");
         AppState {
             ca: Arc::new(ca),
-            store: Arc::new(CertStore::new()),
+            store: Arc::new(CertStore::new(crate::test_support::lazy_pool())),
             jwt_secret: TEST_JWT_SECRET.into(),
             license,
         }

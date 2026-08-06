@@ -69,3 +69,10 @@ Create the name of the service account to use for agent
 {{- default "default" .Values.spire.agent.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Create the name of the service account to use for the SPIFFE CSI driver
+*/}}
+{{- define "skauswatch-spire.csiDriverServiceAccountName" -}}
+{{- printf "%s-csi-driver" (include "skauswatch-spire.fullname" .) }}
+{{- end }}

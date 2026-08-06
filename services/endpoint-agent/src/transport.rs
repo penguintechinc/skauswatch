@@ -89,6 +89,13 @@ pub struct RegisterRequest {
     pub agent_version: String,
     /// Free-form metadata; carries the enabled collector names.
     pub metadata: serde_json::Value,
+    /// Per-tenant EDR enrollment token (`config::AgentConfig::enrollment_token`,
+    /// `docs/v2-port/service-auth-model.md` §5). Required by the manager only
+    /// for a brand-new `agent_id` — sent verbatim (possibly empty, for a
+    /// re-registering agent) on every registration attempt regardless, since
+    /// this client cannot know ahead of time whether the manager considers
+    /// `agent_id` new. NEVER logged.
+    pub enrollment_token: String,
 }
 
 /// `POST /api/v1/endpoint/heartbeat` body — matches the manager's

@@ -7,64 +7,92 @@
 //!
 //! Fully ported (real, tested): the ES/OpenSearch + MongoDB event store
 //! (`src/es.rs`, `src/mongo.rs`), the event search/get/stream API
-//! (`src/routes/events.rs`), the alert API (`src/routes/alerts.rs` — a
-//! faithful port of v1's genuinely unbacked stub behavior, not a shortcut;
-//! see that module's docs), the dashboard metrics stub
-//! (`src/routes/dashboard.rs` — same story), health/version
+//! (`src/routes/events.rs` — hardened: every one of these three endpoints
+//! previously had zero authentication and no tenant filter on the
+//! underlying Elasticsearch query, a critical cross-tenant data-exposure
+//! finding; see that module's docs for the fix), the alert API
+//! (`src/routes/alerts.rs` — a faithful port of v1's genuinely unbacked stub
+//! behavior, not a shortcut; see that module's docs), the dashboard metrics
+//! stub (`src/routes/dashboard.rs` — same story), health/version
 //! (`src/routes/health.rs`), house-standard bearer-JWT + tenant-claim auth
-//! (`src/auth.rs`), the data model layer (`src/models.rs`), and OpenAPI 3.x
-//! publication (`src/routes/openapi.rs`, `openapi/v1.yaml`).
+//! (`src/auth.rs`, `skauswatch_auth::tenant_middleware`), the data model
+//! layer (`src/models.rs`), and OpenAPI 3.x publication
+//! (`src/routes/openapi.rs`, `openapi/v1.yaml`).
+//!
+//! **Phase 12 (this pass) — log collectors + ingest pipeline + TAXII
+//! threat-intel engine**, closing the two largest tracked follow-ups below:
+//!
+//! - `src/collectors/*` (auditd/file/journald/syslog/kubernetes/lxc/
+//!   database): the event producers `GET /events/stream` and the ES event
+//!   store previously had none of — see `src/collectors/mod.rs` module docs
+//!   for the exact scope (subprocess/socket/poll mechanisms kept, several
+//!   of v1's remote-transport fan-outs per collector not reproduced) and
+//!   the flagged-not-silent deployment requirements (host log mounts,
+//!   in-cluster K8s RBAC) this needs once actually deployed.
+//! - `src/ingest.rs`: the batching/backpressure glue between collectors and
+//!   the event store, and — critically — where every collector-produced
+//!   event's `tenant_id` is validated non-empty before it can reach
+//!   storage. **Closes the tenant-provenance gap flagged in
+//!   `src/es.rs::EventStore::index_event`'s doc comment**: every collector
+//!   stamps `tenant_id` from `config.rs::TenancyConfig` (server-side
+//!   deployment config, never anything the collected log content itself
+//!   claims — see that struct's doc comment for the trust-boundary
+//!   reasoning), so `crate::es::build_search_body`'s tenant filter (already
+//!   hardened in an earlier pass) now actually has same-tenant data to
+//!   return instead of an empty index.
+//! - `src/threat_intel/*`: the TAXII 2.x feed engine (`taxii.rs`/`stix.rs`)
+//!   ported for real — discovery, collection polling, STIX indicator
+//!   parsing, Postgres-backed storage (`store.rs`) — plus a matcher
+//!   (`matcher.rs`) wired into the ingest pipeline, and a clean, new,
+//!   read-only REST surface (`routes.rs`) that does **not** restore v1's
+//!   ~15 broken routes described below. See `src/threat_intel/mod.rs` for
+//!   the disambiguation from manager's separate, already-shipped IOC-CRUD
+//!   `threat_intel` subsystem.
 //!
 //! ## Tracked follow-ups (deferred, not stubbed-and-claimed-done)
 //!
-//! v1 is ~25k lines; the groups below (~16k lines, ~65% of v1) are
-//! deliberately **not** ported in this pass. Each is a genuinely separate
-//! subsystem from the ES/Mongo event store this port focuses on, and each
-//! is deferred with its own tracking note rather than faked:
+//! The groups below remain out of scope for this port. Each is a
+//! genuinely separate subsystem, deferred with its own tracking note
+//! rather than faked:
 //!
-//! 1. **Log collectors** (`collectors/kubernetes_collector.py`,
-//!    `lxc_collector.py`, `auditd_collector.py`, `syslog_collector.py`,
-//!    `journald_collector.py`, `file_collector.py`,
-//!    `database_collector.py` — ~6,566 lines). These are the only producers
-//!    of events in v1; without them, `GET /events/stream` has real
-//!    infrastructure but no live publisher (see that module's docs), and
-//!    the event store starts empty until a collector or manual `index_event`
-//!    caller populates it.
-//! 2. **Threat intelligence** (`threat_intel/taxii_client.py` (2,845 lines),
-//!    `stix_parser.py` (1,037), `indicator_matcher.py` (657),
-//!    `threat_database.py` (1,288) — ~5,827 lines) plus the corresponding
-//!    `/threat-intel/*` and `/monitor/threat-intel/*` routes (~15 routes in
-//!    v1's `main.py`). **Found while reading v1 for this port**: most of
-//!    those routes call `ThreatDatabase` methods that do not exist anywhere
-//!    in the v1 codebase (`get_iocs_advanced`, `add_ioc`, `get_ioc_by_id`,
-//!    `search_iocs_advanced`, `bulk_add_iocs`, `get_matches_by_event`,
-//!    `get_feed_status_enhanced`, `add_feed`, `get_feed_by_id`,
-//!    `update_feed`, `get_health_status` — grepped across the full tree,
-//!    zero matches). Every one of those v1 endpoints raises
-//!    `AttributeError` and 500s unconditionally today; there is no working
-//!    v1 behavior to preserve for that portion of the surface.
-//! 3. **AI integration** (`ai_integration/*` — `ai_provider.py`,
+//! 1. **Alerting and core analysis** (`alert_manager.py`, `escalation.py`,
+//!    `pattern_detector.py`, `anomaly_detector.py`, `event_classifier.py`,
+//!    top-level `analysis_engine.py`) — **confirmed v1 dead code, not a
+//!    parity gap**: `search_alerts` always returns empty, `get_alert_by_id`
+//!    always `None`, `start_processing` is an infinite no-op sleep loop,
+//!    `escalation.handle_status_change` only logs, and every
+//!    pattern/anomaly/classification module is an `__init__`-only skeleton
+//!    (`classify_event` hardcodes `{"category": "unknown", "confidence":
+//!    0.0}`). `src/routes/alerts.rs` and `src/routes/dashboard.rs` already
+//!    faithfully preserve this non-functional behavior — see
+//!    `docs/v2-port/phase12-scope-scan-monitor.md` §2 for the full
+//!    verification (including a latent v1 `NameError` in
+//!    `analysis_engine.py`'s constructor, silently swallowed at startup).
+//! 2. **AI integration** (`ai_integration/*` — `ai_provider.py`,
 //!    `analysis_engine.py`, `prompt_templates.py`, `response_processor.py`,
 //!    the OpenAI/Anthropic/Ollama clients — ~3,957 lines) plus the
-//!    `/ai/*` routes (~9 routes).
+//!    `/ai/*` routes (~9 routes). Real but inert without operator-supplied
+//!    API keys even in v1; depends on the now-ported collectors/ingest for
+//!    real input if it's ever built.
 //!
 //! OpenAPI publication (`openapi/v1.yaml` via `utoipa`, see
 //! `src/routes/openapi.rs`) *is* in place for this service, following
 //! `docs/v2-port/openapi-pattern.md` (established on `codescan-backend`).
-//!
-//! `docs/APP_STANDARDS.md`/an issue tracker entry should record these
-//! groups; see the PR description for this port for the full breakdown.
 
 mod auth;
+mod collectors;
 mod config;
 mod error;
 mod es;
 mod flags;
+mod ingest;
 mod models;
 mod routes;
 mod state;
+mod threat_intel;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::Router;
 use clap::{Parser, Subcommand};
@@ -117,7 +145,9 @@ async fn serve() -> anyhow::Result<()> {
     let state = state::AppStateInner::from_env().await?;
     let _license_bg = state.license.spawn_refresh();
 
-    let api = routes::router();
+    spawn_background_workers(&state);
+
+    let api = routes::router(state.clone());
     let app: Router<()> = Router::new()
         .merge(api.clone())
         // The openapi doc route is nested only, not double-mounted flat —
@@ -139,6 +169,37 @@ async fn serve() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Spawns the log collectors (`collectors::spawn_enabled`) and the TAXII
+/// feed poller (`threat_intel::taxii::run`) as background tasks, wiring
+/// them through `ingest::IngestPipeline`. Both degrade gracefully: no
+/// collectors start without `MONITOR_TENANT_ID` (see `collectors::
+/// spawn_enabled`'s doc comment) and the TAXII poller no-ops without
+/// `MONITOR_TAXII_ENABLED`/a threat-intel database — neither failure here
+/// prevents the REST API from serving.
+fn spawn_background_workers(state: &state::AppState) {
+    let matcher: Option<Arc<dyn threat_intel::matcher::EventMatcher>> = state
+        .threat_store
+        .clone()
+        .map(|store| Arc::new(threat_intel::matcher::IndicatorMatcher::new(store)) as _);
+
+    let sink = ingest::IngestPipeline::spawn(
+        state.event_store.clone(),
+        state.event_bus.clone(),
+        matcher,
+        state.license.clone(),
+        ingest::IngestConfig::default(),
+    );
+    collectors::spawn_enabled(&state.config, sink);
+
+    if let Some(store) = state.threat_store.clone() {
+        let taxii_cfg = threat_intel::taxii::TaxiiConfig::from_env();
+        let license = state.license.clone();
+        tokio::spawn(threat_intel::taxii::run(store, taxii_cfg, license));
+    } else {
+        tracing::info!("threat-intel database not configured — TAXII feed poller not started");
+    }
 }
 
 async fn shutdown_signal() {

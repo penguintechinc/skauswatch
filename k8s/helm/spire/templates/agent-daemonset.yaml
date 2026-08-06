@@ -32,7 +32,7 @@ spec:
         {{- toYaml .Values.spire.agent.podSecurityContext | nindent 8 }}
       initContainers:
       - name: init-server-bundle
-        image: busybox:1.36
+        image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
         imagePullPolicy: IfNotPresent
         command:
           - sh
@@ -77,6 +77,11 @@ spec:
           mountPath: /run/spire/agent
         - name: spire-bundle
           mountPath: /run/spire/bundle
+        {{- if .Values.spire.server.nodeAttestation.k8sPsat.enabled }}
+        - name: spire-token
+          mountPath: {{ dir .Values.spire.agent.serviceAccountTokenPath }}
+          readOnly: true
+        {{- end }}
       volumes:
       - name: spire-config
         configMap:
@@ -89,6 +94,15 @@ spec:
         emptyDir: {}
       - name: spire-bundle
         emptyDir: {}
+      {{- if .Values.spire.server.nodeAttestation.k8sPsat.enabled }}
+      - name: spire-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: {{ base .Values.spire.agent.serviceAccountTokenPath }}
+              audience: {{ .Values.spire.agent.serviceAccountTokenAudience | quote }}
+              expirationSeconds: {{ .Values.spire.agent.serviceAccountTokenExpirationSeconds }}
+      {{- end }}
       {{- with .Values.spire.agent.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

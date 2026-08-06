@@ -13,23 +13,25 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::Deserialize;
+use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
-fn default_tenant() -> String {
-    "default".to_owned()
-}
-
 /// Deserialized JWT payload — presence of `sub`/`exp`/`scope` is enforced
 /// by these being non-`Option` fields (v1's `options={"require": [...]}`).
+/// `tenant` uses `#[serde(default)]` (empty string when absent) rather than
+/// hard-failing decode, deliberately: this lets [`decode_bearer`] reject
+/// "key absent" and "key present but empty" identically with a 403, instead
+/// of the former surfacing as an unrelated 401 decode failure — see
+/// `docs/v2-port/tenancy-model.md`.
 #[derive(Debug, Deserialize)]
 struct Claims {
     sub: String,
     #[allow(dead_code)] // validated by jsonwebtoken's `validate_exp`, not read directly
     exp: i64,
     scope: String,
-    #[serde(default = "default_tenant")]
+    #[serde(default)]
     tenant: String,
 }
 
@@ -39,11 +41,11 @@ struct Claims {
 pub struct CurrentUser {
     /// `sub` claim — the caller's user id.
     pub user_id: String,
-    /// `tenant` claim, defaulting to `"default"` (v1 parity). Decoded but
-    /// not yet read by any route — v1 (`g.tenant_id`) never used it either;
-    /// Vault is currently single-tenant-per-deployment. Kept for future
-    /// tenant-scoped query enforcement.
-    #[allow(dead_code)]
+    /// `tenant` claim — the hard tenant-isolation boundary. Always
+    /// non-empty by construction: [`decode_bearer`] rejects (403) any token
+    /// whose `tenant` claim is absent or empty before a [`CurrentUser`] is
+    /// ever built, per the house policy ("client cannot set tenant" /
+    /// "tenant mismatch = immediate 403", `security.md`).
     pub tenant_id: String,
     /// Space-separated `scope` claim, split into a set.
     pub scopes: HashSet<String>,
@@ -79,12 +81,27 @@ impl CurrentUser {
             )))
         }
     }
+
+    /// Parses [`Self::tenant_id`] into the `UUID` type every `tenant_id`
+    /// database column uses (see `docs/v2-port/tenancy-model.md` §4). A
+    /// parse failure means the JWT issuer minted a non-UUID tenant claim —
+    /// never a client-controllable value — so it fails closed as 403, not a
+    /// panic or a silent bypass.
+    pub fn tenant_uuid(&self) -> Result<Uuid, ApiError> {
+        self.tenant_id
+            .parse()
+            .map_err(|_| ApiError::Forbidden("Invalid tenant".to_owned()))
+    }
 }
 
 /// Decodes and validates a bearer token per v1 `_decode_jwt`: HS256,
-/// `sub`/`exp`/`scope` required, expiry checked. Any failure (bad
-/// signature, expired, missing required claim) maps to the single v1
-/// message `"Invalid or expired token"`.
+/// `sub`/`exp`/`scope` required, expiry checked. Signature/expiry/missing
+/// required-claim failures map to the single v1 message
+/// `"Invalid or expired token"` (401). A token that decodes and verifies
+/// cleanly but carries no usable `tenant` claim (absent or empty after
+/// trimming) is a *distinct* failure — 403, not 401 — per the house tenant
+/// boundary: a well-formed credential that simply doesn't identify a tenant
+/// is a tenant-isolation violation, not an authentication failure.
 pub fn decode_bearer(token: &str, secret: &str) -> Result<CurrentUser, ApiError> {
     let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_exp = true;
@@ -95,9 +112,13 @@ pub fn decode_bearer(token: &str, secret: &str) -> Result<CurrentUser, ApiError>
     )
     .map_err(|_| ApiError::Unauthorized("Invalid or expired token".to_owned()))?;
     let claims = data.claims;
+    let tenant_id = claims.tenant.trim().to_owned();
+    if tenant_id.is_empty() {
+        return Err(ApiError::Forbidden("Missing or invalid tenant".to_owned()));
+    }
     Ok(CurrentUser {
         user_id: claims.sub,
-        tenant_id: claims.tenant,
+        tenant_id,
         scopes: claims.scope.split_whitespace().map(str::to_owned).collect(),
         raw_token: token.to_owned(),
     })
@@ -157,11 +178,25 @@ mod tests {
     }
 
     #[test]
-    fn missing_tenant_claim_defaults() {
+    fn missing_tenant_claim_is_rejected() {
         let now = Utc::now().timestamp();
         let token = sign(json!({"sub": "u", "exp": now + 3600, "scope": "secrets:read"}));
-        let user = decode_bearer(&token, SECRET).expect("decode");
-        assert_eq!(user.tenant_id, "default");
+        match decode_bearer(&token, SECRET) {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Missing or invalid tenant"),
+            other => panic!("expected 403, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_tenant_claim_is_rejected() {
+        let now = Utc::now().timestamp();
+        let token = sign(json!({
+            "sub": "u", "exp": now + 3600, "scope": "secrets:read", "tenant": "   ",
+        }));
+        match decode_bearer(&token, SECRET) {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Missing or invalid tenant"),
+            other => panic!("expected 403, got {other:?}"),
+        }
     }
 
     #[test]
@@ -221,5 +256,35 @@ mod tests {
                 .is_ok()
         );
         assert!(user.require_any_scope(&["audit:read"]).is_err());
+    }
+
+    #[test]
+    fn tenant_uuid_parses_a_well_formed_claim() {
+        let user = CurrentUser {
+            user_id: "u".into(),
+            tenant_id: "11111111-1111-1111-1111-111111111111".into(),
+            scopes: HashSet::new(),
+            raw_token: "tok".into(),
+        };
+        assert_eq!(
+            user.tenant_uuid().expect("parse"),
+            "11111111-1111-1111-1111-111111111111"
+                .parse::<uuid::Uuid>()
+                .expect("uuid")
+        );
+    }
+
+    #[test]
+    fn tenant_uuid_rejects_a_non_uuid_claim() {
+        let user = CurrentUser {
+            user_id: "u".into(),
+            tenant_id: "not-a-uuid".into(),
+            scopes: HashSet::new(),
+            raw_token: "tok".into(),
+        };
+        match user.tenant_uuid() {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Invalid tenant"),
+            other => panic!("expected 403, got {other:?}"),
+        }
     }
 }

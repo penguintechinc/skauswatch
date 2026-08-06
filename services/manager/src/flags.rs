@@ -16,6 +16,7 @@ pub const CORE_FLAGS: &[&str] = &[
     "skauswatch.asm",
     "skauswatch.endpoint",
     "skauswatch.research",
+    "skauswatch.users",
     "skauswatch.ai-review",
     "skauswatch.monitor",
     "skauswatch.log-ingest",

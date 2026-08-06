@@ -29,3 +29,8 @@ configMapData:
   db-pool-size: "5"
   redis-url: "redis://redis:6379/0"
   redis-key-prefix: "skauswatch"
+
+# Enabled here so beta stays SPIRE-parity with production ahead of any
+# release-mode flip. Backs awsIdentity.mode: "spire" above.
+spire:
+  enabled: true

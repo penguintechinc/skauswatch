@@ -72,6 +72,11 @@ const PLAN_COLUMNS: &str = "id, external_id, platform, repository, issue_number,
      issue_title, plan_content, plan_steps, ai_provider, ai_model, status, error_message, \
      comment_posted, created_at, updated_at";
 
+// NOTE: `tenant_id` deliberately isn't in `PLAN_COLUMNS`/`PlanRow` — this
+// service never exposed it in the plan detail/list response, and this pass
+// only closes the tenant-isolation gap (filter/stamp), not the response
+// shape. Every query below still filters/stamps on it.
+
 #[derive(Deserialize, utoipa::IntoParams)]
 pub(crate) struct ListQuery {
     platform: Option<String>,
@@ -105,7 +110,7 @@ pub(crate) struct PlanListResponse {
 )]
 pub(crate) async fn list_plans(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Query(q): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
     if let Some(denied) = license_denied(&state).await {
@@ -115,8 +120,9 @@ pub(crate) async fn list_plans(
     let offset = (page - 1) * per_page;
 
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(format!(
-        "SELECT {PLAN_COLUMNS} FROM codescan_issue_plans WHERE 1=1"
+        "SELECT {PLAN_COLUMNS} FROM codescan_issue_plans WHERE tenant_id = "
     ));
+    qb.push_bind(user.tenant_id);
     if let Some(platform) = &q.platform {
         qb.push(" AND platform = ").push_bind(platform.clone());
     }
@@ -133,8 +139,9 @@ pub(crate) async fn list_plans(
     let items = qb.build_query_as::<PlanRow>().fetch_all(&state.db).await?;
 
     let mut count_qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT count(*) FROM codescan_issue_plans WHERE 1=1",
+        "SELECT count(*) FROM codescan_issue_plans WHERE tenant_id = ",
     );
+    count_qb.push_bind(user.tenant_id);
     if let Some(platform) = &q.platform {
         count_qb
             .push(" AND platform = ")
@@ -211,7 +218,7 @@ fn validate_create(body: &CreatePlanRequest) -> Result<(), ApiError> {
 )]
 pub(crate) async fn create_plan(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     ApiJson(body): ApiJson<CreatePlanRequest>,
 ) -> Result<Response, ApiError> {
     if let Some(denied) = license_denied(&state).await {
@@ -228,11 +235,13 @@ pub(crate) async fn create_plan(
         )
     });
 
-    let existing: Option<(i64,)> =
-        sqlx::query_as("SELECT id FROM codescan_issue_plans WHERE external_id = $1")
-            .bind(&external_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let existing: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM codescan_issue_plans WHERE external_id = $1 AND tenant_id = $2",
+    )
+    .bind(&external_id)
+    .bind(user.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
     if existing.is_some() {
         return Err(ApiError::Conflict(serde_json::json!({
             "error": "Issue plan with this external_id already exists"
@@ -241,13 +250,14 @@ pub(crate) async fn create_plan(
 
     let query = format!(
         "INSERT INTO codescan_issue_plans \
-         (external_id, platform, repository, issue_number, issue_url, issue_title, issue_body, \
-          ai_provider, ai_model, status, updated_at) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'queued',now()) \
+         (external_id, tenant_id, platform, repository, issue_number, issue_url, issue_title, \
+          issue_body, ai_provider, ai_model, status, updated_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'queued',now()) \
          RETURNING {PLAN_COLUMNS}"
     );
     let created = sqlx::query_as::<_, PlanRow>(sqlx::AssertSqlSafe(query))
         .bind(&external_id)
+        .bind(user.tenant_id)
         .bind(&body.platform)
         .bind(&body.repository)
         .bind(body.issue_number)
@@ -278,15 +288,17 @@ pub(crate) async fn create_plan(
 )]
 pub(crate) async fn get_plan(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(plan_id): Path<i64>,
 ) -> Result<Response, ApiError> {
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
-    let query = format!("SELECT {PLAN_COLUMNS} FROM codescan_issue_plans WHERE id = $1");
+    let query =
+        format!("SELECT {PLAN_COLUMNS} FROM codescan_issue_plans WHERE id = $1 AND tenant_id = $2");
     let row = sqlx::query_as::<_, PlanRow>(sqlx::AssertSqlSafe(query))
         .bind(plan_id)
+        .bind(user.tenant_id)
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| ApiError::NotFound("Issue plan not found".to_owned()))?;
@@ -447,6 +459,43 @@ mod tests {
         server
             .get("/api/v1/codescan/plans/999999")
             .authorization_bearer(token)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    /// Tenant A cannot list or read tenant B's issue plans.
+    #[tokio::test]
+    async fn tenant_a_cannot_access_tenant_b_plans() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token_a = crate::routes::test_support::sign_token(&state, "1", "viewer");
+        let token_b = crate::routes::test_support::sign_token_for_tenant(
+            &state,
+            "2",
+            "viewer",
+            crate::routes::test_support::OTHER_TENANT_ID,
+        );
+        let server = test_server(state);
+
+        let created = server
+            .post("/api/v1/codescan/plans")
+            .authorization_bearer(&token_b)
+            .json(&create_body("tenant-b/repo", 1))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let plan_id = created.json::<serde_json::Value>()["id"]
+            .as_i64()
+            .unwrap_or_default();
+
+        let listed = server
+            .get("/api/v1/codescan/plans")
+            .authorization_bearer(&token_a)
+            .await;
+        listed.assert_status_ok();
+        assert_eq!(listed.json::<serde_json::Value>()["total"], 0);
+
+        server
+            .get(&format!("/api/v1/codescan/plans/{plan_id}"))
+            .authorization_bearer(&token_a)
             .await
             .assert_status(StatusCode::NOT_FOUND);
     }

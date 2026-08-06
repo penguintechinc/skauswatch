@@ -49,7 +49,12 @@ pub fn classify_object(key: &str, size: i64, file_types: &[String], max_bytes: u
 
 /// Builds the per-object re-dispatch fields, byte-identical to the manager's
 /// `scan_task_fields` (`scan_enabled` always `True` on the scan path; the
-/// `submitted_at` stamp is refreshed to now).
+/// `submitted_at` stamp is refreshed to now), plus the tenancy-retrofit
+/// `tenant_id` field appended at the end (additive, matching the manager's
+/// own producers) — carried forward unchanged from the enumerate task that
+/// triggered this re-dispatch, never re-derived or defaulted, so the
+/// re-published entry passes this worker's own `Task::parse` fail-closed
+/// check when it comes back around the stream.
 pub fn dispatch_fields(
     job_id: &str,
     bucket_config_id: i32,
@@ -57,6 +62,7 @@ pub fn dispatch_fields(
     object_size: i64,
     object_etag: &str,
     yara_enabled: bool,
+    tenant_id: uuid::Uuid,
 ) -> EntryFields {
     vec![
         ("job_id".to_owned(), job_id.to_owned()),
@@ -67,11 +73,12 @@ pub fn dispatch_fields(
         ("scan_enabled".to_owned(), py_bool(true).to_owned()),
         ("yara_enabled".to_owned(), py_bool(yara_enabled).to_owned()),
         ("submitted_at".to_owned(), py_now_isoformat()),
+        ("tenant_id".to_owned(), tenant_id.to_string()),
     ]
 }
 
 #[cfg(test)]
-#[allow(clippy::panic)] // tests fail loudly by design
+#[allow(clippy::panic, clippy::expect_used)] // tests fail loudly by design
 mod tests {
     use super::*;
 
@@ -116,7 +123,10 @@ mod tests {
 
     #[test]
     fn dispatch_fields_match_manager_shape() {
-        let f = dispatch_fields("job-1", 7, "uploads/a.bin", 1024, "\"etag\"", true);
+        let tenant: uuid::Uuid = "22222222-2222-2222-2222-222222222222"
+            .parse()
+            .expect("valid uuid literal");
+        let f = dispatch_fields("job-1", 7, "uploads/a.bin", 1024, "\"etag\"", true, tenant);
         let keys: Vec<&str> = f.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             keys,
@@ -129,6 +139,7 @@ mod tests {
                 "scan_enabled",
                 "yara_enabled",
                 "submitted_at",
+                "tenant_id",
             ]
         );
         // Spot-check the redis-py encodings.
@@ -136,5 +147,6 @@ mod tests {
         assert_eq!(f[3].1, "1024");
         assert_eq!(f[5].1, "True");
         assert_eq!(f[6].1, "True");
+        assert_eq!(f[8].1, tenant.to_string());
     }
 }

@@ -11,12 +11,14 @@ import type {
 import Card from '../components/Card';
 import Button from '../components/Button';
 import TabNavigation from '../components/TabNavigation';
+import SvidTtlSettings from '../components/SvidTtlSettings';
 
-type Tab = 'overview' | 'workloads' | 'federation' | 'nodes' | 'datastore';
+type Tab = 'overview' | 'workloads' | 'federation' | 'nodes' | 'datastore' | 'settings';
 
 export default function Spire() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, isSuperAdmin } = useAuth();
   const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const superAdmin = isSuperAdmin();
 
   const tabs = [
     { id: 'overview', label: 'Overview' },
@@ -24,6 +26,8 @@ export default function Spire() {
     { id: 'federation', label: 'Federation' },
     { id: 'nodes', label: 'Nodes' },
     { id: 'datastore', label: 'Datastore' },
+    // Super-admin-only tab — hidden entirely for Admin/Maintainer/Viewer.
+    ...(superAdmin ? [{ id: 'settings', label: 'Settings' }] : []),
   ];
 
   return (
@@ -45,6 +49,7 @@ export default function Spire() {
         {activeTab === 'federation' && <FederationTab isAdmin={isAdmin()} />}
         {activeTab === 'nodes' && <NodesTab isAdmin={isAdmin()} />}
         {activeTab === 'datastore' && <DatastoreTab isAdmin={isAdmin()} />}
+        {activeTab === 'settings' && superAdmin && <SvidTtlSettings />}
       </div>
     </div>
   );

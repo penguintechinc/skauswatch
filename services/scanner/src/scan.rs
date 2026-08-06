@@ -102,8 +102,17 @@ pub async fn execute_scan(
             }
         }
         "nuclei" | "zap" | "openvas" => {
-            // ASM tool orchestration — placeholder for Phase 3
-            let err = format!("{} scanning not yet implemented", scan_type);
+            // Intentionally not implemented — see `crate::asm` module docs
+            // and docs/v2-port/phase12-scope-scan-monitor.md §1: v1's
+            // standalone nuclei/zap/openvas job surface (scan_targets/
+            // scan_jobs/scan_findings/scan_schedules) had no manager proxy
+            // and no webui reference anywhere — code-complete in v1 but with
+            // no confirmed client, so restoring it here would be unreachable
+            // code. Not the same as the ASM-embedded masscan pipeline
+            // (`crate::asm`, which IS fully wired end-to-end).
+            let err = format!(
+                "{scan_type} scanning not yet implemented (no v1 caller — see crate::asm module docs)"
+            );
             (json!({}), 0, Some(err))
         }
         _ => {
@@ -404,7 +413,9 @@ mod tests {
             assert_eq!(result.status, "error");
             assert_eq!(
                 result.error_message,
-                Some(format!("{scan_type} scanning not yet implemented"))
+                Some(format!(
+                    "{scan_type} scanning not yet implemented (no v1 caller — see crate::asm module docs)"
+                ))
             );
         }
     }

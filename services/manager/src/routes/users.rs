@@ -202,14 +202,16 @@ pub(crate) async fn list_users(
     let items = sqlx::query_as::<_, UserItem>(
         "SELECT id, email, COALESCE(full_name, '') AS full_name, role, is_active, \
                 COALESCE(mfa_enabled, false) AS mfa_enabled, created_at \
-         FROM users ORDER BY created_at LIMIT $1 OFFSET $2",
+         FROM users WHERE tenant_id = $1 ORDER BY created_at LIMIT $2 OFFSET $3",
     )
+    .bind(user.tenant_id)
     .bind(per_page)
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
-    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+    let total: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE tenant_id = $1")
+        .bind(user.tenant_id)
         .fetch_one(&state.db)
         .await?;
 
@@ -245,13 +247,20 @@ pub(crate) async fn get_user(
         return Err(ApiError::Forbidden("Forbidden".to_owned()));
     }
 
+    // Tenant-scoped even for the admin/maintainer branch of `can_view_user`
+    // — role grants cross-USER visibility within the tenant only, never
+    // across tenants (docs/v2-port/tenancy-model.md §6: cross-tenant reads
+    // require a separately-issued super-admin/audit scope, never the plain
+    // `admin` role). A user_id belonging to another tenant is
+    // indistinguishable from a missing one.
     let row = sqlx::query_as::<_, UserDetail>(
         "SELECT id, email, COALESCE(full_name, '') AS full_name, role, is_active, \
                 COALESCE(mfa_enabled, false) AS mfa_enabled, \
                 created_at, updated_at \
-         FROM users WHERE id = $1",
+         FROM users WHERE id = $1 AND tenant_id = $2",
     )
     .bind(user_id)
+    .bind(user.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("User not found".to_owned()))?;
@@ -347,9 +356,14 @@ pub(crate) async fn create_user(
     }
 
     let password_hash = auth::hash_password(&body.password)?;
+    // Tenant is always stamped from the creating admin's own CurrentUser —
+    // never a client-supplied field (CreateRequest has none) — per the
+    // "user-creation/invite stamps the creating admin's tenant" model
+    // (docs/v2-port/tenancy-model.md §8).
     let created = sqlx::query_as::<_, UserSummary>(
-        "INSERT INTO users (email, password_hash, full_name, role, is_active, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, now()) \
+        "INSERT INTO users (email, password_hash, full_name, role, is_active, updated_at, \
+         tenant_id) \
+         VALUES ($1, $2, $3, $4, $5, now(), $6) \
          RETURNING id, email, COALESCE(full_name, '') AS full_name, role, is_active",
     )
     .bind(&email)
@@ -357,6 +371,7 @@ pub(crate) async fn create_user(
     .bind(&body.full_name)
     .bind(&body.role)
     .bind(body.is_active)
+    .bind(user.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -472,10 +487,14 @@ pub(crate) async fn update_user(
         check_password(password)?;
     }
 
-    let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await?;
+    // Self-update always targets the caller's own tenant; the admin branch
+    // must still not reach across tenants (see get_user's tenant-scoping note).
+    let exists: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM users WHERE id = $1 AND tenant_id = $2")
+            .bind(user_id)
+            .bind(user.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound("User not found".to_owned()));
     }
@@ -530,14 +549,17 @@ pub(crate) async fn update_user(
         }
         qb.push(" WHERE id = ");
         qb.push_bind(user_id);
+        qb.push(" AND tenant_id = ");
+        qb.push_bind(user.tenant_id);
         qb.build().execute(&state.db).await?;
     }
 
     let updated = sqlx::query_as::<_, UserSummary>(
         "SELECT id, email, COALESCE(full_name, '') AS full_name, role, is_active \
-         FROM users WHERE id = $1",
+         FROM users WHERE id = $1 AND tenant_id = $2",
     )
     .bind(user_id)
+    .bind(user.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("User not found".to_owned()))?;
@@ -583,21 +605,25 @@ pub(crate) async fn delete_user(
         ));
     }
 
-    let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let exists: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM users WHERE id = $1 AND tenant_id = $2")
+            .bind(user_id)
+            .bind(user.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound("User not found".to_owned()));
     }
 
     let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM refresh_tokens WHERE user_id = $1")
+    sqlx::query("DELETE FROM refresh_tokens WHERE user_id = $1 AND tenant_id = $2")
         .bind(user_id)
+        .bind(user.tenant_id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("DELETE FROM users WHERE id = $1")
+    sqlx::query("DELETE FROM users WHERE id = $1 AND tenant_id = $2")
         .bind(user_id)
+        .bind(user.tenant_id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -865,6 +891,41 @@ mod tests {
         assert_eq!(body["error"], "Email already registered");
     }
 
+    /// Regression (docs/v2-port/tenancy-model.md §4/§7): tenant is ALWAYS
+    /// stamped from the creating admin's own `CurrentUser`, never from a
+    /// client-supplied body field — `CreateRequest` doesn't even have a
+    /// `tenant_id` field, so a caller attempting to inject one into another
+    /// (real, distinct) tenant must have it silently ignored.
+    #[tokio::test]
+    async fn create_user_ignores_client_supplied_tenant_and_stamps_creator_tenant() {
+        let state = db_state(dev_license()).await;
+        let other_tenant = crate::routes::test_support::seed_tenant(&state.db, "other-corp").await;
+        let (_, admin_tok) = authed_user(&state, "tenant-stamp-admin@example.com", "admin").await;
+        let server = server_for(state.clone()).await;
+
+        let res = server
+            .post("/api/v1/users")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({
+                "email": "stamped@example.com",
+                "password": "longenough1",
+                // Not a real request field — must be silently dropped, not
+                // honored as an attempt to place the new user in another
+                // tenant.
+                "tenant_id": other_tenant.to_string(),
+            }))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+
+        let stamped: (uuid::Uuid,) = sqlx::query_as("SELECT tenant_id FROM users WHERE email = $1")
+            .bind("stamped@example.com")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or_else(|e| panic!("verify stamped tenant: {e}"));
+        assert_eq!(stamped.0, crate::routes::test_support::default_tenant_id());
+        assert_ne!(stamped.0, other_tenant);
+    }
+
     #[tokio::test]
     async fn update_user_self_can_only_change_name_and_password() {
         let state = db_state(dev_license()).await;
@@ -952,10 +1013,11 @@ mod tests {
         let (admin_id, admin_tok) = authed_user(&state, "del-admin@example.com", "admin").await;
         let (viewer_id, viewer_tok) = authed_user(&state, "del-viewer@example.com", "viewer").await;
         sqlx::query(
-            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked) \
-             VALUES ($1, 'del-h1', now() + interval '7 days', false)",
+            "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked, tenant_id) \
+             VALUES ($1, 'del-h1', now() + interval '7 days', false, $2)",
         )
         .bind(viewer_id)
+        .bind(crate::routes::test_support::default_tenant_id())
         .execute(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed refresh token: {e}"));
@@ -992,5 +1054,47 @@ mod tests {
         res.assert_status_ok();
         let body: serde_json::Value = res.json();
         assert_eq!(body["message"], "User deleted successfully");
+    }
+
+    // -- tenant isolation (docs/v2-port/tenancy-model.md) -------------------
+
+    use crate::routes::test_support::{authed_user_in_tenant, seed_tenant};
+
+    #[tokio::test]
+    async fn tenant_a_admin_cannot_list_get_update_or_delete_tenant_bs_user() {
+        let state = db_state(dev_license()).await;
+        let tenant_b = seed_tenant(&state.db, "users-tenant-b").await;
+        let (user_b, _) =
+            authed_user_in_tenant(&state, "user-b@example.com", "viewer", tenant_b).await;
+        let (_, admin_a) = authed_user(&state, "users-admin-a@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let list = server
+            .get("/api/v1/users")
+            .authorization_bearer(&admin_a)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        let items = body["items"].as_array().cloned().unwrap_or_default();
+        assert!(items.iter().all(|i| i["id"] != user_b));
+
+        let get = server
+            .get(&format!("/api/v1/users/{user_b}"))
+            .authorization_bearer(&admin_a)
+            .await;
+        get.assert_status(StatusCode::NOT_FOUND);
+
+        let update = server
+            .put(&format!("/api/v1/users/{user_b}"))
+            .authorization_bearer(&admin_a)
+            .json(&serde_json::json!({"full_name": "hijacked"}))
+            .await;
+        update.assert_status(StatusCode::NOT_FOUND);
+
+        let delete = server
+            .delete(&format!("/api/v1/users/{user_b}"))
+            .authorization_bearer(&admin_a)
+            .await;
+        delete.assert_status(StatusCode::NOT_FOUND);
     }
 }

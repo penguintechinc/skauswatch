@@ -137,6 +137,12 @@ pub struct WorkerConfig {
     /// Bucket holding ad-hoc uploads (`S3_SCAN_ADHOC_BUCKET`). Ad-hoc scanning
     /// is only possible when this is configured and the object exists.
     pub adhoc_bucket: Option<String>,
+    /// Explicit `awsIdentity.mode` selection (`AWS_IDENTITY_MODE`) —
+    /// deterministically selects how this worker resolves its own base AWS
+    /// identity for `assume_role`-mode bucket credentials; see
+    /// `docs/v2-port/aws-identity-runbook.md` §0 and
+    /// `skauswatch_s3::credentials::AwsIdentityModeKind`.
+    pub aws_identity_mode: skauswatch_s3::credentials::AwsIdentityModeKind,
 }
 
 impl WorkerConfig {
@@ -176,6 +182,7 @@ impl WorkerConfig {
                 std::env::var("S3_SCAN_ADHOC_BUCKET").ok().as_deref(),
                 std::env::var("S3_ADHOC_BUCKET").ok().as_deref(),
             ),
+            aws_identity_mode: skauswatch_s3::credentials::AwsIdentityModeKind::from_env(),
         })
     }
 
@@ -222,6 +229,7 @@ impl WorkerConfig {
             s3_region: "us-east-1".to_owned(),
             s3_force_path_style: true,
             adhoc_bucket: None,
+            aws_identity_mode: skauswatch_s3::credentials::AwsIdentityModeKind::Irsa,
         }
     }
 }

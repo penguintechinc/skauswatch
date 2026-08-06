@@ -122,6 +122,7 @@ pub(crate) async fn list_secrets(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_scope("secrets:read")?;
+    let tenant_id = user.tenant_uuid()?;
 
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.unwrap_or(20).clamp(1, 100);
@@ -131,34 +132,41 @@ pub(crate) async fn list_secrets(
         Some(t) => {
             let rows = sqlx::query_as::<_, SecretRow>(
                 "SELECT id, name, description, secret_type, tags, expires_at, created_at, \
-                 updated_at, created_by FROM vault_secrets WHERE secret_type = $1 \
-                 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+                 updated_at, created_by FROM vault_secrets \
+                 WHERE tenant_id = $1 AND secret_type = $2 \
+                 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
             )
+            .bind(tenant_id)
             .bind(t)
             .bind(per_page)
             .bind(offset)
             .fetch_all(&state.db)
             .await?;
-            let total: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM vault_secrets WHERE secret_type = $1")
-                    .bind(t)
-                    .fetch_one(&state.db)
-                    .await?;
+            let total: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM vault_secrets WHERE tenant_id = $1 AND secret_type = $2",
+            )
+            .bind(tenant_id)
+            .bind(t)
+            .fetch_one(&state.db)
+            .await?;
             (rows, total)
         }
         None => {
             let rows = sqlx::query_as::<_, SecretRow>(
                 "SELECT id, name, description, secret_type, tags, expires_at, created_at, \
-                 updated_at, created_by FROM vault_secrets \
-                 ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                 updated_at, created_by FROM vault_secrets WHERE tenant_id = $1 \
+                 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
             )
+            .bind(tenant_id)
             .bind(per_page)
             .bind(offset)
             .fetch_all(&state.db)
             .await?;
-            let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vault_secrets")
-                .fetch_one(&state.db)
-                .await?;
+            let total: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM vault_secrets WHERE tenant_id = $1")
+                    .bind(tenant_id)
+                    .fetch_one(&state.db)
+                    .await?;
             (rows, total)
         }
     };
@@ -205,6 +213,7 @@ pub(crate) async fn create_secret(
     Json(body): Json<CreateSecretBody>,
 ) -> Result<(axum::http::StatusCode, Json<Value>), ApiError> {
     user.require_scope("secrets:write")?;
+    let tenant_id = user.tenant_uuid()?;
 
     let name = body.name.unwrap_or_default().trim().to_owned();
     let value = body.value.unwrap_or_default().trim().to_owned();
@@ -227,11 +236,13 @@ pub(crate) async fn create_secret(
     let now = Utc::now().naive_utc();
 
     sqlx::query(
-        "INSERT INTO vault_secrets (id, name, description, secret_type, encrypted_value, \
-         encrypted_dek, dek_version, tags, secret_metadata, expires_at, created_at, \
-         updated_at, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+        "INSERT INTO vault_secrets (id, tenant_id, name, description, secret_type, \
+         encrypted_value, encrypted_dek, dek_version, tags, secret_metadata, expires_at, \
+         created_at, updated_at, created_by) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)",
     )
     .bind(&secret_id)
+    .bind(tenant_id)
     .bind(&name)
     .bind(body.description.unwrap_or_default())
     .bind(&secret_type)
@@ -248,10 +259,12 @@ pub(crate) async fn create_secret(
     .await?;
 
     sqlx::query(
-        "INSERT INTO vault_secret_versions (id, secret_id, version_number, encrypted_value, \
-         encrypted_dek, dek_version, created_by, created_at) VALUES ($1,$2,1,$3,$4,$5,$6,$7)",
+        "INSERT INTO vault_secret_versions (id, tenant_id, secret_id, version_number, \
+         encrypted_value, encrypted_dek, dek_version, created_by, created_at) \
+         VALUES ($1,$2,$3,1,$4,$5,$6,$7,$8)",
     )
     .bind(Uuid::new_v4().to_string())
+    .bind(tenant_id)
     .bind(&secret_id)
     .bind(&encrypted_value)
     .bind(&encrypted_dek)
@@ -262,27 +275,42 @@ pub(crate) async fn create_secret(
     .await?;
 
     sqlx::query(
-        "INSERT INTO vault_secret_owners (secret_id, owner_type, owner_id) VALUES ($1,'user',$2)",
+        "INSERT INTO vault_secret_owners (secret_id, tenant_id, owner_type, owner_id) \
+         VALUES ($1,$2,'user',$3)",
     )
     .bind(&secret_id)
+    .bind(tenant_id)
     .bind(&user.user_id)
     .execute(&state.db)
     .await?;
 
-    write_audit(&state, &user.user_id, "secret.create", &secret_id, &headers).await;
+    write_audit(
+        &state,
+        tenant_id,
+        &user.user_id,
+        "secret.create",
+        &secret_id,
+        &headers,
+    )
+    .await;
 
-    let secret = fetch_secret(&state, &secret_id)
+    let secret = fetch_secret(&state, tenant_id, &secret_id)
         .await?
         .ok_or_else(|| ApiError::internal("create_secret", "row vanished after insert"))?;
     Ok((axum::http::StatusCode::CREATED, Json(secret.to_json())))
 }
 
-async fn fetch_secret(state: &AppState, id: &str) -> Result<Option<SecretRow>, ApiError> {
+async fn fetch_secret(
+    state: &AppState,
+    tenant_id: Uuid,
+    id: &str,
+) -> Result<Option<SecretRow>, ApiError> {
     Ok(sqlx::query_as::<_, SecretRow>(
         "SELECT id, name, description, secret_type, tags, expires_at, created_at, updated_at, \
-         created_by FROM vault_secrets WHERE id = $1",
+         created_by FROM vault_secrets WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
+    .bind(tenant_id)
     .fetch_optional(&state.db)
     .await?)
 }
@@ -306,7 +334,7 @@ pub(crate) async fn get_secret(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_scope("secrets:read")?;
-    let secret = fetch_secret(&state, &id)
+    let secret = fetch_secret(&state, user.tenant_uuid()?, &id)
         .await?
         .ok_or_else(|| ApiError::NotFound("Not found".to_owned()))?;
     Ok(Json(secret.to_json()))
@@ -343,7 +371,8 @@ pub(crate) async fn update_secret(
     body: Option<Json<UpdateSecretBody>>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_scope("secrets:write")?;
-    if fetch_secret(&state, &id).await?.is_none() {
+    let tenant_id = user.tenant_uuid()?;
+    if fetch_secret(&state, tenant_id, &id).await?.is_none() {
         return Err(ApiError::NotFound("Not found".to_owned()));
     }
     let body = body.map(|Json(b)| b).unwrap_or_default();
@@ -357,7 +386,7 @@ pub(crate) async fn update_secret(
          expires_at = COALESCE($4, expires_at), \
          secret_metadata = COALESCE($5, secret_metadata), \
          updated_at = $6 \
-         WHERE id = $7",
+         WHERE id = $7 AND tenant_id = $8",
     )
     .bind(body.name.as_deref().map(str::trim))
     .bind(body.description)
@@ -366,12 +395,21 @@ pub(crate) async fn update_secret(
     .bind(body.metadata.map(SqlxJson))
     .bind(now)
     .bind(&id)
+    .bind(tenant_id)
     .execute(&state.db)
     .await?;
 
-    write_audit(&state, &user.user_id, "secret.update", &id, &headers).await;
+    write_audit(
+        &state,
+        tenant_id,
+        &user.user_id,
+        "secret.update",
+        &id,
+        &headers,
+    )
+    .await;
 
-    let secret = fetch_secret(&state, &id)
+    let secret = fetch_secret(&state, tenant_id, &id)
         .await?
         .ok_or_else(|| ApiError::internal("update_secret", "row vanished after update"))?;
     Ok(Json(secret.to_json()))
@@ -397,12 +435,22 @@ pub(crate) async fn delete_secret(
     Path(id): Path<String>,
 ) -> Result<axum::http::StatusCode, ApiError> {
     user.require_scope("secrets:delete")?;
-    if fetch_secret(&state, &id).await?.is_none() {
+    let tenant_id = user.tenant_uuid()?;
+    if fetch_secret(&state, tenant_id, &id).await?.is_none() {
         return Err(ApiError::NotFound("Not found".to_owned()));
     }
-    write_audit(&state, &user.user_id, "secret.delete", &id, &headers).await;
-    sqlx::query("DELETE FROM vault_secrets WHERE id = $1")
+    write_audit(
+        &state,
+        tenant_id,
+        &user.user_id,
+        "secret.delete",
+        &id,
+        &headers,
+    )
+    .await;
+    sqlx::query("DELETE FROM vault_secrets WHERE id = $1 AND tenant_id = $2")
         .bind(&id)
+        .bind(tenant_id)
         .execute(&state.db)
         .await?;
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -459,20 +507,29 @@ pub(crate) async fn get_secret_value(
         .ok_or_else(|| ApiError::Unauthorized("Authorization required".to_owned()))?
         .trim();
 
-    let actor_id = match validate_jit_token(&state, token, &id).await {
-        Some(grantee_id) => grantee_id,
+    // Two credential shapes share this endpoint (v1 parity): a JIT grant
+    // token (no independent tenant claim of its own — its tenant is
+    // whatever `vault_jit_grants.tenant_id` was stamped with at approval
+    // time, denormalized from the request/secret it was granted against),
+    // or a standard bearer JWT (tenant from `CurrentUser::tenant_uuid`).
+    // Either way, `tenant_id` below is never trusted from the request path
+    // — it is always resolved from a validated credential.
+    let (actor_id, tenant_id) = match validate_jit_token(&state, token, &id).await {
+        Some((grantee_id, tenant_id)) => (grantee_id, tenant_id),
         None => {
-            let user = crate::auth::decode_bearer(token, &state.auth.jwt_secret)
-                .map_err(|_| ApiError::Unauthorized("Invalid or expired token".to_owned()))?;
+            let user = crate::auth::decode_bearer(token, &state.auth.jwt_secret)?;
             user.require_scope("secrets:read")?;
-            user.user_id
+            let tenant_id = user.tenant_uuid()?;
+            (user.user_id, tenant_id)
         }
     };
 
     let row = sqlx::query_as::<_, EncryptedValueRow>(
-        "SELECT encrypted_value, encrypted_dek, dek_version, name FROM vault_secrets WHERE id = $1",
+        "SELECT encrypted_value, encrypted_dek, dek_version, name FROM vault_secrets \
+         WHERE id = $1 AND tenant_id = $2",
     )
     .bind(&id)
+    .bind(tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("Not found".to_owned()))?;
@@ -491,7 +548,15 @@ pub(crate) async fn get_secret_value(
             ApiError::Internal
         })?;
 
-    write_audit(&state, &actor_id, "secret.value.read", &id, &headers).await;
+    write_audit(
+        &state,
+        tenant_id,
+        &actor_id,
+        "secret.value.read",
+        &id,
+        &headers,
+    )
+    .await;
 
     Ok(Json(json!({
         "id": id,
@@ -547,14 +612,17 @@ pub(crate) async fn list_secret_versions(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_scope("secrets:read")?;
-    if fetch_secret(&state, &id).await?.is_none() {
+    let tenant_id = user.tenant_uuid()?;
+    if fetch_secret(&state, tenant_id, &id).await?.is_none() {
         return Err(ApiError::NotFound("Not found".to_owned()));
     }
     let versions = sqlx::query_as::<_, VersionRow>(
         "SELECT id, version_number, created_by, created_at, deprecated_at \
-         FROM vault_secret_versions WHERE secret_id = $1 ORDER BY version_number DESC",
+         FROM vault_secret_versions WHERE secret_id = $1 AND tenant_id = $2 \
+         ORDER BY version_number DESC",
     )
     .bind(&id)
+    .bind(tenant_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -607,7 +675,8 @@ pub(crate) async fn rotate_secret(
     body: Option<Json<RotateBody>>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_scope("secrets:write")?;
-    if fetch_secret(&state, &id).await?.is_none() {
+    let tenant_id = user.tenant_uuid()?;
+    if fetch_secret(&state, tenant_id, &id).await?.is_none() {
         return Err(ApiError::NotFound("Not found".to_owned()));
     }
     let new_value = body
@@ -624,10 +693,11 @@ pub(crate) async fn rotate_secret(
     let now = Utc::now().naive_utc();
     sqlx::query(
         "UPDATE vault_secret_versions SET deprecated_at = $1 \
-         WHERE secret_id = $2 AND deprecated_at IS NULL",
+         WHERE secret_id = $2 AND tenant_id = $3 AND deprecated_at IS NULL",
     )
     .bind(now)
     .bind(&id)
+    .bind(tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -635,18 +705,21 @@ pub(crate) async fn rotate_secret(
         state.envelope.read().await.encrypt(&new_value)?;
 
     let max_version: Option<i32> = sqlx::query_scalar(
-        "SELECT MAX(version_number) FROM vault_secret_versions WHERE secret_id = $1",
+        "SELECT MAX(version_number) FROM vault_secret_versions WHERE secret_id = $1 AND tenant_id = $2",
     )
     .bind(&id)
+    .bind(tenant_id)
     .fetch_one(&state.db)
     .await?;
     let next_version = max_version.unwrap_or(0) + 1;
 
     sqlx::query(
-        "INSERT INTO vault_secret_versions (id, secret_id, version_number, encrypted_value, \
-         encrypted_dek, dek_version, created_by, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        "INSERT INTO vault_secret_versions (id, tenant_id, secret_id, version_number, \
+         encrypted_value, encrypted_dek, dek_version, created_by, created_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
     )
     .bind(Uuid::new_v4().to_string())
+    .bind(tenant_id)
     .bind(&id)
     .bind(next_version)
     .bind(&encrypted_value)
@@ -659,17 +732,26 @@ pub(crate) async fn rotate_secret(
 
     sqlx::query(
         "UPDATE vault_secrets SET encrypted_value = $1, encrypted_dek = $2, dek_version = $3, \
-         updated_at = $4 WHERE id = $5",
+         updated_at = $4 WHERE id = $5 AND tenant_id = $6",
     )
     .bind(&encrypted_value)
     .bind(&encrypted_dek)
     .bind(dek_version as i32)
     .bind(now)
     .bind(&id)
+    .bind(tenant_id)
     .execute(&state.db)
     .await?;
 
-    write_audit(&state, &user.user_id, "secret.rotate", &id, &headers).await;
+    write_audit(
+        &state,
+        tenant_id,
+        &user.user_id,
+        "secret.rotate",
+        &id,
+        &headers,
+    )
+    .await;
 
     Ok(Json(json!({
         "id": id,
@@ -719,6 +801,7 @@ mod tests {
                 "sub": "user-1",
                 "exp": Utc::now().timestamp() + 3600,
                 "scope": scopes,
+                "tenant": crate::routes::test_support::TEST_TENANT,
             }),
             &EncodingKey::from_secret(b"test-secret"),
         )
@@ -1080,14 +1163,19 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
 
+        let tenant_id: Uuid = crate::routes::test_support::TEST_TENANT
+            .parse()
+            .unwrap_or_else(|e| panic!("test tenant uuid: {e}"));
+
         // Satisfies `vault_jit_grants_request_id_fkey` — a real grant only
         // ever exists once `approve_jit_request` has created its parent
         // `vault_jit_requests` row.
         sqlx::query(
-            "INSERT INTO vault_jit_requests (id, secret_id, requestor_id, reason, \
+            "INSERT INTO vault_jit_requests (id, tenant_id, secret_id, requestor_id, reason, \
              requested_duration_seconds, status, created_at) \
-             VALUES ('request-1', $1, $2, 'test', 3600, 'approved', $3)",
+             VALUES ('request-1', $1, $2, $3, 'test', 3600, 'approved', $4)",
         )
+        .bind(tenant_id)
         .bind(&secret_id)
         .bind(grantee_id)
         .bind(chrono::Utc::now().naive_utc())
@@ -1096,10 +1184,11 @@ mod tests {
         .unwrap_or_else(|e| panic!("seed jit request: {e}"));
 
         sqlx::query(
-            "INSERT INTO vault_jit_grants (id, request_id, secret_id, grantee_id, \
-             access_token_hash, expires_at) VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO vault_jit_grants (id, tenant_id, request_id, secret_id, grantee_id, \
+             access_token_hash, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(grant_id)
+        .bind(tenant_id)
         .bind("request-1")
         .bind(&secret_id)
         .bind(grantee_id)
@@ -1206,5 +1295,88 @@ mod tests {
             .json(&json!({"value": "x"}))
             .await;
         missing.assert_status(axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tenant_isolation_across_read_write_and_value_endpoints() {
+        use crate::routes::test_support::sign_token_for_tenant;
+
+        let state = db_state(dev_license()).await;
+        let tenant_a = sign_token_for_tenant(
+            &state,
+            "owner-a",
+            "secrets:write secrets:read secrets:delete",
+            crate::routes::test_support::TEST_TENANT,
+        );
+        let tenant_b = sign_token_for_tenant(
+            &state,
+            "owner-b",
+            "secrets:write secrets:read secrets:delete",
+            crate::routes::test_support::OTHER_TENANT,
+        );
+        let server = test_server_with_state(state);
+
+        let created = server
+            .post("/api/v1/secrets")
+            .authorization_bearer(&tenant_a)
+            .json(&json!({"name": "a-secret", "value": "a-plaintext"}))
+            .await;
+        created.assert_status(axum::http::StatusCode::CREATED);
+        let id = created.json::<Value>()["id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        // Tenant B cannot list tenant A's secret.
+        let listed = server
+            .get("/api/v1/secrets")
+            .authorization_bearer(&tenant_b)
+            .await;
+        assert_eq!(listed.json::<Value>()["total"], 0);
+
+        // Tenant B cannot read tenant A's secret metadata, value, or
+        // versions — all 404, never leaking existence via a different code.
+        server
+            .get(&format!("/api/v1/secrets/{id}"))
+            .authorization_bearer(&tenant_b)
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+        server
+            .get(&format!("/api/v1/secrets/{id}/value"))
+            .authorization_bearer(&tenant_b)
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+        server
+            .get(&format!("/api/v1/secrets/{id}/versions"))
+            .authorization_bearer(&tenant_b)
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+
+        // Tenant B cannot update, rotate, or delete tenant A's secret.
+        server
+            .put(&format!("/api/v1/secrets/{id}"))
+            .authorization_bearer(&tenant_b)
+            .json(&json!({"name": "hijacked"}))
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+        server
+            .post(&format!("/api/v1/secrets/{id}/rotate"))
+            .authorization_bearer(&tenant_b)
+            .json(&json!({"value": "hijacked"}))
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+        server
+            .delete(&format!("/api/v1/secrets/{id}"))
+            .authorization_bearer(&tenant_b)
+            .await
+            .assert_status(axum::http::StatusCode::NOT_FOUND);
+
+        // Tenant A's own access is untouched by tenant B's attempts.
+        let still_there = server
+            .get(&format!("/api/v1/secrets/{id}"))
+            .authorization_bearer(&tenant_a)
+            .await;
+        still_there.assert_status_ok();
+        assert_eq!(still_there.json::<Value>()["name"], "a-secret");
     }
 }

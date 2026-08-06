@@ -1,0 +1,33 @@
+[package]
+publish = false
+name = "skauswatch-spire-entry"
+description = "Minimal tonic client for the SPIRE Server Entry API (ListEntries/BatchUpdateEntry), used to apply the admin-adjustable SVID TTL policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+http = { workspace = true }
+hyper-util = { workspace = true }
+prost = { workspace = true }
+rustls = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio-stream = { workspace = true }
+
+[build-dependencies]
+protox = { workspace = true }
+tonic-prost-build = { workspace = true }
+
+[lints]
+workspace = true

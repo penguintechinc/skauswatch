@@ -18,9 +18,11 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+penguin-licensing = { workspace = true, features = ["axum"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+skauswatch-auth = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -30,6 +32,7 @@ utoipa = { workspace = true, features = ["yaml"] }
 
 [dev-dependencies]
 axum-test = { workspace = true }
+skauswatch-testkit = { workspace = true }
 wiremock = { workspace = true }
 
 [lints]

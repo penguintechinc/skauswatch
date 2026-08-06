@@ -1,8 +1,10 @@
 apiVersion: v2
 name: skauswatch-spire
-description: Optional SPIFFE/SPIRE trust authority for SkausWatch clusters
+description: >-
+  Nested SPIFFE/SPIRE trust authority for SkausWatch clusters — single
+  penguintech.io trust domain, root + per-cluster child servers.
 type: application
-version: 1.0.0
+version: 2.0.0
 appVersion: "1.9.4"
 keywords:
   - skauswatch

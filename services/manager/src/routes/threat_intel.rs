@@ -261,15 +261,19 @@ fn push_filters(qb: &mut QueryBuilder<Postgres>, f: &IocFilters) {
 }
 
 /// Runs the filtered page query plus the matching COUNT(*) — v1 orders by
-/// created_at DESC for both list and search.
+/// created_at DESC for both list and search. `tenant` is bound from
+/// `CurrentUser`, never from `filters` (client input) — see
+/// docs/v2-port/tenancy-model.md §4.
 async fn fetch_ioc_page(
     db: &sqlx::PgPool,
+    tenant: uuid::Uuid,
     filters: &IocFilters,
     page: i64,
     per_page: i64,
 ) -> Result<(Vec<IocRow>, i64), ApiError> {
     let offset = (page - 1) * per_page;
     let mut qb = QueryBuilder::new(IOC_COLUMNS);
+    qb.push(" AND tenant_id = ").push_bind(tenant);
     push_filters(&mut qb, filters);
     qb.push(" ORDER BY created_at DESC LIMIT ")
         .push_bind(per_page)
@@ -278,6 +282,7 @@ async fn fetch_ioc_page(
     let rows = qb.build_query_as::<IocRow>().fetch_all(db).await?;
 
     let mut cq = QueryBuilder::new("SELECT COUNT(*) FROM threat_indicators WHERE TRUE");
+    cq.push(" AND tenant_id = ").push_bind(tenant);
     push_filters(&mut cq, filters);
     let total: i64 = cq.build_query_scalar().fetch_one(db).await?;
     Ok((rows, total))
@@ -390,7 +395,7 @@ pub(crate) struct IocListResponse {
 )]
 pub(crate) async fn list_iocs(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let q = parse_list_params(&params);
@@ -401,7 +406,8 @@ pub(crate) async fn list_iocs(
         include_expired: q.include_expired,
         ..IocFilters::default()
     };
-    let (rows, total) = fetch_ioc_page(&state.db, &filters, q.page, q.per_page).await?;
+    let (rows, total) =
+        fetch_ioc_page(&state.db, user.tenant_id, &filters, q.page, q.per_page).await?;
     let items: Vec<serde_json::Value> = rows.iter().map(ioc_json).collect();
     Ok(Json(serde_json::json!({
         "items": items,
@@ -427,11 +433,14 @@ pub(crate) async fn list_iocs(
 )]
 pub(crate) async fn get_ioc(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(ioc_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut qb = QueryBuilder::new(IOC_COLUMNS);
-    qb.push(" AND id = ").push_bind(ioc_id);
+    qb.push(" AND id = ")
+        .push_bind(ioc_id)
+        .push(" AND tenant_id = ")
+        .push_bind(user.tenant_id);
     let row = qb
         .build_query_as::<IocRow>()
         .fetch_optional(&state.db)
@@ -512,7 +521,19 @@ fn validate_ioc(b: &IocBody, item: Option<usize>) -> Result<ValidIoc, ApiError> 
             "String should have at most 1000 characters",
         ));
     }
-    let value = raw_value.trim().to_owned();
+    // Hash-case normalization (finding #5, docs/v2-port/tenancy-model.md
+    // sibling bug report): store every `hash`-type value lowercase so this
+    // write path, `s3_scan::create_ti_indicator`, and lookups via
+    // `s3_scan::hash_lookup` all compare on one case. Before this fix,
+    // `s3_scan::validate_hash_value` uppercased its lookup input while
+    // `hex_lower` stored digests lowercase, so a hash inserted through this
+    // generic IOC endpoint (whatever case the caller sent) could silently
+    // never match a `hash_lookup` query.
+    let value = if indicator_type == "hash" {
+        raw_value.trim().to_lowercase()
+    } else {
+        raw_value.trim().to_owned()
+    };
     if indicator_type == "ip" && !valid_ip(&value) {
         return Err(validation_at(
             loc("value"),
@@ -650,12 +671,19 @@ pub(crate) async fn create_ioc(
     user.require_role(&["admin", "maintainer"])?;
     let v = validate_ioc(&body, None)?;
 
-    let existing: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM threat_indicators WHERE indicator_type = $1 AND value = $2")
-            .bind(&v.indicator_type)
-            .bind(&v.value)
-            .fetch_optional(&state.db)
-            .await?;
+    // Dedup is per-tenant: without the tenant_id filter here, tenant A's
+    // create request would 409 (and leak `existing_id`) against tenant B's
+    // IOC of the same (indicator_type, value) — a cross-tenant existence
+    // oracle, not just a missing filter.
+    let existing: Option<(i32,)> = sqlx::query_as(
+        "SELECT id FROM threat_indicators \
+         WHERE indicator_type = $1 AND value = $2 AND tenant_id = $3",
+    )
+    .bind(&v.indicator_type)
+    .bind(&v.value)
+    .bind(user.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
     if let Some((existing_id,)) = existing {
         return Err(ApiError::Conflict(serde_json::json!({
             "error": "IOC already exists",
@@ -666,8 +694,8 @@ pub(crate) async fn create_ioc(
     let row = sqlx::query_as::<_, CreatedRow>(
         "INSERT INTO threat_indicators \
          (indicator_type, value, threat_level, confidence, source, tags, metadata, \
-          expires_at, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now()) \
+          expires_at, tenant_id, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now()) \
          RETURNING id, indicator_type, value, threat_level, created_at",
     )
     .bind(&v.indicator_type)
@@ -678,6 +706,7 @@ pub(crate) async fn create_ioc(
     .bind(serde_json::Value::from(v.tags.clone()))
     .bind(&v.metadata)
     .bind(v.expires_at)
+    .bind(user.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -703,23 +732,35 @@ pub(crate) struct BulkBody {
     indicators: Option<Vec<IocBody>>,
 }
 
-/// Upserts one validated IOC on (indicator_type, value); returns true when a
-/// new row was inserted, false when an existing one was updated. pyDAL parity:
-/// updates bump `updated_at`, inserts leave it NULL.
-async fn upsert_ioc(db: &sqlx::PgPool, v: &ValidIoc) -> Result<bool, sqlx::Error> {
-    let existing: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM threat_indicators WHERE indicator_type = $1 AND value = $2")
-            .bind(&v.indicator_type)
-            .bind(&v.value)
-            .fetch_optional(db)
-            .await?;
+/// Upserts one validated IOC on (indicator_type, value) — scoped to `tenant`
+/// (bound from `CurrentUser`, never from `v`/client input); returns true
+/// when a new row was inserted, false when an existing one in the SAME
+/// tenant was updated. pyDAL parity: updates bump `updated_at`, inserts
+/// leave it NULL. Hash-case: `v.value` for `indicator_type == "hash"` is
+/// already lowercased by `validate_ioc` (finding #5) before it reaches
+/// here, so the dedup match below is case-consistent with
+/// `s3_scan::create_ti_indicator`/`hash_lookup`.
+async fn upsert_ioc(
+    db: &sqlx::PgPool,
+    tenant: uuid::Uuid,
+    v: &ValidIoc,
+) -> Result<bool, sqlx::Error> {
+    let existing: Option<(i32,)> = sqlx::query_as(
+        "SELECT id FROM threat_indicators \
+         WHERE indicator_type = $1 AND value = $2 AND tenant_id = $3",
+    )
+    .bind(&v.indicator_type)
+    .bind(&v.value)
+    .bind(tenant)
+    .fetch_optional(db)
+    .await?;
 
     match existing {
         Some((id,)) => {
             sqlx::query(
                 "UPDATE threat_indicators SET threat_level = $1, confidence = $2, \
                  source = $3, tags = $4, metadata = $5, expires_at = $6, \
-                 updated_at = now() WHERE id = $7",
+                 updated_at = now() WHERE id = $7 AND tenant_id = $8",
             )
             .bind(&v.threat_level)
             .bind(v.confidence)
@@ -728,6 +769,7 @@ async fn upsert_ioc(db: &sqlx::PgPool, v: &ValidIoc) -> Result<bool, sqlx::Error
             .bind(&v.metadata)
             .bind(v.expires_at)
             .bind(id)
+            .bind(tenant)
             .execute(db)
             .await?;
             Ok(false)
@@ -736,8 +778,8 @@ async fn upsert_ioc(db: &sqlx::PgPool, v: &ValidIoc) -> Result<bool, sqlx::Error
             sqlx::query(
                 "INSERT INTO threat_indicators \
                  (indicator_type, value, threat_level, confidence, source, tags, \
-                  metadata, expires_at, created_at, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())",
+                  metadata, expires_at, tenant_id, created_at, updated_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now())",
             )
             .bind(&v.indicator_type)
             .bind(&v.value)
@@ -747,6 +789,7 @@ async fn upsert_ioc(db: &sqlx::PgPool, v: &ValidIoc) -> Result<bool, sqlx::Error
             .bind(serde_json::Value::from(v.tags.clone()))
             .bind(&v.metadata)
             .bind(v.expires_at)
+            .bind(tenant)
             .execute(db)
             .await?;
             Ok(true)
@@ -810,7 +853,7 @@ pub(crate) async fn bulk_create_iocs(
     let mut updated_count = 0_i64;
     let mut errors: Vec<serde_json::Value> = Vec::new();
     for (idx, v) in valid.iter().enumerate() {
-        match upsert_ioc(&state.db, v).await {
+        match upsert_ioc(&state.db, user.tenant_id, v).await {
             Ok(true) => created_count += 1,
             Ok(false) => updated_count += 1,
             Err(e) => errors.push(serde_json::json!({
@@ -860,16 +903,19 @@ pub(crate) async fn delete_ioc(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     user.require_role(&["admin"])?;
 
-    let exists: Option<(i32,)> = sqlx::query_as("SELECT id FROM threat_indicators WHERE id = $1")
-        .bind(ioc_id)
-        .fetch_optional(&state.db)
-        .await?;
+    let exists: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM threat_indicators WHERE id = $1 AND tenant_id = $2")
+            .bind(ioc_id)
+            .bind(user.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
     if exists.is_none() {
         return Err(ApiError::NotFound("IOC not found".to_owned()));
     }
 
-    sqlx::query("DELETE FROM threat_indicators WHERE id = $1")
+    sqlx::query("DELETE FROM threat_indicators WHERE id = $1 AND tenant_id = $2")
         .bind(ioc_id)
+        .bind(user.tenant_id)
         .execute(&state.db)
         .await?;
 
@@ -990,11 +1036,11 @@ pub(crate) struct IocSearchResponse {
 )]
 pub(crate) async fn search_iocs(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     ApiJson(body): ApiJson<SearchBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (filters, page, per_page) = validate_search(&body)?;
-    let (rows, total) = fetch_ioc_page(&state.db, &filters, page, per_page).await?;
+    let (rows, total) = fetch_ioc_page(&state.db, user.tenant_id, &filters, page, per_page).await?;
     let items: Vec<serde_json::Value> = rows.iter().map(search_json).collect();
     Ok(Json(serde_json::json!({
         "items": items,
@@ -1032,7 +1078,7 @@ pub(crate) struct LookupBody {
 )]
 pub(crate) async fn lookup_ioc(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     ApiJson(body): ApiJson<LookupBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let indicator_type = body.indicator_type.as_deref().filter(|s| !s.is_empty());
@@ -1047,11 +1093,12 @@ pub(crate) async fn lookup_ioc(
         "SELECT id, indicator_type, value, threat_level, confidence, source, tags, \
          metadata, expires_at, created_at, updated_at \
          FROM threat_indicators \
-         WHERE indicator_type = $1 AND value = $2 \
-           AND (expires_at IS NULL OR expires_at > $3)",
+         WHERE indicator_type = $1 AND value = $2 AND tenant_id = $3 \
+           AND (expires_at IS NULL OR expires_at > $4)",
     )
     .bind(indicator_type)
     .bind(value)
+    .bind(user.tenant_id)
     .bind(Utc::now().naive_utc())
     .fetch_optional(&state.db)
     .await?;
@@ -1115,32 +1162,40 @@ pub(crate) struct ThreatIntelStatisticsResponse {
 )]
 pub(crate) async fn get_statistics(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM threat_indicators")
-        .fetch_one(&state.db)
-        .await?;
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM threat_indicators WHERE tenant_id = $1")
+            .bind(user.tenant_id)
+            .fetch_one(&state.db)
+            .await?;
     let type_rows: Vec<(Option<String>, i64)> = sqlx::query_as(
-        "SELECT indicator_type, COUNT(*) FROM threat_indicators GROUP BY indicator_type",
+        "SELECT indicator_type, COUNT(*) FROM threat_indicators \
+         WHERE tenant_id = $1 GROUP BY indicator_type",
     )
+    .bind(user.tenant_id)
     .fetch_all(&state.db)
     .await?;
     let level_rows: Vec<(Option<String>, i64)> = sqlx::query_as(
-        "SELECT threat_level, COUNT(*) FROM threat_indicators GROUP BY threat_level",
+        "SELECT threat_level, COUNT(*) FROM threat_indicators \
+         WHERE tenant_id = $1 GROUP BY threat_level",
     )
+    .bind(user.tenant_id)
     .fetch_all(&state.db)
     .await?;
     let source_rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT source, COUNT(*) FROM threat_indicators \
-         WHERE source IS NOT NULL AND source <> '' \
+         WHERE tenant_id = $1 AND source IS NOT NULL AND source <> '' \
          GROUP BY source ORDER BY COUNT(*) DESC LIMIT 10",
     )
+    .bind(user.tenant_id)
     .fetch_all(&state.db)
     .await?;
     let expired: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM threat_indicators \
-         WHERE expires_at IS NOT NULL AND expires_at <= $1",
+         WHERE tenant_id = $1 AND expires_at IS NOT NULL AND expires_at <= $2",
     )
+    .bind(user.tenant_id)
     .bind(Utc::now().naive_utc())
     .fetch_one(&state.db)
     .await?;
@@ -1739,15 +1794,35 @@ mod tests {
     }
 
     async fn seed_ioc(state: &AppState, itype: &str, value: &str, level: &str) -> i32 {
+        seed_ioc_in_tenant(
+            state,
+            crate::routes::test_support::default_tenant_id(),
+            itype,
+            value,
+            level,
+        )
+        .await
+    }
+
+    /// Like [`seed_ioc`] but stamps an explicit `tenant_id` — used by the
+    /// cross-tenant isolation tests below.
+    async fn seed_ioc_in_tenant(
+        state: &AppState,
+        tenant_id: uuid::Uuid,
+        itype: &str,
+        value: &str,
+        level: &str,
+    ) -> i32 {
         let (id,): (i32,) = sqlx::query_as(
             "INSERT INTO threat_indicators \
              (indicator_type, value, threat_level, confidence, source, tags, metadata, \
-              created_at, updated_at) \
-             VALUES ($1, $2, $3, 0.5, 'unit-test', '[]', '{}', now(), now()) RETURNING id",
+              tenant_id, created_at, updated_at) \
+             VALUES ($1, $2, $3, 0.5, 'unit-test', '[]', '{}', $4, now(), now()) RETURNING id",
         )
         .bind(itype)
         .bind(value)
         .bind(level)
+        .bind(tenant_id)
         .fetch_one(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed_ioc: {e}"));
@@ -1950,5 +2025,182 @@ mod tests {
 
         let unauth = server.get("/api/v1/threat-intel/feeds").await;
         unauth.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    // -- hash-case normalization (finding #5) -------------------------------
+
+    #[test]
+    fn hash_values_are_normalized_to_lowercase_on_write() {
+        let mixed_case = IocBody {
+            indicator_type: Some("hash".to_owned()),
+            value: Some(" D41D8CD98F00B204E9800998ECF8427E ".to_owned()),
+            ..base_body()
+        };
+        match validate_ioc(&mixed_case, None) {
+            Ok(v) => assert_eq!(v.value, "d41d8cd98f00b204e9800998ecf8427e"),
+            Err(e) => panic!("expected ok, got {e:?}"),
+        }
+        // Non-hash types are untouched (case is significant for domains).
+        let domain = IocBody {
+            indicator_type: Some("domain".to_owned()),
+            value: Some("Evil.Example.COM".to_owned()),
+            ..base_body()
+        };
+        match validate_ioc(&domain, None) {
+            Ok(v) => assert_eq!(v.value, "Evil.Example.COM"),
+            Err(e) => panic!("expected ok, got {e:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_ioc_dedup_is_case_insensitive_for_hash_type() {
+        let state = db_state(dev_license()).await;
+        let (_, maint_tok) = authed_user(&state, "hash-dedup@example.com", "maintainer").await;
+        let server = server_for(state).await;
+
+        let first = server
+            .post("/api/v1/threat-intel/iocs")
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({
+                "indicator_type": "hash",
+                "value": "d41d8cd98f00b204e9800998ecf8427e",
+                "source": "unit-test",
+            }))
+            .await;
+        first.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = first.json();
+        assert_eq!(body["ioc"]["value"], "d41d8cd98f00b204e9800998ecf8427e");
+
+        // Same hash, uppercased — must dedup against the lowercase row
+        // stored above, not create a duplicate.
+        let dup = server
+            .post("/api/v1/threat-intel/iocs")
+            .authorization_bearer(&maint_tok)
+            .json(&serde_json::json!({
+                "indicator_type": "hash",
+                "value": "D41D8CD98F00B204E9800998ECF8427E",
+                "source": "unit-test",
+            }))
+            .await;
+        dup.assert_status(StatusCode::CONFLICT);
+    }
+
+    // -- tenant isolation (docs/v2-port/tenancy-model.md) -------------------
+
+    #[tokio::test]
+    async fn tenant_a_cannot_list_get_or_lookup_tenant_bs_ioc() {
+        let state = db_state(dev_license()).await;
+        let tenant_b = crate::routes::test_support::seed_tenant(&state.db, "ti-tenant-b").await;
+        let id_b =
+            seed_ioc_in_tenant(&state, tenant_b, "domain", "b-only.example.com", "high").await;
+        let (_, token_a) = authed_user(&state, "ti-tenant-a@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let list = server
+            .get("/api/v1/threat-intel/iocs")
+            .authorization_bearer(&token_a)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        let items = body["items"].as_array().cloned().unwrap_or_default();
+        assert!(items.iter().all(|i| i["value"] != "b-only.example.com"));
+
+        let get = server
+            .get(&format!("/api/v1/threat-intel/iocs/{id_b}"))
+            .authorization_bearer(&token_a)
+            .await;
+        get.assert_status(StatusCode::NOT_FOUND);
+
+        let lookup = server
+            .post("/api/v1/threat-intel/iocs/lookup")
+            .authorization_bearer(&token_a)
+            .json(&serde_json::json!({"type": "domain", "value": "b-only.example.com"}))
+            .await;
+        lookup.assert_status_ok();
+        let body: serde_json::Value = lookup.json();
+        assert_eq!(body["found"], false);
+    }
+
+    #[tokio::test]
+    async fn tenant_a_cannot_delete_tenant_bs_ioc_and_dedup_is_per_tenant() {
+        let state = db_state(dev_license()).await;
+        let tenant_b = crate::routes::test_support::seed_tenant(&state.db, "ti-tenant-b-2").await;
+        let id_b = seed_ioc_in_tenant(&state, tenant_b, "ip", "203.0.113.77", "high").await;
+        let (_, admin_a) = authed_user(&state, "ti-delete-a@example.com", "admin").await;
+        let (_, maint_a) = authed_user(&state, "ti-create-a@example.com", "maintainer").await;
+        let server = server_for(state).await;
+
+        let delete = server
+            .delete(&format!("/api/v1/threat-intel/iocs/{id_b}"))
+            .authorization_bearer(&admin_a)
+            .await;
+        delete.assert_status(StatusCode::NOT_FOUND);
+
+        // Tenant A creating the SAME (indicator_type, value) as tenant B's
+        // IOC must succeed (201), not 409 — dedup is per-tenant, not global.
+        let create = server
+            .post("/api/v1/threat-intel/iocs")
+            .authorization_bearer(&maint_a)
+            .json(&serde_json::json!({
+                "indicator_type": "ip", "value": "203.0.113.77", "source": "unit-test"
+            }))
+            .await;
+        create.assert_status(StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn statistics_and_search_are_scoped_to_the_caller_tenant() {
+        let state = db_state(dev_license()).await;
+        let tenant_b =
+            crate::routes::test_support::seed_tenant(&state.db, "ti-tenant-stats-b").await;
+        seed_ioc_in_tenant(&state, tenant_b, "ip", "198.51.100.77", "critical").await;
+        seed_ioc(&state, "domain", "a-only.example.com", "low").await;
+        let (_, token_a) = authed_user(&state, "ti-stats-a@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let stats = server
+            .get("/api/v1/threat-intel/statistics")
+            .authorization_bearer(&token_a)
+            .await;
+        stats.assert_status_ok();
+        let body: serde_json::Value = stats.json();
+        assert_eq!(body["by_type"]["ip"], 0);
+        assert!(body["by_type"]["domain"].as_i64().unwrap_or(0) >= 1);
+
+        let search = server
+            .post("/api/v1/threat-intel/iocs/search")
+            .authorization_bearer(&token_a)
+            .json(&serde_json::json!({"query": "198.51.100.77"}))
+            .await;
+        search.assert_status_ok();
+        let body: serde_json::Value = search.json();
+        assert_eq!(body["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn bulk_upsert_is_scoped_per_tenant() {
+        let state = db_state(dev_license()).await;
+        let tenant_b =
+            crate::routes::test_support::seed_tenant(&state.db, "ti-tenant-bulk-b").await;
+        seed_ioc_in_tenant(&state, tenant_b, "ip", "198.51.100.200", "medium").await;
+        let (_, maint_a) = authed_user(&state, "ti-bulk-a@example.com", "maintainer").await;
+        let server = server_for(state).await;
+
+        // Tenant A bulk-upserting the same (type, value) tenant B already
+        // has must INSERT a new row for A (created_count == 1), never
+        // silently UPDATE tenant B's row.
+        let res = server
+            .post("/api/v1/threat-intel/iocs/bulk")
+            .authorization_bearer(&maint_a)
+            .json(&serde_json::json!({
+                "indicators": [
+                    {"indicator_type": "ip", "value": "198.51.100.200", "source": "s"},
+                ]
+            }))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["created_count"], 1);
+        assert_eq!(body["updated_count"], 0);
     }
 }

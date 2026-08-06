@@ -206,6 +206,35 @@ impl SshCa {
     }
 }
 
+/// Detects the subject key algorithm from its OpenSSH public-key line
+/// prefix — used only to populate the durable `ssh_certificates.key_type`
+/// column (`crate::store`). Signing itself derives the real algorithm from
+/// the parsed key inside [`SshCa::sign`]; this is a cheap, independent
+/// classification for storage/display, not part of the signing path.
+pub fn detect_key_type(public_key_line: &str) -> String {
+    if public_key_line.starts_with("ssh-ed25519") {
+        "ed25519".to_owned()
+    } else if public_key_line.starts_with("ssh-rsa") {
+        "rsa".to_owned()
+    } else if public_key_line.starts_with("ecdsa-sha2") {
+        "ecdsa".to_owned()
+    } else {
+        "unknown".to_owned()
+    }
+}
+
+/// Recomputes a subject public key's SHA256 OpenSSH fingerprint from its
+/// stored OpenSSH line. `ssh_certificates` (the pki-owned schema this
+/// service now persists into, see `crate::store`) has no dedicated
+/// fingerprint column — the fingerprint is a pure, deterministic function
+/// of the stored `public_key` text, so nothing is lost by recomputing it on
+/// read instead of persisting it separately.
+pub fn public_key_fingerprint(public_key_line: &str) -> Result<String, SignError> {
+    let key = PublicKey::from_openssh(public_key_line)
+        .map_err(|e| SignError::InvalidSubjectKey(e.to_string()))?;
+    Ok(key.fingerprint(HashAlg::Sha256).to_string())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -347,17 +376,13 @@ mod tests {
         Ok(())
     }
 
-    // Cross-parity emitter: when `SSHCA_PARITY_DIR` points at a directory
-    // containing `ca_key` + subject fixtures, sign a user and host cert with
-    // the real load+sign code path and write them out for an external
-    // `ssh-keygen -L` diff against the OpenSSH golden. A no-op otherwise, so it
-    // never runs (or touches the filesystem) during normal `cargo test`.
-    #[test]
-    fn emit_parity_certs_when_requested() -> anyhow::Result<()> {
-        let Ok(dir) = std::env::var("SSHCA_PARITY_DIR") else {
-            return Ok(());
-        };
-        let dir = std::path::PathBuf::from(dir);
+    /// Core logic shared by the always-run coverage test below and the
+    /// opt-in `SSHCA_PARITY_DIR` manual export: sign a user and host cert
+    /// with the real load+sign code path and write them to `dir`, reading
+    /// subject fixtures (`ca_key`, `subj_ed25519.pub`, `subj_rsa.pub`) from
+    /// the same directory. Split out purely for testability — no behaviour
+    /// change from the original single-function version.
+    fn emit_parity_certs(dir: &Path) -> anyhow::Result<()> {
         let ca = SshCa::load_or_generate(&dir.join("ca_key"))?;
 
         let user_permits = [
@@ -404,6 +429,52 @@ mod tests {
             dir.join("v2_host-cert.pub"),
             format!("{}\n", host.signed_certificate),
         )?;
+        Ok(())
+    }
+
+    // Cross-parity emitter: when `SSHCA_PARITY_DIR` points at a directory
+    // containing `ca_key` + subject fixtures, sign a user and host cert with
+    // the real load+sign code path and write them out for an external
+    // `ssh-keygen -L` diff against the OpenSSH golden. A no-op otherwise, so it
+    // never runs (or touches the filesystem) during normal `cargo test`.
+    #[test]
+    fn emit_parity_certs_when_requested() -> anyhow::Result<()> {
+        let Ok(dir) = std::env::var("SSHCA_PARITY_DIR") else {
+            return Ok(());
+        };
+        emit_parity_certs(&std::path::PathBuf::from(dir))
+    }
+
+    /// Always-run exercise of [`emit_parity_certs`] against a scratch
+    /// directory with freshly generated subject fixtures, so the emitter's
+    /// logic — otherwise only reachable via the opt-in `SSHCA_PARITY_DIR`
+    /// manual workflow above — has automated regression coverage.
+    #[test]
+    fn emit_parity_certs_writes_valid_certificates() -> anyhow::Result<()> {
+        let dir = scratch_key_path();
+        std::fs::create_dir_all(&dir)?;
+
+        std::fs::write(dir.join("subj_ed25519.pub"), gen_subject())?;
+        let rsa_subject = PrivateKey::random(&mut OsRng, Algorithm::Rsa { hash: None })?;
+        std::fs::write(
+            dir.join("subj_rsa.pub"),
+            rsa_subject.public_key().to_openssh()?,
+        )?;
+
+        emit_parity_certs(&dir)?;
+
+        let user_cert = std::fs::read_to_string(dir.join("v2_user-cert.pub"))?;
+        let user = Certificate::from_openssh(user_cert.trim())?;
+        assert_eq!(user.cert_type(), CertType::User);
+        assert_eq!(user.key_id(), "user-req-USERID");
+        assert!(user.extensions().0.contains_key("permit-pty"));
+
+        let host_cert = std::fs::read_to_string(dir.join("v2_host-cert.pub"))?;
+        let host = Certificate::from_openssh(host_cert.trim())?;
+        assert_eq!(host.cert_type(), CertType::Host);
+        assert_eq!(host.key_id(), "host-req-HOSTID");
+
+        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
 
@@ -470,6 +541,25 @@ mod tests {
         let ca = SshCa::load_or_generate(&path)?;
         assert!(ca.fingerprint().starts_with("SHA256:"));
         assert!(!ca.public_key_openssh().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn detect_key_type_covers_all_prefixes() {
+        assert_eq!(detect_key_type("ssh-ed25519 AAA"), "ed25519");
+        assert_eq!(detect_key_type("ssh-rsa AAA"), "rsa");
+        assert_eq!(detect_key_type("ecdsa-sha2-nistp256 AAA"), "ecdsa");
+        assert_eq!(detect_key_type("weird-type AAA"), "unknown");
+    }
+
+    #[test]
+    fn public_key_fingerprint_matches_the_signing_path_and_rejects_garbage() -> anyhow::Result<()> {
+        let subject = gen_subject();
+        let fp = public_key_fingerprint(&subject).map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert!(fp.starts_with("SHA256:"));
+
+        let err = public_key_fingerprint("not-a-key");
+        assert!(matches!(err, Err(SignError::InvalidSubjectKey(_))));
         Ok(())
     }
 

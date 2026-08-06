@@ -1,0 +1,42 @@
+# Tetragon exec-allowlist for {{ include "skauswatch-monitor.fullname" . }}.
+# ENFORCE: any sys_execve NOT matching one of the listed binaries is
+# SIGKILLed -- blocks a dropped shell/reverse-shell/living-off-the-land
+# binary (bash, sh, curl, nc, wget, python3, perl, ...) in a pod whose only
+# legitimate process is the binaries below. Requires the Tetragon agent
+# DaemonSet running in the cluster (cluster add-on, not part of this chart
+# -- see k8s/helm/README.md "Tetragon prerequisite").
+# journalctl/tail are collector subprocesses (services/monitor/src/
+# collectors/{journald,auditd,lxc}.rs) reading host-mounted log paths --
+# NOT yet wired as hostPath volumes in this chart (flagged in source as
+# out of scope for the services/monitor-only change; see k8s/helm/README.md
+# "PSA namespace baseline"). Allowlisted here so enabling that mount later
+# doesn't also require a Tetragon policy change.
+{{- if .Values.tetragon.enabled | default true }}
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: {{ include "skauswatch-monitor.fullname" . }}-exec-allowlist
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "skauswatch-monitor.selectorLabels" . | nindent 6 }}
+  kprobes:
+    - call: "sys_execve"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+        - index: 1
+          type: "string_arr"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "NotEqual"
+              values:
+                - "/usr/local/bin/skauswatch-monitor"
+                - "/usr/bin/journalctl"
+                - "/usr/bin/tail"
+          matchActions:
+            - action: Sigkill
+{{- end }}

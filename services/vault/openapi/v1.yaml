@@ -40,6 +40,14 @@ paths:
     post:
       tags:
       - admin
+      summary: |-
+        Intentionally **not** tenant-filtered: this is the deployment-wide MEK
+        rotation operation — there is exactly one MEK (and one active version) per
+        deployment, shared across every tenant's envelope-encrypted rows, so
+        rotation must re-wrap DEKs on every rotatable row regardless of tenant.
+        It never returns secret plaintext or metadata to the caller, only a row
+        count, so this is not a tenant-isolation gap — analogous to pki's
+        `ca/info` cross-tenant exception in `docs/v2-port/tenancy-model.md` §6.
       operationId: rotate_mek
       requestBody:
         content:
@@ -159,9 +167,23 @@ paths:
           type: array
           items:
             type: string
+      - name: page
+        in: query
+        description: Page number (1-indexed, default 1)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: per_page
+        in: query
+        description: Items per page (default 20, max 100)
+        required: false
+        schema:
+          type: integer
+          format: int64
       responses:
         '200':
-          description: Requestor's own requests, plus (for jit:approve callers) requests against secrets they own
+          description: 'Paginated: requestor''s own requests, plus (for jit:approve callers) requests against secrets they own'
           content:
             application/json:
               schema:
@@ -366,6 +388,16 @@ paths:
         this service, this endpoint has no bearer-token auth at all by design:
         the URL-embedded, single-use token *is* the credential (v1 parity). Not
         an oversight; see `docs/v2-port/openapi-pattern.md` step 2.
+        Deliberately **not** filtered by `tenant_id`: this route has no
+        `CurrentUser` (see the doc comment above) so there is no validated
+        tenant claim to filter on. This is a documented exception to "every
+        query filters on tenant_id, no exceptions" — the URL-embedded token
+        (32 cryptographically random bytes, SHA-256-hashed, globally unique by
+        construction) is already the *complete* credential; a tenant filter
+        would add no isolation value on top of it, since possessing the token
+        already proves authorization regardless of tenant. `tenant_id` is still
+        stamped on the row at creation (`create_one_time_secret`) for audit/
+        listing purposes, just never consulted on this read path.
       operationId: retrieve_one_time_secret
       parameters:
       - name: token
@@ -894,7 +926,7 @@ paths:
           type: string
       responses:
         '200':
-          description: Sync event published to worker-vault-sync
+          description: Sync event(s) published to worker-vault-sync, one per in-scope secret
           content:
             application/json:
               schema:
@@ -1155,11 +1187,23 @@ components:
       description: Documentation-only mirror of `list_jit_requests`'s response envelope.
       required:
       - requests
+      - total
+      - page
+      - per_page
       properties:
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
         requests:
           type: array
           items:
             $ref: '#/components/schemas/JitRequestResponse'
+        total:
+          type: integer
+          format: int64
     JitRequestResponse:
       type: object
       description: Documentation-only mirror of `RequestRow::to_json`'s wire shape.
@@ -1501,6 +1545,7 @@ components:
       - integration_id
       - provider
       - status
+      - secrets_queued
       - queued_at
       properties:
         integration_id:
@@ -1509,6 +1554,13 @@ components:
           type: string
         queued_at:
           type: string
+        secrets_queued:
+          type: integer
+          format: int64
+          description: |-
+            Number of `action=push` messages actually published — one per
+            matched secret. `0` for a `cloud_to_vault`-only integration (no push
+            leg exists) or when the tenant has no secrets in scope.
         status:
           type: string
           description: Always `"sync_queued"`.

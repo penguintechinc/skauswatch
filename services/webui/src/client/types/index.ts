@@ -1,5 +1,9 @@
 // User types
-export type UserRole = 'admin' | 'maintainer' | 'viewer';
+// `super_admin` is a manager-internal, DB-only provisioned role (never
+// settable via the public users API — see services/manager/src/routes/
+// tenants.rs) used to gate tenant provisioning and other super-admin-only
+// controls such as the SVID TTL settings panel.
+export type UserRole = 'admin' | 'maintainer' | 'viewer' | 'super_admin';
 
 export interface User {
   id: number;

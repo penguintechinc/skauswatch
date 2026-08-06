@@ -121,10 +121,29 @@ async fn fetch_gitlab_diff(
 
     if let Some(diffs) = data.as_array() {
         for diff in diffs {
-            if let Some(d) = diff.get("diff").and_then(|d| d.as_str()) {
-                diff_output.push_str(d);
-                diff_output.push('\n');
+            let Some(d) = diff.get("diff").and_then(|d| d.as_str()) else {
+                continue;
+            };
+            // GitLab's MR-diffs endpoint returns `old_path`/`new_path`
+            // alongside the hunk body but the hunk body itself usually has
+            // no `--- a/`/`+++ b/` header — synthesize one so downstream
+            // diff-scanning (`detection::detect_from_diff`,
+            // `license_scan::extract_dependencies`) can identify touched
+            // files the same way it does for GitHub's native `.diff`
+            // format. Harmless when the hunk already embeds its own
+            // headers (as some test fixtures / older GitLab versions do):
+            // both consumers dedupe touched files into a set.
+            let old_path = diff.get("old_path").and_then(|v| v.as_str());
+            let new_path = diff.get("new_path").and_then(|v| v.as_str());
+            if let Some(path) = new_path.or(old_path) {
+                diff_output.push_str(&format!(
+                    "--- a/{}\n+++ b/{}\n",
+                    old_path.unwrap_or(path),
+                    path
+                ));
             }
+            diff_output.push_str(d);
+            diff_output.push('\n');
         }
     }
 

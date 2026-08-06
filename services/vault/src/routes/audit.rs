@@ -42,24 +42,30 @@ fn user_agent(headers: &HeaderMap) -> String {
     ua.chars().take(512).collect()
 }
 
-/// Inserts one `vault_audit_log` row. Mirrors v1 `_write_audit`; failures
-/// are logged, not propagated — an audit-write outage must never block the
-/// operation it is recording (matches v1, which had no try/except here
-/// only because PyDAL raised synchronously inside the same transaction as
-/// the caller — this Rust port explicitly decouples the two so a slow/
-/// down audit sink can't turn every mutation into a 500).
+/// Inserts one `vault_audit_log` row, stamped with `tenant_id` from the
+/// caller's validated [`crate::auth::CurrentUser::tenant_uuid`] (or the
+/// resolved JIT-grant tenant for the JIT-token read path) — never from
+/// request input. Mirrors v1 `_write_audit`; failures are logged, not
+/// propagated — an audit-write outage must never block the operation it is
+/// recording (matches v1, which had no try/except here only because PyDAL
+/// raised synchronously inside the same transaction as the caller — this
+/// Rust port explicitly decouples the two so a slow/down audit sink can't
+/// turn every mutation into a 500).
 pub async fn write_audit(
     state: &AppState,
+    tenant_id: Uuid,
     actor_id: &str,
     action: &str,
     resource_id: &str,
     headers: &HeaderMap,
 ) {
     let result = sqlx::query(
-        "INSERT INTO vault_audit_log (id, actor_id, action, resource_type, resource_id, \
-         ip_address, user_agent, created_at) VALUES ($1,$2,$3,'secret',$4,$5,$6,$7)",
+        "INSERT INTO vault_audit_log (id, tenant_id, actor_id, action, resource_type, \
+         resource_id, ip_address, user_agent, created_at) \
+         VALUES ($1,$2,$3,$4,'secret',$5,$6,$7,$8)",
     )
     .bind(Uuid::new_v4().to_string())
+    .bind(tenant_id)
     .bind(actor_id)
     .bind(action)
     .bind(resource_id)
@@ -134,6 +140,7 @@ pub(crate) async fn get_audit_log(
     Query(q): Query<AuditQuery>,
 ) -> Result<Json<Value>, ApiError> {
     user.require_scope("audit:read")?;
+    let tenant_id = user.tenant_uuid()?;
 
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.unwrap_or(50).clamp(1, 200);
@@ -142,12 +149,14 @@ pub(crate) async fn get_audit_log(
     let rows = sqlx::query_as::<_, AuditRow>(
         "SELECT id, actor_id, action, resource_type, resource_id, ip_address, created_at \
          FROM vault_audit_log \
-         WHERE ($1::text IS NULL OR actor_id = $1) \
-           AND ($2::text IS NULL OR resource_type = $2) \
-           AND ($3::text IS NULL OR resource_id = $3) \
-           AND ($4::text IS NULL OR action = $4) \
-         ORDER BY created_at DESC LIMIT $5 OFFSET $6",
+         WHERE tenant_id = $1 \
+           AND ($2::text IS NULL OR actor_id = $2) \
+           AND ($3::text IS NULL OR resource_type = $3) \
+           AND ($4::text IS NULL OR resource_id = $4) \
+           AND ($5::text IS NULL OR action = $5) \
+         ORDER BY created_at DESC LIMIT $6 OFFSET $7",
     )
+    .bind(tenant_id)
     .bind(&q.actor_id)
     .bind(&q.resource_type)
     .bind(&q.resource_id)
@@ -159,11 +168,13 @@ pub(crate) async fn get_audit_log(
 
     let total: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM vault_audit_log \
-         WHERE ($1::text IS NULL OR actor_id = $1) \
-           AND ($2::text IS NULL OR resource_type = $2) \
-           AND ($3::text IS NULL OR resource_id = $3) \
-           AND ($4::text IS NULL OR action = $4)",
+         WHERE tenant_id = $1 \
+           AND ($2::text IS NULL OR actor_id = $2) \
+           AND ($3::text IS NULL OR resource_type = $3) \
+           AND ($4::text IS NULL OR resource_id = $4) \
+           AND ($5::text IS NULL OR action = $5)",
     )
+    .bind(tenant_id)
     .bind(&q.actor_id)
     .bind(&q.resource_type)
     .bind(&q.resource_id)
@@ -225,7 +236,12 @@ mod tests {
     use axum_test::TestServer;
     use skauswatch_testkit::license::dev_license;
 
-    use crate::routes::test_support::{db_state, sign_token};
+    use crate::routes::test_support::{OTHER_TENANT, TEST_TENANT, db_state, sign_token};
+
+    fn tenant_uuid(s: &str) -> Uuid {
+        s.parse()
+            .unwrap_or_else(|e| panic!("test tenant uuid: {e}"))
+    }
 
     fn test_server_with_state(state: crate::state::AppState) -> TestServer {
         let app = axum::Router::new()
@@ -243,7 +259,15 @@ mod tests {
             HeaderValue::from_static("9.9.9.9, 1.1.1.1"),
         );
 
-        write_audit(&state, "actor-1", "secret.create", "res-1", &headers).await;
+        write_audit(
+            &state,
+            tenant_uuid(TEST_TENANT),
+            "actor-1",
+            "secret.create",
+            "res-1",
+            &headers,
+        )
+        .await;
 
         let row: (String, String, Option<String>) = sqlx::query_as(
             "SELECT actor_id, action, ip_address FROM vault_audit_log WHERE resource_id = $1",
@@ -266,6 +290,7 @@ mod tests {
         // propagate — a slow/down audit sink must never block the caller.
         write_audit(
             &state,
+            tenant_uuid(TEST_TENANT),
             "actor-1",
             "secret.create",
             "res-1",
@@ -295,7 +320,15 @@ mod tests {
         assert_eq!(empty.json::<Value>()["total"], 0);
 
         for (actor, action) in [("alice", "secret.create"), ("bob", "secret.delete")] {
-            write_audit(&state, actor, action, "res-x", &HeaderMap::new()).await;
+            write_audit(
+                &state,
+                tenant_uuid(TEST_TENANT),
+                actor,
+                action,
+                "res-x",
+                &HeaderMap::new(),
+            )
+            .await;
         }
 
         let all = server
@@ -337,5 +370,40 @@ mod tests {
         let paged_body: Value = paged.json();
         assert_eq!(paged_body["entries"].as_array().map(Vec::len), Some(1));
         assert_eq!(paged_body["per_page"], 1);
+    }
+
+    #[tokio::test]
+    async fn get_audit_log_never_returns_another_tenants_entries() {
+        let state = db_state(dev_license("skauswatch")).await;
+        write_audit(
+            &state,
+            tenant_uuid(TEST_TENANT),
+            "actor-a",
+            "secret.create",
+            "res-a",
+            &HeaderMap::new(),
+        )
+        .await;
+        write_audit(
+            &state,
+            tenant_uuid(OTHER_TENANT),
+            "actor-b",
+            "secret.create",
+            "res-b",
+            &HeaderMap::new(),
+        )
+        .await;
+
+        let server = test_server_with_state(state.clone());
+        let tenant_a_reader = sign_token(&state, "u", "audit:read");
+
+        let resp = server
+            .get("/api/v1/audit/log")
+            .authorization_bearer(&tenant_a_reader)
+            .await;
+        resp.assert_status_ok();
+        let body: Value = resp.json();
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["entries"][0]["actor_id"], "actor-a");
     }
 }

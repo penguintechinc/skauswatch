@@ -57,13 +57,40 @@ spec:
         {{- end }}
         env:
         {{- toYaml .Values.env | nindent 12 }}
-        {{- with .Values.volumeMounts }}
-        volumeMounts:
-          {{- toYaml . | nindent 12 }}
+        {{- if .Values.spire.enabled }}
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix://{{ .Values.spire.socketDir }}/agent.sock"
         {{- end }}
-      {{- with .Values.volumes }}
+        {{- if or .Values.volumeMounts .Values.spire.enabled }}
+        volumeMounts:
+          {{- with .Values.volumeMounts }}
+          {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.spire.enabled }}
+            - name: spiffe-workload-api
+              mountPath: {{ .Values.spire.socketDir }}
+              {{- if not .Values.spire.csiDriver.enabled }}
+              readOnly: true
+              {{- end }}
+          {{- end }}
+        {{- end }}
+      {{- if or .Values.volumes .Values.spire.enabled }}
       volumes:
+        {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.spire.enabled }}
+        - name: spiffe-workload-api
+          {{- if .Values.spire.csiDriver.enabled }}
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+          {{- else }}
+          hostPath:
+            path: {{ .Values.spire.socketDir }}
+            type: DirectoryOrCreate
+          {{- end }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

@@ -12,16 +12,21 @@ publish = false
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
+aws-sdk-s3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 clap.workspace = true
 fred.workspace = true
 metrics.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx = { workspace = true, features = ["postgres"] }
+tempfile.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tower.workspace = true
 tower-http = { workspace = true, features = ["trace"] }
 tracing.workspace = true
@@ -30,15 +35,19 @@ uuid.workspace = true
 thiserror.workspace = true
 glob = "=0.3.4"
 futures = "=0.3.32"
+x509-parser.workspace = true
 
 skauswatch-common.workspace = true
 skauswatch-db.workspace = true
+skauswatch-s3.workspace = true
 skauswatch-streams.workspace = true
 skauswatch-telemetry.workspace = true
 
 [dev-dependencies]
-tempfile = "=3.27.0"
+rcgen.workspace = true
+time.workspace = true
 skauswatch-testkit = { workspace = true }
+wiremock.workspace = true
 
 [lints]
 workspace = true

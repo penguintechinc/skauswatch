@@ -1,0 +1,197 @@
+# Cilium default-deny + explicit allow for the spire chart's workloads.
+# Each block below selects only its own component (server/agent/
+# oidc-provider) via the `component` label already used by this chart's
+# Deployments/DaemonSet -- mirrors the same-file-per-component pattern this
+# chart already uses (server-*.yaml, agent-*.yaml, oidc-provider-*.yaml).
+# See k8s/helm/README.md "Cluster security baseline". csi-driver is
+# disabled by default (privileged: true) and intentionally has no policy
+# here -- see README "spire csi-driver: privileged, no CNP".
+{{- if .Values.spire.enabled }}
+---
+# spire-server: node attestation (from spire-agent), TokenReview calls FROM
+# kube-apiserver (k8s_psat attestor), optional federation bundle endpoint.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-server
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: server
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "skauswatch-spire.selectorLabels" . | nindent 6 }}
+      component: server
+  ingress:
+    - fromEntities:
+        - host
+        - remote-node
+    # kube-apiserver validates the agent's k8s_psat projected token against
+    # spire-server via a webhook-style call originating from the control
+    # plane, not a normal pod identity.
+    - fromEntities:
+        - kube-apiserver
+    # spire-agent node attestation + workload API registration (gRPC).
+    - fromEndpoints:
+        - matchLabels:
+            {{- include "skauswatch-spire.selectorLabels" . | nindent 12 }}
+            component: agent
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+    {{- if .Values.spire.oidcProvider.enabled }}
+    # oidc-discovery-provider reads the trust bundle from spire-server.
+    - fromEndpoints:
+        - matchLabels:
+            {{- include "skauswatch-spire.selectorLabels" . | nindent 12 }}
+            component: oidc-provider
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+    {{- end }}
+    {{- if .Values.spire.federation.enabled }}
+    # Cross-trust-domain federation bundle endpoint -- external peers only
+    # when federation is explicitly enabled.
+    - toPorts:
+        - ports:
+            - port: "{{ .Values.spire.federation.bundleEndpoint.port }}"
+              protocol: TCP
+    {{- end }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    {{- if eq .Values.spire.server.dataStore.type "postgresql" }}
+    # Postgres datastore backend (NOT owned by this chart -- see
+    # k8s/helm/README.md "Dependency label assumption"). sqlite (default)
+    # needs no network egress at all.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: postgresql
+      toPorts:
+        - ports:
+            - port: "{{ .Values.spire.server.dataStore.postgresql.port }}"
+              protocol: TCP
+    {{- end }}
+    {{- if and (eq .Values.spire.topology.role "child") .Values.spire.topology.upstreamRoot.enabled }}
+    # Nested topology: child registers upstream against the root server --
+    # destination is cross-cluster/external, so this is FQDN/CIDR-based and
+    # left to the environment's values file (root host is env-specific).
+    {{- end }}
+---
+# spire-agent: DaemonSet, hostPath socket only -- runs as root (see
+# k8s/helm/README.md "spire-agent: baseline, not restricted"), no extra
+# Linux capabilities and not privileged. Ingress-side is workload pods on
+# the SAME node reading /run/spire/sockets via hostPath, not a network
+# path Cilium can see -- nothing to allow here beyond kubelet probes.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-agent
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: agent
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "skauswatch-spire.selectorLabels" . | nindent 6 }}
+      component: agent
+  ingress:
+    - fromEntities:
+        - host
+        - remote-node
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # spire-server node attestation + SVID rotation (gRPC).
+    - toEndpoints:
+        - matchLabels:
+            {{- include "skauswatch-spire.selectorLabels" . | nindent 12 }}
+            component: server
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+{{- if .Values.spire.oidcProvider.enabled }}
+---
+# oidc-discovery-provider: public JWKS/OIDC discovery endpoint for AWS
+# federation (AssumeRoleWithWebIdentity) -- only the root server per
+# values.yaml comments.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-oidc-provider
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: oidc-provider
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "skauswatch-spire.selectorLabels" . | nindent 6 }}
+      component: oidc-provider
+  ingress:
+    - fromEntities:
+        - host
+        - remote-node
+    {{- if or .Values.spire.oidcProvider.ingress.enabled .Values.spire.oidcProvider.httproute.enabled }}
+    # Public discovery endpoint: AWS STS (external) reaches this via the
+    # cluster's gateway/ingress -- allow from the shared gateway namespace,
+    # same convention as every other chart's ingress/httproute gate.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.spire.oidcProvider.httproute.gatewayNamespace | default "gateway" }}
+      toPorts:
+        - ports:
+            - port: "{{ .Values.spire.oidcProvider.port }}"
+              protocol: TCP
+    {{- end }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    - toEndpoints:
+        - matchLabels:
+            {{- include "skauswatch-spire.selectorLabels" . | nindent 12 }}
+            component: server
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+{{- end }}
+{{- end }}

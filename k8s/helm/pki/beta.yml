@@ -39,3 +39,9 @@ configMapData:
   db-pool-size: "5"
   license-server-url: "https://license.penguintech.io"
   release-mode: "false"
+
+# pki hard-requires a live SPIFFE Workload API socket in release mode —
+# enabled here even though release-mode is currently "false" so beta
+# stays SPIRE-parity with production ahead of any release-mode flip.
+spire:
+  enabled: true

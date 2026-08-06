@@ -40,9 +40,16 @@ impl ManagerGrpc {
         Self { state }
     }
 
-    /// Fetches an alert row and renders the v1 AlertResponse, or NOT_FOUND
-    /// "Alert not found" — shared by GetAlert and UpdateAlertStatus.
-    async fn fetch_alert(&self, alert_id: i64) -> Result<AlertResponse, Status> {
+    /// Fetches an alert row scoped to `tenant` and renders the v1
+    /// AlertResponse, or NOT_FOUND "Alert not found" — shared by GetAlert and
+    /// UpdateAlertStatus. `tenant` is bound from the caller's `x-tenant-id`
+    /// gRPC metadata (`require_tenant_metadata`), never from `alert_id`/the
+    /// request body.
+    async fn fetch_alert(
+        &self,
+        alert_id: i64,
+        tenant: uuid::Uuid,
+    ) -> Result<AlertResponse, Status> {
         // v1 compared the raw int against the integer PK; out-of-range ids
         // simply never match a row.
         let Ok(pk) = i32::try_from(alert_id) else {
@@ -50,9 +57,10 @@ impl ManagerGrpc {
         };
         let row: Option<AlertRow> = sqlx::query_as(
             "SELECT id, title, description, severity, status, source, indicators, \
-             created_at, updated_at FROM alerts WHERE id = $1",
+             created_at, updated_at FROM alerts WHERE id = $1 AND tenant_id = $2",
         )
         .bind(pk)
+        .bind(tenant)
         .fetch_optional(&self.state.db)
         .await
         .map_err(db_err)?;
@@ -217,9 +225,14 @@ fn lookup_confidence(c: Option<f64>) -> f32 {
 
 #[tonic::async_trait]
 impl ManagerService for ManagerGrpc {
-    /// HealthCheck — v1 parity: `status` depends only on the DB probe;
-    /// `redis` is hardcoded "connected" and `version` "1.0.0" exactly as
-    /// the Python servicer did (it had no stream-manager handle).
+    /// HealthCheck — `version` "1.0.0" is a fixed v1-parity value (the
+    /// Python servicer hardcoded it, never reading `.version` on this
+    /// path). `database`/`redis` are real probes (`SELECT 1` / Redis PING),
+    /// matching the REST `/healthz` handler (`health.rs::healthz`) exactly;
+    /// `status` depends on both — a live regression fix, since v1 (and this
+    /// crate before this fix) hardcoded `redis: "connected"` unconditionally
+    /// and derived `status` from the DB probe alone, so a broken Redis
+    /// stream producer was invisible on this RPC.
     async fn health_check(
         &self,
         _request: Request<()>,
@@ -228,7 +241,14 @@ impl ManagerService for ManagerGrpc {
             Ok(_) => "connected".to_owned(),
             Err(e) => format!("error: {e}"),
         };
-        let status = if database == "connected" {
+        let redis = match &self.state.streams {
+            None => "not initialized".to_owned(),
+            Some(producer) => match producer.ping().await {
+                Ok(()) => "connected".to_owned(),
+                Err(e) => format!("error: {e}"),
+            },
+        };
+        let status = if database == "connected" && redis == "connected" {
             "healthy"
         } else {
             "unhealthy"
@@ -237,7 +257,7 @@ impl ManagerService for ManagerGrpc {
             status: status.to_owned(),
             version: V1_GRPC_VERSION.to_owned(),
             database,
-            redis: "connected".to_owned(),
+            redis,
             timestamp: Some(now_ts()),
         }))
     }
@@ -250,15 +270,18 @@ impl ManagerService for ManagerGrpc {
         request: Request<AlertRequest>,
     ) -> Result<Response<AlertResponse>, Status> {
         require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
         // v1 ignored request.metadata entirely; proto3 unset strings insert
-        // as "" (not NULL), matching the Python servicer.
+        // as "" (not NULL), matching the Python servicer. tenant_id is
+        // stamped from the caller's `x-tenant-id` metadata, never a request
+        // field (the proto has none) — see docs/v2-port/tenancy-model.md §3.
         let indicators = serde_json::Value::from(req.indicators.clone());
         let row: (i32, Option<NaiveDateTime>) = sqlx::query_as(
             "INSERT INTO alerts (title, description, severity, status, source, indicators, \
-             created_at) VALUES ($1, $2, $3, 'pending', $4, $5, now()) \
+             tenant_id, created_at) VALUES ($1, $2, $3, 'pending', $4, $5, $6, now()) \
              RETURNING id, created_at",
         )
         .bind(&req.title)
@@ -266,6 +289,7 @@ impl ManagerService for ManagerGrpc {
         .bind(severity_to_db(req.severity))
         .bind(&req.source)
         .bind(&indicators)
+        .bind(tenant)
         .fetch_one(&self.state.db)
         .await
         .map_err(db_err)?;
@@ -291,9 +315,10 @@ impl ManagerService for ManagerGrpc {
         request: Request<AlertQuery>,
     ) -> Result<Response<AlertResponse>, Status> {
         require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
-        Ok(Response::new(self.fetch_alert(req.alert_id).await?))
+        Ok(Response::new(self.fetch_alert(req.alert_id, tenant).await?))
     }
 
     /// UpdateAlertStatus — maps the enum (unknown → "pending"), sets
@@ -304,6 +329,7 @@ impl ManagerService for ManagerGrpc {
         request: Request<AlertStatusUpdate>,
     ) -> Result<Response<AlertResponse>, Status> {
         require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
         let Ok(pk) = i32::try_from(req.alert_id) else {
@@ -320,12 +346,15 @@ impl ManagerService for ManagerGrpc {
         if req.new_status == AlertStatus::StatusResolved as i32 {
             qb.push(", resolved_at = now()");
         }
-        qb.push(" WHERE id = ").push_bind(pk);
+        qb.push(" WHERE id = ")
+            .push_bind(pk)
+            .push(" AND tenant_id = ")
+            .push_bind(tenant);
         let result = qb.build().execute(&self.state.db).await.map_err(db_err)?;
         if result.rows_affected() == 0 {
             return Err(Status::not_found("Alert not found"));
         }
-        Ok(Response::new(self.fetch_alert(req.alert_id).await?))
+        Ok(Response::new(self.fetch_alert(req.alert_id, tenant).await?))
     }
 
     /// Server streaming response type for the StreamAlerts method.
@@ -364,6 +393,7 @@ impl ManagerService for ManagerGrpc {
         request: Request<IocRequest>,
     ) -> Result<Response<IocResponse>, Status> {
         require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -371,7 +401,8 @@ impl ManagerService for ManagerGrpc {
         let metadata = map_to_json(&req.metadata);
         let row: (i32, Option<NaiveDateTime>) = sqlx::query_as(
             "INSERT INTO threat_indicators (indicator_type, value, threat_level, confidence, \
-             source, tags, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
+             source, tags, metadata, tenant_id, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) \
              RETURNING id, created_at",
         )
         .bind(indicator_to_db(req.indicator_type))
@@ -381,6 +412,7 @@ impl ManagerService for ManagerGrpc {
         .bind(&req.source)
         .bind(&tags)
         .bind(&metadata)
+        .bind(tenant)
         .fetch_one(&self.state.db)
         .await
         .map_err(db_err)?;
@@ -412,15 +444,18 @@ impl ManagerService for ManagerGrpc {
         request: Request<IndicatorLookup>,
     ) -> Result<Response<IndicatorMatch>, Status> {
         require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
         let row: Option<IocRow> = sqlx::query_as(
             "SELECT id, indicator_type, value, threat_level, confidence, source, tags, \
-             created_at FROM threat_indicators WHERE indicator_type = $1 AND value = $2 LIMIT 1",
+             created_at FROM threat_indicators \
+             WHERE indicator_type = $1 AND value = $2 AND tenant_id = $3 LIMIT 1",
         )
         .bind(indicator_to_db(req.r#type))
         .bind(&req.value)
+        .bind(tenant)
         .fetch_optional(&self.state.db)
         .await
         .map_err(db_err)?;
@@ -485,6 +520,7 @@ impl ManagerService for ManagerGrpc {
         request: Request<AuditEvent>,
     ) -> Result<Response<AuditResponse>, Status> {
         require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -497,8 +533,8 @@ impl ManagerService for ManagerGrpc {
         let details = map_to_json(&req.details);
         sqlx::query(
             "INSERT INTO audit_logs (event_type, action, resource_type, resource_id, user_id, \
-             ip_address, success, details, severity, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())",
+             ip_address, success, details, severity, tenant_id, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())",
         )
         .bind(&req.event_type)
         .bind(&req.action)
@@ -509,6 +545,7 @@ impl ManagerService for ManagerGrpc {
         .bind(req.success)
         .bind(&details)
         .bind(severity)
+        .bind(tenant)
         .execute(&self.state.db)
         .await
         .map_err(db_err)?;
@@ -552,9 +589,26 @@ mod tests {
         ManagerGrpc::new(test_state())
     }
 
+    /// Fixed tenant used by every `authed()` request — the seeded bootstrap
+    /// tenant (`crate::auth::DEFAULT_TENANT_ID`), guaranteed to already
+    /// exist so inserts satisfy the `fk_*_tenant` foreign keys without extra
+    /// per-test seeding. Round-trip tests only need ONE consistent tenant;
+    /// cross-tenant isolation tests below mint their own second (real,
+    /// FK-satisfying) tenant explicitly instead of using this constant.
+    const TEST_TENANT: &str = crate::auth::DEFAULT_TENANT_ID;
+
     /// Wraps `msg` in a `Request` carrying a valid `test-secret`-signed
-    /// bearer token, matching `test_state()`'s `AuthSettings::jwt_secret`.
+    /// bearer token (matching `test_state()`'s `AuthSettings::jwt_secret`)
+    /// plus a valid `x-tenant-id` metadata entry (`require_tenant_metadata`,
+    /// docs/v2-port/tenancy-model.md §3) — every implemented RPC now
+    /// requires both.
     fn authed<T>(msg: T) -> Request<T> {
+        authed_for_tenant(msg, TEST_TENANT)
+    }
+
+    /// Like [`authed`] but with an explicit tenant — used by the
+    /// cross-tenant isolation tests below.
+    fn authed_for_tenant<T>(msg: T, tenant: &str) -> Request<T> {
         let token = match skauswatch_auth::issue_service_token(
             "test-caller",
             "admin",
@@ -570,6 +624,11 @@ mod tests {
             Err(e) => panic!("metadata value: {e}"),
         };
         req.metadata_mut().insert("authorization", value);
+        let tenant_value = match tenant.parse() {
+            Ok(v) => v,
+            Err(e) => panic!("tenant metadata value: {e}"),
+        };
+        req.metadata_mut().insert("x-tenant-id", tenant_value);
         req
     }
 
@@ -620,7 +679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_check_reports_v1_hardcoded_fields_and_db_error() {
+    async fn health_check_reports_real_redis_probe_and_db_error() {
         let resp = match svc().health_check(Request::new(())).await {
             Ok(r) => r.into_inner(),
             Err(e) => panic!("health_check must not error: {e}"),
@@ -632,8 +691,12 @@ mod tests {
             "db: {}",
             resp.database
         );
-        // v1 hardcodes: redis "connected", version "1.0.0".
-        assert_eq!(resp.redis, "connected");
+        // Test state has no stream producer wired (see
+        // `state::AppStateInner::for_tests`) — mirrors REST /healthz's
+        // identical "not initialized" degrade, replacing the old hardcoded
+        // "connected" value this RPC used to report regardless of reality.
+        assert_eq!(resp.redis, "not initialized");
+        // version stays v1-parity fixed.
         assert_eq!(resp.version, "1.0.0");
         assert!(resp.timestamp.is_some());
     }
@@ -1056,6 +1119,126 @@ mod tests {
         assert!(resp.success);
         assert!(resp.event_id.starts_with("audit-"));
         assert!(resp.timestamp.is_some());
+    }
+
+    /// A valid JWT alone is not enough — every mutating/reading RPC that
+    /// touches a tenant-scoped table also requires `x-tenant-id` metadata
+    /// (docs/v2-port/tenancy-model.md §3).
+    #[tokio::test]
+    async fn missing_tenant_metadata_is_rejected_even_with_a_valid_jwt() {
+        let token = match skauswatch_auth::issue_service_token(
+            "test-caller",
+            "admin",
+            "test-secret",
+            300,
+        ) {
+            Ok(t) => t,
+            Err(e) => panic!("issue test token: {e}"),
+        };
+        let mut req = Request::new(AlertRequest {
+            title: "no-tenant".to_owned(),
+            api_version: "v1".to_owned(),
+            ..Default::default()
+        });
+        let value = match format!("Bearer {token}").parse() {
+            Ok(v) => v,
+            Err(e) => panic!("metadata value: {e}"),
+        };
+        req.metadata_mut().insert("authorization", value);
+        // Deliberately no x-tenant-id metadata.
+        let err = match svc().create_alert(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("missing x-tenant-id must be rejected"),
+        };
+        assert_eq!(err.code(), Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn tenant_a_cannot_read_or_update_tenant_bs_alert_over_grpc() {
+        let state = crate::grpc::test_util::db_state().await;
+        let tenant_b = crate::routes::test_support::seed_tenant(&state.db, "grpc-tenant-b").await;
+        let tenant_b = tenant_b.to_string();
+        let svc = ManagerGrpc::new(state);
+
+        let created_b = match svc
+            .create_alert(authed_for_tenant(
+                AlertRequest {
+                    title: "tenant-b-alert".to_owned(),
+                    api_version: "v1".to_owned(),
+                    ..Default::default()
+                },
+                &tenant_b,
+            ))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("create_alert (tenant b): {e:?}"),
+        };
+
+        // Tenant A (the default `authed()` tenant) must not be able to read
+        // or update tenant B's alert.
+        let get = match svc
+            .get_alert(authed(AlertQuery {
+                alert_id: created_b.id,
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("tenant A must not see tenant B's alert"),
+        };
+        assert_eq!(get.code(), Code::NotFound);
+
+        let update = match svc
+            .update_alert_status(authed(AlertStatusUpdate {
+                alert_id: created_b.id,
+                new_status: AlertStatus::StatusResolved as i32,
+                resolution_notes: String::new(),
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("tenant A must not update tenant B's alert"),
+        };
+        assert_eq!(update.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn tenant_a_cannot_look_up_tenant_bs_indicator_over_grpc() {
+        let state = crate::grpc::test_util::db_state().await;
+        let tenant_b = crate::routes::test_support::seed_tenant(&state.db, "grpc-tenant-b2").await;
+        let tenant_b = tenant_b.to_string();
+        let svc = ManagerGrpc::new(state);
+
+        match svc
+            .create_ioc(authed_for_tenant(
+                IocRequest {
+                    indicator_type: IndicatorType::IndicatorDomain as i32,
+                    value: "tenant-b-only.example.com".to_owned(),
+                    api_version: "v1".to_owned(),
+                    ..Default::default()
+                },
+                &tenant_b,
+            ))
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => panic!("create_ioc (tenant b): {e:?}"),
+        };
+
+        let lookup = match svc
+            .lookup_indicator(authed(IndicatorLookup {
+                r#type: IndicatorType::IndicatorDomain as i32,
+                value: "tenant-b-only.example.com".to_owned(),
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => panic!("lookup_indicator: {e:?}"),
+        };
+        assert!(!lookup.found);
     }
 
     #[test]

@@ -5,8 +5,10 @@
 
 mod config;
 mod db;
+mod detection;
 mod git_provider;
 mod handler;
+mod license_scan;
 mod message;
 mod review;
 

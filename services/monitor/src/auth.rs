@@ -101,7 +101,7 @@ impl FromRequestParts<AppState> for AuthedUser {
             });
         }
 
-        let claims = decode_bearer(token, &state.config.security.secret_key)?;
+        let claims = decode_bearer(token, &state.jwt_secret)?;
         Ok(AuthedUser { claims })
     }
 }

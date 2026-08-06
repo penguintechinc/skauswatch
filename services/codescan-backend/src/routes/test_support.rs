@@ -2,42 +2,50 @@
 
 use std::sync::Arc;
 
-use jsonwebtoken::{EncodingKey, Header};
 use penguin_licensing::LicenseClient;
-use serde::Serialize;
 
 use crate::state::{AppState, AppStateInner};
 
-#[derive(Serialize)]
-struct TestClaims<'a> {
-    sub: &'a str,
-    role: &'a str,
-    #[serde(rename = "type")]
-    token_type: &'a str,
-    exp: i64,
-    iat: i64,
-}
+/// Fixed test tenant used by [`sign_token`] — an arbitrary, stable UUID
+/// distinct from manager's real bootstrap tenant literal
+/// (`00000000-0000-0000-0000-000000000001`), since this service's tests
+/// never share a database with manager and only need a stable, parseable
+/// UUID string.
+pub(crate) const TEST_TENANT_ID: &str = "00000000-0000-0000-0000-0000000000aa";
 
-/// Signs an access token matching the manager's claim shape, using the
-/// given state's configured JWT secret — for exercising `CurrentUser`.
+/// A second, distinct tenant for cross-tenant-isolation tests (tenant A's
+/// token must never see/modify tenant B's rows).
+pub(crate) const OTHER_TENANT_ID: &str = "00000000-0000-0000-0000-0000000000bb";
+
+/// Signs an access token in the house `skauswatch_auth::Claims` shape,
+/// carrying [`TEST_TENANT_ID`], using the given state's configured JWT
+/// secret — for exercising `CurrentUser` in the common case. Role-based
+/// authorization checks (`AdminOnly`/`MaintainerOnly`) key off `roles`, so
+/// `role` is minted as the token's sole role entry.
 #[allow(clippy::panic)]
 pub(crate) fn sign_token(state: &AppState, sub: &str, role: &str) -> String {
-    let now = chrono::Utc::now().timestamp();
-    let claims = TestClaims {
-        sub,
-        role,
-        token_type: "access",
-        exp: now + 300,
-        iat: now,
-    };
-    match jsonwebtoken::encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(state.auth.jwt_secret.as_bytes()),
-    ) {
-        Ok(t) => t,
-        Err(e) => panic!("sign test token: {e}"),
-    }
+    sign_token_for_tenant(state, sub, role, TEST_TENANT_ID)
+}
+
+/// Like [`sign_token`] but for an explicitly chosen tenant — for
+/// cross-tenant-isolation tests that need two distinct tenants in play.
+#[allow(clippy::panic)]
+pub(crate) fn sign_token_for_tenant(
+    state: &AppState,
+    sub: &str,
+    role: &str,
+    tenant: &str,
+) -> String {
+    skauswatch_testkit::jwt::mint_claims_token(&state.auth.jwt_secret, sub, tenant, "", &[role])
+}
+
+/// Signs an otherwise-valid access token with an empty `tenant` claim, for
+/// exercising the tenant-isolation reject path (both `CurrentUser` and the
+/// router-wide `tenant_middleware` must reject this with 403, never a
+/// silent fallback to some default tenant).
+#[allow(clippy::panic)]
+pub(crate) fn sign_token_without_tenant(state: &AppState, sub: &str, role: &str) -> String {
+    skauswatch_testkit::jwt::mint_claims_token(&state.auth.jwt_secret, sub, "", "", &[role])
 }
 
 /// Builds an `AppState` backed by a real, migrated Postgres pool (a fresh

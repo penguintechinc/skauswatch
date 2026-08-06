@@ -2,6 +2,18 @@ spire:
   enabled: true
   environment: "gamma"
 
+  topology:
+    role: child
+    upstreamRoot:
+      # Live-ops flips this to true once root is live and a join token
+      # has been minted for dal2-gamma (see chart README "Live-Ops").
+      # Until then this server runs self-signed, same as standalone.
+      enabled: false
+      serverAddress: ""
+      serverPort: 8081
+      downstreamSpiffeID: "spiffe://penguintech.io/spire/server/dal2-gamma"
+      nodeAttestor: join_token
+
   server:
     replicaCount: 1
     image:
@@ -10,6 +22,12 @@ spire:
       pullPolicy: Always
     dataStore:
       type: sqlite
+    nodeAttestation:
+      k8sPsat:
+        enabled: true
+        cluster: "dal2-gamma"
+        serviceAccountAllowList:
+          - "skauswatch:spire-agent"
 
   agent:
     image:
@@ -24,12 +42,13 @@ spire:
     enabled: true
     peers: []
 
+  # OIDC discovery runs on ROOT only in a nested topology — see
+  # root.example.yml. Do not enable here.
   oidcProvider:
     enabled: false
-    image:
-      repository: ghcr.io/spiffe/oidc-discovery-provider@sha256:1da5c3f80c6772d731a00fe33035baa77ce515991d28e23576f4f86d8d8a4759
-      tag: "1.9.4"  # Reference only
-      pullPolicy: Always
+
+  csiDriver:
+    enabled: false
 
   autoEnroll:
     enabled: true

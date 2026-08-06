@@ -105,6 +105,13 @@ const ROTATABLE_TABLES: &[RotatableTable] = &[
     },
 ];
 
+/// Intentionally **not** tenant-filtered: this is the deployment-wide MEK
+/// rotation operation — there is exactly one MEK (and one active version) per
+/// deployment, shared across every tenant's envelope-encrypted rows, so
+/// rotation must re-wrap DEKs on every rotatable row regardless of tenant.
+/// It never returns secret plaintext or metadata to the caller, only a row
+/// count, so this is not a tenant-isolation gap — analogous to pki's
+/// `ca/info` cross-tenant exception in `docs/v2-port/tenancy-model.md` §6.
 #[utoipa::path(
     post,
     path = "/api/v1/admin/mek/rotate",

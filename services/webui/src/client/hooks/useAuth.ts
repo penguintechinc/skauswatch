@@ -133,5 +133,6 @@ export const useAuth = () => {
     isAdmin: () => store.user?.role === 'admin',
     isMaintainer: () => store.user?.role === 'maintainer',
     isViewer: () => store.user?.role === 'viewer',
+    isSuperAdmin: () => store.user?.role === 'super_admin',
   };
 };

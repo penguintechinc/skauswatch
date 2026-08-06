@@ -14,7 +14,7 @@ use skauswatch_proto::s3scan::{
     ScanStatusResponse, ScanTask, StreamAck, TaskAck,
 };
 
-use super::{check_api_version, require_jwt};
+use super::{check_api_version, require_jwt, require_tenant_metadata};
 use crate::state::AppState;
 
 /// S3ScanService servicer backed by the shared AppState (DB + streams).
@@ -31,8 +31,16 @@ impl S3ScanGrpc {
 
 /// v1 `S3ScanPublisher.publish_scan_task` wire fields for a gRPC-submitted
 /// task: the request fields in dict order plus `submitted_at`, stringified
-/// redis-py style (ints → decimal, bools → "True"/"False").
-fn submit_task_fields(req: &ScanTask, submitted_at: &str) -> skauswatch_streams::EntryFields {
+/// redis-py style (ints → decimal, bools → "True"/"False"), plus the
+/// tenancy-retrofit `tenant_id` field appended at the end (additive — see
+/// docs/v2-port/tenancy-model.md §3). `tenant` comes from the caller-
+/// supplied `x-tenant-id` gRPC metadata ([`require_tenant_metadata`]),
+/// never from the request message itself.
+fn submit_task_fields(
+    req: &ScanTask,
+    submitted_at: &str,
+    tenant: uuid::Uuid,
+) -> skauswatch_streams::EntryFields {
     vec![
         ("task_id".to_owned(), req.task_id.clone()),
         ("job_id".to_owned(), req.job_id.clone()),
@@ -60,17 +68,21 @@ fn submit_task_fields(req: &ScanTask, submitted_at: &str) -> skauswatch_streams:
             skauswatch_streams::py_bool(req.yara_enabled).to_owned(),
         ),
         ("submitted_at".to_owned(), submitted_at.to_owned()),
+        ("tenant_id".to_owned(), tenant.to_string()),
     ]
 }
 
 /// Ad-hoc dispatch fields — same shape as the REST /upload dispatch (the
 /// v2 convention: empty bucket_config_id, `{scan_id}/{filename}` key,
-/// scan+yara enabled) so workers see one ad-hoc task format.
+/// scan+yara enabled) so workers see one ad-hoc task format. `tenant` comes
+/// from the caller-supplied `x-tenant-id` gRPC metadata
+/// ([`require_tenant_metadata`]) — see [`submit_task_fields`] docs.
 fn adhoc_task_fields(
     scan_id: &str,
     object_key: &str,
     object_size: i64,
     submitted_at: &str,
+    tenant: uuid::Uuid,
 ) -> skauswatch_streams::EntryFields {
     vec![
         ("job_id".to_owned(), scan_id.to_owned()),
@@ -87,6 +99,7 @@ fn adhoc_task_fields(
             skauswatch_streams::py_bool(true).to_owned(),
         ),
         ("submitted_at".to_owned(), submitted_at.to_owned()),
+        ("tenant_id".to_owned(), tenant.to_string()),
     ]
 }
 
@@ -124,20 +137,25 @@ async fn handle_scan_result(state: &AppState, res: &ScanResult) -> bool {
     }
 
     // v1 looked the job up for bucket_config_id (falling back to an FK-
-    // breaking 0); the real-schema port requires the job row.
-    let job: Option<(i32, i32)> =
-        match sqlx::query_as("SELECT id, bucket_config_id FROM s3_scan_jobs WHERE job_id = $1")
-            .bind(&res.job_id)
-            .fetch_optional(&state.db)
-            .await
-        {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::warn!(job_id = %res.job_id, error = %e, "scan result job lookup failed");
-                return false;
-            }
-        };
-    let Some((job_pk, bucket_config_id)) = job else {
+    // breaking 0); the real-schema port requires the job row. The job's own
+    // `tenant_id` (stamped when the job was created by a tenant-scoped REST
+    // caller — see `routes/s3_scan.rs::trigger_scan`/`upload_file`) is the
+    // authoritative tenant for the result row this reports against, never a
+    // value the reporting worker could supply itself.
+    let job: Option<(i32, i32, uuid::Uuid)> = match sqlx::query_as(
+        "SELECT id, bucket_config_id, tenant_id FROM s3_scan_jobs WHERE job_id = $1",
+    )
+    .bind(&res.job_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!(job_id = %res.job_id, error = %e, "scan result job lookup failed");
+            return false;
+        }
+    };
+    let Some((job_pk, bucket_config_id, tenant_id)) = job else {
         tracing::warn!(job_id = %res.job_id, "scan result for unknown job");
         return false;
     };
@@ -154,8 +172,8 @@ async fn handle_scan_result(state: &AppState, res: &ScanResult) -> bool {
         "INSERT INTO s3_scan_results (job_id, bucket_config_id, object_key, \
          detected_file_type, scan_status, is_malware, is_pup, is_threat, threat_names, \
          clamav_result, yara_matches, file_md5, file_sha1, file_sha256, ti_enrichment, \
-         scan_duration_ms, scanned_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())",
+         scan_duration_ms, tenant_id, scanned_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now())",
     )
     .bind(job_pk)
     .bind(bucket_config_id)
@@ -173,6 +191,7 @@ async fn handle_scan_result(state: &AppState, res: &ScanResult) -> bool {
     .bind(opt_str(&res.file_sha256))
     .bind(parse_json_field(&res.ti_enrichment_json))
     .bind(res.scan_duration_ms)
+    .bind(tenant_id)
     .execute(&state.db)
     .await;
     if let Err(e) = insert {
@@ -213,6 +232,7 @@ impl S3ScanService for S3ScanGrpc {
         request: Request<ScanTask>,
     ) -> Result<Response<TaskAck>, Status> {
         require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        let tenant = require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -231,7 +251,7 @@ impl S3ScanService for S3ScanGrpc {
 
         // The ack reflects the publish outcome, so this bypasses the
         // swallow-and-warn helper and reads the producer directly.
-        let fields = submit_task_fields(&req, &skauswatch_streams::py_now_isoformat());
+        let fields = submit_task_fields(&req, &skauswatch_streams::py_now_isoformat(), tenant);
         let ack = match &self.state.streams {
             None => TaskAck {
                 accepted: false,
@@ -275,6 +295,7 @@ impl S3ScanService for S3ScanGrpc {
         request: Request<AdhocScanRequest>,
     ) -> Result<Response<AdhocScanResponse>, Status> {
         require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        let tenant = require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -304,7 +325,8 @@ impl S3ScanService for S3ScanGrpc {
         sqlx::query(
             "INSERT INTO adhoc_scan_results (scan_id, uploaded_by, original_filename, \
              file_size, file_md5, file_sha256, scan_status, is_malware, is_pup, is_threat, \
-             uploaded_at) VALUES ($1, $2, $3, $4, $5, $6, 'pending', FALSE, FALSE, FALSE, now())",
+             tenant_id, uploaded_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'pending', FALSE, FALSE, FALSE, $7, now())",
         )
         .bind(&scan_id)
         .bind(req.uploaded_by)
@@ -312,6 +334,7 @@ impl S3ScanService for S3ScanGrpc {
         .bind(file_size)
         .bind(&md5_hex)
         .bind(&sha256_hex)
+        .bind(tenant)
         .execute(&self.state.db)
         .await
         .map_err(|e| {
@@ -330,6 +353,7 @@ impl S3ScanService for S3ScanGrpc {
                     &object_key,
                     i64::from(file_size),
                     &skauswatch_streams::py_now_isoformat(),
+                    tenant,
                 ),
             )
             .await;
@@ -368,12 +392,16 @@ impl S3ScanService for S3ScanGrpc {
     }
 
     /// GetScanStatus — INVALID_ARGUMENT "Missing job_id", NOT_FOUND
-    /// "Job not found: {id}", else the job's progress counters.
+    /// "Job not found: {id}", else the job's progress counters. Tenant-
+    /// scoped like every other RPC here (and the REST `get_job` equivalent
+    /// in `routes/s3_scan.rs`): a cross-tenant `job_id` must read as
+    /// not-found, never leak another tenant's status.
     async fn get_scan_status(
         &self,
         request: Request<ScanStatusRequest>,
     ) -> Result<Response<ScanStatusResponse>, Status> {
         require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        let tenant = require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
 
@@ -383,9 +411,10 @@ impl S3ScanService for S3ScanGrpc {
 
         let row: Option<(Option<String>, Option<i32>, Option<i32>, Option<i32>)> = sqlx::query_as(
             "SELECT status, total_objects, scanned_objects, infected_objects \
-             FROM s3_scan_jobs WHERE job_id = $1",
+             FROM s3_scan_jobs WHERE job_id = $1 AND tenant_id = $2",
         )
         .bind(&req.job_id)
+        .bind(tenant)
         .fetch_optional(&self.state.db)
         .await
         .map_err(|e| {
@@ -434,6 +463,30 @@ mod tests {
         req
     }
 
+    /// A fixed, valid tenant UUID for tests that need `x-tenant-id`
+    /// metadata but don't care about its specific value.
+    const TEST_TENANT: &str = "11111111-1111-1111-1111-111111111111";
+
+    /// [`authed`] plus an `x-tenant-id` metadata entry set to `tenant` —
+    /// the shape `submit_scan_task`/`scan_adhoc_file`/`get_scan_status`
+    /// require per docs/v2-port/tenancy-model.md §3.
+    fn authed_with_tenant_value<T>(msg: T, tenant: &str) -> Request<T> {
+        let mut req = authed(msg);
+        let value = match tenant.parse() {
+            Ok(v) => v,
+            Err(e) => panic!("metadata value: {e}"),
+        };
+        req.metadata_mut().insert("x-tenant-id", value);
+        req
+    }
+
+    /// [`authed_with_tenant_value`] fixed to [`TEST_TENANT`] — for tests
+    /// that need `x-tenant-id` metadata but don't care about its specific
+    /// value.
+    fn authed_with_tenant<T>(msg: T) -> Request<T> {
+        authed_with_tenant_value(msg, TEST_TENANT)
+    }
+
     fn full_task(api_version: &str) -> ScanTask {
         ScanTask {
             task_id: "task-1".to_owned(),
@@ -463,6 +516,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_scan_task_without_tenant_metadata_is_unauthenticated() {
+        // Bearer JWT present, but no x-tenant-id — the tenancy-retrofit
+        // contract (docs/v2-port/tenancy-model.md §3) rejects this the same
+        // way as a missing JWT, before any field validation runs.
+        let err = match svc().submit_scan_task(authed(full_task(""))).await {
+            Err(e) => e,
+            Ok(_) => panic!("missing x-tenant-id metadata must be rejected"),
+        };
+        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(err.message(), "missing x-tenant-id metadata");
+    }
+
+    #[tokio::test]
     async fn submit_scan_task_reports_missing_fields_in_ack() {
         for (field, mutate) in [("task_id", 0_usize), ("job_id", 1), ("object_key", 2)] {
             let mut task = full_task("");
@@ -471,7 +537,7 @@ mod tests {
                 1 => task.job_id = String::new(),
                 _ => task.object_key = String::new(),
             }
-            let ack = match svc().submit_scan_task(authed(task)).await {
+            let ack = match svc().submit_scan_task(authed_with_tenant(task)).await {
                 Ok(r) => r.into_inner(),
                 Err(e) => panic!("validation failures must ack, not error: {e}"),
             };
@@ -484,7 +550,10 @@ mod tests {
     async fn submit_scan_task_without_streams_acks_error() {
         // Empty api_version (old-agent path) routes to the handler; the
         // test state has no producer → v1-style "Error: ..." ack.
-        let ack = match svc().submit_scan_task(authed(full_task(""))).await {
+        let ack = match svc()
+            .submit_scan_task(authed_with_tenant(full_task("")))
+            .await
+        {
             Ok(r) => r.into_inner(),
             Err(e) => panic!("publish failures must ack, not error: {e}"),
         };
@@ -494,7 +563,10 @@ mod tests {
 
     #[tokio::test]
     async fn submit_scan_task_unknown_api_version_is_unimplemented() {
-        let err = match svc().submit_scan_task(authed(full_task("v9"))).await {
+        let err = match svc()
+            .submit_scan_task(authed_with_tenant(full_task("v9")))
+            .await
+        {
             Err(e) => e,
             Ok(_) => panic!("v9 must be rejected"),
         };
@@ -504,8 +576,9 @@ mod tests {
 
     #[test]
     fn submit_task_fields_match_v1_names_order_and_encoding() {
-        let fields = submit_task_fields(&full_task(""), "2026-07-22T09:30:00.000042");
-        let expected: Vec<(String, String)> = [
+        let tenant = uuid::Uuid::nil();
+        let fields = submit_task_fields(&full_task(""), "2026-07-22T09:30:00.000042", tenant);
+        let mut expected: Vec<(String, String)> = [
             ("task_id", "task-1"),
             ("job_id", "job-1"),
             ("bucket_config_id", "3"),
@@ -524,13 +597,21 @@ mod tests {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
         .collect();
+        expected.push(("tenant_id".to_owned(), tenant.to_string()));
         assert_eq!(fields, expected);
     }
 
     #[test]
     fn adhoc_task_fields_match_rest_upload_dispatch_shape() {
-        let fields = adhoc_task_fields("scan-1", "scan-1/a.bin", 7, "2026-07-22T09:30:00.000042");
-        let expected: Vec<(String, String)> = [
+        let tenant = uuid::Uuid::nil();
+        let fields = adhoc_task_fields(
+            "scan-1",
+            "scan-1/a.bin",
+            7,
+            "2026-07-22T09:30:00.000042",
+            tenant,
+        );
+        let mut expected: Vec<(String, String)> = [
             ("job_id", "scan-1"),
             ("bucket_config_id", ""),
             ("object_key", "scan-1/a.bin"),
@@ -543,6 +624,7 @@ mod tests {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
         .collect();
+        expected.push(("tenant_id".to_owned(), tenant.to_string()));
         assert_eq!(fields, expected);
     }
 
@@ -587,7 +669,7 @@ mod tests {
     #[tokio::test]
     async fn scan_adhoc_file_validates_content_and_filename() {
         let err = match svc()
-            .scan_adhoc_file(authed(AdhocScanRequest {
+            .scan_adhoc_file(authed_with_tenant(AdhocScanRequest {
                 filename: "a.bin".to_owned(),
                 ..Default::default()
             }))
@@ -600,7 +682,7 @@ mod tests {
         assert_eq!(err.message(), "Missing file content");
 
         let err = match svc()
-            .scan_adhoc_file(authed(AdhocScanRequest {
+            .scan_adhoc_file(authed_with_tenant(AdhocScanRequest {
                 file_content: vec![1, 2, 3],
                 ..Default::default()
             }))
@@ -619,7 +701,7 @@ mod tests {
         // message must be generic (no sqlx/internal detail leaked to the
         // caller); the real cause is logged server-side only.
         let err = match svc()
-            .scan_adhoc_file(authed(AdhocScanRequest {
+            .scan_adhoc_file(authed_with_tenant(AdhocScanRequest {
                 scan_id: "scan-1".to_owned(),
                 file_content: vec![1, 2, 3],
                 filename: "a.bin".to_owned(),
@@ -638,7 +720,7 @@ mod tests {
     #[tokio::test]
     async fn get_scan_status_requires_job_id() {
         let err = match svc()
-            .get_scan_status(authed(ScanStatusRequest::default()))
+            .get_scan_status(authed_with_tenant(ScanStatusRequest::default()))
             .await
         {
             Err(e) => e,
@@ -651,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn get_scan_status_unknown_api_version_is_unimplemented() {
         let err = match svc()
-            .get_scan_status(authed(ScanStatusRequest {
+            .get_scan_status(authed_with_tenant(ScanStatusRequest {
                 job_id: "job-1".to_owned(),
                 api_version: "v9".to_owned(),
             }))
@@ -664,26 +746,54 @@ mod tests {
         assert_eq!(err.message(), "api_version v9 not supported");
     }
 
+    #[tokio::test]
+    async fn get_scan_status_without_tenant_metadata_is_unauthenticated() {
+        // Bearer JWT present, but no x-tenant-id — same contract as
+        // submit_scan_task: rejected before job_id/api_version validation.
+        let err = match svc()
+            .get_scan_status(authed(ScanStatusRequest {
+                job_id: "job-1".to_owned(),
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("missing x-tenant-id metadata must be rejected"),
+        };
+        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(err.message(), "missing x-tenant-id metadata");
+    }
+
     async fn seed_bucket_and_job(pool: &sqlx::PgPool) -> (i32, String) {
+        // `assume_role` mode needs no credential_enc ciphertext — this test
+        // never resolves an S3 client, only exercises job/result plumbing.
+        // `tenant_id` is NOT NULL on both tables
+        // (`services/s3scan/migrations/0002_s3scan_tenancy.sql`); the exact
+        // value doesn't matter to these tests (they never assert isolation),
+        // so both rows share the bootstrap tenant.
+        let tenant_id = crate::auth::default_tenant_uuid();
         let (bucket_id,): (i32,) = sqlx::query_as(
             "INSERT INTO s3_bucket_configs \
-             (name, endpoint_url, bucket_name, access_key_id, secret_access_key, region, \
-              use_ssl, path_style, scan_enabled, yara_enabled, created_by, created_at, \
-              updated_at) \
-             VALUES ('grpc-bucket', 'http://parity-stub:9999', 'bkt', 'AKIATESTKEY123456', \
-                     'supersecretvalue1234', 'us-east-1', false, true, true, false, 1, now(), \
-                     now()) RETURNING id",
+             (name, endpoint_url, bucket_name, credential_mode, role_arn, region, \
+              use_ssl, path_style, scan_enabled, yara_enabled, created_by, tenant_id, \
+              created_at, updated_at) \
+             VALUES ('grpc-bucket', 'http://parity-stub:9999', 'bkt', 'assume_role', \
+                     'arn:aws:iam::123456789012:role/test', 'us-east-1', false, true, true, \
+                     false, 1, $1, now(), now()) RETURNING id",
         )
+        .bind(tenant_id)
         .fetch_one(pool)
         .await
         .unwrap_or_else(|e| panic!("seed bucket: {e}"));
         let job_uuid = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO s3_scan_jobs (job_id, bucket_config_id, job_type, status, \
-             triggered_by, created_at) VALUES ($1, $2, 'full_scan', 'running', 1, now())",
+             triggered_by, tenant_id, created_at) \
+             VALUES ($1, $2, 'full_scan', 'running', 1, $3, now())",
         )
         .bind(&job_uuid)
         .bind(bucket_id)
+        .bind(tenant_id)
         .execute(pool)
         .await
         .unwrap_or_else(|e| panic!("seed job: {e}"));
@@ -694,6 +804,7 @@ mod tests {
     async fn report_scan_result_and_get_scan_status_round_trip_against_real_db() {
         let state = crate::grpc::test_util::db_state_with_s3scan().await;
         let (_, job_uuid) = seed_bucket_and_job(&state.db).await;
+        let owner_tenant = crate::auth::default_tenant_uuid().to_string();
         let svc = S3ScanGrpc::new(state);
 
         let ack = match svc
@@ -717,10 +828,13 @@ mod tests {
         assert!(ack.accepted);
 
         let status = match svc
-            .get_scan_status(authed(ScanStatusRequest {
-                job_id: job_uuid.clone(),
-                api_version: "v1".to_owned(),
-            }))
+            .get_scan_status(authed_with_tenant_value(
+                ScanStatusRequest {
+                    job_id: job_uuid.clone(),
+                    api_version: "v1".to_owned(),
+                },
+                &owner_tenant,
+            ))
             .await
         {
             Ok(r) => r.into_inner(),
@@ -731,16 +845,43 @@ mod tests {
         assert_eq!(status.infected, 1);
 
         let missing = match svc
-            .get_scan_status(authed(ScanStatusRequest {
-                job_id: "no-such-job".to_owned(),
-                api_version: "v1".to_owned(),
-            }))
+            .get_scan_status(authed_with_tenant_value(
+                ScanStatusRequest {
+                    job_id: "no-such-job".to_owned(),
+                    api_version: "v1".to_owned(),
+                },
+                &owner_tenant,
+            ))
             .await
         {
             Err(e) => e,
             Ok(_) => panic!("expected not found"),
         };
         assert_eq!(missing.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn get_scan_status_rejects_cross_tenant_job_id() {
+        // Regression for the tenancy gap this RPC had: job_id alone was
+        // enough to read another tenant's scan-job status. A caller
+        // authenticated as a different tenant (TEST_TENANT) than the job's
+        // owner (default_tenant_uuid) must see NotFound, never the row.
+        let state = crate::grpc::test_util::db_state_with_s3scan().await;
+        let (_, job_uuid) = seed_bucket_and_job(&state.db).await;
+        assert_ne!(TEST_TENANT, crate::auth::default_tenant_uuid().to_string());
+        let svc = S3ScanGrpc::new(state);
+
+        let err = match svc
+            .get_scan_status(authed_with_tenant(ScanStatusRequest {
+                job_id: job_uuid,
+                api_version: "v1".to_owned(),
+            }))
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("cross-tenant job_id must not resolve"),
+        };
+        assert_eq!(err.code(), Code::NotFound);
     }
 
     #[tokio::test]
@@ -767,7 +908,7 @@ mod tests {
         let state = crate::grpc::test_util::db_state_with_s3scan().await;
         let svc = S3ScanGrpc::new(state);
         let resp = match svc
-            .scan_adhoc_file(authed(AdhocScanRequest {
+            .scan_adhoc_file(authed_with_tenant(AdhocScanRequest {
                 scan_id: String::new(),
                 file_content: vec![1, 2, 3, 4],
                 filename: "grpc-upload.bin".to_owned(),

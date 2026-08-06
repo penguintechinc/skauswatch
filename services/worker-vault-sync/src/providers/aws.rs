@@ -17,6 +17,29 @@ fn str_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
+/// Resolves the AWS region for an `AwsProvider`: `credentials.region`, then
+/// `config.region`, then `us-east-1` — matches v1 `AwsProvider.__init__`.
+/// Exposed (crate-private) so `handler.rs` can resolve the same region when
+/// pre-fetching own-AWS federated credentials (see
+/// [`AwsProvider::with_federated_fallback`]), without duplicating the
+/// fallback chain.
+pub(crate) fn resolve_region(credentials: &Value, config: &Value) -> String {
+    str_field(credentials, "region")
+        .or_else(|| str_field(config, "region"))
+        .unwrap_or_else(|| "us-east-1".to_owned())
+}
+
+/// True when `credentials` carries a static `access_key_id`/`secret_access_key`
+/// pair — the customer-supplied path [`AwsProvider`] always prefers. When
+/// `false`, [`AwsProvider::with_federated_fallback`]'s `federated_credentials`
+/// (if any) is used instead of leaving the client with no credentials
+/// provider at all — today's behavior, which resolves to nothing on dal2
+/// (see `docs/v2-port/aws-identity-runbook.md`).
+pub(crate) fn has_static_credentials(credentials: &Value) -> bool {
+    str_field(credentials, "access_key_id").is_some()
+        && str_field(credentials, "secret_access_key").is_some()
+}
+
 /// Syncs secrets between Vault and AWS Secrets Manager.
 pub struct AwsProvider {
     client: Client,
@@ -34,10 +57,32 @@ impl AwsProvider {
     /// non-AWS-hosted Secrets-Manager-compatible endpoint (e.g. LocalStack,
     /// or the `wiremock` server this module's tests use) the same way
     /// `secret_prefix`/`region` are already sourced from `config`.
+    ///
+    /// The one production call site (`get_provider`) always goes through
+    /// [`AwsProvider::with_federated_fallback`] instead, so this stays as a
+    /// convenience constructor for this module's own pre-existing tests
+    /// (equivalent to passing `federated_credentials: None`).
+    #[allow(dead_code)]
     pub fn new(credentials: &Value, config: &Value) -> Self {
-        let region = str_field(credentials, "region")
-            .or_else(|| str_field(config, "region"))
-            .unwrap_or_else(|| "us-east-1".to_owned());
+        Self::with_federated_fallback(credentials, config, None)
+    }
+
+    /// Same as [`AwsProvider::new`], but when `credentials` carries no
+    /// static access-key/secret pair, uses `federated_credentials` —
+    /// already resolved via
+    /// `skauswatch_s3::credentials::federated_base_credentials` — as this
+    /// worker's own-AWS identity instead of leaving the client with no
+    /// credentials provider at all (today's behavior: the SDK's default
+    /// credential-provider chain, which has nothing to resolve to on dal2
+    /// — see `docs/v2-port/aws-identity-runbook.md`). `None` here preserves
+    /// today's behavior exactly; a customer's static credentials, when
+    /// present, always win over federation.
+    pub fn with_federated_fallback(
+        credentials: &Value,
+        config: &Value,
+        federated_credentials: Option<Credentials>,
+    ) -> Self {
+        let region = resolve_region(credentials, config);
         let prefix = str_field(config, "secret_prefix").unwrap_or_else(|| "vault/".to_owned());
 
         let mut builder = aws_sdk_secretsmanager::Config::builder()
@@ -60,6 +105,8 @@ impl AwsProvider {
                 None,
                 "vault-cloud-integration",
             ));
+        } else if let Some(creds) = federated_credentials {
+            builder = builder.credentials_provider(creds);
         }
 
         Self {
@@ -246,7 +293,7 @@ impl CloudProvider for AwsProvider {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use serde_json::json;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, header_regex, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -652,5 +699,111 @@ mod tests {
         // still produces a working, successfully-signed client.
         let result = provider.push_secret("s", "v", "secret-7").await;
         assert!(result.success);
+    }
+
+    // ── has_static_credentials / resolve_region ─────────────────────────
+
+    #[test]
+    fn has_static_credentials_requires_both_fields() {
+        assert!(has_static_credentials(&json!({
+            "access_key_id": "AK", "secret_access_key": "SK",
+        })));
+        assert!(!has_static_credentials(&json!({"access_key_id": "AK"})));
+        assert!(!has_static_credentials(&json!({"secret_access_key": "SK"})));
+        assert!(!has_static_credentials(&Value::Null));
+        assert!(!has_static_credentials(&json!({})));
+    }
+
+    #[test]
+    fn resolve_region_precedence_and_default() {
+        assert_eq!(
+            resolve_region(
+                &json!({"region": "eu-west-1"}),
+                &json!({"region": "us-west-2"})
+            ),
+            "eu-west-1"
+        );
+        assert_eq!(
+            resolve_region(&json!({}), &json!({"region": "us-west-2"})),
+            "us-west-2"
+        );
+        assert_eq!(resolve_region(&json!({}), &json!({})), "us-east-1");
+    }
+
+    // ── AwsProvider::with_federated_fallback ────────────────────────────
+
+    #[tokio::test]
+    async fn federated_fallback_used_when_no_static_credentials_present() {
+        // No access_key_id/secret_access_key in `credentials` — the
+        // federated `Credentials` override must be what actually signs the
+        // request, proving `with_federated_fallback` reaches its `else`
+        // branch rather than silently leaving the client unauthenticated
+        // (today's pre-fix behavior, still exercised above by
+        // `push_secret_without_static_credentials_falls_back_gracefully`
+        // for the `federated_credentials: None` case).
+        let server = MockServer::start().await;
+        mount_target(
+            &server,
+            "PutSecretValue",
+            200,
+            json!({"ARN": "arn:1", "Name": "vault/fed", "VersionId": "v1"}),
+        )
+        .await;
+        let federated = Credentials::new(
+            "AKIAFEDERATED",
+            "federatedSecret",
+            Some("federated-session-token".to_owned()),
+            None,
+            "skauswatch-federated-base",
+        );
+        let provider = AwsProvider::with_federated_fallback(
+            &json!({}),
+            &test_config(&server.uri()),
+            Some(federated),
+        );
+
+        let result = provider.push_secret("fed", "v", "secret-fed").await;
+        assert!(result.success, "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn static_credentials_win_over_federated_fallback() {
+        // Both a static pair AND a federated override are supplied —
+        // static must win (matches `AwsProvider`'s customer-first
+        // priority). SigV4's `Authorization` header embeds the signing
+        // access-key-id in its `Credential=` component, so asserting on it
+        // proves which credentials actually signed the request, not just
+        // that a request was sent.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(header("x-amz-target", "secretsmanager.PutSecretValue"))
+            .and(header_regex("Authorization", "Credential=AKIASTATIC/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ARN": "arn:1", "Name": "vault/precedence", "VersionId": "v1",
+            })))
+            .mount(&server)
+            .await;
+
+        let credentials =
+            json!({"access_key_id": "AKIASTATIC", "secret_access_key": "staticSecret"});
+        let federated = Credentials::new(
+            "AKIAFEDERATED",
+            "federatedSecret",
+            None,
+            None,
+            "skauswatch-federated-base",
+        );
+        let provider = AwsProvider::with_federated_fallback(
+            &credentials,
+            &test_config(&server.uri()),
+            Some(federated),
+        );
+
+        let result = provider.push_secret("precedence", "v", "secret-p").await;
+        assert!(
+            result.success,
+            "expected the request signed with the static credentials to match the mock: {result:?}"
+        );
     }
 }

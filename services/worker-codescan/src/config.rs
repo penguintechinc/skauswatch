@@ -52,6 +52,22 @@ pub struct WorkerConfig {
     pub _ai_timeout_sec: u64,
     /// Review categories (default: security,best_practices).
     pub _review_categories: Vec<String>,
+    /// Base64-encoded AES-256-GCM key (`CREDENTIAL_ENCRYPTION_KEY`) used to
+    /// decrypt `codescan_git_credentials.encrypted_token` rows — must match
+    /// the key codescan-backend encrypted with (same env var name, same
+    /// format; see `skauswatch_vault::CredentialCipher`). `None` means
+    /// per-repo credential
+    /// resolution is disabled; the worker falls back to `git_token`.
+    pub credential_encryption_key: Option<String>,
+    /// npm registry base URL override for license lookups (`NPM_REGISTRY_URL`);
+    /// `None` uses the public registry.
+    pub npm_registry_url: Option<String>,
+    /// PyPI base URL override for license lookups (`PYPI_REGISTRY_URL`);
+    /// `None` uses the public index.
+    pub pypi_registry_url: Option<String>,
+    /// crates.io base URL override for license lookups
+    /// (`CRATES_REGISTRY_URL`); `None` uses the public registry.
+    pub crates_registry_url: Option<String>,
 }
 
 impl WorkerConfig {
@@ -80,6 +96,10 @@ impl WorkerConfig {
             env::var("GIT_API_BASE_URL").ok().as_deref(),
             env::var("AI_TIMEOUT_SEC").ok().as_deref(),
             env::var("REVIEW_CATEGORIES").ok().as_deref(),
+            env::var("CREDENTIAL_ENCRYPTION_KEY").ok().as_deref(),
+            env::var("NPM_REGISTRY_URL").ok().as_deref(),
+            env::var("PYPI_REGISTRY_URL").ok().as_deref(),
+            env::var("CRATES_REGISTRY_URL").ok().as_deref(),
         ))
     }
 
@@ -103,6 +123,10 @@ impl WorkerConfig {
         git_api_base_url: Option<&str>,
         ai_timeout_sec: Option<&str>,
         review_categories: Option<&str>,
+        credential_encryption_key: Option<&str>,
+        npm_registry_url: Option<&str>,
+        pypi_registry_url: Option<&str>,
+        crates_registry_url: Option<&str>,
     ) -> Self {
         Self {
             redis_url: redis_url.unwrap_or("redis://localhost:6379").to_owned(),
@@ -127,6 +151,10 @@ impl WorkerConfig {
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect(),
+            credential_encryption_key: credential_encryption_key.map(str::to_owned),
+            npm_registry_url: npm_registry_url.map(str::to_owned),
+            pypi_registry_url: pypi_registry_url.map(str::to_owned),
+            crates_registry_url: crates_registry_url.map(str::to_owned),
         }
     }
 }
@@ -155,6 +183,10 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
+            None,
         );
         assert_eq!(cfg.redis_url, "redis://localhost:6379");
         assert_eq!(cfg.redis_password, None);
@@ -172,6 +204,10 @@ mod tests {
         assert_eq!(cfg.git_api_base_url, None);
         assert_eq!(cfg._ai_timeout_sec, 60);
         assert_eq!(cfg._review_categories, vec!["security", "best_practices"]);
+        assert_eq!(cfg.credential_encryption_key, None);
+        assert_eq!(cfg.npm_registry_url, None);
+        assert_eq!(cfg.pypi_registry_url, None);
+        assert_eq!(cfg.crates_registry_url, None);
     }
 
     #[test]
@@ -193,6 +229,10 @@ mod tests {
             Some("https://github.example.com/api/v3"),
             Some("30"),
             Some("security, license"),
+            Some("base64keymaterial"),
+            Some("http://npm.example.com"),
+            Some("http://pypi.example.com"),
+            Some("http://crates.example.com"),
         );
         assert_eq!(cfg.redis_url, "redis://cache:6379");
         assert_eq!(cfg.redis_password.as_deref(), Some("s3cr3t"));
@@ -214,6 +254,22 @@ mod tests {
         assert_eq!(cfg._ai_timeout_sec, 30);
         // Split values are trimmed of surrounding whitespace.
         assert_eq!(cfg._review_categories, vec!["security", "license"]);
+        assert_eq!(
+            cfg.credential_encryption_key.as_deref(),
+            Some("base64keymaterial")
+        );
+        assert_eq!(
+            cfg.npm_registry_url.as_deref(),
+            Some("http://npm.example.com")
+        );
+        assert_eq!(
+            cfg.pypi_registry_url.as_deref(),
+            Some("http://pypi.example.com")
+        );
+        assert_eq!(
+            cfg.crates_registry_url.as_deref(),
+            Some("http://crates.example.com")
+        );
     }
 
     #[test]
@@ -234,6 +290,10 @@ mod tests {
             None,
             None,
             Some("nope"),
+            None,
+            None,
+            None,
+            None,
             None,
         );
         assert_eq!(cfg.max_concurrent_tasks, 5);

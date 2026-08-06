@@ -1,9 +1,23 @@
-//! v1-parity authentication: bcrypt password hashes, HS256 JWTs with the
-//! exact v1 claim shapes (`{sub: str(user_id), role, type, exp, iat}`), and
-//! the `CurrentUser` extractor that mirrors `@auth_required`.
+//! Authentication: bcrypt password hashes, HS256 access tokens in the house
+//! `skauswatch_auth::Claims` shape (`sub/iss/aud/iat/exp/scope/tenant/teams/
+//! roles` — see `security.md` Authentication & Authorization), and the
+//! `CurrentUser` extractor that mirrors v1's `@auth_required`.
 //!
-//! Do NOT swap in the house-standard claims model here until the webui and
-//! ENDPOINT fleet migrate — the token shape is part of the v1 wire contract.
+//! Tenancy retrofit (docs/v2-port/tenancy-model.md): the access token used to
+//! be the exact v1 shape (`{sub, role, type, exp, iat}`) — that is now
+//! replaced by the shared `Claims` model so every access token carries a
+//! `tenant` claim, per the hard tenant-isolation boundary in `security.md`.
+//! This is a deliberate wire-contract break; `docs/v2-port/tenancy-model.md`
+//! §8 records the confirmation that no in-repo client (webui, ENDPOINT
+//! agents) decodes JWT claims directly — both only read the JSON response
+//! *bodies* of `/auth/login`/`/auth/me` (unchanged shapes), never the token
+//! payload, so this is safe. Refresh tokens keep their own minimal
+//! `RefreshClaims` shape unchanged: they carry no `tenant` claim at all —
+//! rotation reads `tenant_id` straight off the `refresh_tokens` row instead
+//! (denormalized from `users` at issuance), never re-deriving it from a
+//! second `users` join. `ServiceClaims` (pki/sshca/this service's own gRPC
+//! surface) is a separate, tenant-free machine-token shape and is untouched
+//! by this change — see `skauswatch_auth::ServiceClaims` docs.
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -11,24 +25,58 @@ use chrono::Utc;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use skauswatch_auth::Claims;
 
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// Access-token claims — exact v1 shape.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AccessClaims {
-    /// String-encoded user id.
-    pub sub: String,
-    /// Role name (admin/maintainer/viewer) — v1 authorizes on this.
-    pub role: String,
-    /// Token type discriminator: `access`.
-    #[serde(rename = "type")]
-    pub token_type: String,
-    /// Expiry (epoch seconds).
-    pub exp: i64,
-    /// Issued-at (epoch seconds).
-    pub iat: i64,
+/// Issuer/audience stamped on every access token this service mints —
+/// matches the fixture values already established elsewhere in the
+/// workspace for `skauswatch_auth::Claims` (e.g. `services/monitor`).
+const CLAIMS_ISSUER: &str = "https://auth.skauswatch.app";
+const CLAIMS_AUDIENCE: &str = "skauswatch";
+
+/// Fixed, reproducible bootstrap tenant seeded by
+/// `migrations/0002_tenancy.sql` — literal value must match the migration's
+/// seed row exactly. Self-service `/auth/register` has no admin/inviter
+/// context to derive a tenant from, so new registrants are attached here
+/// (v2.0 decision: admin-provisioned tenants, single default tenant — see
+/// docs/v2-port/tenancy-model.md §8; self-serve multi-tenant signup is a
+/// v2.1 backlog item).
+pub(crate) const DEFAULT_TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+/// Parses [`DEFAULT_TENANT_ID`] into a `Uuid`. The constant is a hardcoded,
+/// compile-time-known literal — not user input, never fallible in practice
+/// — so a parse failure here can only mean the literal itself was typo'd;
+/// panicking immediately at the call site is preferable to threading a
+/// spurious `Result` for an error that can never occur at runtime.
+#[allow(clippy::panic)]
+pub(crate) fn default_tenant_uuid() -> uuid::Uuid {
+    DEFAULT_TENANT_ID
+        .parse()
+        .unwrap_or_else(|e| panic!("DEFAULT_TENANT_ID is not a valid UUID literal: {e}"))
+}
+
+/// Expands a role name into the house OIDC scope bundle it corresponds to
+/// (`security.md` "Scope bundles"). `users.role` remains the authoritative
+/// permission model for this service's existing role-gated routes
+/// (`CurrentUser::require_role` — the ~89-site scope-based-authz migration
+/// is out of scope for the tenancy retrofit); `scope` is populated on the
+/// minted JWT so any current/future consumer that authorizes on
+/// `skauswatch_auth::Claims::has_scope` instead sees an equivalent bundle.
+/// Unknown roles get no scope at all — fail closed, never a guessed bundle.
+pub(crate) fn role_scope_bundle(role: &str) -> &'static str {
+    match role {
+        "admin" => "*:read *:write *:admin *:delete settings:write users:admin",
+        "maintainer" => "*:read *:write teams:read reports:read analytics:read",
+        "viewer" => "*:read",
+        // `super_admin` is a manager-internal, DB-only role (never settable
+        // via the public users API — see `routes/users.rs::ROLES`) used
+        // solely to gate `routes::tenants::create_tenant`; it needs no
+        // scope bundle of its own today since that gate checks
+        // `CurrentUser::require_role` directly, not `Claims::has_scope`.
+        _ => "",
+    }
 }
 
 /// Refresh-token claims — v1 shape (`sub`/`type`/`exp`/`iat`) plus a `jti`
@@ -62,20 +110,30 @@ pub struct RefreshClaims {
     pub jti: String,
 }
 
-/// Issues a v1-shape access token.
+/// Issues an access token in the house `skauswatch_auth::Claims` shape.
+/// `tenant` must be a stringified tenant UUID (see `DEFAULT_TENANT_ID`,
+/// or a caller's own `CurrentUser::tenant_id`/`users.tenant_id` row) — never
+/// empty, since every downstream consumer (this service's own
+/// `tenant_middleware`/`CurrentUser`, and any future service that adopts
+/// the shared `Claims` model) rejects a token with no usable tenant claim.
 pub fn create_access_token(
     user_id: i32,
     role: &str,
+    tenant: &str,
     secret: &str,
     expires_minutes: i64,
 ) -> Result<String, ApiError> {
     let now = Utc::now().timestamp();
-    let claims = AccessClaims {
+    let claims = Claims {
         sub: user_id.to_string(),
-        role: role.to_owned(),
-        token_type: "access".to_owned(),
-        exp: now + expires_minutes * 60,
+        iss: CLAIMS_ISSUER.to_owned(),
+        aud: CLAIMS_AUDIENCE.to_owned(),
         iat: now,
+        exp: now + expires_minutes * 60,
+        scope: role_scope_bundle(role).to_owned(),
+        tenant: tenant.to_owned(),
+        teams: vec![],
+        roles: vec![role.to_owned()],
     };
     jsonwebtoken::encode(
         &Header::default(),
@@ -110,8 +168,10 @@ pub fn create_refresh_token(
 /// Decodes signature/exp into raw claims. Error strings are caller-supplied
 /// because v1 words them per flow ("Token expired" vs "Refresh token
 /// expired", ...); the type check happens after, exactly like v1's
-/// jwt.decode-then-`payload.get("type")` ordering.
-fn decode_claims(
+/// jwt.decode-then-`payload.get("type")` ordering. Used by [`decode_refresh`]
+/// only — [`decode_access`] uses `skauswatch_auth::decode_claims` instead,
+/// since the access token has moved to the shared `Claims` shape.
+fn decode_generic_claims(
     token: &str,
     secret: &str,
     expired_msg: &str,
@@ -134,18 +194,29 @@ fn decode_claims(
     })
 }
 
-/// Decodes and type-checks an access token (v1 `auth_required` strings).
-pub fn decode_access(token: &str, secret: &str) -> Result<AccessClaims, ApiError> {
-    let claims = decode_claims(token, secret, "Token expired", "Invalid token")?;
-    if claims.get("type").and_then(|t| t.as_str()) != Some("access") {
-        return Err(ApiError::Unauthorized("Invalid token type".to_owned()));
-    }
-    serde_json::from_value(claims).map_err(|_| ApiError::Unauthorized("Invalid token".to_owned()))
+/// Decodes and tenant-validates an access token: HS256 signature, expiry,
+/// and a non-empty `tenant` claim — the same tenant-isolation boundary
+/// `skauswatch_auth::tenant_middleware` enforces at the router layer,
+/// enforced again here so `CurrentUser` fails closed even for a handler
+/// reached through a router that (for whatever reason, e.g. a per-module
+/// test router) never mounted the outer middleware. "Token expired"/
+/// "Invalid token" wording matches v1's `auth_required` messages.
+pub fn decode_access(token: &str, secret: &str) -> Result<Claims, ApiError> {
+    let claims = skauswatch_auth::decode_claims(token, secret).map_err(|e| match e {
+        skauswatch_auth::TenantAuthError::Expired => {
+            ApiError::Unauthorized("Token expired".to_owned())
+        }
+        _ => ApiError::Unauthorized("Invalid token".to_owned()),
+    })?;
+    claims
+        .require_tenant()
+        .map_err(|_| ApiError::Forbidden("missing or empty tenant claim".to_owned()))?;
+    Ok(claims)
 }
 
 /// Decodes and type-checks a refresh token (v1 `/auth/refresh` strings).
 pub fn decode_refresh(token: &str, secret: &str) -> Result<RefreshClaims, ApiError> {
-    let claims = decode_claims(
+    let claims = decode_generic_claims(
         token,
         secret,
         "Refresh token expired",
@@ -184,7 +255,7 @@ pub struct CurrentUser {
     pub email: String,
     /// Display name.
     pub full_name: Option<String>,
-    /// Role (admin/maintainer/viewer).
+    /// Role (admin/maintainer/viewer/super_admin).
     pub role: String,
     /// Active flag.
     pub is_active: bool,
@@ -192,6 +263,13 @@ pub struct CurrentUser {
     pub mfa_enabled: bool,
     /// Creation timestamp (RFC3339).
     pub created_at: Option<String>,
+    /// The caller's tenant, read from `users.tenant_id` (the DB row, not
+    /// the JWT claim — same convention `role` already followed before this
+    /// field existed: the token authenticates identity, the database row is
+    /// the authoritative source for everything else). Every tenant-scoped
+    /// query/insert a handler issues must filter/stamp on this, never on a
+    /// client-supplied value — see docs/v2-port/tenancy-model.md §4.
+    pub tenant_id: uuid::Uuid,
 }
 
 impl CurrentUser {
@@ -227,7 +305,8 @@ impl FromRequestParts<AppState> for CurrentUser {
             .map_err(|_| ApiError::Unauthorized("Invalid token".to_owned()))?;
 
         let row = sqlx::query_as::<_, UserRow>(
-            "SELECT id, email, full_name, role, is_active, mfa_enabled, created_at::text \
+            "SELECT id, email, full_name, role, is_active, mfa_enabled, created_at::text, \
+                    tenant_id \
              FROM users WHERE id = $1",
         )
         .bind(user_id)
@@ -261,6 +340,8 @@ pub struct UserRow {
     pub mfa_enabled: bool,
     /// Creation timestamp as text.
     pub created_at: Option<String>,
+    /// Tenant — authoritative source for `CurrentUser::tenant_id`.
+    pub tenant_id: uuid::Uuid,
 }
 
 impl From<UserRow> for CurrentUser {
@@ -273,6 +354,7 @@ impl From<UserRow> for CurrentUser {
             is_active: r.is_active,
             mfa_enabled: r.mfa_enabled,
             created_at: r.created_at,
+            tenant_id: r.tenant_id,
         }
     }
 }
@@ -285,8 +367,8 @@ mod tests {
     const SECRET: &str = "test-secret";
 
     #[test]
-    fn access_token_roundtrips_with_v1_claims() {
-        let token = match create_access_token(42, "admin", SECRET, 30) {
+    fn access_token_roundtrips_with_tenant_and_scope() {
+        let token = match create_access_token(42, "admin", "tenant-a", SECRET, 30) {
             Ok(t) => t,
             Err(e) => panic!("encode: {e:?}"),
         };
@@ -295,8 +377,35 @@ mod tests {
             Err(e) => panic!("decode: {e:?}"),
         };
         assert_eq!(claims.sub, "42");
-        assert_eq!(claims.role, "admin");
-        assert_eq!(claims.token_type, "access");
+        assert_eq!(claims.tenant, "tenant-a");
+        assert_eq!(claims.iss, CLAIMS_ISSUER);
+        assert_eq!(claims.aud, CLAIMS_AUDIENCE);
+        assert!(claims.has_scope("users:admin"));
+        assert_eq!(claims.roles, vec!["admin".to_owned()]);
+    }
+
+    #[test]
+    fn role_scope_bundle_matches_security_md_and_fails_closed_on_unknown() {
+        assert!(role_scope_bundle("admin").contains("users:admin"));
+        assert!(role_scope_bundle("maintainer").contains("teams:read"));
+        assert_eq!(role_scope_bundle("viewer"), "*:read");
+        assert_eq!(role_scope_bundle("not-a-role"), "");
+    }
+
+    #[test]
+    fn access_token_with_empty_tenant_is_rejected_by_decode() {
+        // create_access_token itself never validates its `tenant` argument —
+        // the tenant-isolation boundary is enforced on decode, matching
+        // `skauswatch_auth::tenant_middleware`'s "reject if absent/empty"
+        // contract (never a silent bypass at mint time).
+        let token = match create_access_token(1, "viewer", "", SECRET, 30) {
+            Ok(t) => t,
+            Err(e) => panic!("encode: {e:?}"),
+        };
+        match decode_access(&token, SECRET) {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "missing or empty tenant claim"),
+            other => panic!("expected 403, got {other:?}"),
+        }
     }
 
     #[test]
@@ -311,12 +420,16 @@ mod tests {
     #[test]
     fn expired_token_maps_to_token_expired() {
         let now = Utc::now().timestamp();
-        let claims = AccessClaims {
+        let claims = Claims {
             sub: "1".into(),
-            role: "viewer".into(),
-            token_type: "access".into(),
-            exp: now - 120,
+            iss: CLAIMS_ISSUER.into(),
+            aud: CLAIMS_AUDIENCE.into(),
             iat: now - 240,
+            exp: now - 120,
+            scope: role_scope_bundle("viewer").to_owned(),
+            tenant: "tenant-a".into(),
+            teams: vec![],
+            roles: vec!["viewer".into()],
         };
         let token = match jsonwebtoken::encode(
             &Header::default(),
@@ -404,8 +517,14 @@ mod tests {
     #[tokio::test]
     async fn current_user_rejects_unknown_user_id_against_real_db() {
         let state = crate::routes::test_support::db_state(dev_license()).await;
-        let token = create_access_token(999_999, "admin", &state.auth.jwt_secret, 30)
-            .unwrap_or_else(|e| panic!("encode: {e:?}"));
+        let token = create_access_token(
+            999_999,
+            "admin",
+            DEFAULT_TENANT_ID,
+            &state.auth.jwt_secret,
+            30,
+        )
+        .unwrap_or_else(|e| panic!("encode: {e:?}"));
         let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
         match CurrentUser::from_request_parts(&mut parts, &state).await {
             Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "User not found or inactive"),
@@ -417,18 +536,21 @@ mod tests {
     async fn current_user_rejects_inactive_user() {
         let state = crate::routes::test_support::db_state(dev_license()).await;
         let (id,): (i32,) = match sqlx::query_as(
-            "INSERT INTO users (email, password_hash, full_name, role, is_active, created_at) \
-             VALUES ('inactive@example.com', 'x', 'Inactive', 'viewer', false, now()) \
+            "INSERT INTO users (email, password_hash, full_name, role, is_active, created_at, \
+             tenant_id) \
+             VALUES ('inactive@example.com', 'x', 'Inactive', 'viewer', false, now(), $1) \
              RETURNING id",
         )
+        .bind(default_tenant_uuid())
         .fetch_one(&state.db)
         .await
         {
             Ok(r) => r,
             Err(e) => panic!("seed: {e}"),
         };
-        let token = create_access_token(id, "viewer", &state.auth.jwt_secret, 30)
-            .unwrap_or_else(|e| panic!("encode: {e:?}"));
+        let token =
+            create_access_token(id, "viewer", DEFAULT_TENANT_ID, &state.auth.jwt_secret, 30)
+                .unwrap_or_else(|e| panic!("encode: {e:?}"));
         let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
         match CurrentUser::from_request_parts(&mut parts, &state).await {
             Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "User not found or inactive"),
@@ -450,6 +572,26 @@ mod tests {
         assert_eq!(user.email, "active@example.com");
         assert_eq!(user.role, "admin");
         assert!(user.is_active);
+        assert_eq!(user.tenant_id.to_string(), DEFAULT_TENANT_ID);
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_token_with_no_tenant_even_without_outer_middleware() {
+        // Defense in depth: CurrentUser enforces the tenant boundary itself
+        // (see decode_access), independent of whether tenant_middleware ran
+        // — this is what every per-module test router (which never mounts
+        // tenant_middleware) implicitly relies on.
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, _) =
+            crate::routes::test_support::authed_user(&state, "no-tenant@example.com", "admin")
+                .await;
+        let token = create_access_token(id, "admin", "", &state.auth.jwt_secret, 30)
+            .unwrap_or_else(|e| panic!("encode: {e:?}"));
+        let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "missing or empty tenant claim"),
+            other => panic!("expected 403, got {other:?}"),
+        }
     }
 
     #[test]
@@ -462,6 +604,7 @@ mod tests {
             is_active: true,
             mfa_enabled: false,
             created_at: None,
+            tenant_id: uuid::Uuid::nil(),
         };
         assert!(user.require_role(&["viewer", "admin"]).is_ok());
         match user.require_role(&["admin"]) {

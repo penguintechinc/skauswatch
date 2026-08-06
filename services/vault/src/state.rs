@@ -26,15 +26,17 @@ pub struct AuthSettings {
 }
 
 impl AuthSettings {
-    fn from_env() -> Self {
-        Self {
-            jwt_secret: std::env::var("JWT_SECRET_KEY")
-                .or_else(|_| std::env::var("JWT_SECRET"))
-                .unwrap_or_else(|_| {
-                    tracing::warn!("JWT_SECRET_KEY not set — using ephemeral dev secret");
-                    format!("dev-{}", std::process::id())
-                }),
-        }
+    /// Loads the HS256 signing secret via the house fail-fast policy
+    /// (`skauswatch_auth::load_jwt_secret`): a missing/empty
+    /// `JWT_SECRET_KEY` aborts startup in production (`RELEASE_MODE !=
+    /// "false"`) rather than falling back to a guessable value — vault's
+    /// own former fallback (`dev-{pid}`) was both weak (a small, guessable
+    /// process id) and never checked production posture at all. Non-prod
+    /// only gets a random ephemeral secret, per the shared policy.
+    fn from_env() -> Result<Self, skauswatch_auth::MissingProductionSecret> {
+        Ok(Self {
+            jwt_secret: skauswatch_auth::load_jwt_secret()?,
+        })
     }
 }
 
@@ -98,10 +100,12 @@ impl AppStateInner {
             .await
             .map_err(|e| anyhow::anyhow!("redis connect: {e}"))?;
 
+        let auth = AuthSettings::from_env().map_err(|e| anyhow::anyhow!("jwt secret: {e}"))?;
+
         Ok(Arc::new(Self {
             license,
             db,
-            auth: AuthSettings::from_env(),
+            auth,
             envelope: RwLock::new(envelope),
             streams: Some(streams),
         }))

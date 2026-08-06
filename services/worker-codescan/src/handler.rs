@@ -8,9 +8,13 @@ use skauswatch_ai::{
 use skauswatch_streams::{StreamEntry, StreamHandler, StreamProducer};
 use sqlx::PgPool;
 
+use skauswatch_vault::CredentialCipher;
+
 use crate::config::WorkerConfig;
-use crate::db;
+use crate::db::{self, RepoConfigRecord};
+use crate::detection;
 use crate::git_provider::{self, GitCredentials};
+use crate::license_scan::RegistryClient;
 use crate::message::CodeScanReviewTask;
 use crate::review::ReviewOutput;
 
@@ -19,15 +23,144 @@ pub struct CodeScanReviewHandler {
     pool: PgPool,
     producer: StreamProducer,
     config: WorkerConfig,
+    /// npm/PyPI/crates.io client for `codescan_license_detections` scanning
+    /// (see `crate::license_scan`). Built once so tests/prod share one
+    /// pooled `reqwest::Client`.
+    registry_client: RegistryClient,
 }
 
 impl CodeScanReviewHandler {
     /// Create a new CodeScan review handler.
     pub fn new(pool: PgPool, producer: StreamProducer, config: WorkerConfig) -> Self {
+        let registry_client = RegistryClient::new(
+            config.npm_registry_url.clone(),
+            config.pypi_registry_url.clone(),
+            config.crates_registry_url.clone(),
+        );
         Self {
             pool,
             producer,
             config,
+            registry_client,
+        }
+    }
+
+    /// Resolves which git credential to use for `task`'s repo: a per-repo
+    /// `codescan_git_credentials` row (via `repo_config.credential_id`) when
+    /// one is configured and usable, falling back to the worker-wide
+    /// `GIT_TOKEN`/`GIT_API_BASE_URL` config otherwise. Every failure mode
+    /// (no credential configured, missing encryption key, credential not
+    /// found/inactive/expired/wrong-type, decrypt failure) degrades to the
+    /// fallback with a warning rather than failing the review — mirrors how
+    /// `git_provider::fetch_pr_diff` failures degrade to an empty diff
+    /// rather than aborting (see `execute_pipeline`).
+    async fn resolve_git_credentials(
+        &self,
+        task: &CodeScanReviewTask,
+        repo_config: &RepoConfigRecord,
+    ) -> GitCredentials {
+        let fallback = || GitCredentials {
+            provider: repo_config._provider.clone(),
+            token: self.config.git_token.clone().unwrap_or_default(),
+            base_url: self.config.git_api_base_url.clone(),
+        };
+
+        let Some(credential_id) = repo_config.credential_id else {
+            return fallback();
+        };
+
+        let Some(key) = &self.config.credential_encryption_key else {
+            tracing::warn!(
+                review_id = task.review_id,
+                credential_id,
+                "repo has a git credential configured but CREDENTIAL_ENCRYPTION_KEY is unset, \
+                 falling back to the worker-wide GIT_TOKEN"
+            );
+            return fallback();
+        };
+
+        let cipher = match CredentialCipher::from_base64_key(key) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    review_id = task.review_id,
+                    error = ?e,
+                    "invalid CREDENTIAL_ENCRYPTION_KEY, falling back to the worker-wide GIT_TOKEN"
+                );
+                return fallback();
+            }
+        };
+
+        let credential = match db::get_git_credential(&self.pool, credential_id, task.tenant_id)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    review_id = task.review_id,
+                    credential_id,
+                    error = %e,
+                    "git credential not found for this tenant, falling back to the worker-wide GIT_TOKEN"
+                );
+                return fallback();
+            }
+        };
+
+        if !credential.is_active {
+            tracing::warn!(
+                review_id = task.review_id,
+                credential_id,
+                "git credential is inactive, falling back to the worker-wide GIT_TOKEN"
+            );
+            return fallback();
+        }
+        if credential.credential_type != "token" {
+            tracing::warn!(
+                review_id = task.review_id,
+                credential_id,
+                credential_type = %credential.credential_type,
+                "only 'token' credentials are usable for API-based diff fetching, \
+                 falling back to the worker-wide GIT_TOKEN"
+            );
+            return fallback();
+        }
+        if credential.platform != repo_config._provider {
+            tracing::warn!(
+                review_id = task.review_id,
+                credential_id,
+                credential_platform = %credential.platform,
+                repo_provider = %repo_config._provider,
+                "git credential platform does not match the repo's provider (misconfigured \
+                 credential_id), falling back to the worker-wide GIT_TOKEN"
+            );
+            return fallback();
+        }
+        if let Some(expires_at) = credential.token_expires_at
+            && expires_at < Utc::now()
+        {
+            tracing::warn!(
+                review_id = task.review_id,
+                credential_id,
+                "git credential has expired, falling back to the worker-wide GIT_TOKEN"
+            );
+            return fallback();
+        }
+
+        match cipher.decrypt(&credential.encrypted_token) {
+            Ok(token) => GitCredentials {
+                provider: credential.platform,
+                token,
+                base_url: self.config.git_api_base_url.clone(),
+            },
+            Err(e) => {
+                tracing::warn!(
+                    review_id = task.review_id,
+                    credential_id,
+                    error = ?e,
+                    "failed to decrypt git credential, falling back to the worker-wide GIT_TOKEN"
+                );
+                fallback()
+            }
         }
     }
 
@@ -93,6 +226,17 @@ impl CodeScanReviewHandler {
             });
         }
 
+        // Language/framework detection and license-compliance scanning are
+        // diff-only and independent of the AI call below — run them first so
+        // they persist even if the AI provider subsequently fails (that
+        // failure marks the review "failed" via `handle`, but these findings
+        // remain valid metadata regardless of review outcome). Both are
+        // best-effort: a write failure is logged and skipped, never
+        // propagated as a pipeline error (matches `db::insert_review_comment`
+        // call sites in `handle`).
+        self.record_detections(task, &code_diff).await;
+        self.record_license_findings(task, &code_diff).await;
+
         // Prepare review prompt with system context.
         let system_prompt = "You are a code reviewer. Analyze the diff for security, \
                             best practices, and performance issues. Return findings as JSON array \
@@ -110,13 +254,25 @@ impl CodeScanReviewHandler {
                 },
                 Message {
                     role: "user".to_string(),
-                    content: user_prompt,
+                    content: user_prompt.clone(),
                 },
             ],
             max_tokens: 2000,
         };
 
+        let call_started = std::time::Instant::now();
         let response = provider.complete(req).await?;
+        let latency_ms = i64::try_from(call_started.elapsed().as_millis()).unwrap_or(i64::MAX);
+
+        self.record_provider_usage(
+            task,
+            system_prompt,
+            &user_prompt,
+            &response.content,
+            &response.model,
+            latency_ms,
+        )
+        .await;
 
         // Parse the AI response to extract findings/comments.
         let comments = crate::review::parse_ai_response(&response.content)?;
@@ -133,6 +289,194 @@ impl CodeScanReviewHandler {
             summary,
         })
     }
+
+    /// Writes language/framework detections for `diff` (see
+    /// `crate::detection`). Best-effort — logs and continues on any write
+    /// failure rather than failing the review.
+    async fn record_detections(&self, task: &CodeScanReviewTask, diff: &str) {
+        for d in detection::detect_from_diff(diff) {
+            if let Err(e) = db::insert_review_detection(
+                &self.pool,
+                task.review_id,
+                task.tenant_id,
+                d.detection_type,
+                &d.name,
+                d.confidence,
+                d.file_count,
+            )
+            .await
+            {
+                tracing::warn!(
+                    review_id = task.review_id,
+                    error = %e,
+                    detection = %d.name,
+                    "failed to insert review detection"
+                );
+            }
+        }
+    }
+
+    /// Scans `diff` for added dependencies (see `crate::license_scan`),
+    /// resolves each one's license, evaluates it against
+    /// `codescan_license_policies`, and records a
+    /// `codescan_license_detections` row (plus a
+    /// `codescan_license_violations` row when the tenant has a
+    /// `review_required`/`blocked` policy for that license). Best-effort —
+    /// logs and continues on any write failure rather than failing the
+    /// review; a license this tenant has not configured a policy for is
+    /// recorded but never treated as a violation (see
+    /// `db::get_license_policy`'s doc comment).
+    async fn record_license_findings(&self, task: &CodeScanReviewTask, diff: &str) {
+        for finding in self.registry_client.scan_diff(diff).await {
+            let policy = match &finding.license_name {
+                Some(name) => {
+                    match db::get_license_policy(&self.pool, task.tenant_id, name).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            tracing::warn!(
+                                review_id = task.review_id,
+                                error = %e,
+                                license = %name,
+                                "failed to look up license policy"
+                            );
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            let policy_violation = matches!(
+                policy.as_ref().map(|p| p.policy.as_str()),
+                Some("review_required") | Some("blocked")
+            );
+
+            let detection_id = match db::insert_license_detection(
+                &self.pool,
+                task.review_id,
+                task.tenant_id,
+                &finding.package_name,
+                &finding.package_version,
+                finding.license_name.as_deref(),
+                finding.license_source,
+                &finding.file_path,
+                finding.confidence,
+                policy_violation,
+            )
+            .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!(
+                        review_id = task.review_id,
+                        error = %e,
+                        package = %finding.package_name,
+                        "failed to insert license detection"
+                    );
+                    continue;
+                }
+            };
+
+            if !policy_violation {
+                continue;
+            }
+            let Some(p) = &policy else { continue };
+            let severity = if p.policy == "blocked" {
+                "critical"
+            } else {
+                "medium"
+            };
+            let license_name = finding.license_name.as_deref().unwrap_or("unknown");
+            if let Err(e) = db::insert_license_violation(
+                &self.pool,
+                task.review_id,
+                task.tenant_id,
+                detection_id,
+                license_name,
+                &finding.package_name,
+                &p.policy,
+                severity,
+                p.actions.as_ref(),
+            )
+            .await
+            {
+                tracing::warn!(
+                    review_id = task.review_id,
+                    error = %e,
+                    package = %finding.package_name,
+                    "failed to insert license violation"
+                );
+            }
+        }
+    }
+
+    /// Records approximate token usage/cost for one AI provider call.
+    /// Best-effort — logs and continues on write failure.
+    ///
+    /// `skauswatch_ai::CompletionResponse` does not expose provider-reported
+    /// token counts (see crates/skauswatch-ai/src/lib.rs, out of scope for
+    /// this service to change), so token counts here are a `chars / 4`
+    /// approximation — the commonly-cited rule of thumb for English text —
+    /// not a billed-usage reconciliation figure. `cost_estimate` uses a
+    /// small hardcoded blended per-1K-token rate per provider for the same
+    /// reason; both are for cost-tracking dashboards, not invoicing.
+    async fn record_provider_usage(
+        &self,
+        task: &CodeScanReviewTask,
+        system_prompt: &str,
+        user_prompt: &str,
+        response_content: &str,
+        response_model: &str,
+        latency_ms: i64,
+    ) {
+        let prompt_tokens = estimate_tokens(system_prompt) + estimate_tokens(user_prompt);
+        let completion_tokens = estimate_tokens(response_content);
+        let cost_estimate =
+            estimate_cost_usd(&self.config.ai_provider, prompt_tokens, completion_tokens);
+
+        if let Err(e) = db::insert_provider_usage(
+            &self.pool,
+            task.review_id,
+            task.tenant_id,
+            &self.config.ai_provider,
+            response_model,
+            prompt_tokens,
+            completion_tokens,
+            latency_ms,
+            cost_estimate,
+        )
+        .await
+        {
+            tracing::warn!(
+                review_id = task.review_id,
+                error = %e,
+                "failed to insert provider usage"
+            );
+        }
+    }
+}
+
+/// `chars / 4` token-count approximation — see `record_provider_usage`'s doc
+/// comment for why this is heuristic rather than provider-reported.
+fn estimate_tokens(text: &str) -> i32 {
+    let chars = text.chars().count();
+    i32::try_from(chars.div_ceil(4)).unwrap_or(i32::MAX)
+}
+
+/// Best-effort blended USD-per-1K-token cost estimate. Rates are
+/// approximate and not kept in sync with provider pricing pages — see
+/// `record_provider_usage`'s doc comment.
+fn estimate_cost_usd(provider: &str, prompt_tokens: i32, completion_tokens: i32) -> Option<f64> {
+    let (in_per_1k, out_per_1k) = match provider.to_lowercase().as_str() {
+        "anthropic" => (0.003, 0.015),
+        "openai" => (0.0025, 0.01),
+        // Self-hosted: no per-token billing to estimate.
+        "ollama" => return None,
+        _ => return None,
+    };
+    Some(
+        (f64::from(prompt_tokens) / 1000.0) * in_per_1k
+            + (f64::from(completion_tokens) / 1000.0) * out_per_1k,
+    )
 }
 
 #[async_trait::async_trait]
@@ -152,50 +496,66 @@ impl StreamHandler for CodeScanReviewHandler {
             "processing CodeScan review task"
         );
 
-        // Mark review as processing.
-        if let Err(e) = db::update_review_status(&self.pool, task.review_id, "processing").await {
+        // Mark review as processing. Scoped to the task's validated tenant —
+        // a spoofed/mismatched tenant simply matches zero rows here; the
+        // get_review call immediately below is what actually surfaces the
+        // tenant mismatch as an error and aborts the task.
+        if let Err(e) =
+            db::update_review_status(&self.pool, task.review_id, task.tenant_id, "processing").await
+        {
             tracing::error!(review_id = task.review_id, error = %e, "failed to mark review processing");
             return Err(format!("db update status: {}", e).into());
         }
 
-        // Validate that review exists and fetch details.
-        let review = match db::get_review(&self.pool, task.review_id).await {
+        // Validate that review exists *for this tenant* and fetch details.
+        // A review that exists under a different tenant is indistinguishable
+        // from a missing review — see db::get_review's doc comment.
+        let review = match db::get_review(&self.pool, task.review_id, task.tenant_id).await {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(review_id = task.review_id, error = %e, "review not found");
-                let _ =
-                    db::mark_review_failed(&self.pool, task.review_id, "review not found").await;
+                let _ = db::mark_review_failed(
+                    &self.pool,
+                    task.review_id,
+                    task.tenant_id,
+                    "review not found",
+                )
+                .await;
                 return Err(format!("get review: {}", e).into());
             }
         };
 
-        // Fetch repo configuration and credentials.
-        let repo_config = match db::get_repo_config(&self.pool, review.repo_config_id).await {
+        // Fetch repo configuration and credentials, scoped to the same tenant.
+        let repo_config = match db::get_repo_config(
+            &self.pool,
+            review.repo_config_id,
+            task.tenant_id,
+        )
+        .await
+        {
             Ok(rc) => rc,
             Err(e) => {
                 tracing::error!(review_id = task.review_id, error = %e, "repo config not found");
-                let _ = db::mark_review_failed(&self.pool, task.review_id, "repo config not found")
-                    .await;
+                let _ = db::mark_review_failed(
+                    &self.pool,
+                    task.review_id,
+                    task.tenant_id,
+                    "repo config not found",
+                )
+                .await;
                 return Err(format!("get repo config: {}", e).into());
             }
         };
 
-        // Fetch git credentials (from config, sourced from GIT_TOKEN/
-        // GIT_API_BASE_URL). In production, per-repo credentials should come
-        // from the codescan_git_credentials table instead of a single
-        // worker-wide token; tracked as a follow-up (this worker only reads
-        // codescan_reviews/codescan_repo_configs/codescan_review_comments
-        // today — see services/codescan-backend/src/crypto.rs for the
-        // decrypt-side counterpart already in place for that future path).
-        let git_creds = GitCredentials {
-            provider: repo_config._provider.clone(),
-            token: self.config.git_token.clone().unwrap_or_default(),
-            base_url: self.config.git_api_base_url.clone(),
-        };
+        // Resolve git credentials: prefer the repo's own
+        // codescan_git_credentials row (see `resolve_git_credentials`),
+        // falling back to the worker-wide GIT_TOKEN/GIT_API_BASE_URL config.
+        let git_creds = self.resolve_git_credentials(&task, &repo_config).await;
         if git_creds.token.is_empty() {
             tracing::warn!(
                 review_id = task.review_id,
-                "GIT_TOKEN not set, skipping PR diff fetch"
+                "no usable git credential (neither a per-repo credential nor GIT_TOKEN), \
+                 skipping PR diff fetch"
             );
         }
 
@@ -205,7 +565,9 @@ impl StreamHandler for CodeScanReviewHandler {
             Err(e) => {
                 tracing::error!(review_id = task.review_id, error = %e, "review execution failed");
                 let error_msg = e.to_string();
-                let _ = db::mark_review_failed(&self.pool, task.review_id, &error_msg).await;
+                let _ =
+                    db::mark_review_failed(&self.pool, task.review_id, task.tenant_id, &error_msg)
+                        .await;
                 return Err(format!("execute review: {}", e).into());
             }
         };
@@ -216,6 +578,7 @@ impl StreamHandler for CodeScanReviewHandler {
             match db::insert_review_comment(
                 &self.pool,
                 task.review_id,
+                task.tenant_id,
                 &comment.file_path,
                 comment.line_start,
                 &format!("**{}**\n\n{}", comment.title, comment.body),
@@ -234,6 +597,7 @@ impl StreamHandler for CodeScanReviewHandler {
         if let Err(e) = db::complete_review(
             &self.pool,
             task.review_id,
+            task.tenant_id,
             &review_result.summary,
             comments_count,
         )
@@ -340,7 +704,26 @@ mod tests {
             git_api_base_url: None,
             _ai_timeout_sec: 60,
             _review_categories: vec![],
+            credential_encryption_key: None,
+            npm_registry_url: None,
+            pypi_registry_url: None,
+            crates_registry_url: None,
         }
+    }
+
+    /// Bootstrap tenant literal — matches manager's
+    /// `crate::auth::DEFAULT_TENANT_ID` / codescan-backend's migration seed
+    /// (see docs/v2-port/tenancy-model.md §8). Every seeded row and every
+    /// `task_entry` in this module use this tenant by default so the two
+    /// stay consistent; [`OTHER_TENANT_ID`] exists solely to prove
+    /// cross-tenant isolation.
+    const TEST_TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
+    const OTHER_TENANT_ID: &str = "00000000-0000-0000-0000-0000000000bb";
+
+    fn test_tenant() -> uuid::Uuid {
+        TEST_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("test tenant uuid: {e}"))
     }
 
     async fn seed_repo_config(pool: &PgPool, provider: &str) -> i64 {
@@ -348,7 +731,7 @@ mod tests {
             "INSERT INTO codescan_repo_configs (tenant_id, provider, repo_url, repo_name) \
              VALUES ($1, $2, $3, $4) RETURNING id",
         )
-        .bind(1i64)
+        .bind(test_tenant())
         .bind(provider)
         .bind("https://github.com/acme/widgets")
         .bind("acme/widgets")
@@ -364,7 +747,7 @@ mod tests {
              VALUES ($1, $2, 'queued') RETURNING id",
         )
         .bind(repo_config_id)
-        .bind(1i64)
+        .bind(test_tenant())
         .fetch_one(pool)
         .await
         .unwrap_or_else(|e| panic!("seed review: {e}"));
@@ -378,7 +761,7 @@ mod tests {
         fields.insert("provider".to_string(), "github".to_string());
         fields.insert("repo_name".to_string(), "acme/widgets".to_string());
         fields.insert("pr_url".to_string(), pr_url.to_string());
-        fields.insert("tenant_id".to_string(), "1".to_string());
+        fields.insert("tenant_id".to_string(), TEST_TENANT_ID.to_string());
         StreamEntry {
             id: "1-0".to_string(),
             fields,
@@ -716,5 +1099,610 @@ mod tests {
         let comment_text: String = comment_rows[0].get(0);
         assert!(comment_text.contains("Nit"));
         assert!(comment_text.contains("tidy up"));
+    }
+
+    /// End-to-end tenant-isolation regression: a task claiming a tenant that
+    /// does not own the review must fail, and — critically — must leave the
+    /// review row completely untouched (not even flipped to "failed") since
+    /// every write in the handler is scoped to the task's tenant.
+    #[tokio::test]
+    async fn handle_fails_and_does_not_touch_the_row_when_task_tenant_does_not_own_the_review() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool, "github").await;
+        let review = seed_review(&pool, repo).await;
+        let producer = test_producer().await;
+        let handler = CodeScanReviewHandler::new(pool.clone(), producer, base_config("ollama"));
+
+        let mut entry = task_entry(review, repo, "https://github.com/acme/widgets/pull/1");
+        entry
+            .fields
+            .insert("tenant_id".to_string(), OTHER_TENANT_ID.to_string());
+
+        let result = handler.handle(&entry).await;
+        assert!(
+            result.is_err(),
+            "a task claiming the wrong tenant must be rejected"
+        );
+
+        let row = sqlx::query("SELECT status FROM codescan_reviews WHERE id = $1")
+            .bind(review)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("select review: {e}"));
+        assert_eq!(
+            row.get::<String, _>(0),
+            "queued",
+            "review must be untouched by a task claiming the wrong tenant"
+        );
+    }
+
+    // -- Git credential resolution (per-repo codescan_git_credentials wiring) --
+
+    fn test_encryption_key() -> String {
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [4u8; 32])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_repo_config_with_credential(
+        pool: &PgPool,
+        provider: &str,
+        credential_tenant: uuid::Uuid,
+        credential_type: &str,
+        is_active: bool,
+        token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+        plaintext_token: &str,
+    ) -> (i64, i64) {
+        let cipher = skauswatch_vault::CredentialCipher::from_base64_key(&test_encryption_key())
+            .unwrap_or_else(|e| panic!("cipher: {e:?}"));
+        let encrypted = cipher
+            .encrypt(plaintext_token)
+            .unwrap_or_else(|e| panic!("encrypt: {e:?}"));
+        let cred_row = sqlx::query(
+            "INSERT INTO codescan_git_credentials \
+             (user_id, tenant_id, platform, credential_type, encrypted_token, is_active, token_expires_at) \
+             VALUES (1, $1, $2, $3, $4, $5, $6) RETURNING id",
+        )
+        .bind(credential_tenant)
+        .bind(provider)
+        .bind(credential_type)
+        .bind(&encrypted)
+        .bind(is_active)
+        .bind(token_expires_at)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed credential: {e}"));
+        let credential_id: i64 = cred_row.get(0);
+
+        let repo_row = sqlx::query(
+            "INSERT INTO codescan_repo_configs (tenant_id, provider, repo_url, repo_name, credential_id) \
+             VALUES ($1, $2, 'https://github.com/acme/widgets', 'acme/widgets', $3) RETURNING id",
+        )
+        .bind(test_tenant())
+        .bind(provider)
+        .bind(credential_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed repo config: {e}"));
+        (repo_row.get(0), credential_id)
+    }
+
+    /// Every credential-resolution test below fetches a real (non-empty)
+    /// diff, so `execute_pipeline` always reaches the AI-provider call —
+    /// this mocks Ollama to return zero findings rather than hitting a real
+    /// (likely absent, in CI) local Ollama instance.
+    async fn mount_empty_ollama_mock() -> MockServer {
+        let ollama_mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {"content": "[]"}
+            })))
+            .mount(&ollama_mock)
+            .await;
+        ollama_mock
+    }
+
+    #[tokio::test]
+    async fn handle_uses_the_per_repo_credential_over_the_worker_wide_git_token() {
+        let pool = test_pool().await;
+        let (repo, _credential_id) = seed_repo_config_with_credential(
+            &pool,
+            "github",
+            test_tenant(),
+            "token",
+            true,
+            None,
+            "ghp_per_repo_secret",
+        )
+        .await;
+        let review = seed_review(&pool, repo).await;
+        let producer = test_producer().await;
+
+        let github_mock = MockServer::start().await;
+        Mock::given(path("/repos/acme/widgets/pulls/1"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "token ghp_per_repo_secret",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+y\n"),
+            )
+            .mount(&github_mock)
+            .await;
+        let ollama_mock = mount_empty_ollama_mock().await;
+
+        let mut cfg = base_config("ollama");
+        cfg.credential_encryption_key = Some(test_encryption_key());
+        // Deliberately a different value than the credential's plaintext —
+        // proves the per-repo credential (not this) was used.
+        cfg.git_token = Some("worker-wide-token-must-not-be-used".to_string());
+        cfg.git_api_base_url = Some(github_mock.uri());
+        cfg.ollama_url = ollama_mock.uri();
+        let handler = CodeScanReviewHandler::new(pool.clone(), producer, cfg);
+        let entry = task_entry(review, repo, "https://github.com/acme/widgets/pull/1");
+
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_falls_back_to_git_token_when_encryption_key_is_unset() {
+        let pool = test_pool().await;
+        let (repo, _credential_id) = seed_repo_config_with_credential(
+            &pool,
+            "github",
+            test_tenant(),
+            "token",
+            true,
+            None,
+            "ghp_per_repo_secret",
+        )
+        .await;
+        let review = seed_review(&pool, repo).await;
+        let producer = test_producer().await;
+
+        let github_mock = MockServer::start().await;
+        Mock::given(path("/repos/acme/widgets/pulls/1"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "token fallback-token",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+y\n"),
+            )
+            .mount(&github_mock)
+            .await;
+        let ollama_mock = mount_empty_ollama_mock().await;
+
+        let mut cfg = base_config("ollama");
+        // credential_encryption_key intentionally left None.
+        cfg.git_token = Some("fallback-token".to_string());
+        cfg.git_api_base_url = Some(github_mock.uri());
+        cfg.ollama_url = ollama_mock.uri();
+        let handler = CodeScanReviewHandler::new(pool.clone(), producer, cfg);
+        let entry = task_entry(review, repo, "https://github.com/acme/widgets/pull/1");
+
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_falls_back_to_git_token_when_credential_is_inactive() {
+        let pool = test_pool().await;
+        let (repo, _credential_id) = seed_repo_config_with_credential(
+            &pool,
+            "github",
+            test_tenant(),
+            "token",
+            false,
+            None,
+            "ghp_inactive",
+        )
+        .await;
+        let review = seed_review(&pool, repo).await;
+        let producer = test_producer().await;
+
+        let github_mock = MockServer::start().await;
+        Mock::given(path("/repos/acme/widgets/pulls/1"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "token fallback-token",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+y\n"),
+            )
+            .mount(&github_mock)
+            .await;
+        let ollama_mock = mount_empty_ollama_mock().await;
+
+        let mut cfg = base_config("ollama");
+        cfg.credential_encryption_key = Some(test_encryption_key());
+        cfg.git_token = Some("fallback-token".to_string());
+        cfg.git_api_base_url = Some(github_mock.uri());
+        cfg.ollama_url = ollama_mock.uri();
+        let handler = CodeScanReviewHandler::new(pool.clone(), producer, cfg);
+        let entry = task_entry(review, repo, "https://github.com/acme/widgets/pull/1");
+
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_falls_back_to_git_token_when_credential_is_expired() {
+        let pool = test_pool().await;
+        let expired = Utc::now() - chrono::Duration::hours(1);
+        let (repo, _credential_id) = seed_repo_config_with_credential(
+            &pool,
+            "github",
+            test_tenant(),
+            "token",
+            true,
+            Some(expired),
+            "ghp_expired",
+        )
+        .await;
+        let review = seed_review(&pool, repo).await;
+        let producer = test_producer().await;
+
+        let github_mock = MockServer::start().await;
+        Mock::given(path("/repos/acme/widgets/pulls/1"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "token fallback-token",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+y\n"),
+            )
+            .mount(&github_mock)
+            .await;
+        let ollama_mock = mount_empty_ollama_mock().await;
+
+        let mut cfg = base_config("ollama");
+        cfg.credential_encryption_key = Some(test_encryption_key());
+        cfg.git_token = Some("fallback-token".to_string());
+        cfg.git_api_base_url = Some(github_mock.uri());
+        cfg.ollama_url = ollama_mock.uri();
+        let handler = CodeScanReviewHandler::new(pool.clone(), producer, cfg);
+        let entry = task_entry(review, repo, "https://github.com/acme/widgets/pull/1");
+
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn handle_falls_back_to_git_token_when_credential_belongs_to_another_tenant() {
+        let pool = test_pool().await;
+        // Credential row is owned by a *different* tenant than the repo
+        // config/review/task below — a data inconsistency that must never
+        // let one tenant's task use another tenant's credential.
+        let (repo, _credential_id) = seed_repo_config_with_credential(
+            &pool,
+            "github",
+            other_tenant(),
+            "token",
+            true,
+            None,
+            "ghp_wrong_tenant",
+        )
+        .await;
+        // seed_repo_config_with_credential always stamps the repo config
+        // itself under `test_tenant()`, so this exercises exactly the
+        // credential-ownership mismatch described above.
+        let review = seed_review(&pool, repo).await;
+        let producer = test_producer().await;
+
+        let github_mock = MockServer::start().await;
+        Mock::given(path("/repos/acme/widgets/pulls/1"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "token fallback-token",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+y\n"),
+            )
+            .mount(&github_mock)
+            .await;
+        let ollama_mock = mount_empty_ollama_mock().await;
+
+        let mut cfg = base_config("ollama");
+        cfg.credential_encryption_key = Some(test_encryption_key());
+        cfg.git_token = Some("fallback-token".to_string());
+        cfg.git_api_base_url = Some(github_mock.uri());
+        cfg.ollama_url = ollama_mock.uri();
+        let handler = CodeScanReviewHandler::new(pool.clone(), producer, cfg);
+        let entry = task_entry(review, repo, "https://github.com/acme/widgets/pull/1");
+
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    fn other_tenant() -> uuid::Uuid {
+        OTHER_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("other tenant uuid: {e}"))
+    }
+
+    #[tokio::test]
+    async fn handle_falls_back_to_git_token_when_credential_platform_does_not_match_repo_provider()
+    {
+        let pool = test_pool().await;
+        // Credential is a gitlab token, but the repo config's own `provider`
+        // column is github — a data inconsistency (misconfigured
+        // credential_id) that must never be used to auth a github API call.
+        let cipher = skauswatch_vault::CredentialCipher::from_base64_key(&test_encryption_key())
+            .unwrap_or_else(|e| panic!("cipher: {e:?}"));
+        let encrypted = cipher
+            .encrypt("glpat_mismatched_platform")
+            .unwrap_or_else(|e| panic!("encrypt: {e:?}"));
+        let cred_row = sqlx::query(
+            "INSERT INTO codescan_git_credentials \
+             (user_id, tenant_id, platform, credential_type, encrypted_token, is_active) \
+             VALUES (1, $1, 'gitlab', 'token', $2, true) RETURNING id",
+        )
+        .bind(test_tenant())
+        .bind(&encrypted)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed credential: {e}"));
+        let credential_id: i64 = cred_row.get(0);
+        let repo_row = sqlx::query(
+            "INSERT INTO codescan_repo_configs (tenant_id, provider, repo_url, repo_name, credential_id) \
+             VALUES ($1, 'github', 'https://github.com/acme/widgets', 'acme/widgets', $2) RETURNING id",
+        )
+        .bind(test_tenant())
+        .bind(credential_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed repo config: {e}"));
+        let repo: i64 = repo_row.get(0);
+        let review = seed_review(&pool, repo).await;
+        let producer = test_producer().await;
+
+        let github_mock = MockServer::start().await;
+        Mock::given(path("/repos/acme/widgets/pulls/1"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "token fallback-token",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("--- a/f\n+++ b/f\n@@ -1 +1 @@\n-x\n+y\n"),
+            )
+            .mount(&github_mock)
+            .await;
+        let ollama_mock = mount_empty_ollama_mock().await;
+
+        let mut cfg = base_config("ollama");
+        cfg.credential_encryption_key = Some(test_encryption_key());
+        cfg.git_token = Some("fallback-token".to_string());
+        cfg.git_api_base_url = Some(github_mock.uri());
+        cfg.ollama_url = ollama_mock.uri();
+        let handler = CodeScanReviewHandler::new(pool.clone(), producer, cfg);
+        let entry = task_entry(review, repo, "https://github.com/acme/widgets/pull/1");
+
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    // -- provider_usage / review_detections wiring --
+
+    #[tokio::test]
+    async fn handle_records_provider_usage_and_language_detection_on_success() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool, "github").await;
+        let review = seed_review(&pool, repo).await;
+        let producer = test_producer().await;
+
+        let github_mock = MockServer::start().await;
+        Mock::given(path("/repos/acme/widgets/pulls/10"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n",
+                ),
+            )
+            .mount(&github_mock)
+            .await;
+
+        let ollama_mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {"content": "[]"}
+            })))
+            .mount(&ollama_mock)
+            .await;
+
+        let mut cfg = base_config("ollama");
+        cfg.git_token = Some("test-token".to_string());
+        cfg.git_api_base_url = Some(github_mock.uri());
+        cfg.ollama_url = ollama_mock.uri();
+        let handler = CodeScanReviewHandler::new(pool.clone(), producer, cfg);
+        let entry = task_entry(review, repo, "https://github.com/acme/widgets/pull/10");
+
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let usage_row = sqlx::query(
+            "SELECT provider, prompt_tokens, completion_tokens, total_tokens, latency_ms, tenant_id \
+             FROM codescan_provider_usage WHERE review_id = $1",
+        )
+        .bind(review)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select provider usage: {e}"));
+        assert_eq!(usage_row.get::<String, _>(0), "ollama");
+        assert!(usage_row.get::<i32, _>(1) > 0);
+        assert_eq!(
+            usage_row.get::<i32, _>(3),
+            usage_row.get::<i32, _>(1) + usage_row.get::<i32, _>(2)
+        );
+        assert!(usage_row.get::<i32, _>(4) >= 0);
+        assert_eq!(usage_row.get::<uuid::Uuid, _>(5), test_tenant());
+
+        let detection_row = sqlx::query(
+            "SELECT detection_type, name, file_count, tenant_id \
+             FROM codescan_review_detections WHERE review_id = $1",
+        )
+        .bind(review)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select review detection: {e}"));
+        assert_eq!(detection_row.get::<String, _>(0), "language");
+        assert_eq!(detection_row.get::<String, _>(1), "Rust");
+        assert_eq!(detection_row.get::<i32, _>(2), 1);
+        assert_eq!(detection_row.get::<uuid::Uuid, _>(3), test_tenant());
+    }
+
+    // -- license-compliance scan + policy evaluation wiring --
+
+    #[tokio::test]
+    async fn handle_records_a_license_violation_for_a_blocked_license() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool, "github").await;
+        let review = seed_review(&pool, repo).await;
+        let producer = test_producer().await;
+
+        sqlx::query(
+            "INSERT INTO codescan_license_policies (tenant_id, license_name, policy, actions) \
+             VALUES ($1, 'GPL-3.0', 'blocked', $2)",
+        )
+        .bind(test_tenant())
+        .bind(serde_json::json!(["block_merge"]))
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed license policy: {e}"));
+
+        let github_mock = MockServer::start().await;
+        Mock::given(path("/repos/acme/widgets/pulls/11"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-x\n+  \"copyleft-pkg\": \"1.0.0\"\n",
+            ))
+            .mount(&github_mock)
+            .await;
+
+        let npm_mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/copyleft-pkg"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"license": "GPL-3.0"})),
+            )
+            .mount(&npm_mock)
+            .await;
+
+        let ollama_mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {"content": "[]"}
+            })))
+            .mount(&ollama_mock)
+            .await;
+
+        let mut cfg = base_config("ollama");
+        cfg.git_token = Some("test-token".to_string());
+        cfg.git_api_base_url = Some(github_mock.uri());
+        cfg.ollama_url = ollama_mock.uri();
+        cfg.npm_registry_url = Some(npm_mock.uri());
+        let handler = CodeScanReviewHandler::new(pool.clone(), producer, cfg);
+        let entry = task_entry(review, repo, "https://github.com/acme/widgets/pull/11");
+
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let detection_row = sqlx::query(
+            "SELECT package_name, license_name, policy_violation, tenant_id \
+             FROM codescan_license_detections WHERE review_id = $1",
+        )
+        .bind(review)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select license detection: {e}"));
+        assert_eq!(detection_row.get::<String, _>(0), "copyleft-pkg");
+        assert_eq!(detection_row.get::<String, _>(1), "GPL-3.0");
+        assert!(detection_row.get::<bool, _>(2));
+        assert_eq!(detection_row.get::<uuid::Uuid, _>(3), test_tenant());
+
+        let violation_row = sqlx::query(
+            "SELECT license_name, package_name, policy, severity, status, tenant_id \
+             FROM codescan_license_violations WHERE review_id = $1",
+        )
+        .bind(review)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select license violation: {e}"));
+        assert_eq!(violation_row.get::<String, _>(0), "GPL-3.0");
+        assert_eq!(violation_row.get::<String, _>(1), "copyleft-pkg");
+        assert_eq!(violation_row.get::<String, _>(2), "blocked");
+        assert_eq!(violation_row.get::<String, _>(3), "critical");
+        assert_eq!(violation_row.get::<String, _>(4), "open");
+        assert_eq!(violation_row.get::<uuid::Uuid, _>(5), test_tenant());
+    }
+
+    #[tokio::test]
+    async fn handle_records_a_license_detection_without_a_violation_when_no_policy_is_configured() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool, "github").await;
+        let review = seed_review(&pool, repo).await;
+        let producer = test_producer().await;
+
+        let github_mock = MockServer::start().await;
+        Mock::given(path("/repos/acme/widgets/pulls/12"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "--- a/package.json\n+++ b/package.json\n@@ -1 +1 @@\n-x\n+  \"permissive-pkg\": \"1.0.0\"\n",
+            ))
+            .mount(&github_mock)
+            .await;
+
+        let npm_mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/permissive-pkg"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"license": "MIT"})),
+            )
+            .mount(&npm_mock)
+            .await;
+
+        let ollama_mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {"content": "[]"}
+            })))
+            .mount(&ollama_mock)
+            .await;
+
+        let mut cfg = base_config("ollama");
+        cfg.git_token = Some("test-token".to_string());
+        cfg.git_api_base_url = Some(github_mock.uri());
+        cfg.ollama_url = ollama_mock.uri();
+        cfg.npm_registry_url = Some(npm_mock.uri());
+        let handler = CodeScanReviewHandler::new(pool.clone(), producer, cfg);
+        let entry = task_entry(review, repo, "https://github.com/acme/widgets/pull/12");
+
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let detection_row = sqlx::query(
+            "SELECT policy_violation FROM codescan_license_detections WHERE review_id = $1",
+        )
+        .bind(review)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select license detection: {e}"));
+        assert!(!detection_row.get::<bool, _>(0));
+
+        let violation_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM codescan_license_violations WHERE review_id = $1",
+        )
+        .bind(review)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("count violations: {e}"));
+        assert_eq!(violation_count, 0);
     }
 }

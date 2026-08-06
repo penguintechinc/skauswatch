@@ -59,6 +59,7 @@ async fn register_sends_hmac_header_and_manager_contract_shape() {
             "os_version": "6.8.0",
             "agent_version": "2.0.0",
             "metadata": {"collectors": ["process", "file", "network"]},
+            "enrollment_token": "enroll-tok-integration",
         })))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "message": "Agent registered successfully",
@@ -78,6 +79,7 @@ async fn register_sends_hmac_header_and_manager_contract_shape() {
         os_version: "6.8.0".to_owned(),
         agent_version: "2.0.0".to_owned(),
         metadata: json!({"collectors": ["process", "file", "network"]}),
+        enrollment_token: "enroll-tok-integration".to_owned(),
     };
 
     let result = reporter.register(&req).await;
@@ -107,6 +109,9 @@ async fn register_accepts_200_for_re_registration() {
         os_version: String::new(),
         agent_version: "2.0.0".to_owned(),
         metadata: json!({}),
+        // Re-registration of an existing agent_id — the manager ignores
+        // this field on that path (see `routes/endpoint.rs::register_agent`).
+        enrollment_token: String::new(),
     };
     assert!(reporter.register(&req).await.is_ok());
 }
@@ -129,6 +134,7 @@ async fn register_surfaces_401_as_error() {
         os_version: String::new(),
         agent_version: "2.0.0".to_owned(),
         metadata: json!({}),
+        enrollment_token: String::new(),
     };
     let result = reporter.register(&req).await;
     assert!(

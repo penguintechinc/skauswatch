@@ -65,6 +65,14 @@ async fn serve() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
 
+    // Envelope encryption for `static`-mode stored bucket credentials
+    // (security finding #2 — see `skauswatch_s3::credentials`). Same
+    // `VAULT_MEK*` env vars as the `vault`/`worker-vault-sync` services —
+    // one master-key infrastructure product-wide. Fails startup rather than
+    // running with a service that can never decrypt a stored credential.
+    let envelope = skauswatch_vault::EnvelopeEncryption::from_env()
+        .map_err(|e| anyhow::anyhow!("envelope encryption init failed: {e}"))?;
+
     // Producer (per-object re-dispatch + onward events) and consumer share the
     // v1 REDIS_* semantics; startup fails if the broker is unreachable.
     let producer = StreamProducer::connect(
@@ -91,7 +99,11 @@ async fn serve() -> anyhow::Result<()> {
         c.batch = cfg.max_concurrent_tasks.max(1);
         c
     };
-    let handler = S3ScanHandler::new(pool, producer, cfg.clone());
+    let handler = S3ScanHandler::new(pool, producer, cfg.clone(), envelope);
+    let handler = match own_aws_federation().await {
+        Some((identity, role_arn)) => handler.with_federation(identity, role_arn),
+        None => handler,
+    };
 
     // Health/readiness + metrics endpoints (standard telemetry surface).
     let readiness = skauswatch_telemetry::Readiness::new();
@@ -127,6 +139,50 @@ async fn serve() -> anyhow::Result<()> {
 /// Resolves once the shutdown broadcast fires, gating graceful shutdown.
 async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
     let _ = rx.wait_for(|stop| *stop).await;
+}
+
+/// Resolves this worker's own-AWS JWT-SVID federation, if configured — see
+/// `docs/v2-port/aws-identity-runbook.md`. Opt-in via `AWS_FEDERATION_ROLE_ARN`
+/// (this worker's own service-owned IAM role, never a customer's): when
+/// unset, this returns `None` immediately without even attempting to reach
+/// a SPIRE agent, leaving `adhoc_client` byte-for-byte unchanged from
+/// before this feature existed. When set but the local SPIFFE identity is
+/// unavailable (no SPIRE agent reachable), logs a warning and returns
+/// `None` — federation is an opportunistic enhancement over the default
+/// AWS credential-provider chain, never a startup-blocking requirement.
+async fn own_aws_federation() -> Option<(
+    std::sync::Arc<dyn skauswatch_s3::credentials::JwtSvidSource>,
+    String,
+)> {
+    let role_arn = std::env::var("AWS_FEDERATION_ROLE_ARN")
+        .ok()
+        .filter(|v| !v.is_empty())?;
+    if skauswatch_s3::credentials::AwsIdentityModeKind::from_env()
+        != skauswatch_s3::credentials::AwsIdentityModeKind::Spire
+    {
+        tracing::info!(
+            "AWS_FEDERATION_ROLE_ARN is set but AWS_IDENTITY_MODE is not \"spire\" — own-AWS \
+             federation skipped, deferring to the default AWS credential-provider chain"
+        );
+        return None;
+    }
+    match skauswatch_identity::IdentityProvider::connect().await {
+        Ok(identity) => {
+            tracing::info!(
+                "own-AWS JWT-SVID federation enabled for ad-hoc S3 access (AWS_FEDERATION_ROLE_ARN set)"
+            );
+            Some((std::sync::Arc::new(identity), role_arn))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "AWS_FEDERATION_ROLE_ARN is set but no SPIFFE identity is available — \
+                 own-AWS federation disabled, ad-hoc S3 access falls back to the default \
+                 AWS credential-provider chain"
+            );
+            None
+        }
+    }
 }
 
 async fn shutdown_signal() {

@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
 use crate::models::{RevokeRequest, X509CertificateRequest};
 use crate::state::AppState;
+use crate::tenant::TenantId;
 
 use super::{page_params, user_id};
 
@@ -48,6 +49,7 @@ fn paginated(items: Vec<Value>, total: i64, page: i64, page_size: i64) -> Json<V
 )]
 pub async fn issue(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     headers: HeaderMap,
     body: ApiJson<X509CertificateRequest>,
 ) -> Result<Response, ApiError> {
@@ -56,7 +58,7 @@ pub async fn issue(
     let params = req.into_issue_params();
     let result = st
         .manager
-        .issue_x509(params, user_id(&headers).as_deref())
+        .issue_x509(params, user_id(&headers).as_deref(), tenant)
         .await?;
     Ok((StatusCode::CREATED, Json(result)).into_response())
 }
@@ -81,6 +83,7 @@ pub async fn issue(
 )]
 pub async fn get_cert(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Path(cert_id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
@@ -90,7 +93,7 @@ pub async fn get_cert(
         .unwrap_or(false);
     let mut cert = st
         .manager
-        .get_x509(Some(&cert_id), None, true)
+        .get_x509(Some(&cert_id), None, true, tenant)
         .await?
         .ok_or_else(|| ApiError::NotFound("Certificate not found".into()))?;
     #[allow(clippy::collapsible_if)]
@@ -119,11 +122,12 @@ pub async fn get_cert(
 )]
 pub async fn get_by_serial(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Path(serial): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let mut cert = st
         .manager
-        .get_x509(None, Some(&serial), true)
+        .get_x509(None, Some(&serial), true, tenant)
         .await?
         .ok_or_else(|| ApiError::NotFound("Certificate not found".into()))?;
     if let Some(o) = cert.as_object_mut() {
@@ -150,6 +154,7 @@ pub async fn get_by_serial(
 )]
 pub async fn revoke_cert(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Path(cert_id): Path<String>,
     headers: HeaderMap,
     body: ApiJson<RevokeRequest>,
@@ -161,6 +166,7 @@ pub async fn revoke_cert(
             None,
             &body.0.reason,
             user_id(&headers).as_deref(),
+            tenant,
         )
         .await?;
     if !ok {
@@ -190,6 +196,7 @@ pub async fn revoke_cert(
 )]
 pub async fn revoke_by_serial(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Path(serial): Path<String>,
     headers: HeaderMap,
     body: ApiJson<RevokeRequest>,
@@ -201,6 +208,7 @@ pub async fn revoke_by_serial(
             Some(&serial),
             &body.0.reason,
             user_id(&headers).as_deref(),
+            tenant,
         )
         .await?;
     if !ok {
@@ -234,6 +242,7 @@ pub async fn revoke_by_serial(
 )]
 pub async fn list(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Query(q): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>, ApiError> {
     let (page, page_size) = page_params(&q);
@@ -248,6 +257,7 @@ pub async fn list(
             expires_before,
             page,
             page_size,
+            tenant,
         )
         .await?;
     Ok(paginated(items, total, page, page_size))
@@ -291,6 +301,7 @@ fn fifty() -> i64 {
 )]
 pub async fn search(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     body: ApiJson<SearchBody>,
 ) -> Result<Json<Value>, ApiError> {
     let b = body.0;
@@ -306,6 +317,7 @@ pub async fn search(
             expires_before,
             b.page,
             b.page_size,
+            tenant,
         )
         .await?;
     Ok(paginated(items, total, b.page, b.page_size))
@@ -327,8 +339,12 @@ pub async fn search(
         (status = 500, description = "Internal server error", body = ErrorResponse),
     ),
 )]
-pub async fn get_crl(State(st): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
-    let crl = st.manager.generate_x509_crl().await?;
+pub async fn get_crl(
+    State(st): State<AppState>,
+    TenantId(tenant): TenantId,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let crl = st.manager.generate_x509_crl(tenant).await?;
     if headers.get(header::ACCEPT).and_then(|v| v.to_str().ok()) == Some("application/pkix-crl") {
         let pem = crl
             .get("crl_pem")
@@ -366,6 +382,7 @@ pub async fn get_crl(State(st): State<AppState>, headers: HeaderMap) -> Result<R
 )]
 pub async fn ocsp(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
@@ -384,7 +401,10 @@ pub async fn ocsp(
         return Err(ApiError::BadRequest("serial_number required".into()));
     };
     let now = skauswatch_streams::py_now_isoformat();
-    let cert = st.manager.get_x509(None, Some(serial), false).await?;
+    let cert = st
+        .manager
+        .get_x509(None, Some(serial), false, tenant)
+        .await?;
     let Some(cert) = cert else {
         return Ok(Json(serde_json::json!({
             "serial_number": serial,
@@ -484,11 +504,12 @@ pub async fn download_ca_cert(State(st): State<AppState>) -> Response {
 )]
 pub async fn cert_status(
     State(st): State<AppState>,
+    TenantId(tenant): TenantId,
     Path(cert_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let cert = st
         .manager
-        .get_x509(Some(&cert_id), None, false)
+        .get_x509(Some(&cert_id), None, false, tenant)
         .await?
         .ok_or_else(|| ApiError::NotFound("Certificate not found".into()))?;
     let na = cert
@@ -525,6 +546,7 @@ mod tests {
     use axum::http::StatusCode;
 
     use crate::state::AppStateInner;
+    use crate::tenant::TENANT_HEADER;
 
     use super::paginated;
 
@@ -551,12 +573,19 @@ mod tests {
         }
     }
 
+    /// A fixed tenant for tests that don't specifically exercise
+    /// cross-tenant isolation.
+    fn tenant() -> uuid::Uuid {
+        uuid::Uuid::new_v4()
+    }
+
     #[tokio::test]
     async fn issue_rejects_invalid_body_with_validation_details() {
         let server = test_server();
         let res = server
             .post("/api/v1/certificates")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({ "subject": "", "key_algorithm": "DSA" }))
             .await;
         res.assert_status(StatusCode::BAD_REQUEST);
@@ -571,6 +600,7 @@ mod tests {
         let res = server
             .post("/api/v1/certificates")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({
                 "subject": "CN=route-test.example.com",
                 "san_dns": ["route-test.example.com"],
@@ -581,12 +611,27 @@ mod tests {
         assert_eq!(body["error"], "Internal Server Error");
     }
 
+    /// Regression: issuance without a tenant header must be rejected before
+    /// touching the CA or DB at all — this is a CA, so a missing tenant
+    /// filter/stamp is a severe-impact bug, not a cosmetic one.
+    #[tokio::test]
+    async fn issue_without_tenant_header_is_403() {
+        let server = test_server();
+        let res = server
+            .post("/api/v1/certificates")
+            .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .json(&serde_json::json!({ "subject": "CN=no-tenant.example.com" }))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
     #[tokio::test]
     async fn get_cert_with_unparseable_id_is_404_without_touching_db() {
         let server = test_server();
         let res = server
             .get("/api/v1/certificates/not-a-uuid")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .await;
         res.assert_status(StatusCode::NOT_FOUND);
     }
@@ -597,6 +642,7 @@ mod tests {
         let res = server
             .get(&format!("/api/v1/certificates/{}", uuid::Uuid::new_v4()))
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .add_query_param("include_private_key", "true")
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
@@ -608,6 +654,7 @@ mod tests {
         let res = server
             .get("/api/v1/certificates/serial/abc123")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -618,6 +665,7 @@ mod tests {
         let res = server
             .post("/api/v1/certificates/not-a-uuid/revoke")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({}))
             .await;
         res.assert_status(StatusCode::NOT_FOUND);
@@ -632,6 +680,7 @@ mod tests {
                 uuid::Uuid::new_v4()
             ))
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({ "reason": "key_compromise" }))
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
@@ -643,6 +692,7 @@ mod tests {
         let res = server
             .post("/api/v1/certificates/serial/abc123/revoke")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({}))
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
@@ -654,6 +704,7 @@ mod tests {
         let res = server
             .get("/api/v1/certificates")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .add_query_param("status", "active")
             .add_query_param("subject", "example")
             .add_query_param("expires_before", "2030-01-01T00:00:00")
@@ -669,6 +720,7 @@ mod tests {
         let bad = server
             .post("/api/v1/certificates/search")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .bytes(axum::body::Bytes::from_static(b"not json"))
             .await;
         bad.assert_status(StatusCode::BAD_REQUEST);
@@ -676,6 +728,7 @@ mod tests {
         let ok = server
             .post("/api/v1/certificates/search")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({ "subject": "example", "status": "active" }))
             .await;
         ok.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
@@ -687,6 +740,7 @@ mod tests {
         let res = server
             .get("/api/v1/certificates/crl")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .add_header(axum::http::header::ACCEPT, "application/pkix-crl")
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
@@ -698,6 +752,7 @@ mod tests {
         let res = server
             .post("/api/v1/certificates/ocsp")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .add_header(axum::http::header::CONTENT_TYPE, "application/ocsp-request")
             .bytes(axum::body::Bytes::from_static(b"\x30\x03"))
             .await;
@@ -710,6 +765,7 @@ mod tests {
         let res = server
             .post("/api/v1/certificates/ocsp")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({}))
             .await;
         res.assert_status(StatusCode::BAD_REQUEST);
@@ -721,6 +777,7 @@ mod tests {
         let res = server
             .post("/api/v1/certificates/ocsp")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .json(&serde_json::json!({ "serial_number": "abc123" }))
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
@@ -766,6 +823,7 @@ mod tests {
         let res = server
             .get("/api/v1/certificates/not-a-uuid/status")
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .await;
         res.assert_status(StatusCode::NOT_FOUND);
     }
@@ -779,6 +837,7 @@ mod tests {
                 uuid::Uuid::new_v4()
             ))
             .add_header(axum::http::header::AUTHORIZATION, bearer())
+            .add_header(TENANT_HEADER, tenant().to_string())
             .await;
         res.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -797,6 +856,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .json(&serde_json::json!({ "subject": subject, "san_dns": ["www.example.com"] }))
             .await;
@@ -818,6 +881,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .await;
         by_id.assert_status_ok();
         let by_id_json: serde_json::Value = by_id.json();
@@ -829,6 +896,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .add_query_param("include_private_key", "true")
             .await;
@@ -845,6 +916,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .await;
         by_serial.assert_status_ok();
@@ -865,6 +940,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .json(&serde_json::json!({ "reason": "key_compromise" }))
             .await;
         res.assert_status_ok();
@@ -876,6 +955,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .await;
         status.assert_status_ok();
@@ -889,6 +972,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .json(&serde_json::json!({}))
             .await;
@@ -907,6 +994,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .await;
         list_res.assert_status_ok();
         let list_json: serde_json::Value = list_res.json();
@@ -917,6 +1008,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .json(&serde_json::json!({ "subject": "route-db-list-1" }))
             .await;
@@ -936,6 +1031,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .json(&serde_json::json!({}))
             .await
             .assert_status_ok();
@@ -945,6 +1044,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .await;
         json_res.assert_status_ok();
@@ -961,6 +1064,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .add_header(axum::http::header::ACCEPT, "application/pkix-crl")
             .await;
@@ -985,6 +1092,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .json(&serde_json::json!({ "serial_number": serial }))
             .await;
         good.assert_status_ok();
@@ -996,6 +1107,10 @@ mod tests {
             .add_header(
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
             )
             .json(&serde_json::json!({ "serial_number": "does-not-exist" }))
             .await;
@@ -1009,6 +1124,10 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .json(&serde_json::json!({ "reason": "ca_compromise" }))
             .await
             .assert_status_ok();
@@ -1018,11 +1137,103 @@ mod tests {
                 axum::http::header::AUTHORIZATION,
                 crate::routes::test_support::bearer(),
             )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                crate::routes::test_support::tenant().to_string(),
+            )
             .json(&serde_json::json!({ "serial_number": serial }))
             .await;
         revoked.assert_status_ok();
         let revoked_json: serde_json::Value = revoked.json();
         assert_eq!(revoked_json["status"], "revoked");
         assert_eq!(revoked_json["revocation_reason"], "ca_compromise");
+    }
+
+    /// Regression: tenant A's issued certificate must be invisible — not
+    /// gettable, not listable, not revocable — to a caller presenting
+    /// tenant B's `X-Tenant-ID` header, even with a fully valid bearer
+    /// token. This is a CA; cross-tenant visibility here is a severe bug.
+    #[tokio::test]
+    async fn tenant_b_cannot_get_list_or_revoke_tenant_as_certificate() {
+        let server = db_server().await;
+        let tenant_a = uuid::Uuid::new_v4();
+        let tenant_b = uuid::Uuid::new_v4();
+
+        let issued = server
+            .post("/api/v1/certificates")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(crate::tenant::TENANT_HEADER, tenant_a.to_string())
+            .json(&serde_json::json!({ "subject": "CN=tenant-a-isolation.example.com" }))
+            .await;
+        issued.assert_status(StatusCode::CREATED);
+        let issued: serde_json::Value = issued.json();
+        let id = issued["id"].as_str().unwrap();
+        let serial = issued["serial_number"].as_str().unwrap();
+
+        // GET by id / by serial: tenant B sees nothing.
+        server
+            .get(&format!("/api/v1/certificates/{id}"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(crate::tenant::TENANT_HEADER, tenant_b.to_string())
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        server
+            .get(&format!("/api/v1/certificates/serial/{serial}"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(crate::tenant::TENANT_HEADER, tenant_b.to_string())
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+
+        // List: tenant B's list never contains tenant A's row.
+        let list_res = server
+            .get("/api/v1/certificates")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(crate::tenant::TENANT_HEADER, tenant_b.to_string())
+            .await;
+        list_res.assert_status_ok();
+        let list_json: serde_json::Value = list_res.json();
+        assert!(
+            list_json["certificates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["id"] != id)
+        );
+
+        // Revoke: tenant B's attempt is a 404, and the certificate stays
+        // active for tenant A.
+        server
+            .post(&format!("/api/v1/certificates/{id}/revoke"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(crate::tenant::TENANT_HEADER, tenant_b.to_string())
+            .json(&serde_json::json!({}))
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+        let status_res = server
+            .get(&format!("/api/v1/certificates/{id}/status"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                crate::routes::test_support::bearer(),
+            )
+            .add_header(crate::tenant::TENANT_HEADER, tenant_a.to_string())
+            .await;
+        status_res.assert_status_ok();
+        let status_json: serde_json::Value = status_res.json();
+        assert_eq!(status_json["status"], "active");
     }
 }

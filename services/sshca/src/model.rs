@@ -32,6 +32,20 @@ impl CertificateType {
             CertificateType::Host => "host",
         }
     }
+
+    /// Parses the durable-store column value. The `ssh_certificates.
+    /// certificate_type` column carries a `CHECK (certificate_type IN
+    /// ('user','host'))` constraint (`services/pki/migrations/0001_pki_schema.sql`,
+    /// the schema this service now persists into — see `crate::store`'s
+    /// module doc), so any value read back from a row is guaranteed to be
+    /// one of these two; the fallback exists only to make this function
+    /// total.
+    pub(crate) fn from_db(s: &str) -> Self {
+        match s {
+            "host" => CertificateType::Host,
+            _ => CertificateType::User,
+        }
+    }
 }
 
 /// Body for `POST /api/v1/ssh/certificates`.

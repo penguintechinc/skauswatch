@@ -1,7 +1,7 @@
 {
   "counts": {
-    "PASS": 207,
-    "ALLOWLISTED": 75,
+    "PASS": 177,
+    "ALLOWLISTED": 105,
     "FINDING": 0
   },
   "results": [
@@ -137,7 +137,10 @@
       "path": "/api/v1/auth/me",
       "v1_status": 401,
       "v2_status": 401,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-auth-me-refresh-as-access-wording"
+      ]
     },
     {
       "id": "auth.refresh.setup-login",
@@ -177,7 +180,10 @@
       "path": "/api/v1/auth/refresh",
       "v1_status": 401,
       "v2_status": 401,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-auth-refresh-access-as-refresh-wording"
+      ]
     },
     {
       "id": "auth.refresh.val-missing-field",
@@ -1480,7 +1486,10 @@
       "path": "/api/v1/s3-scan/buckets",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-s3-buckets-new-credential-fields"
+      ]
     },
     {
       "id": "s3.buckets.list.no-token",
@@ -1496,7 +1505,10 @@
       "path": "/api/v1/s3-scan/buckets/1",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-s3-buckets-get-new-credential-fields"
+      ]
     },
     {
       "id": "s3.buckets.get-404",
@@ -1980,7 +1992,7 @@
       "method": "POST",
       "path": "/api/v1/s3-scan/results/2/create-indicator",
       "v1_status": 500,
-      "v2_status": 200,
+      "v2_status": 201,
       "verdict": "ALLOWLISTED",
       "allowlist_entries": [
         "defect1-create-indicator"
@@ -2022,7 +2034,10 @@
       "path": "/api/v1/s3-scan/hash-lookup",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-s3-hash-lookup-case-normalization"
+      ]
     },
     {
       "id": "s3.hash-lookup.val-bad-hex",
@@ -2041,7 +2056,10 @@
       "path": "/api/v1/siem/health",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-siem-health-logs-rename"
+      ]
     },
     {
       "id": "siem.ingest.proxy",
@@ -2081,7 +2099,10 @@
       "path": "/api/v1/siem/config",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-siem-config-logs-rename"
+      ]
     },
     {
       "id": "siem.config.put.happy",
@@ -2128,16 +2149,22 @@
       "method": "POST",
       "path": "/api/v1/asm/scans",
       "v1_status": 200,
-      "v2_status": 200,
-      "verdict": "PASS"
+      "v2_status": 201,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.create"
+      ]
     },
     {
       "id": "asm.scans.create-empty-body",
       "method": "POST",
       "path": "/api/v1/asm/scans",
       "v1_status": 200,
-      "v2_status": 200,
-      "verdict": "PASS"
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.create-empty-body"
+      ]
     },
     {
       "id": "asm.scans.list",
@@ -2145,55 +2172,76 @@
       "path": "/api/v1/asm/scans",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.list"
+      ]
     },
     {
       "id": "asm.scans.get",
       "method": "GET",
       "path": "/api/v1/asm/scans/7",
       "v1_status": 200,
-      "v2_status": 200,
-      "verdict": "PASS"
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.get"
+      ]
     },
     {
       "id": "asm.scans.hosts",
       "method": "GET",
       "path": "/api/v1/asm/scans/7/hosts",
       "v1_status": 200,
-      "v2_status": 200,
-      "verdict": "PASS"
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.hosts"
+      ]
     },
     {
       "id": "asm.scans.screenshots",
       "method": "GET",
       "path": "/api/v1/asm/scans/7/screenshots",
       "v1_status": 200,
-      "v2_status": 200,
-      "verdict": "PASS"
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.screenshots"
+      ]
     },
     {
       "id": "asm.scans.certs",
       "method": "GET",
       "path": "/api/v1/asm/scans/7/certs",
       "v1_status": 200,
-      "v2_status": 200,
-      "verdict": "PASS"
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.certs"
+      ]
     },
     {
       "id": "asm.scans.diff",
       "method": "GET",
       "path": "/api/v1/asm/scans/7/diff",
       "v1_status": 200,
-      "v2_status": 200,
-      "verdict": "PASS"
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.diff"
+      ]
     },
     {
       "id": "asm.scans.report",
       "method": "GET",
       "path": "/api/v1/asm/scans/7/report",
       "v1_status": 200,
-      "v2_status": 200,
-      "verdict": "PASS"
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.report"
+      ]
     },
     {
       "id": "asm.settings.ports.get",
@@ -2201,7 +2249,10 @@
       "path": "/api/v1/asm/settings/ports",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.settings.ports.get"
+      ]
     },
     {
       "id": "asm.settings.ports.put.admin",
@@ -2209,7 +2260,10 @@
       "path": "/api/v1/asm/settings/ports",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.settings.ports.put.admin"
+      ]
     },
     {
       "id": "asm.settings.ports.put.viewer-403",
@@ -2233,7 +2287,10 @@
       "path": "/api/v1/darwin/status",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "darwin.status.no-token",
@@ -2249,7 +2306,10 @@
       "path": "/api/v1/darwin/repos",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "darwin.repos.create.admin",
@@ -2257,7 +2317,10 @@
       "path": "/api/v1/darwin/repos",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "darwin.repos.create.viewer-403",
@@ -2281,7 +2344,10 @@
       "path": "/api/v1/darwin/repos/3",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "darwin.repos.update.admin",
@@ -2289,7 +2355,10 @@
       "path": "/api/v1/darwin/repos/3",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "darwin.repos.delete.admin",
@@ -2297,7 +2366,10 @@
       "path": "/api/v1/darwin/repos/3",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "darwin.repos.delete.maintainer-403",
@@ -2313,7 +2385,10 @@
       "path": "/api/v1/darwin/reviews",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "darwin.reviews.create.maintainer",
@@ -2321,7 +2396,10 @@
       "path": "/api/v1/darwin/reviews",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "darwin.reviews.create.admin-403",
@@ -2337,7 +2415,10 @@
       "path": "/api/v1/darwin/reviews/9",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "darwin.plans.list",
@@ -2345,7 +2426,10 @@
       "path": "/api/v1/darwin/plans",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "darwin.plans.create",
@@ -2353,7 +2437,10 @@
       "path": "/api/v1/darwin/plans",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "darwin.plans.get",
@@ -2361,7 +2448,10 @@
       "path": "/api/v1/darwin/plans/2",
       "v1_status": 200,
       "v2_status": 200,
-      "verdict": "PASS"
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
     },
     {
       "id": "research.lookup.no-token",

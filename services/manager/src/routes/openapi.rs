@@ -28,7 +28,8 @@ use axum::{Json, Router};
 use utoipa::OpenApi;
 
 use super::{
-    alerts, approvals, asm, auth, codescan, endpoint, research, s3_scan, siem, threat_intel, users,
+    admin, alerts, approvals, asm, auth, codescan, endpoint, research, s3_scan, scanner, siem,
+    tenants, threat_intel, users,
 };
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ErrorResponse, ValidationErrorResponse};
@@ -93,6 +94,12 @@ pub(crate) struct PublicApiDoc;
         users::delete_user,
         // license
         super::license::license_features,
+        // tenants
+        tenants::create_tenant,
+        tenants::create_enrollment_token,
+        // admin
+        admin::get_svid_ttl,
+        admin::update_svid_ttl,
         // alerts
         alerts::list_alerts,
         alerts::get_alert,
@@ -172,6 +179,8 @@ pub(crate) struct PublicApiDoc;
         asm::get_asm_scan_report,
         asm::get_port_settings,
         asm::update_port_settings,
+        // scanner
+        scanner::trigger_scanner_task,
         // codescan
         codescan::codescan_status,
         codescan::list_repos,
@@ -219,6 +228,15 @@ pub(crate) struct PublicApiDoc;
         super::license::LicenseFeaturesResponse,
         super::license::LicenseFeaturesData,
         super::license::LicenseFeaturesMeta,
+        // tenants
+        tenants::CreateTenantRequest,
+        tenants::TenantSummary,
+        tenants::TenantCreateResponse,
+        tenants::CreateEnrollmentTokenRequest,
+        tenants::EnrollmentTokenResponse,
+        // admin
+        admin::SvidTtlSettings,
+        admin::UpdateSvidTtlRequest,
         // alerts
         alerts::AlertItem,
         alerts::AlertSearchItem,
@@ -326,6 +344,15 @@ pub(crate) struct PublicApiDoc;
         siem::SiemStatsResponse,
         siem::SiemConfigResponse,
         siem::SiemConfigUpdateResponse,
+        // asm
+        asm::AsmScanCreateBody,
+        asm::AsmScanListResponse,
+        asm::AsmScreenshotDto,
+        asm::AsmScreenshotsResponse,
+        asm::PortSettingsBody,
+        // scanner
+        scanner::ScannerScanBody,
+        scanner::ScannerScanResponse,
         // research
         research::LookupBody,
         research::QueryTypeBody,
@@ -336,13 +363,16 @@ pub(crate) struct PublicApiDoc;
         (name = "auth", description = "Authentication: login, refresh, logout, register, current user"),
         (name = "users", description = "User account management"),
         (name = "license", description = "License tier and feature-flag entitlements"),
+        (name = "tenants", description = "Super-admin tenant provisioning and EDR enrollment tokens"),
+        (name = "admin", description = "Super-admin operational controls (SPIFFE SVID TTL policy)"),
         (name = "alerts", description = "Security alert lifecycle and AI-assisted review"),
         (name = "threat-intel", description = "Threat indicator (IOC) CRUD, search, and lookup"),
         (name = "approvals", description = "Multi-approver approval workflow"),
         (name = "s3-scan", description = "S3 bucket malware scanning: buckets, jobs, results, ad-hoc uploads"),
         (name = "endpoint", description = "ENDPOINT agent fleet: registration, heartbeat, events, operator views"),
         (name = "siem", description = "Log-pipeline health, ingest proxy, OpenSearch search/stats, configuration"),
-        (name = "asm", description = "Attack surface management — authenticated proxy to the scanner service"),
+        (name = "asm", description = "Attack surface management: masscan/banner/cert scan orchestration, hosts, certs, diffs"),
+        (name = "scanner", description = "Ad-hoc malware scan triggers (YARA/ClamAV) — publishes to the scanner:tasks queue"),
         (name = "codescan", description = "AI code review — authenticated proxy to worker-codescan"),
         (name = "research", description = "Threat-research lookups: whois, dns, asn, shodan, maltego"),
     ),
@@ -381,10 +411,26 @@ impl utoipa::Modify for SecurityAddon {
 }
 
 /// Router for the live `/openapi.json` and `/openapi/login.json` routes.
+/// Used as-is by this module's own tests; the app-wide assembly
+/// (`routes/mod.rs`) mounts [`public_router`]/[`protected_router`]
+/// separately so `tenant_middleware` wraps only the authenticated
+/// `/openapi.json` route, never the deliberately-public login doc.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn router() -> Router<AppState> {
-    Router::new()
-        .route("/openapi.json", get(openapi_spec))
-        .route("/openapi/login.json", get(public_openapi_spec))
+    public_router().merge(protected_router())
+}
+
+/// `GET /openapi/login.json` — deliberately unauthenticated, same class of
+/// route as `auth::login`/`auth::refresh`/`auth::register`. Must never sit
+/// behind `tenant_middleware`.
+pub(crate) fn public_router() -> Router<AppState> {
+    Router::new().route("/openapi/login.json", get(public_openapi_spec))
+}
+
+/// `GET /openapi.json` — gated by `CurrentUser` (and, in the app-wide
+/// assembly, `tenant_middleware`) like every other route in this service.
+pub(crate) fn protected_router() -> Router<AppState> {
+    Router::new().route("/openapi.json", get(openapi_spec))
 }
 
 /// GET /openapi.json — the generated full OpenAPI 3.x document, gated by

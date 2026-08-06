@@ -2,6 +2,18 @@ spire:
   enabled: true
   environment: "prod"
 
+  topology:
+    role: child
+    upstreamRoot:
+      # Live-ops flips this to true once root is live and a join token
+      # has been minted for skauswatch-prod (see chart README "Live-Ops").
+      # Until then this server runs self-signed, same as standalone.
+      enabled: false
+      serverAddress: ""
+      serverPort: 8081
+      downstreamSpiffeID: "spiffe://penguintech.io/spire/server/skauswatch-prod"
+      nodeAttestor: join_token
+
   server:
     replicaCount: 3
     image:
@@ -9,13 +21,24 @@ spire:
       tag: "1.9.4"  # Reference only
       pullPolicy: IfNotPresent
     dataStore:
-      # Preferred: NEST via marchproxy. Fallback: any PostgreSQL host.
+      # Preferred: NEST-hosted PostgreSQL. Fallback: any PG host.
       type: postgresql
       postgresql:
         host: "marchproxy.nest.svc"
         port: 5432
         dbName: spire
         secretName: spire-db-credentials
+    nodeAttestation:
+      k8sPsat:
+        enabled: true
+        cluster: "skauswatch-prod"
+        serviceAccountAllowList:
+          - "skauswatch:spire-agent"
+      # dal2 prod is on-prem bare metal today — leave disabled. Flip only
+      # if/when a prod node pool moves to AWS-resident nodes (EKS/EC2),
+      # and only for that node pool's own cluster identity.
+      awsIid:
+        enabled: false
 
   agent:
     image:
@@ -29,12 +52,13 @@ spire:
   federation:
     enabled: true
 
+  # OIDC discovery runs on ROOT only in a nested topology — prod is a
+  # CHILD, not root. See root.example.yml.
   oidcProvider:
-    enabled: true
-    image:
-      repository: ghcr.io/spiffe/oidc-discovery-provider@sha256:1da5c3f80c6772d731a00fe33035baa77ce515991d28e23576f4f86d8d8a4759
-      tag: "1.9.4"  # Reference only
-      pullPolicy: IfNotPresent
+    enabled: false
+
+  csiDriver:
+    enabled: false
 
   autoEnroll:
     enabled: true

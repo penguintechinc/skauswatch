@@ -1,7 +1,9 @@
 //! SkausWatch scanner worker entry point. Consumes `scanner:tasks` stream
-//! and performs YARA + ClamAV + ASM (Nuclei/ZAP/OpenVAS) scanning. `serve`
-//! (default) runs the consumer loop + health/metrics endpoints; `healthcheck`
-//! is the container-native probe (no curl in images, per container standards).
+//! and performs YARA + ClamAV + ASM (masscan/banner/cert/screenshot —
+//! nuclei/zap/openvas are intentionally not implemented, see `crate::asm`
+//! module docs) scanning. `serve` (default) runs the consumer loop +
+//! health/metrics endpoints; `healthcheck` is the container-native probe
+//! (no curl in images, per container standards).
 
 mod asm;
 mod clamav;
@@ -90,7 +92,8 @@ async fn serve() -> anyhow::Result<()> {
         c.batch = cfg.max_concurrent_tasks.max(1);
         c
     };
-    let handler = ScannerHandler::new(pool, producer, cfg.clone());
+    let screenshot_uploader = build_screenshot_uploader(&cfg).await;
+    let handler = ScannerHandler::new(pool, producer, cfg.clone(), screenshot_uploader);
 
     // Health/readiness + metrics endpoints (standard telemetry surface).
     let readiness = skauswatch_telemetry::Readiness::new();
@@ -121,6 +124,36 @@ async fn serve() -> anyhow::Result<()> {
     tokio::try_join!(health_srv, consume)?;
     tracing::info!("worker stopped cleanly");
     Ok(())
+}
+
+/// Builds the ASM screenshot S3 uploader from `S3_*` env vars
+/// (`skauswatch_s3::S3Config`) and `cfg.asm_screenshot_bucket`. Returns
+/// `None` — logged, not fatal — whenever the screenshot stage is disabled,
+/// no bucket is configured, or the S3 config itself is malformed; a worker
+/// must never fail to start over an optional capture stage (see
+/// `crate::asm` module docs' fail-safe posture).
+async fn build_screenshot_uploader(cfg: &WorkerConfig) -> Option<crate::asm::ScreenshotUploader> {
+    if !cfg.asm_screenshot_enabled {
+        tracing::info!("ASM screenshot stage disabled (ASM_SCREENSHOT_ENABLED=false)");
+        return None;
+    }
+    let Some(bucket) = cfg.asm_screenshot_bucket.clone() else {
+        tracing::warn!(
+            "ASM_SCREENSHOT_ENABLED is true but ASM_SCREENSHOT_BUCKET is unset; \
+             screenshot capture disabled"
+        );
+        return None;
+    };
+    let s3_cfg = match skauswatch_s3::S3Config::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "invalid S3_* config; ASM screenshot capture disabled");
+            return None;
+        }
+    };
+    let client = skauswatch_s3::client(&s3_cfg).await;
+    tracing::info!(bucket = %bucket, "ASM screenshot stage enabled");
+    Some(crate::asm::ScreenshotUploader::new(client, bucket))
 }
 
 /// Resolves once the shutdown broadcast fires, gating graceful shutdown.

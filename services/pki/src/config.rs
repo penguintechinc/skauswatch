@@ -102,6 +102,17 @@ impl SshCaConfig {
     }
 }
 
+/// Deployment environment segment used both in this workload's own SPIFFE
+/// ID and in the peer identities it trusts (`spiffe://penguintech.io/<env>/
+/// ...` — `docs/v2-port/service-auth-model.md` §1). Read from `SPIFFE_ENV`,
+/// defaulting to `"beta"` — every environment this service has actually run
+/// in so far; the production trust-domain segment is a separate, explicitly
+/// unresolved decision (that doc's §7 item 5) and is not settled by this
+/// default.
+pub fn spiffe_env() -> String {
+    env_or("SPIFFE_ENV", "beta")
+}
+
 /// REST + gRPC bind settings (v1 `APIConfig` / `GRPCConfig`).
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -155,5 +166,11 @@ mod tests {
         let cfg = ServerConfig::from_env();
         assert_eq!(cfg.api_port, 8001);
         assert_eq!(cfg.grpc_port, 50_052);
+    }
+
+    #[test]
+    fn spiffe_env_defaults_to_beta_when_unset() {
+        assert!(std::env::var("SPIFFE_ENV").is_err());
+        assert_eq!(spiffe_env(), "beta");
     }
 }

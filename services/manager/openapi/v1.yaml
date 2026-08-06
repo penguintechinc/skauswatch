@@ -10,6 +10,77 @@ info:
     identifier: AGPL-3.0-only
   version: '1'
 paths:
+  /api/v1/admin/svid-ttl:
+    get:
+      tags:
+      - admin
+      summary: |-
+        GET /admin/svid-ttl — super_admin only. Reads the singleton row if one
+        has ever been persisted, else reports the documented defaults without
+        requiring a seed migration to insert one.
+      operationId: get_svid_ttl
+      responses:
+        '200':
+          description: Current SVID TTL policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SvidTtlSettings'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions — super_admin required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    put:
+      tags:
+      - admin
+      summary: |-
+        PUT /admin/svid-ttl — super_admin only; validates both fields, persists
+        the singleton row (insert-or-update), and best-effort applies the change
+        to SPIRE (see [`apply_svid_ttl_to_spire`] — never blocks the response).
+      operationId: update_svid_ttl
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSvidTtlRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated SVID TTL policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SvidTtlSettings'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions — super_admin required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
   /api/v1/alerts:
     get:
       tags:
@@ -670,28 +741,38 @@ paths:
     get:
       tags:
       - asm
-      summary: GET /asm/scans — list ASM scans; query params forward first-value-wins.
+      summary: GET /asm/scans — paginated, tenant-scoped; optional `target` filter.
       operationId: list_asm_scans
+      parameters:
+      - name: page
+        in: query
+        description: 1-based page number (default 1)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: per_page
+        in: query
+        description: Page size, capped at 100 (default 20)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: target
+        in: query
+        description: Filter by exact target value
+        required: false
+        schema:
+          type: string
       responses:
         '200':
-          description: Proxied scanner response
+          description: Paginated ASM scan list
           content:
             application/json:
-              schema: {}
+              schema:
+                $ref: '#/components/schemas/AsmScanListResponse'
         '401':
           description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
           content:
             application/json:
               schema:
@@ -701,349 +782,30 @@ paths:
     post:
       tags:
       - asm
-      summary: POST /asm/scans — trigger a new ASM scan (proxied; body forwarded).
-      description: |-
-        This whole router is a thin authenticated proxy to the scanner service —
-        every response body below is documented as a generic JSON object
-        (`serde_json::Value`) rather than a fixed schema, since the wire shape is
-        whatever the upstream scanner returns, not something this service
-        defines. See `docs/v2-port/openapi-pattern.md`.
+      summary: |-
+        POST /asm/scans — admin/maintainer. Inserts the `asm_scans` row and
+        publishes one `scanner:tasks` message (`scan_type: "asm"`); the scanner
+        worker picks it up, runs the pipeline, and writes hosts/services/certs/
+        diff rows back tenant-stamped.
       operationId: create_asm_scan
       requestBody:
         content:
           application/json:
-            schema: {}
+            schema:
+              $ref: '#/components/schemas/AsmScanCreateBody'
         required: true
       responses:
-        '200':
-          description: Proxied scanner response
+        '201':
+          description: ASM scan created and queued
           content:
             application/json:
               schema: {}
         '400':
-          description: Invalid JSON body
+          description: Validation error
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}:
-    get:
-      tags:
-      - asm
-      summary: GET /asm/scans/{scan_id} — ASM scan detail (proxied).
-      operationId: get_asm_scan
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}/certs:
-    get:
-      tags:
-      - asm
-      summary: GET /asm/scans/{scan_id}/certs — TLS certificate findings (proxied).
-      operationId: get_asm_scan_certs
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}/diff:
-    get:
-      tags:
-      - asm
-      summary: GET /asm/scans/{scan_id}/diff — diff vs the previous scan (proxied).
-      operationId: get_asm_scan_diff
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}/hosts:
-    get:
-      tags:
-      - asm
-      summary: GET /asm/scans/{scan_id}/hosts — discovered hosts and services (proxied).
-      operationId: get_asm_scan_hosts
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}/report:
-    get:
-      tags:
-      - asm
-      summary: |-
-        GET /asm/scans/{scan_id}/report — presigned URL for the full scan report
-        (proxied).
-      operationId: get_asm_scan_report
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/scans/{scan_id}/screenshots:
-    get:
-      tags:
-      - asm
-      summary: |-
-        GET /asm/scans/{scan_id}/screenshots — screenshots with presigned URLs
-        (proxied).
-      operationId: get_asm_scan_screenshots
-      parameters:
-      - name: scan_id
-        in: path
-        description: ASM scan id
-        required: true
-        schema:
-          type: integer
-          format: int64
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-  /api/v1/asm/settings/ports:
-    get:
-      tags:
-      - asm
-      summary: GET /asm/settings/ports — port configuration (proxied; any role).
-      operationId: get_port_settings
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '401':
-          description: Missing or invalid authorization header
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-      security:
-      - bearer_jwt: []
-    put:
-      tags:
-      - asm
-      summary: PUT /asm/settings/ports — update port settings (admin only; proxied).
-      operationId: update_port_settings
-      requestBody:
-        content:
-          application/json:
-            schema: {}
-        required: true
-      responses:
-        '200':
-          description: Proxied scanner response
-          content:
-            application/json:
-              schema: {}
-        '400':
-          description: Invalid JSON body
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/ValidationErrorResponse'
         '401':
           description: Missing or invalid authorization header
           content:
@@ -1056,14 +818,278 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: Cannot connect to scanner
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}:
+    get:
+      tags:
+      - asm
+      summary: GET /asm/scans/{scan_id} — scan detail.
+      operationId: get_asm_scan
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: ASM scan detail
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: Scanner request timed out
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}/certs:
+    get:
+      tags:
+      - asm
+      summary: GET /asm/scans/{scan_id}/certs — TLS certificate findings.
+      operationId: get_asm_scan_certs
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: TLS certificate findings for this scan
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}/diff:
+    get:
+      tags:
+      - asm
+      summary: |-
+        GET /asm/scans/{scan_id}/diff — diff vs the previous completed scan for
+        the same target (written by `services/scanner/src/asm.rs`).
+      operationId: get_asm_scan_diff
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Diff vs the previous scan (null if none computed yet)
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}/hosts:
+    get:
+      tags:
+      - asm
+      summary: GET /asm/scans/{scan_id}/hosts — discovered hosts nested with services.
+      operationId: get_asm_scan_hosts
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Discovered hosts and services
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}/report:
+    get:
+      tags:
+      - asm
+      summary: |-
+        GET /asm/scans/{scan_id}/report — on-the-fly summary (hosts, services,
+        certs, diff). v1 generated a presigned URL to an S3-uploaded report
+        artifact; this deviates deliberately (no report-generation/upload
+        pipeline exists in v2) and returns the equivalent data inline as JSON
+        instead of a document to fetch.
+      operationId: get_asm_scan_report
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Full scan report (hosts, certs, diff summary)
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/scans/{scan_id}/screenshots:
+    get:
+      tags:
+      - asm
+      summary: |-
+        GET /asm/scans/{scan_id}/screenshots — screenshots captured for this
+        scan's services, tenant-scoped (via `fetch_scan`'s ownership check plus
+        `fetch_screenshots`'s own `tenant_id` filter — defense in depth). Empty
+        until the scanner's screenshot-capture stage lands a matching scan; the
+        join/read path itself is real.
+      operationId: get_asm_scan_screenshots
+      parameters:
+      - name: scan_id
+        in: path
+        description: ASM scan id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Screenshots for this scan's services
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsmScreenshotsResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Scan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/asm/settings/ports:
+    get:
+      tags:
+      - asm
+      summary: |-
+        GET /asm/settings/ports — any authenticated role; per-tenant, defaults
+        to `{extra_ports: [], masscan_rate: 1000}` when unset.
+      operationId: get_port_settings
+      responses:
+        '200':
+          description: Port configuration settings
+          content:
+            application/json:
+              schema: {}
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    put:
+      tags:
+      - asm
+      summary: PUT /asm/settings/ports — admin only.
+      operationId: update_port_settings
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PortSettingsBody'
+        required: true
+      responses:
+        '200':
+          description: Updated port configuration settings
+          content:
+            application/json:
+              schema: {}
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions
           content:
             application/json:
               schema:
@@ -1148,6 +1174,13 @@ paths:
         creates a `viewer`-role account (see `PublicApiDoc` note on `login`
         above — `register` itself is NOT part of the public doc, only `login`
         is, per `docs/v2-port/openapi-pattern.md` §6).
+      description: |-
+        Tenancy (v2.0 decision, docs/v2-port/tenancy-model.md §8): admin-
+        provisioned tenants only — this endpoint never creates a tenant, it
+        attaches the new registrant to the seeded bootstrap tenant
+        ([`crate::auth::DEFAULT_TENANT_ID`]). There is no inviter/admin context
+        to derive a different tenant from at this unauthenticated call site;
+        self-serve *multi-tenant* signup is a v2.1 backlog item.
       operationId: register
       requestBody:
         content:
@@ -2050,9 +2083,12 @@ paths:
       - endpoint
       summary: |-
         POST /endpoint/register — HMAC agent auth. Re-registers (200) when the body's
-        agent_id already exists (full field overwrite, metadata replaced), else
-        inserts a new active agent (201). v1 keys off the BODY agent_id, which
-        need not match the authenticated X-Agent-ID — preserved as-is.
+        agent_id already exists (full field overwrite, metadata replaced, tenant
+        unchanged — `enrollment_token` is ignored on this path), else requires a
+        valid, unexpired, unexhausted `enrollment_token` (§5) to resolve the new
+        agent's tenant and inserts a new active agent (201). v1 keys off the BODY
+        agent_id, which need not match the authenticated X-Agent-ID — preserved
+        as-is.
       operationId: register_agent
       parameters:
       - name: X-Agent-ID
@@ -3446,6 +3482,51 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
       security:
       - bearer_jwt: []
+  /api/v1/scanner/scan:
+    post:
+      tags:
+      - scanner
+      summary: |-
+        POST /scanner/scan — admin/maintainer. Queues one YARA/ClamAV scan task
+        on `scanner:tasks`, tenant-stamped from the caller's JWT (never from the
+        request body — `docs/v2-port/tenancy-model.md` §3/§4). Publish failures
+        are swallowed with a warning (`AppState::publish_stream`), matching
+        every other producer in this service — the response always reflects
+        "queued", not delivery confirmation, same as `s3_scan.rs::trigger_scan`.
+      operationId: trigger_scanner_task
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScannerScanBody'
+        required: true
+      responses:
+        '202':
+          description: Scan task queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScannerScanResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
   /api/v1/siem/config:
     get:
       tags:
@@ -3662,6 +3743,117 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: OpenSearch unreachable or errored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/tenants:
+    post:
+      tags:
+      - tenants
+      summary: |-
+        POST /tenants — super_admin only; the sole tenant-creation surface for
+        v2.0 (admin-provisioned, per the module docs). 409 on a duplicate slug,
+        201 `{message,tenant}` on success. Every call is audit-logged against
+        the newly created tenant (the only tenant the action is meaningfully
+        "about" — see `security.md`'s "Super-admin ... audit-logged").
+      operationId: create_tenant
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+        required: true
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantCreateResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions — super_admin required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Slug already in use
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/tenants/{tenant_id}/enrollment-tokens:
+    post:
+      tags:
+      - tenants
+      summary: |-
+        POST /tenants/{tenant_id}/enrollment-tokens — super_admin only (matching
+        this module's existing tenant-provisioning posture — see the "Decision
+        needing user confirmation" note in `docs/v2-port/service-auth-model.md`
+        §5: a narrower delegated `tenant_admin` role is a v2.1-backlog
+        candidate, not required for v2.0). Mints a token scoped to `tenant_id`;
+        `routes::endpoint::register_agent` resolves a *new* agent's tenant from
+        it instead of the default bootstrap tenant (§5 Option A).
+      operationId: create_enrollment_token
+      parameters:
+      - name: tenant_id
+        in: path
+        description: Tenant the minted token enrolls new agents into
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        description: Optional — a missing/empty body accepts the defaults
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEnrollmentTokenRequest'
+        required: true
+      responses:
+        '201':
+          description: Enrollment token minted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollmentTokenResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient permissions — super_admin required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Tenant not found
           content:
             application/json:
               schema:
@@ -5060,11 +5252,115 @@ components:
         total:
           type: integer
           format: int64
+    AsmScanCreateBody:
+      type: object
+      properties:
+        extra_ports:
+          type:
+          - array
+          - 'null'
+          items:
+            type: integer
+            format: int64
+        mode:
+          type:
+          - string
+          - 'null'
+        rate:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        target:
+          type:
+          - string
+          - 'null'
+    AsmScanListResponse:
+      type: object
+      required:
+      - scans
+      - total
+      - page
+      - per_page
+      properties:
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        scans:
+          type: array
+          items: {}
+        total:
+          type: integer
+          format: int64
+    AsmScreenshotDto:
+      type: object
+      description: |-
+        One screenshot reference, as returned by the standalone `/screenshots`
+        endpoint. Typed (rather than ad-hoc `serde_json::Value`, unlike the
+        aggregated `/report` endpoint below) so the response shape is explicit
+        in the OpenAPI spec — see `crate::asm` (scanner)'s screenshot-capture
+        stage, which is what populates `asm_screenshots` rows for this to read.
+      required:
+      - id
+      - service_id
+      - s3_key
+      - tool
+      properties:
+        captured_at:
+          type:
+          - string
+          - 'null'
+        file_size_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        height:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        id:
+          type: integer
+          format: int64
+        s3_key:
+          type: string
+        service_id:
+          type: integer
+          format: int64
+        tool:
+          type: string
+        url:
+          type:
+          - string
+          - 'null'
+        width:
+          type:
+          - integer
+          - 'null'
+          format: int32
+    AsmScreenshotsResponse:
+      type: object
+      description: Response body for `GET /asm/scans/{scan_id}/screenshots`.
+      required:
+      - screenshots
+      properties:
+        screenshots:
+          type: array
+          items:
+            $ref: '#/components/schemas/AsmScreenshotDto'
     BucketCreateBody:
       type: object
       description: |-
         BucketConfigCreateRequest — fields optional so missing ones map to the
         validation envelope instead of an axum extractor rejection.
+        `credential_mode` selects the hybrid credential model (security finding
+        #2): `"static"` (default) requires `access_key_id`/`secret_access_key`;
+        `"assume_role"` requires `role_arn` (+ optional `external_id`) and is
+        only valid against a genuine AWS S3 endpoint.
       properties:
         access_key_id:
           type:
@@ -5074,7 +5370,15 @@ components:
           type:
           - string
           - 'null'
+        credential_mode:
+          type:
+          - string
+          - 'null'
         endpoint_url:
+          type:
+          - string
+          - 'null'
+        external_id:
           type:
           - string
           - 'null'
@@ -5102,6 +5406,10 @@ components:
           - string
           - 'null'
         region:
+          type:
+          - string
+          - 'null'
+        role_arn:
           type:
           - string
           - 'null'
@@ -5134,26 +5442,36 @@ components:
           type: string
     BucketCreateSummary:
       type: object
-      description: Summary embedded in [`BucketCreateResponse`].
+      description: |-
+        Summary embedded in [`BucketCreateResponse`]. `access_key_id`/`role_arn`
+        mirror the row's credential mode (see [`BucketItem`]).
       required:
       - id
       - name
       - bucket_name
-      - access_key_id
+      - credential_mode
       properties:
         access_key_id:
-          type: string
+          type:
+          - string
+          - 'null'
         bucket_name:
           type: string
         created_at:
           type:
           - string
           - 'null'
+        credential_mode:
+          type: string
         id:
           type: integer
           format: int32
         name:
           type: string
+        role_arn:
+          type:
+          - string
+          - 'null'
     BucketDeleteResponse:
       type: object
       description: Documentation-only mirror of `delete_bucket`'s `serde_json::json!` body.
@@ -5167,25 +5485,35 @@ components:
       description: |-
         Documentation-only mirror of `bucket_json`'s wire shape (list items and
         GET detail share this shape) — credentials are masked, never raw.
+        `access_key_id`/`secret_access_key` are populated (masked) for `static`
+        mode only; `role_arn` (shown in full — ARNs aren't secret) and
+        `external_id` (masked) for `assume_role` mode only.
       required:
       - id
       - name
       - endpoint_url
       - bucket_name
-      - access_key_id
-      - secret_access_key
+      - credential_mode
       - file_types_filter
       properties:
         access_key_id:
-          type: string
+          type:
+          - string
+          - 'null'
         bucket_name:
           type: string
         created_at:
           type:
           - string
           - 'null'
+        credential_mode:
+          type: string
         endpoint_url:
           type: string
+        external_id:
+          type:
+          - string
+          - 'null'
         file_types_filter: {}
         id:
           type: integer
@@ -5209,12 +5537,18 @@ components:
           type:
           - string
           - 'null'
+        role_arn:
+          type:
+          - string
+          - 'null'
         scan_enabled:
           type:
           - boolean
           - 'null'
         secret_access_key:
-          type: string
+          type:
+          - string
+          - 'null'
         updated_at:
           type:
           - string
@@ -5282,7 +5616,13 @@ components:
           type: boolean
     BucketUpdateBody:
       type: object
-      description: BucketConfigUpdateRequest — every field optional; absent fields untouched.
+      description: |-
+        BucketConfigUpdateRequest — every field optional; absent fields untouched.
+        Credential fields (security finding #2 — hybrid model) are coupled: any
+        one of `credential_mode`/`access_key_id`/`secret_access_key`/`role_arn`/
+        `external_id` present triggers a full re-resolve (see
+        `resolve_updated_credentials`), merging with the existing stored values
+        for whichever sub-fields weren't supplied.
       properties:
         access_key_id:
           type:
@@ -5292,7 +5632,15 @@ components:
           type:
           - string
           - 'null'
+        credential_mode:
+          type:
+          - string
+          - 'null'
         endpoint_url:
+          type:
+          - string
+          - 'null'
+        external_id:
           type:
           - string
           - 'null'
@@ -5320,6 +5668,10 @@ components:
           - string
           - 'null'
         region:
+          type:
+          - string
+          - 'null'
+        role_arn:
           type:
           - string
           - 'null'
@@ -5356,15 +5708,23 @@ components:
       required:
       - id
       - name
-      - access_key_id
+      - credential_mode
       properties:
         access_key_id:
+          type:
+          - string
+          - 'null'
+        credential_mode:
           type: string
         id:
           type: integer
           format: int32
         name:
           type: string
+        role_arn:
+          type:
+          - string
+          - 'null'
         updated_at:
           type:
           - string
@@ -5445,6 +5805,26 @@ components:
           type:
           - string
           - 'null'
+    CreateEnrollmentTokenRequest:
+      type: object
+      description: |-
+        POST /tenants/{tenant_id}/enrollment-tokens body — both fields optional,
+        falling back to the defaults above.
+      properties:
+        expires_in_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Token lifetime in seconds (default 86400).
+        max_uses:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Number of `register_agent` calls the token may resolve before it's
+            exhausted (default 1).
     CreateRequest:
       type: object
       description: POST /users body — mirrors v1 `UserCreateRequest` defaults.
@@ -5461,6 +5841,17 @@ components:
         password:
           type: string
         role:
+          type: string
+    CreateTenantRequest:
+      type: object
+      description: POST /tenants body.
+      required:
+      - slug
+      - name
+      properties:
+        name:
+          type: string
+        slug:
           type: string
     DeactivateResponse:
       type: object
@@ -5539,6 +5930,30 @@ components:
         total_events:
           type: integer
           format: int64
+    EnrollmentTokenResponse:
+      type: object
+      description: Documentation-only mirror of `create_enrollment_token`'s success body.
+      required:
+      - token
+      - tenant_id
+      - expires_at
+      - max_uses
+      properties:
+        expires_at:
+          type: string
+          description: RFC 3339 expiry timestamp.
+        max_uses:
+          type: integer
+          format: int64
+        tenant_id:
+          type: string
+          format: uuid
+        token:
+          type: string
+          description: |-
+            The raw enrollment token — returned exactly once; only its SHA-256
+            hash is ever persisted (same principle as `users.password_hash`), so
+            it can never be retrieved again after this response.
     ErrorResponse:
       type: object
       description: |-
@@ -6158,6 +6573,21 @@ components:
           type: boolean
         role:
           type: string
+    PortSettingsBody:
+      type: object
+      properties:
+        extra_ports:
+          type:
+          - array
+          - 'null'
+          items:
+            type: integer
+            format: int64
+        masscan_rate:
+          type:
+          - integer
+          - 'null'
+          format: int64
     QueryTypeBody:
       type: object
       description: POST /research/whois + /research/asn body — `query` and `indicator_type`.
@@ -6211,6 +6641,16 @@ components:
           type:
           - string
           - 'null'
+        enrollment_token:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Per-tenant enrollment token (`docs/v2-port/service-auth-model.md`
+            §5) minted via `POST /tenants/{tenant_id}/enrollment-tokens`.
+            Required only for a *new* agent_id — re-registration of an existing
+            agent keeps its stored tenant and never consults this field (see
+            `register_agent`'s branch split below).
         hostname:
           type:
           - string
@@ -6576,6 +7016,40 @@ components:
         total_skipped:
           type: integer
           format: int64
+    ScannerScanBody:
+      type: object
+      description: |-
+        ScannerScanRequest — `target` is a free-form label for the item being
+        scanned (filename, description, ...); `file_path` is the path the
+        scanner worker should read (must be reachable from the scanner pod —
+        shared volume or an already-resolved local path; this route does no
+        file transport of its own). `params` is opaque, scan-type-specific
+        configuration forwarded verbatim to the worker.
+      properties:
+        file_path:
+          type:
+          - string
+          - 'null'
+        params: {}
+        scan_type:
+          type:
+          - string
+          - 'null'
+        target:
+          type:
+          - string
+          - 'null'
+    ScannerScanResponse:
+      type: object
+      description: Documentation-only mirror of `trigger_scanner_task`'s response body.
+      required:
+      - job_id
+      - status
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
     ScheduleBody:
       type: object
       description: ScheduleSetRequest body.
@@ -6835,6 +7309,62 @@ components:
           type:
           - string
           - 'null'
+    SvidTtlSettings:
+      type: object
+      description: |-
+        GET/PUT wire shape — identical on both directions per the webui contract
+        (`services/webui/src/client/types/svidTtl.ts::SvidTtlSettings`).
+      required:
+      - x509_ttl_seconds
+      - jwt_ttl_seconds
+      - default_seconds
+      - min_seconds
+      - max_seconds
+      properties:
+        default_seconds:
+          type: integer
+          format: int64
+        jwt_ttl_seconds:
+          type: integer
+          format: int64
+        max_seconds:
+          type: integer
+          format: int64
+        min_seconds:
+          type: integer
+          format: int64
+        x509_ttl_seconds:
+          type: integer
+          format: int64
+    TenantCreateResponse:
+      type: object
+      description: Documentation-only mirror of `create_tenant`'s `serde_json::json!` body.
+      required:
+      - message
+      - tenant
+      properties:
+        message:
+          type: string
+        tenant:
+          $ref: '#/components/schemas/TenantSummary'
+    TenantSummary:
+      type: object
+      description: Tenant summary embedded in [`TenantCreateResponse`].
+      required:
+      - id
+      - slug
+      - name
+      - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        status:
+          type: string
     ThreatIntelStatisticsResponse:
       type: object
       description: |-
@@ -7030,6 +7560,22 @@ components:
           type:
           - string
           - 'null'
+    UpdateSvidTtlRequest:
+      type: object
+      description: |-
+        PUT /admin/svid-ttl body — both fields required, each independently
+        bounds-checked against [`MIN_SVID_TTL_SECONDS`, `MAX_SVID_TTL_SECONDS`].
+      properties:
+        jwt_ttl_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        x509_ttl_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
     UploadCreateResponse:
       type: object
       description: Documentation-only mirror of `upload_file`'s `serde_json::json!` body.
@@ -7415,6 +7961,10 @@ tags:
   description: User account management
 - name: license
   description: License tier and feature-flag entitlements
+- name: tenants
+  description: Super-admin tenant provisioning and EDR enrollment tokens
+- name: admin
+  description: Super-admin operational controls (SPIFFE SVID TTL policy)
 - name: alerts
   description: Security alert lifecycle and AI-assisted review
 - name: threat-intel
@@ -7428,7 +7978,9 @@ tags:
 - name: siem
   description: Log-pipeline health, ingest proxy, OpenSearch search/stats, configuration
 - name: asm
-  description: Attack surface management — authenticated proxy to the scanner service
+  description: 'Attack surface management: masscan/banner/cert scan orchestration, hosts, certs, diffs'
+- name: scanner
+  description: Ad-hoc malware scan triggers (YARA/ClamAV) — publishes to the scanner:tasks queue
 - name: codescan
   description: AI code review — authenticated proxy to worker-codescan
 - name: research

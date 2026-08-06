@@ -12,6 +12,9 @@ mod error;
 mod model;
 mod routes;
 mod store;
+mod tenant;
+#[cfg(test)]
+mod test_support;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -94,7 +97,18 @@ async fn serve() -> anyhow::Result<()> {
 
     let ca = Arc::new(SshCa::load_or_generate(&cfg.ca_key_path)?);
     tracing::info!(ca_fingerprint = %ca.fingerprint(), "CA ready");
-    let store = Arc::new(CertStore::new());
+
+    // Durable store: same Postgres database `services/pki` migrates
+    // (`ssh_certificates`/`crl_entries`), reached via this service's own
+    // per-service DB_USER — see store.rs's consolidation decision doc
+    // comment. Schema authority stays with pki; this service runs no
+    // migrations of its own.
+    let db_cfg =
+        skauswatch_db::DbConfig::from_env().map_err(|e| anyhow::anyhow!("db config: {e}"))?;
+    let db = skauswatch_db::connect_postgres(&db_cfg)
+        .await
+        .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+    let store = Arc::new(CertStore::new(db));
     let state = AppState {
         ca,
         store,

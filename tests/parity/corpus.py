@@ -291,10 +291,15 @@ CASES = [
     {"id": "approvals.statistics.viewer-403", "method": "GET", "path": "/api/v1/approvals/statistics", "auth": "viewer"},
 
     # ── edr (agent HMAC endpoints) ───────────────────────────────────────
+    # enrollment_token: v2 requires it to resolve a *new* agent's tenant
+    # (routes/endpoint.rs::resolve_enrollment_token, migration 0005); v1 has
+    # no such concept and silently ignores the unknown field (pydantic v2
+    # default extra="ignore" on EDRAgentRegisterRequest). Raw value must
+    # match the seeded hash in seed_v2.sql's endpoint_enrollment_tokens row.
     {"id": "edr.register.new-agent", "method": "POST", "path": "/api/v1/edr/register", "auth": "agent:agent-delta",
      "json": {"agent_id": "agent-delta", "hostname": "db-04.corp", "ip_address": "10.0.0.14",
               "os_type": "linux", "os_version": "Debian 12", "agent_version": "1.4.2",
-              "metadata": {"site": "dal2"}}},
+              "metadata": {"site": "dal2"}, "enrollment_token": "parity-fixed-enrollment-token-0001"}},
     {"id": "edr.register.re-register", "sleep_before": 1.1, "method": "POST", "path": "/api/v1/edr/register", "auth": "agent:agent-alpha",
      "json": {"agent_id": "agent-alpha", "hostname": "web-01.corp", "ip_address": "10.0.0.11",
               "os_type": "linux", "os_version": "Ubuntu 24.04", "agent_version": "1.5.0",

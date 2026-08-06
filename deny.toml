@@ -23,13 +23,17 @@ ignore = [
     # paste 1.0.15 flagged unmaintained. Transitive via netstat2 (endpoint-agent
     # socket enumeration); compile-time macro only, no runtime surface. Not a CVE.
     "RUSTSEC-2024-0436",
-    # rand 0.8.5 flagged unsound (RUSTSEC-2026-0097): the unsound path is only
-    # reachable when a *custom logger* invokes rand::rng() during rand's own
-    # initialization. Transitive via fred/jsonwebtoken/rsa — all pin rand 0.8
-    # (no 0.8.x patch exists; rand 0.9 is a breaking bump those upstreams must
-    # make, not us). We install no custom logger that touches rand, so the path
-    # is never taken. Revisit when fred/jsonwebtoken move to rand 0.9.
-    "RUSTSEC-2026-0097",
+    # wasmtime type-confusion (RUSTSEC-2026-0222 / GHSA-hgjw-h833-99q9, published
+    # 2026-07-31). Transitive via yara-x (scanner). The bug requires the *embedding
+    # host* to build multiple wasmtime::Engine instances and cross-wire a Linker/
+    # type from one Engine into a Store from another (CVSS AV:L/AC:H/PR:H/UI:R) —
+    # it is NOT triggerable by guest input (a scanned file / a rule). yara-x uses a
+    # single process-global Engine singleton (lib/src/wasm/mod.rs) and never does
+    # this, so the path is unreachable in our usage. No patched yara-x exists — even
+    # main HEAD pins an unpatched wasmtime; patched ranges are >=24.0.12<25,
+    # >=36.0.13<37, >=46.0.2<47, >=47.0.3. Drop this + `cargo update -p wasmtime`
+    # the moment yara-x bumps its wasmtime pin into a patched range.
+    "RUSTSEC-2026-0222",
 ]
 
 [licenses]

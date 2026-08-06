@@ -53,7 +53,7 @@ fn pagination(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
 pub(crate) struct ReviewRow {
     id: i64,
     external_id: Option<String>,
-    tenant_id: Option<i64>,
+    tenant_id: uuid::Uuid,
     team_id: Option<i64>,
     triggered_by: Option<i64>,
     repo_config_id: i64,
@@ -126,7 +126,7 @@ pub(crate) struct ReviewListResponse {
 )]
 pub(crate) async fn list_reviews(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Query(q): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
     if let Some(denied) = license_denied(&state).await {
@@ -136,8 +136,9 @@ pub(crate) async fn list_reviews(
     let offset = (page - 1) * per_page;
 
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(format!(
-        "SELECT {REVIEW_COLUMNS} FROM codescan_reviews WHERE 1=1"
+        "SELECT {REVIEW_COLUMNS} FROM codescan_reviews WHERE tenant_id = "
     ));
+    qb.push_bind(user.tenant_id);
     if let Some(repo_config_id) = q.repo_config_id {
         qb.push(" AND repo_config_id = ").push_bind(repo_config_id);
     }
@@ -155,8 +156,9 @@ pub(crate) async fn list_reviews(
         .await?;
 
     let mut count_qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT count(*) FROM codescan_reviews WHERE 1=1",
+        "SELECT count(*) FROM codescan_reviews WHERE tenant_id = ",
     );
+    count_qb.push_bind(user.tenant_id);
     if let Some(repo_config_id) = q.repo_config_id {
         count_qb
             .push(" AND repo_config_id = ")
@@ -226,7 +228,6 @@ fn validate_create(body: &CreateReviewRequest) -> Result<(), ApiError> {
 #[derive(sqlx::FromRow)]
 struct RepoConfigRef {
     id: i64,
-    tenant_id: Option<i64>,
     provider: String,
     repo_name: String,
     default_ai_provider: Option<String>,
@@ -235,10 +236,22 @@ struct RepoConfigRef {
 /// Builds the ordered `codescan:tasks` field list — a pure function so the
 /// wire contract with worker-codescan (services/worker-codescan/src/message.rs)
 /// can be unit-tested without a live Redis/Postgres.
+///
+/// `tenant_id` is always the caller's own validated tenant (`CurrentUser`/
+/// `TenantContext`), never re-derived from the `codescan_repo_configs` row —
+/// the row's own `tenant_id` is already enforced to match at the query layer
+/// (see `create_review`'s repo-config lookup), so this just avoids a second,
+/// redundant source of truth. NOTE: this is now a stringified tenant UUID,
+/// not the small integer the field used to carry pre-tenancy-retrofit;
+/// worker-codescan's consumer side (`_tenant_id: i64` in
+/// `services/worker-codescan/src/message.rs`) is out of scope for this
+/// change and needs its own follow-up to parse the new shape — see
+/// docs/v2-port/tenancy-model.md's per-service checklist for that service.
 fn build_review_task_fields(
     review_id: i64,
     repo_config: &RepoConfigRef,
     pr_url: &str,
+    tenant_id: &str,
     ai_provider: Option<&str>,
     ai_model: Option<&str>,
 ) -> skauswatch_streams::EntryFields {
@@ -248,10 +261,7 @@ fn build_review_task_fields(
         ("provider".to_owned(), repo_config.provider.clone()),
         ("repo_name".to_owned(), repo_config.repo_name.clone()),
         ("pr_url".to_owned(), pr_url.to_owned()),
-        (
-            "tenant_id".to_owned(),
-            repo_config.tenant_id.unwrap_or(0).to_string(),
-        ),
+        ("tenant_id".to_owned(), tenant_id.to_owned()),
     ];
     if let Some(p) = ai_provider {
         fields.push(("ai_provider".to_owned(), p.to_owned()));
@@ -289,21 +299,28 @@ pub(crate) async fn create_review(
     }
     validate_create(&body)?;
 
+    // Scoped to the caller's tenant: this both 404s a repo config that
+    // belongs to a different tenant (never leaking its existence) and
+    // guarantees the review we're about to create can only ever reference a
+    // repo config the caller's own tenant owns.
     let repo_config = sqlx::query_as::<_, RepoConfigRef>(
-        "SELECT id, tenant_id, provider, repo_name, default_ai_provider \
-         FROM codescan_repo_configs WHERE id = $1",
+        "SELECT id, provider, repo_name, default_ai_provider \
+         FROM codescan_repo_configs WHERE id = $1 AND tenant_id = $2",
     )
     .bind(body.repo_config_id)
+    .bind(user.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("Repository configuration not found".to_owned()))?;
 
     if let Some(external_id) = &body.external_id {
-        let existing: Option<(i64,)> =
-            sqlx::query_as("SELECT id FROM codescan_reviews WHERE external_id = $1")
-                .bind(external_id)
-                .fetch_optional(&state.db)
-                .await?;
+        let existing: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM codescan_reviews WHERE external_id = $1 AND tenant_id = $2",
+        )
+        .bind(external_id)
+        .bind(user.tenant_id)
+        .fetch_optional(&state.db)
+        .await?;
         if existing.is_some() {
             return Err(ApiError::Conflict(serde_json::json!({
                 "error": "Review with this external_id already exists"
@@ -330,9 +347,13 @@ pub(crate) async fn create_review(
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'queued',now()) \
          RETURNING {REVIEW_COLUMNS}"
     );
+    // tenant_id is always the caller's own validated tenant — never derived
+    // from the request body or the repo_config row (see
+    // build_review_task_fields's doc comment for why re-deriving from the
+    // row would be a redundant, not-more-trustworthy second source).
     let created = sqlx::query_as::<_, ReviewRow>(sqlx::AssertSqlSafe(query))
         .bind(&external_id)
-        .bind(repo_config.tenant_id)
+        .bind(user.tenant_id)
         .bind(user.id)
         .bind(body.repo_config_id)
         .bind(body.pr_number)
@@ -351,6 +372,7 @@ pub(crate) async fn create_review(
         created.id,
         &repo_config,
         &body.pr_url,
+        &user.tenant_id.to_string(),
         ai_provider.as_deref(),
         body.ai_model.as_deref(),
     );
@@ -371,16 +393,53 @@ pub(crate) struct ReviewComment {
     created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// One `codescan_review_detections` row (language/framework detected in the
+/// review's diff — see `services/worker-codescan/src/detection.rs`, the
+/// writer for this table). Net-new reader (Phase 12): v1's own reader for
+/// this table was wired to a GET endpoint that therefore always returned
+/// empty, since v1's writer had zero callers either — see
+/// docs/v2-port/phase12-scope-codeai.md row 2.
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct ReviewDetection {
+    id: i64,
+    detection_type: Option<String>,
+    name: Option<String>,
+    confidence: Option<f64>,
+    file_count: Option<i32>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One `codescan_license_violations` row (policy-flagged dependency license
+/// — see `services/worker-codescan/src/license_scan.rs`, the scanner, and
+/// `handler.rs`, the policy-evaluation writer for this table). Net-new
+/// reader (Phase 12) — no v1 equivalent ever wired the scanner to the
+/// review pipeline (docs/v2-port/phase12-scope-codeai.md row 3).
+#[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
+pub(crate) struct ReviewLicenseViolation {
+    id: i64,
+    license_name: Option<String>,
+    package_name: Option<String>,
+    policy: Option<String>,
+    severity: Option<String>,
+    status: String,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 /// Documentation-only mirror of `get_review`'s merged JSON body — the
-/// handler builds this shape by hand (`ReviewRow` fields flattened, plus a
-/// `comments` array) via `serde_json::Value` manipulation rather than
-/// deriving `Serialize` on a single struct, so this type exists solely to
-/// describe the wire shape to `utoipa`.
+/// handler builds this shape by hand (`ReviewRow` fields flattened, plus
+/// `comments`/`detections`/`license_violations` arrays) via
+/// `serde_json::Value` manipulation rather than deriving `Serialize` on a
+/// single struct, so this type exists solely to describe the wire shape to
+/// `utoipa`.
 #[derive(Serialize, utoipa::ToSchema)]
 pub(crate) struct ReviewDetailResponse {
     #[serde(flatten)]
     review: ReviewRow,
     comments: Vec<ReviewComment>,
+    detections: Vec<ReviewDetection>,
+    license_violations: Vec<ReviewLicenseViolation>,
 }
 
 /// GET /codescan/reviews/{review_id} — review detail enriched with comments.
@@ -399,24 +458,48 @@ pub(crate) struct ReviewDetailResponse {
 )]
 pub(crate) async fn get_review(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(review_id): Path<i64>,
 ) -> Result<Response, ApiError> {
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
-    let query = format!("SELECT {REVIEW_COLUMNS} FROM codescan_reviews WHERE id = $1");
+    let query =
+        format!("SELECT {REVIEW_COLUMNS} FROM codescan_reviews WHERE id = $1 AND tenant_id = $2");
     let review = sqlx::query_as::<_, ReviewRow>(sqlx::AssertSqlSafe(query))
         .bind(review_id)
+        .bind(user.tenant_id)
         .fetch_optional(&state.db)
         .await?
         .ok_or_else(|| ApiError::NotFound("Review not found".to_owned()))?;
 
     let comments = sqlx::query_as::<_, ReviewComment>(
         "SELECT id, file_path, line_number, comment, category, severity, created_at \
-         FROM codescan_review_comments WHERE review_id = $1 ORDER BY created_at",
+         FROM codescan_review_comments WHERE review_id = $1 AND tenant_id = $2 \
+         ORDER BY created_at",
     )
     .bind(review_id)
+    .bind(user.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let detections = sqlx::query_as::<_, ReviewDetection>(
+        "SELECT id, detection_type, name, confidence, file_count, created_at \
+         FROM codescan_review_detections WHERE review_id = $1 AND tenant_id = $2 \
+         ORDER BY created_at",
+    )
+    .bind(review_id)
+    .bind(user.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    let license_violations = sqlx::query_as::<_, ReviewLicenseViolation>(
+        "SELECT id, license_name, package_name, policy, severity, status, created_at \
+         FROM codescan_license_violations WHERE review_id = $1 AND tenant_id = $2 \
+         ORDER BY created_at",
+    )
+    .bind(review_id)
+    .bind(user.tenant_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -428,6 +511,14 @@ pub(crate) async fn get_review(
         map.insert(
             "comments".to_owned(),
             serde_json::to_value(&comments).unwrap_or(serde_json::Value::Array(vec![])),
+        );
+        map.insert(
+            "detections".to_owned(),
+            serde_json::to_value(&detections).unwrap_or(serde_json::Value::Array(vec![])),
+        );
+        map.insert(
+            "license_violations".to_owned(),
+            serde_json::to_value(&license_violations).unwrap_or(serde_json::Value::Array(vec![])),
         );
     }
     Ok((StatusCode::OK, Json(payload)).into_response())
@@ -507,7 +598,6 @@ mod tests {
     fn task_fields_match_worker_codescan_message_contract() {
         let repo_config = RepoConfigRef {
             id: 7,
-            tenant_id: Some(3),
             provider: "github".to_owned(),
             repo_name: "penguintechinc/skauswatch".to_owned(),
             default_ai_provider: Some("claude".to_owned()),
@@ -516,6 +606,7 @@ mod tests {
             42,
             &repo_config,
             "https://github.com/penguintechinc/skauswatch/pull/9",
+            "00000000-0000-0000-0000-0000000000aa",
             Some("claude"),
             Some("claude-opus"),
         );
@@ -531,7 +622,10 @@ mod tests {
             map.get("pr_url"),
             Some(&"https://github.com/penguintechinc/skauswatch/pull/9".to_owned())
         );
-        assert_eq!(map.get("tenant_id"), Some(&"3".to_owned()));
+        assert_eq!(
+            map.get("tenant_id"),
+            Some(&"00000000-0000-0000-0000-0000000000aa".to_owned())
+        );
         assert_eq!(map.get("ai_provider"), Some(&"claude".to_owned()));
         assert_eq!(map.get("ai_model"), Some(&"claude-opus".to_owned()));
     }
@@ -540,18 +634,26 @@ mod tests {
     fn task_fields_omit_optional_ai_overrides_when_absent() {
         let repo_config = RepoConfigRef {
             id: 1,
-            tenant_id: None,
             provider: "gitlab".to_owned(),
             repo_name: "group/proj".to_owned(),
             default_ai_provider: None,
         };
-        let fields =
-            build_review_task_fields(1, &repo_config, "https://gitlab.com/g/p/-/mr/1", None, None);
+        let fields = build_review_task_fields(
+            1,
+            &repo_config,
+            "https://gitlab.com/g/p/-/mr/1",
+            "00000000-0000-0000-0000-0000000000bb",
+            None,
+            None,
+        );
         let keys: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
         assert!(!keys.contains(&"ai_provider"));
         assert!(!keys.contains(&"ai_model"));
         let map: std::collections::HashMap<_, _> = fields.into_iter().collect();
-        assert_eq!(map.get("tenant_id"), Some(&"0".to_owned()));
+        assert_eq!(
+            map.get("tenant_id"),
+            Some(&"00000000-0000-0000-0000-0000000000bb".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -583,12 +685,20 @@ mod tests {
 
     /// Inserts a `codescan_repo_configs` row directly (bypassing the REST
     /// surface) so review tests have a valid `repo_config_id` to reference —
-    /// keeps each review test focused on the reviews table itself.
-    async fn seed_repo_config(state: &crate::state::AppState, repo_name: &str) -> i64 {
+    /// keeps each review test focused on the reviews table itself. Always
+    /// stamps a tenant (the column is `NOT NULL`); callers choose which one
+    /// so cross-tenant tests can seed rows under two distinct tenants.
+    async fn seed_repo_config_for_tenant(
+        state: &crate::state::AppState,
+        repo_name: &str,
+        tenant: &str,
+    ) -> i64 {
+        let tenant_uuid: uuid::Uuid = tenant.parse().unwrap_or_else(|e| panic!("uuid: {e}"));
         let row: (i64,) = match sqlx::query_as(
-            "INSERT INTO codescan_repo_configs (provider, repo_url, repo_name) \
-             VALUES ('github', $1, $2) RETURNING id",
+            "INSERT INTO codescan_repo_configs (tenant_id, provider, repo_url, repo_name) \
+             VALUES ($1, 'github', $2, $3) RETURNING id",
         )
+        .bind(tenant_uuid)
         .bind(format!("https://github.com/a/{repo_name}"))
         .bind(repo_name)
         .fetch_one(&state.db)
@@ -598,6 +708,17 @@ mod tests {
             Err(e) => panic!("seed repo config: {e}"),
         };
         row.0
+    }
+
+    /// [`seed_repo_config_for_tenant`] under the common-case
+    /// [`crate::routes::test_support::TEST_TENANT_ID`].
+    async fn seed_repo_config(state: &crate::state::AppState, repo_name: &str) -> i64 {
+        seed_repo_config_for_tenant(
+            state,
+            repo_name,
+            crate::routes::test_support::TEST_TENANT_ID,
+        )
+        .await
     }
 
     #[tokio::test]
@@ -666,11 +787,15 @@ mod tests {
             .await;
         dup.assert_status(StatusCode::CONFLICT);
 
+        let tenant_uuid: uuid::Uuid = crate::routes::test_support::TEST_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("uuid: {e}"));
         if let Err(e) = sqlx::query(
-            "INSERT INTO codescan_review_comments (review_id, file_path, comment) \
-             VALUES ($1, 'src/lib.rs', 'looks good')",
+            "INSERT INTO codescan_review_comments (review_id, tenant_id, file_path, comment) \
+             VALUES ($1, $2, 'src/lib.rs', 'looks good')",
         )
         .bind(review_id)
+        .bind(tenant_uuid)
         .execute(&state.db)
         .await
         {
@@ -697,6 +822,89 @@ mod tests {
         assert_eq!(listed_body["pagination"]["total"], 1);
     }
 
+    /// The `detections`/`license_violations` readers Phase 12 adds to this
+    /// endpoint — both tables are written by worker-codescan (a separate
+    /// process this test doesn't run), so rows are seeded directly, mirroring
+    /// `create_list_and_get_round_trip_with_comments`'s pattern for comments.
+    #[tokio::test]
+    async fn get_review_includes_detections_and_license_violations() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let repo_config_id = seed_repo_config(&state, "detections-repo").await;
+        let maintainer = sign_token(&state, "1", "maintainer");
+        let server = test_server(state.clone());
+
+        let created = server
+            .post("/api/v1/codescan/reviews")
+            .authorization_bearer(&maintainer)
+            .json(&serde_json::json!({
+                "repo_config_id": repo_config_id,
+                "pr_url": "https://github.com/a/detections-repo/pull/1",
+            }))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let review_id = created.json::<serde_json::Value>()["id"]
+            .as_i64()
+            .unwrap_or_default();
+
+        let tenant_uuid: uuid::Uuid = crate::routes::test_support::TEST_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("uuid: {e}"));
+        if let Err(e) = sqlx::query(
+            "INSERT INTO codescan_review_detections \
+             (review_id, tenant_id, detection_type, name, confidence, file_count) \
+             VALUES ($1, $2, 'language', 'Rust', 1.0, 3)",
+        )
+        .bind(review_id)
+        .bind(tenant_uuid)
+        .execute(&state.db)
+        .await
+        {
+            panic!("seed detection: {e}");
+        }
+
+        let detection_id: (i64,) = match sqlx::query_as(
+            "INSERT INTO codescan_license_detections \
+             (review_id, tenant_id, package_name, package_version, license_name, license_source, \
+              file_path, confidence, policy_violation) \
+             VALUES ($1, $2, 'left-pad', '1.3.0', 'GPL-3.0', 'npm_registry', 'package.json', 0.9, true) \
+             RETURNING id",
+        )
+        .bind(review_id)
+        .bind(tenant_uuid)
+        .fetch_one(&state.db)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => panic!("seed license detection: {e}"),
+        };
+
+        if let Err(e) = sqlx::query(
+            "INSERT INTO codescan_license_violations \
+             (review_id, tenant_id, detection_id, license_name, package_name, policy, severity) \
+             VALUES ($1, $2, $3, 'GPL-3.0', 'left-pad', 'blocked', 'critical')",
+        )
+        .bind(review_id)
+        .bind(tenant_uuid)
+        .bind(detection_id.0)
+        .execute(&state.db)
+        .await
+        {
+            panic!("seed license violation: {e}");
+        }
+
+        let fetched = server
+            .get(&format!("/api/v1/codescan/reviews/{review_id}"))
+            .authorization_bearer(&maintainer)
+            .await;
+        fetched.assert_status_ok();
+        let body: serde_json::Value = fetched.json();
+        assert_eq!(body["detections"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["detections"][0]["name"], "Rust");
+        assert_eq!(body["license_violations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["license_violations"][0]["license_name"], "GPL-3.0");
+        assert_eq!(body["license_violations"][0]["status"], "open");
+    }
+
     #[tokio::test]
     async fn get_review_404_on_unknown_id() {
         let state = crate::routes::test_support::db_state(dev_license()).await;
@@ -705,6 +913,85 @@ mod tests {
         server
             .get("/api/v1/codescan/reviews/999999")
             .authorization_bearer(token)
+            .await
+            .assert_status(StatusCode::NOT_FOUND);
+    }
+
+    /// Regression for the tenancy IDOR this service used to have:
+    /// `create_review` used to stamp `tenant_id` from the referenced repo
+    /// config's own (client-body-controlled, pre-retrofit) column. It now
+    /// always stamps the caller's own JWT tenant, and the repo-config lookup
+    /// itself is tenant-scoped — a maintainer cannot create a review against
+    /// another tenant's `repo_config_id` at all (404, not a review stamped
+    /// with the wrong tenant).
+    #[tokio::test]
+    async fn cannot_create_a_review_against_another_tenants_repo_config() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let other_repo_config_id = seed_repo_config_for_tenant(
+            &state,
+            "other-tenant-repo",
+            crate::routes::test_support::OTHER_TENANT_ID,
+        )
+        .await;
+        let maintainer = sign_token(&state, "1", "maintainer");
+        let server = test_server(state);
+
+        let resp = server
+            .post("/api/v1/codescan/reviews")
+            .authorization_bearer(&maintainer)
+            .json(&serde_json::json!({
+                "repo_config_id": other_repo_config_id,
+                "pr_url": "https://github.com/a/b/pull/1",
+            }))
+            .await;
+        resp.assert_status(StatusCode::NOT_FOUND);
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["error"], "Repository configuration not found");
+    }
+
+    /// Tenant A cannot list or read tenant B's reviews, even by guessing a
+    /// valid review id.
+    #[tokio::test]
+    async fn tenant_a_cannot_access_tenant_b_reviews() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let repo_config_id = seed_repo_config_for_tenant(
+            &state,
+            "tenant-b-review-repo",
+            crate::routes::test_support::OTHER_TENANT_ID,
+        )
+        .await;
+        let maintainer_b = crate::routes::test_support::sign_token_for_tenant(
+            &state,
+            "2",
+            "maintainer",
+            crate::routes::test_support::OTHER_TENANT_ID,
+        );
+        let viewer_a = sign_token(&state, "1", "viewer");
+        let server = test_server(state);
+
+        let created = server
+            .post("/api/v1/codescan/reviews")
+            .authorization_bearer(&maintainer_b)
+            .json(&serde_json::json!({
+                "repo_config_id": repo_config_id,
+                "pr_url": "https://github.com/a/b/pull/1",
+            }))
+            .await;
+        created.assert_status(StatusCode::CREATED);
+        let review_id = created.json::<serde_json::Value>()["id"]
+            .as_i64()
+            .unwrap_or_default();
+
+        let listed = server
+            .get("/api/v1/codescan/reviews")
+            .authorization_bearer(&viewer_a)
+            .await;
+        listed.assert_status_ok();
+        assert_eq!(listed.json::<serde_json::Value>()["pagination"]["total"], 0);
+
+        server
+            .get(&format!("/api/v1/codescan/reviews/{review_id}"))
+            .authorization_bearer(&viewer_a)
             .await
             .assert_status(StatusCode::NOT_FOUND);
     }

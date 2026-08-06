@@ -31,3 +31,9 @@ configMapData:
   redis-key-prefix: "skauswatch"
   license-server-url: "https://license.penguintech.io"
   release-mode: "false"
+
+# Enabled here even though release-mode is currently "false" so beta
+# stays SPIRE-parity with production ahead of any release-mode flip.
+# Backs awsIdentity.mode: "spire" above.
+spire:
+  enabled: true

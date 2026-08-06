@@ -35,15 +35,27 @@ JWT_SECRET=parity-jwt-secret
 ENDPOINT_API_SECRET=parity-endpoint-secret
 export ENDPOINT_API_SECRET
 
-# Cargo caches live in the session scratchpad (fall back to /tmp for
-# standalone runs).
-SCRATCH="${PARITY_SCRATCH:-/tmp/claude-1000/-home-penguin-code-skauswatch/1f7aef20-b887-40e5-9822-90f00d5419c0/scratchpad}"
+# v2-only: skauswatch-vault envelope encryption (crates/skauswatch-vault/src/crypto.rs)
+# is wired into the manager for S3 bucket credential storage (see
+# services/manager/src/state.rs) and exits at startup if no VAULT_MEK* is
+# set. Fixed 32 raw bytes, base64-standard-encoded, matching the KEY_LEN=32
+# AES-256 requirement. v1 predates Vault entirely, so it needs no equivalent.
+VAULT_MEK=cGFyaXR5LXZhdWx0LW1lay1maXhlZC0zMi1ieXRlcyE=
+
+# Cargo/pip caches + build scratch dir. Override with PARITY_SCRATCH (CI
+# sets this to a runner-temp path); defaults to a fixed /tmp dir for
+# standalone local runs.
+SCRATCH="${PARITY_SCRATCH:-/tmp/skauswatch-parity-scratch}"
 mkdir -p "$SCRATCH/cargo-cache" "$SCRATCH/cargo-git" "$SCRATCH/target-parity" "$SCRATCH/pip-cache"
 
-RUST_IMG=rust:1.97-slim-bookworm
-PY_IMG=python:3.13-slim-bookworm
-PG_IMG=postgres:17-bookworm
-REDIS_IMG=valkey/valkey:8-bookworm
+# Pinned by digest (external images — see backend-rust.md / devops-containers.md
+# dependency-pinning rules); digests match the ones already pinned in
+# services/manager/Dockerfile and .github/workflows/rust.yml so a single
+# `docker pull` warms the cache for both the harness and the rest of CI.
+RUST_IMG=rust:1.97-slim-bookworm@sha256:99e09cb2284e2ddbb73a995deee3e91783fd04d177602ccf6eab326d778ee777
+PY_IMG=python:3.13-slim-bookworm@sha256:e853aef5a8b52fb7d636b7b545aea2fb90f41c27101ee1d2f25789f29a7b5cf8
+PG_IMG=postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+REDIS_IMG=valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
 
 down() {
   for c in "$V1" "$V2" "$STUB" "$REDIS" "$PG"; do
@@ -68,6 +80,15 @@ wait_http() {
   return 1
 }
 
+# aws-lc-sys (rustls' default crypto provider, pulled in transitively by
+# reqwest/sqlx-tls everywhere in the workspace) needs cmake + a C/C++
+# compiler + perl for its assembly codegen, plus libclang for bindgen; git is
+# needed for the penguin-licensing workspace git dependency; ssh client covers
+# git-over-ssh workspace deps if any are added later. Same package list as
+# services/manager/Dockerfile's builder stage — the bare rust:*-slim-bookworm
+# image ships none of this.
+BUILD_DEPS="cmake clang libclang-dev perl pkg-config g++ make git openssh-client"
+
 build_v2() {
   echo "== building v2 manager (docker cargo) =="
   docker run --rm \
@@ -75,7 +96,8 @@ build_v2() {
     -v "$SCRATCH/cargo-cache":/usr/local/cargo/registry \
     -v "$SCRATCH/cargo-git":/usr/local/cargo/git \
     -v "$SCRATCH/target-parity":/t -e CARGO_TARGET_DIR=/t \
-    "$RUST_IMG" cargo build -p skauswatch-manager
+    "$RUST_IMG" bash -c \
+    "apt-get update -qq && apt-get install -y -qq --no-install-recommends $BUILD_DEPS >/dev/null && cargo build -p skauswatch-manager"
 }
 
 up() {
@@ -89,6 +111,16 @@ up() {
   n=0
   until docker exec "$PG" pg_isready -U "$PG_USER" >/dev/null 2>&1; do
     sleep 1; n=$((n + 1)); [ "$n" -lt 60 ] || { echo "postgres not ready" >&2; exit 1; }
+  done
+  # The official postgres image runs a transient init-only instance (initdb +
+  # docker-entrypoint-initdb.d scripts) on the same Unix socket before
+  # stopping it and starting the real server a moment later; pg_isready can
+  # observe that transient instance as "accepting connections" and return
+  # success just before the socket goes away for the handoff. Retry an
+  # actual query (not just pg_isready) so we don't race that gap.
+  n=0
+  until docker exec "$PG" psql -q -U "$PG_USER" -d postgres -c "SELECT 1" >/dev/null 2>&1; do
+    sleep 1; n=$((n + 1)); [ "$n" -lt 30 ] || { echo "postgres not accepting queries" >&2; exit 1; }
   done
   docker exec "$PG" psql -q -U "$PG_USER" -d postgres \
     -c "CREATE DATABASE skauswatch_v1;" -c "CREATE DATABASE skauswatch_v2;"
@@ -108,11 +140,22 @@ up() {
   echo "== v1 manager (Quart) =="
   # services/manager on this branch is the v2 Rust service; the v1 Python
   # source lives frozen on release/v1.0.x. Extract a pristine snapshot from
-  # git history for the container mount.
+  # git history for the container mount. Resolve the ref defensively: a
+  # local dev clone has a local `release/v1.0.x` branch, but a CI checkout
+  # (actions/checkout, even with fetch-depth:0) only creates the
+  # remote-tracking ref `origin/release/v1.0.x` — no local branch.
+  V1_REF="$(git -C "$REPO" rev-parse --verify --quiet release/v1.0.x || true)"
+  if [ -z "$V1_REF" ]; then
+    V1_REF="$(git -C "$REPO" rev-parse --verify --quiet origin/release/v1.0.x || true)"
+  fi
+  if [ -z "$V1_REF" ]; then
+    echo "release/v1.0.x not found (checked local branch and origin/release/v1.0.x)" >&2
+    exit 1
+  fi
   V1_SRC="$SCRATCH/v1-manager-src"
   rm -rf "$V1_SRC"
   mkdir -p "$V1_SRC"
-  git -C "$REPO" archive release/v1.0.x services/manager | tar -x -C "$V1_SRC"
+  git -C "$REPO" archive "$V1_REF" services/manager | tar -x -C "$V1_SRC"
   # Dependencies install once into a persistent PYTHONUSERBASE volume so the
   # runner's poisoned-connection recovery (docker restart) reboots in
   # seconds instead of re-running pip (see README: v1 defect — a SQL error
@@ -141,6 +184,12 @@ up() {
     >/dev/null
 
   echo "== v2 manager (Rust) =="
+  # RELEASE_MODE=false: skauswatch-identity (crates/skauswatch-identity/src/lib.rs)
+  # hard-fails startup if the SPIFFE Workload API is unreachable while in
+  # production posture — there is no SPIRE agent in this harness, and per
+  # that crate's own docs RELEASE_MODE=false is the only supported way to
+  # run outside production posture (no domain-based bypass exists, by
+  # design). v1 predates SPIFFE identity entirely, so it needs no equivalent.
   docker run -d --name "$V2" --network "$NET" -p "$V2_PORT":5000 \
     -v "$SCRATCH/target-parity/debug/skauswatch-manager":/usr/local/bin/skauswatch-manager:ro \
     -v "$REPO/.version":/work/.version:ro \
@@ -150,6 +199,8 @@ up() {
     -e REDIS_URL="redis://$REDIS:6379/1" \
     -e JWT_SECRET_KEY="$JWT_SECRET" \
     -e ENDPOINT_API_SECRET="$ENDPOINT_API_SECRET" \
+    -e VAULT_MEK="$VAULT_MEK" \
+    -e RELEASE_MODE=false \
     -e GRPC_ENABLED=false \
     -e LICENSE_SERVER_URL="http://$STUB:9999" \
     -e SCANNER_URL="http://$STUB:9999" \

@@ -75,6 +75,21 @@ async fn serve() -> anyhow::Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("http client: {e}"))?;
 
+    // Fail-fast (before serving a single request) if `JWT_SECRET_KEY` is
+    // missing in production — see `skauswatch_auth::load_jwt_secret`.
+    // `/ingest` requires a valid bearer token verified against this secret.
+    let jwt_secret = skauswatch_auth::load_jwt_secret().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let license_cfg = penguin_licensing::LicenseConfig::from_env("skauswatch")
+        .map_err(|e| anyhow::anyhow!("license config: {e}"))?
+        .with_bypass_domain("skauswatch.app");
+    let license = penguin_licensing::LicenseClient::new(license_cfg)
+        .map_err(|e| anyhow::anyhow!("license client: {e}"))?;
+    let _ = license.refresh().await;
+    // License/flag refresh loop — fail-safe by design; startup never blocks
+    // on the license server.
+    let _license_bg = license.spawn_refresh();
+
     // v1 `ensure_ism_policy` at startup — best-effort; errors are swallowed so
     // the service still serves ingest when OpenSearch is briefly unavailable.
     opensearch::ensure_ism_policy(&http, &cfg.opensearch_url, cfg.log_retention_days).await;
@@ -83,6 +98,8 @@ async fn serve() -> anyhow::Result<()> {
         http: http.clone(),
         opensearch_url: cfg.opensearch_url.clone().into(),
         clock: Clock::System,
+        jwt_secret: jwt_secret.into(),
+        license,
     };
     let app = ingest::router(state);
 

@@ -21,7 +21,7 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
-use sqlx::{Postgres, QueryBuilder};
+use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ApiJson, ErrorResponse, ValidationErrorResponse};
@@ -44,23 +44,67 @@ const AGENT_COLUMNS: &str = "SELECT id, agent_id, hostname, ip_address, os_type,
      agent_version, status, last_heartbeat, metadata, created_at, updated_at \
      FROM endpoint_agents WHERE TRUE";
 
-/// Router for /api/v1/endpoint. Also mounts the pre-rename `/edr/*` paths as
-/// a deprecated alias to the same handlers (see docs/MIGRATION.md) — old
-/// callers keep working and get `Deprecation`/`Sunset` response headers via
-/// [`crate::deprecated`].
+/// Router for /api/v1/endpoint — merges [`agent_router`] and
+/// [`operator_router`]. Used as-is by this module's own tests; the app-wide
+/// assembly (`routes/mod.rs`) mounts the two halves separately so
+/// `tenant_middleware` wraps only the operator half (see [`agent_router`]'s
+/// docs for why the agent-facing half must never sit behind it).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .merge(canonical_router())
-        .merge(legacy_router())
+    agent_router().merge(operator_router())
 }
 
-/// The canonical `/endpoint/*` routes.
-fn canonical_router() -> Router<AppState> {
+/// The HMAC-authenticated ENDPOINT agent ingestion routes (`EndpointAgent`
+/// extractor — `X-API-Key`/`X-Agent-ID` headers, never a bearer JWT). Per
+/// docs/v2-port/tenancy-model.md §3, an agent's tenant is resolved
+/// server-side from `endpoint_agents.tenant_id` (looked up by `agent_id`),
+/// not from a JWT `tenant` claim these requests don't and can't carry —
+/// `tenant_middleware` must never wrap this half of the router, or every
+/// agent request would be rejected before reaching the HMAC check at all.
+/// Also mounts the pre-rename `/edr/*` paths as a deprecated alias (see
+/// docs/MIGRATION.md).
+pub fn agent_router() -> Router<AppState> {
+    Router::new()
+        .merge(canonical_agent_router())
+        .merge(legacy_agent_router())
+}
+
+/// The canonical `/endpoint/*` agent-ingestion routes.
+fn canonical_agent_router() -> Router<AppState> {
     Router::new()
         .route("/endpoint/register", post(register_agent))
         .route("/endpoint/heartbeat", post(heartbeat))
         .route("/endpoint/events", post(report_events))
         .route("/endpoint/config", get(agent_config))
+}
+
+/// The deprecated `/edr/*` agent-ingestion aliases — identical handlers,
+/// tagged deprecated.
+fn legacy_agent_router() -> Router<AppState> {
+    Router::new()
+        .route("/edr/register", post(register_agent))
+        .route("/edr/heartbeat", post(heartbeat))
+        .route("/edr/events", post(report_events))
+        .route("/edr/config", get(agent_config))
+        .layer(axum::middleware::from_fn(
+            crate::deprecated::deprecated_alias,
+        ))
+}
+
+/// The JWT/`CurrentUser`-authenticated operator routes (agent list/get/
+/// events/deactivate, fleet statistics) — wrapped in `tenant_middleware`
+/// like every other authenticated route in the app-wide assembly. Also
+/// mounts the pre-rename `/edr/*` paths as a deprecated alias (see
+/// docs/MIGRATION.md).
+pub fn operator_router() -> Router<AppState> {
+    Router::new()
+        .merge(canonical_operator_router())
+        .merge(legacy_operator_router())
+}
+
+/// The canonical `/endpoint/*` operator routes.
+fn canonical_operator_router() -> Router<AppState> {
+    Router::new()
         .route("/endpoint/agents", get(list_agents))
         .route("/endpoint/agents/{agent_id}", get(get_agent))
         .route("/endpoint/agents/{agent_id}/events", get(get_agent_events))
@@ -71,13 +115,10 @@ fn canonical_router() -> Router<AppState> {
         .route("/endpoint/statistics", get(get_statistics))
 }
 
-/// The deprecated `/edr/*` aliases — identical handlers, tagged deprecated.
-fn legacy_router() -> Router<AppState> {
+/// The deprecated `/edr/*` operator aliases — identical handlers, tagged
+/// deprecated.
+fn legacy_operator_router() -> Router<AppState> {
     Router::new()
-        .route("/edr/register", post(register_agent))
-        .route("/edr/heartbeat", post(heartbeat))
-        .route("/edr/events", post(report_events))
-        .route("/edr/config", get(agent_config))
         .route("/edr/agents", get(list_agents))
         .route("/edr/agents/{agent_id}", get(get_agent))
         .route("/edr/agents/{agent_id}/events", get(get_agent_events))
@@ -279,6 +320,12 @@ pub(crate) struct RegisterBody {
     os_version: Option<String>,
     agent_version: Option<String>,
     metadata: Option<serde_json::Value>,
+    /// Per-tenant enrollment token (`docs/v2-port/service-auth-model.md`
+    /// §5) minted via `POST /tenants/{tenant_id}/enrollment-tokens`.
+    /// Required only for a *new* agent_id — re-registration of an existing
+    /// agent keeps its stored tenant and never consults this field (see
+    /// `register_agent`'s branch split below).
+    enrollment_token: Option<String>,
 }
 
 struct ValidRegister {
@@ -315,10 +362,42 @@ pub(crate) struct RegisterResponse {
     status: String,
 }
 
+/// Resolves and atomically consumes a per-tenant enrollment token for a
+/// *new* agent registration (`docs/v2-port/service-auth-model.md` §5):
+/// looks the token up by its SHA-256 hash and, in the same statement,
+/// requires it to be unexpired, unrevoked, and under `max_uses` before
+/// incrementing `use_count` — a single `UPDATE ... RETURNING` closes the
+/// TOCTOU window a separate check-then-increment pair would leave open
+/// under concurrent registrations. Returns the tenant the token is scoped
+/// to, or 401 if the token is missing, unknown, expired, revoked, or
+/// exhausted (deliberately one generic message — never reveals which
+/// specific condition failed).
+async fn resolve_enrollment_token(db: &PgPool, raw_token: &str) -> Result<uuid::Uuid, ApiError> {
+    const INVALID_TOKEN_MSG: &str = "Invalid or expired enrollment token";
+    if raw_token.is_empty() {
+        return Err(ApiError::Unauthorized(INVALID_TOKEN_MSG.to_owned()));
+    }
+    let hash = crate::auth::token_hash(raw_token);
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
+        "UPDATE endpoint_enrollment_tokens SET use_count = use_count + 1 \
+         WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now() \
+           AND use_count < max_uses \
+         RETURNING tenant_id",
+    )
+    .bind(&hash)
+    .fetch_optional(db)
+    .await?;
+    row.map(|(tenant_id,)| tenant_id)
+        .ok_or_else(|| ApiError::Unauthorized(INVALID_TOKEN_MSG.to_owned()))
+}
+
 /// POST /endpoint/register — HMAC agent auth. Re-registers (200) when the body's
-/// agent_id already exists (full field overwrite, metadata replaced), else
-/// inserts a new active agent (201). v1 keys off the BODY agent_id, which
-/// need not match the authenticated X-Agent-ID — preserved as-is.
+/// agent_id already exists (full field overwrite, metadata replaced, tenant
+/// unchanged — `enrollment_token` is ignored on this path), else requires a
+/// valid, unexpired, unexhausted `enrollment_token` (§5) to resolve the new
+/// agent's tenant and inserts a new active agent (201). v1 keys off the BODY
+/// agent_id, which need not match the authenticated X-Agent-ID — preserved
+/// as-is.
 #[utoipa::path(
     post,
     path = "/api/v1/endpoint/register",
@@ -347,7 +426,12 @@ pub(crate) async fn register_agent(
             .await?;
 
     if existing.is_some() {
-        // pyDAL sets updated_at automatically on every update (update=utcnow).
+        // Re-registration never touches tenant_id — an already-provisioned
+        // agent stays on the tenant it was created under (see
+        // docs/v2-port/tenancy-model.md §3: agent tenant is resolved
+        // server-side from the stored row, never re-derived from the
+        // request). pyDAL sets updated_at automatically on every update
+        // (update=utcnow).
         sqlx::query(
             "UPDATE endpoint_agents SET hostname = $1, ip_address = $2, os_type = $3, \
              os_version = $4, agent_version = $5, status = 'active', \
@@ -374,10 +458,22 @@ pub(crate) async fn register_agent(
         ));
     }
 
+    // A brand-new agent has no JWT/tenant claim to derive a tenant from (HMAC
+    // auth, not a bearer token — see the `agent_router` module docs).
+    // Resolves the tenant from the caller-supplied per-tenant enrollment
+    // token (docs/v2-port/service-auth-model.md §5 Option A) instead of the
+    // default bootstrap tenant — closes the "every new agent lands on the
+    // default tenant" gap flagged in docs/v2-port/tenancy-model.md §8.
+    let tenant_id = resolve_enrollment_token(
+        &state.db,
+        body.enrollment_token.as_deref().unwrap_or_default(),
+    )
+    .await?;
+
     sqlx::query(
         "INSERT INTO endpoint_agents (agent_id, hostname, ip_address, os_type, os_version, \
-         agent_version, status, last_heartbeat, metadata, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'active', now(), $7, now(), now())",
+         agent_version, status, last_heartbeat, metadata, tenant_id, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'active', now(), $7, $8, now(), now())",
     )
     .bind(&v.agent_id)
     .bind(&v.hostname)
@@ -386,6 +482,7 @@ pub(crate) async fn register_agent(
     .bind(&v.os_version)
     .bind(&v.agent_version)
     .bind(&v.metadata)
+    .bind(tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -587,21 +684,25 @@ fn parse_event(raw: &serde_json::Value) -> Result<EventInsert, String> {
 }
 
 /// Checks the event's agent exists then inserts it. `Ok(false)` = agent not
-/// registered (v1 skips the event with an error entry, not a 404).
+/// registered (v1 skips the event with an error entry, not a 404). Per
+/// docs/v2-port/tenancy-model.md §3, the event's `tenant_id` is resolved
+/// server-side from the owning `endpoint_agents` row (looked up by
+/// `agent_id`) — this HMAC-authenticated path carries no JWT/tenant claim of
+/// its own, so the agent's own tenant is the only trustworthy source.
 async fn store_event(db: &sqlx::PgPool, ev: &EventInsert) -> Result<bool, sqlx::Error> {
-    let exists: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM endpoint_agents WHERE agent_id = $1")
+    let agent: Option<(i32, uuid::Uuid)> =
+        sqlx::query_as("SELECT id, tenant_id FROM endpoint_agents WHERE agent_id = $1")
             .bind(&ev.agent_id)
             .fetch_optional(db)
             .await?;
-    if exists.is_none() {
+    let Some((_, tenant_id)) = agent else {
         return Ok(false);
-    }
+    };
     sqlx::query(
         "INSERT INTO endpoint_events (agent_id, event_type, severity, process_name, process_path, \
          process_hash, parent_process, command_line, network_connections, file_operations, \
-         registry_operations, details, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())",
+         registry_operations, details, tenant_id, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())",
     )
     .bind(&ev.agent_id)
     .bind(&ev.event_type)
@@ -615,6 +716,7 @@ async fn store_event(db: &sqlx::PgPool, ev: &EventInsert) -> Result<bool, sqlx::
     .bind(&ev.file_operations)
     .bind(&ev.registry_operations)
     .bind(&ev.details)
+    .bind(tenant_id)
     .execute(db)
     .await?;
     Ok(true)
@@ -922,6 +1024,7 @@ pub(crate) async fn list_agents(
     };
 
     let mut qb = QueryBuilder::new(AGENT_COLUMNS);
+    qb.push(" AND tenant_id = ").push_bind(user.tenant_id);
     push_filters(&mut qb);
     qb.push(" ORDER BY last_heartbeat DESC LIMIT ")
         .push_bind(per_page)
@@ -930,6 +1033,7 @@ pub(crate) async fn list_agents(
     let rows = qb.build_query_as::<AgentRow>().fetch_all(&state.db).await?;
 
     let mut cq = QueryBuilder::new("SELECT COUNT(*) FROM endpoint_agents WHERE TRUE");
+    cq.push(" AND tenant_id = ").push_bind(user.tenant_id);
     push_filters(&mut cq);
     let total: i64 = cq.build_query_scalar().fetch_one(&state.db).await?;
 
@@ -976,11 +1080,14 @@ pub(crate) struct AgentDetail {
 )]
 pub(crate) async fn get_agent(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(agent_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut qb = QueryBuilder::new(AGENT_COLUMNS);
-    qb.push(" AND agent_id = ").push_bind(&agent_id);
+    qb.push(" AND agent_id = ")
+        .push_bind(&agent_id)
+        .push(" AND tenant_id = ")
+        .push_bind(user.tenant_id);
     let row = qb
         .build_query_as::<AgentRow>()
         .fetch_optional(&state.db)
@@ -1061,13 +1168,14 @@ pub(crate) struct AgentEventsResponse {
 )]
 pub(crate) async fn get_agent_events(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(agent_id): Path<String>,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let exists: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM endpoint_agents WHERE agent_id = $1")
+        sqlx::query_as("SELECT id FROM endpoint_agents WHERE agent_id = $1 AND tenant_id = $2")
             .bind(&agent_id)
+            .bind(user.tenant_id)
             .fetch_optional(&state.db)
             .await?;
     if exists.is_none() {
@@ -1077,18 +1185,22 @@ pub(crate) async fn get_agent_events(
     let (page, per_page) = parse_page_params(&params, 50, 200);
     let rows = sqlx::query_as::<_, EventRow>(
         "SELECT id, event_type, severity, process_name, process_path, command_line, \
-         created_at FROM endpoint_events WHERE agent_id = $1 \
-         ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+         created_at FROM endpoint_events WHERE agent_id = $1 AND tenant_id = $2 \
+         ORDER BY created_at DESC LIMIT $3 OFFSET $4",
     )
     .bind(&agent_id)
+    .bind(user.tenant_id)
     .bind(per_page)
     .bind((page - 1) * per_page)
     .fetch_all(&state.db)
     .await?;
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_events WHERE agent_id = $1")
-        .bind(&agent_id)
-        .fetch_one(&state.db)
-        .await?;
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM endpoint_events WHERE agent_id = $1 AND tenant_id = $2",
+    )
+    .bind(&agent_id)
+    .bind(user.tenant_id)
+    .fetch_one(&state.db)
+    .await?;
 
     let items: Vec<serde_json::Value> = rows
         .iter()
@@ -1143,8 +1255,9 @@ pub(crate) async fn deactivate_agent(
     user.require_role(&["admin"])?;
 
     let exists: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM endpoint_agents WHERE agent_id = $1")
+        sqlx::query_as("SELECT id FROM endpoint_agents WHERE agent_id = $1 AND tenant_id = $2")
             .bind(&agent_id)
+            .bind(user.tenant_id)
             .fetch_optional(&state.db)
             .await?;
     if exists.is_none() {
@@ -1152,9 +1265,11 @@ pub(crate) async fn deactivate_agent(
     }
 
     sqlx::query(
-        "UPDATE endpoint_agents SET status = 'inactive', updated_at = now() WHERE agent_id = $1",
+        "UPDATE endpoint_agents SET status = 'inactive', updated_at = now() \
+         WHERE agent_id = $1 AND tenant_id = $2",
     )
     .bind(&agent_id)
+    .bind(user.tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -1208,19 +1323,24 @@ pub(crate) struct EndpointStatisticsResponse {
 )]
 pub(crate) async fn get_statistics(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let total_agents: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_agents")
-        .fetch_one(&state.db)
-        .await?;
-    let status_rows: Vec<(Option<String>, i64)> =
-        sqlx::query_as("SELECT status, COUNT(*) FROM endpoint_agents GROUP BY status")
-            .fetch_all(&state.db)
+    let total_agents: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_agents WHERE tenant_id = $1")
+            .bind(user.tenant_id)
+            .fetch_one(&state.db)
             .await?;
+    let status_rows: Vec<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT status, COUNT(*) FROM endpoint_agents WHERE tenant_id = $1 GROUP BY status",
+    )
+    .bind(user.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
     let os_rows: Vec<(Option<String>, i64)> = sqlx::query_as(
         "SELECT os_type, COUNT(*) FROM endpoint_agents \
-         WHERE os_type IS NOT NULL AND os_type <> '' GROUP BY os_type",
+         WHERE tenant_id = $1 AND os_type IS NOT NULL AND os_type <> '' GROUP BY os_type",
     )
+    .bind(user.tenant_id)
     .fetch_all(&state.db)
     .await?;
     let mut agents_by_os = serde_json::Map::new();
@@ -1232,21 +1352,27 @@ pub(crate) async fn get_statistics(
 
     let stale_cutoff = Utc::now().naive_utc() - chrono::Duration::minutes(5);
     let stale_agents: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM endpoint_agents WHERE status = 'active' AND last_heartbeat < $1",
+        "SELECT COUNT(*) FROM endpoint_agents \
+         WHERE tenant_id = $1 AND status = 'active' AND last_heartbeat < $2",
     )
+    .bind(user.tenant_id)
     .bind(stale_cutoff)
     .fetch_one(&state.db)
     .await?;
 
-    let total_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_events")
-        .fetch_one(&state.db)
-        .await?;
-    let cutoff_24h = Utc::now().naive_utc() - chrono::Duration::days(1);
-    let events_last_24h: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_events WHERE created_at >= $1")
-            .bind(cutoff_24h)
+    let total_events: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM endpoint_events WHERE tenant_id = $1")
+            .bind(user.tenant_id)
             .fetch_one(&state.db)
             .await?;
+    let cutoff_24h = Utc::now().naive_utc() - chrono::Duration::days(1);
+    let events_last_24h: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM endpoint_events WHERE tenant_id = $1 AND created_at >= $2",
+    )
+    .bind(user.tenant_id)
+    .bind(cutoff_24h)
+    .fetch_one(&state.db)
+    .await?;
 
     Ok(Json(serde_json::json!({
         "total_agents": total_agents,
@@ -1496,6 +1622,7 @@ mod tests {
             os_version: None,
             agent_version: Some("1.2.3".to_owned()),
             metadata: None,
+            enrollment_token: None,
         };
         let v = match validate_register(&body) {
             Ok(v) => v,
@@ -1517,6 +1644,7 @@ mod tests {
             os_version: None,
             agent_version: Some("1.2.3".to_owned()),
             metadata: None,
+            enrollment_token: None,
         };
         let long_id = RegisterBody {
             agent_id: Some("x".repeat(129)),
@@ -1561,6 +1689,7 @@ mod tests {
             os_version: b.os_version.clone(),
             agent_version: b.agent_version.clone(),
             metadata: b.metadata.clone(),
+            enrollment_token: b.enrollment_token.clone(),
         }
     }
 
@@ -1684,24 +1813,90 @@ mod tests {
     }
 
     async fn seed_agent(state: &AppState, agent_id: &str, status: &str) -> i32 {
+        seed_agent_in_tenant(
+            state,
+            crate::routes::test_support::default_tenant_id(),
+            agent_id,
+            status,
+        )
+        .await
+    }
+
+    /// Like [`seed_agent`] but stamps an explicit `tenant_id` — used by the
+    /// cross-tenant isolation tests below.
+    async fn seed_agent_in_tenant(
+        state: &AppState,
+        tenant_id: uuid::Uuid,
+        agent_id: &str,
+        status: &str,
+    ) -> i32 {
         let (id,): (i32,) = sqlx::query_as(
             "INSERT INTO endpoint_agents \
              (agent_id, hostname, ip_address, os_type, os_version, agent_version, status, \
-              last_heartbeat, metadata, created_at, updated_at) \
-             VALUES ($1, 'host-1', '10.0.0.1', 'linux', 'Ubuntu', '1.0', $2, now(), '{}', \
+              last_heartbeat, metadata, tenant_id, created_at, updated_at) \
+             VALUES ($1, 'host-1', '10.0.0.1', 'linux', 'Ubuntu', '1.0', $2, now(), '{}', $3, \
                      now(), now()) RETURNING id",
         )
         .bind(agent_id)
         .bind(status)
+        .bind(tenant_id)
         .fetch_one(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed_agent: {e}"));
         id
     }
 
+    /// Seeds an enrollment token scoped to `tenant_id` directly (bypassing
+    /// `POST /tenants/{id}/enrollment-tokens`) and returns the raw token —
+    /// `max_uses`/`expires_in_seconds` (negative for already-expired) let
+    /// tests exercise the exhausted/expired rejection paths deterministically.
+    async fn seed_enrollment_token_with(
+        pool: &PgPool,
+        tenant_id: uuid::Uuid,
+        max_uses: i32,
+        expires_in_seconds: i64,
+    ) -> String {
+        let creator_id = crate::routes::test_support::seed_user_in_tenant(
+            pool,
+            &format!("enrollment-seed-{}@example.com", uuid::Uuid::new_v4()),
+            "super_admin",
+            tenant_id,
+        )
+        .await;
+        let raw = format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        let hash = crate::auth::token_hash(&raw);
+        sqlx::query(
+            "INSERT INTO endpoint_enrollment_tokens \
+             (tenant_id, token_hash, max_uses, expires_at, created_by) \
+             VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5)",
+        )
+        .bind(tenant_id)
+        .bind(&hash)
+        .bind(max_uses)
+        .bind(expires_in_seconds as f64)
+        .bind(creator_id)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed_enrollment_token_with: {e}"));
+        raw
+    }
+
+    /// [`seed_enrollment_token_with`] with generous defaults (10 uses, 24h)
+    /// — the common case for tests that just need *a* valid token.
+    async fn seed_enrollment_token(pool: &PgPool, tenant_id: uuid::Uuid) -> String {
+        seed_enrollment_token_with(pool, tenant_id, 10, 86_400).await
+    }
+
     #[tokio::test]
     async fn register_agent_inserts_then_reregisters() {
         let state = db_state(dev_license()).await;
+        let token =
+            seed_enrollment_token(&state.db, crate::routes::test_support::default_tenant_id())
+                .await;
         let server = server_for(state).await;
 
         let create = server
@@ -1709,7 +1904,8 @@ mod tests {
             .add_header("X-Agent-ID", "agent-x1")
             .add_header("X-API-Key", valid_key("agent-x1"))
             .json(&serde_json::json!({
-                "agent_id": "agent-x1", "hostname": "h1", "agent_version": "2.0"
+                "agent_id": "agent-x1", "hostname": "h1", "agent_version": "2.0",
+                "enrollment_token": token
             }))
             .await;
         create.assert_status(StatusCode::CREATED);
@@ -1732,6 +1928,9 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_requires_registration_then_merges_metadata() {
         let state = db_state(dev_license()).await;
+        let token =
+            seed_enrollment_token(&state.db, crate::routes::test_support::default_tenant_id())
+                .await;
         let server = server_for(state).await;
 
         let unregistered = server
@@ -1749,7 +1948,8 @@ mod tests {
             .add_header("X-Agent-ID", "agent-hb")
             .add_header("X-API-Key", valid_key("agent-hb"))
             .json(&serde_json::json!({
-                "agent_id": "agent-hb", "hostname": "h", "agent_version": "1"
+                "agent_id": "agent-hb", "hostname": "h", "agent_version": "1",
+                "enrollment_token": token
             }))
             .await
             .assert_status(StatusCode::CREATED);
@@ -1768,13 +1968,17 @@ mod tests {
     #[tokio::test]
     async fn events_are_stored_when_agent_is_registered() {
         let state = db_state(dev_license()).await;
+        let token =
+            seed_enrollment_token(&state.db, crate::routes::test_support::default_tenant_id())
+                .await;
         let server = server_for(state).await;
         server
             .post("/api/v1/endpoint/register")
             .add_header("X-Agent-ID", "agent-ev")
             .add_header("X-API-Key", valid_key("agent-ev"))
             .json(&serde_json::json!({
-                "agent_id": "agent-ev", "hostname": "h", "agent_version": "1"
+                "agent_id": "agent-ev", "hostname": "h", "agent_version": "1",
+                "enrollment_token": token
             }))
             .await
             .assert_status(StatusCode::CREATED);
@@ -1798,6 +2002,9 @@ mod tests {
     #[tokio::test]
     async fn agent_config_reflects_metadata_overrides() {
         let state = db_state(dev_license()).await;
+        let token =
+            seed_enrollment_token(&state.db, crate::routes::test_support::default_tenant_id())
+                .await;
         let server = server_for(state).await;
 
         let missing = server
@@ -1813,7 +2020,8 @@ mod tests {
             .add_header("X-API-Key", valid_key("cfg-agent"))
             .json(&serde_json::json!({
                 "agent_id": "cfg-agent", "hostname": "h", "agent_version": "1",
-                "metadata": {"reporting_interval": 15}
+                "metadata": {"reporting_interval": 15},
+                "enrollment_token": token
             }))
             .await
             .assert_status(StatusCode::CREATED);
@@ -1921,5 +2129,192 @@ mod tests {
         let body: serde_json::Value = res.json();
         assert!(body["total_agents"].as_i64().unwrap_or(0) >= 1);
         assert!(body["agents_by_status"]["active"].as_i64().unwrap_or(0) >= 1);
+    }
+
+    // -- tenant isolation (docs/v2-port/tenancy-model.md) -------------------
+
+    #[tokio::test]
+    async fn new_agent_registration_resolves_tenant_from_enrollment_token_not_the_default() {
+        // Regression for docs/v2-port/tenancy-model.md §8 / service-auth-model.md
+        // §5: a new agent's tenant comes from its presented enrollment
+        // token, never a silent fallback to the bootstrap default — proven
+        // here with a token scoped to a *non-default* tenant.
+        let state = db_state(dev_license()).await;
+        let tenant_b =
+            crate::routes::test_support::seed_tenant(&state.db, "enroll-resolve-b").await;
+        let token = seed_enrollment_token(&state.db, tenant_b).await;
+        let server = server_for(state.clone()).await;
+
+        server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "tenant-check-agent")
+            .add_header("X-API-Key", valid_key("tenant-check-agent"))
+            .json(&serde_json::json!({
+                "agent_id": "tenant-check-agent", "hostname": "h", "agent_version": "1",
+                "enrollment_token": token
+            }))
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        let (tenant_id,): (uuid::Uuid,) =
+            sqlx::query_as("SELECT tenant_id FROM endpoint_agents WHERE agent_id = $1")
+                .bind("tenant-check-agent")
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or_else(|e| panic!("fetch: {e}"));
+        assert_eq!(tenant_id, tenant_b);
+        assert_ne!(tenant_id, crate::routes::test_support::default_tenant_id());
+    }
+
+    #[tokio::test]
+    async fn register_agent_rejects_missing_or_garbage_enrollment_tokens() {
+        let state = db_state(dev_license()).await;
+        let server = server_for(state).await;
+
+        let missing = server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "no-token-agent")
+            .add_header("X-API-Key", valid_key("no-token-agent"))
+            .json(&serde_json::json!({
+                "agent_id": "no-token-agent", "hostname": "h", "agent_version": "1"
+            }))
+            .await;
+        missing.assert_status(StatusCode::UNAUTHORIZED);
+        let body: serde_json::Value = missing.json();
+        assert_eq!(body["error"], "Invalid or expired enrollment token");
+
+        let bad = server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "bad-token-agent")
+            .add_header("X-API-Key", valid_key("bad-token-agent"))
+            .json(&serde_json::json!({
+                "agent_id": "bad-token-agent", "hostname": "h", "agent_version": "1",
+                "enrollment_token": "not-a-real-token"
+            }))
+            .await;
+        bad.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn register_agent_rejects_exhausted_and_expired_enrollment_tokens() {
+        let state = db_state(dev_license()).await;
+        let tenant = crate::routes::test_support::default_tenant_id();
+        let server = server_for(state.clone()).await;
+
+        let single_use = seed_enrollment_token_with(&state.db, tenant, 1, 86_400).await;
+        server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "exhaust-agent-1")
+            .add_header("X-API-Key", valid_key("exhaust-agent-1"))
+            .json(&serde_json::json!({
+                "agent_id": "exhaust-agent-1", "hostname": "h", "agent_version": "1",
+                "enrollment_token": single_use
+            }))
+            .await
+            .assert_status(StatusCode::CREATED);
+
+        // Same token, second new agent — already at max_uses.
+        let reused = server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "exhaust-agent-2")
+            .add_header("X-API-Key", valid_key("exhaust-agent-2"))
+            .json(&serde_json::json!({
+                "agent_id": "exhaust-agent-2", "hostname": "h", "agent_version": "1",
+                "enrollment_token": single_use
+            }))
+            .await;
+        reused.assert_status(StatusCode::UNAUTHORIZED);
+
+        let expired = seed_enrollment_token_with(&state.db, tenant, 10, -3600).await;
+        let expired_res = server
+            .post("/api/v1/endpoint/register")
+            .add_header("X-Agent-ID", "expired-agent")
+            .add_header("X-API-Key", valid_key("expired-agent"))
+            .json(&serde_json::json!({
+                "agent_id": "expired-agent", "hostname": "h", "agent_version": "1",
+                "enrollment_token": expired
+            }))
+            .await;
+        expired_res.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn reported_events_inherit_the_agents_tenant_not_the_bootstrap_default() {
+        let state = db_state(dev_license()).await;
+        let tenant_b = crate::routes::test_support::seed_tenant(&state.db, "ep-tenant-b").await;
+        seed_agent_in_tenant(&state, tenant_b, "tenant-b-agent", "active").await;
+        let server = server_for(state.clone()).await;
+
+        server
+            .post("/api/v1/endpoint/events")
+            .add_header("X-Agent-ID", "tenant-b-agent")
+            .add_header("X-API-Key", valid_key("tenant-b-agent"))
+            .json(&serde_json::json!([
+                {"agent_id": "tenant-b-agent", "event_type": "process_start"},
+            ]))
+            .await
+            .assert_status(StatusCode::ACCEPTED);
+
+        let (tenant_id,): (uuid::Uuid,) =
+            sqlx::query_as("SELECT tenant_id FROM endpoint_events WHERE agent_id = $1")
+                .bind("tenant-b-agent")
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or_else(|e| panic!("fetch: {e}"));
+        assert_eq!(tenant_id, tenant_b);
+    }
+
+    #[tokio::test]
+    async fn tenant_a_cannot_list_get_or_deactivate_tenant_bs_agent() {
+        let state = db_state(dev_license()).await;
+        let tenant_b = crate::routes::test_support::seed_tenant(&state.db, "ep-tenant-b-2").await;
+        seed_agent_in_tenant(&state, tenant_b, "b-only-agent", "active").await;
+        let (_, admin_a) = authed_user(&state, "ep-admin-a@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let list = server
+            .get("/api/v1/endpoint/agents")
+            .authorization_bearer(&admin_a)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        let items = body["items"].as_array().cloned().unwrap_or_default();
+        assert!(items.iter().all(|i| i["agent_id"] != "b-only-agent"));
+
+        let get = server
+            .get("/api/v1/endpoint/agents/b-only-agent")
+            .authorization_bearer(&admin_a)
+            .await;
+        get.assert_status(StatusCode::NOT_FOUND);
+
+        let events = server
+            .get("/api/v1/endpoint/agents/b-only-agent/events")
+            .authorization_bearer(&admin_a)
+            .await;
+        events.assert_status(StatusCode::NOT_FOUND);
+
+        let deactivate = server
+            .post("/api/v1/endpoint/agents/b-only-agent/deactivate")
+            .authorization_bearer(&admin_a)
+            .await;
+        deactivate.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn statistics_are_scoped_to_the_caller_tenant() {
+        let state = db_state(dev_license()).await;
+        let tenant_b =
+            crate::routes::test_support::seed_tenant(&state.db, "ep-tenant-stats-b").await;
+        seed_agent_in_tenant(&state, tenant_b, "stats-b-agent", "active").await;
+        let (_, token_a) = authed_user(&state, "ep-stats-a@example.com", "viewer").await;
+        let server = server_for(state).await;
+
+        let stats = server
+            .get("/api/v1/endpoint/statistics")
+            .authorization_bearer(&token_a)
+            .await;
+        stats.assert_status_ok();
+        let body: serde_json::Value = stats.json();
+        assert_eq!(body["total_agents"], 0);
     }
 }

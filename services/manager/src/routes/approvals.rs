@@ -265,7 +265,7 @@ pub(crate) struct ApprovalListResponse {
 )]
 pub(crate) async fn list_approvals(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let q = parse_list_params(&params);
@@ -277,6 +277,7 @@ pub(crate) async fn list_approvals(
     let offset = (q.page - 1) * q.per_page;
 
     let mut qb = QueryBuilder::new(LIST_COLUMNS);
+    qb.push(" AND tenant_id = ").push_bind(user.tenant_id);
     push_list_filters(&mut qb, &filters);
     qb.push(" ORDER BY created_at DESC LIMIT ")
         .push_bind(q.per_page)
@@ -288,6 +289,7 @@ pub(crate) async fn list_approvals(
         .await?;
 
     let mut cq = QueryBuilder::new("SELECT COUNT(*) FROM approval_requests WHERE TRUE");
+    cq.push(" AND tenant_id = ").push_bind(user.tenant_id);
     push_list_filters(&mut cq, &filters);
     let total: i64 = cq.build_query_scalar().fetch_one(&state.db).await?;
 
@@ -370,9 +372,11 @@ pub(crate) async fn list_pending_approvals(
                 expires_at, created_at \
          FROM approval_requests \
          WHERE status = 'pending' AND (expires_at IS NULL OR expires_at > $1) \
+           AND tenant_id = $2 \
          ORDER BY created_at DESC",
     )
     .bind(now)
+    .bind(user.tenant_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -458,7 +462,7 @@ pub(crate) struct ApprovalDetail {
 )]
 pub(crate) async fn get_approval(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(approval_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let r = sqlx::query_as::<_, ApprovalFullRow>(
@@ -466,9 +470,10 @@ pub(crate) async fn get_approval(
                 required_approvals, current_approvals, approvers, approval_history, \
                 metadata, expires_at, completed_at, \
                 created_at, updated_at \
-         FROM approval_requests WHERE id = $1",
+         FROM approval_requests WHERE id = $1 AND tenant_id = $2",
     )
     .bind(approval_id)
+    .bind(user.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("Approval request not found".to_owned()))?;
@@ -601,8 +606,8 @@ pub(crate) async fn create_approval(
         "INSERT INTO approval_requests \
              (request_type, resource_id, resource_type, requester_id, status, \
               required_approvals, current_approvals, approvers, approval_history, \
-              metadata, expires_at, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, 'pending', $5, 0, '[]'::jsonb, '[]'::jsonb, $6, $7, $8, $8) \
+              metadata, expires_at, tenant_id, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, 'pending', $5, 0, '[]'::jsonb, '[]'::jsonb, $6, $7, $8, $9, $9) \
          RETURNING id, request_type, resource_id, status, expires_at, created_at",
     )
     .bind(&v.request_type)
@@ -612,6 +617,7 @@ pub(crate) async fn create_approval(
     .bind(v.required_approvals)
     .bind(&v.metadata)
     .bind(expires_at)
+    .bind(user.tenant_id)
     .bind(now)
     .fetch_one(&state.db)
     .await?;
@@ -826,9 +832,10 @@ pub(crate) async fn decide_approval(
                 COALESCE(required_approvals, 1) AS required_approvals, \
                 COALESCE(current_approvals, 0) AS current_approvals, \
                 approvers, approval_history, expires_at \
-         FROM approval_requests WHERE id = $1",
+         FROM approval_requests WHERE id = $1 AND tenant_id = $2",
     )
     .bind(approval_id)
+    .bind(user.tenant_id)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError::NotFound("Approval request not found".to_owned()))?;
@@ -850,10 +857,12 @@ pub(crate) async fn decide_approval(
         }
         DecisionGuard::Expired => {
             sqlx::query(
-                "UPDATE approval_requests SET status = 'expired', updated_at = $2 WHERE id = $1",
+                "UPDATE approval_requests SET status = 'expired', updated_at = $2 \
+                 WHERE id = $1 AND tenant_id = $3",
             )
             .bind(approval_id)
             .bind(now)
+            .bind(user.tenant_id)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
@@ -905,15 +914,19 @@ pub(crate) async fn decide_approval(
     if upd.completed {
         qb.push(", completed_at = ").push_bind(now);
     }
-    qb.push(" WHERE id = ").push_bind(approval_id);
+    qb.push(" WHERE id = ")
+        .push_bind(approval_id)
+        .push(" AND tenant_id = ")
+        .push_bind(user.tenant_id);
     qb.build().execute(&mut *tx).await?;
     tx.commit().await?;
 
     let out = sqlx::query_as::<_, DecidedRow>(
         "SELECT id, status, current_approvals, required_approvals, completed_at \
-         FROM approval_requests WHERE id = $1",
+         FROM approval_requests WHERE id = $1 AND tenant_id = $2",
     )
     .bind(approval_id)
+    .bind(user.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("Approval request not found".to_owned()))?;
@@ -960,9 +973,10 @@ pub(crate) async fn cancel_approval(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let row: Option<(i32, String)> = sqlx::query_as(
         "SELECT requester_id, COALESCE(status, 'pending') AS status \
-         FROM approval_requests WHERE id = $1",
+         FROM approval_requests WHERE id = $1 AND tenant_id = $2",
     )
     .bind(approval_id)
+    .bind(user.tenant_id)
     .fetch_optional(&state.db)
     .await?;
     let Some((requester_id, status)) = row else {
@@ -984,10 +998,12 @@ pub(crate) async fn cancel_approval(
     let now = Utc::now().naive_utc();
     sqlx::query(
         "UPDATE approval_requests \
-         SET status = 'rejected', completed_at = $2, updated_at = $2 WHERE id = $1",
+         SET status = 'rejected', completed_at = $2, updated_at = $2 \
+         WHERE id = $1 AND tenant_id = $3",
     )
     .bind(approval_id)
     .bind(now)
+    .bind(user.tenant_id)
     .execute(&state.db)
     .await?;
 
@@ -1043,31 +1059,41 @@ pub(crate) async fn get_statistics(
     user.require_role(&["admin", "maintainer"])?;
     let now = Utc::now().naive_utc();
 
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM approval_requests")
-        .fetch_one(&state.db)
-        .await?;
-    let status_rows: Vec<(Option<String>, i64)> =
-        sqlx::query_as("SELECT status, COUNT(*) FROM approval_requests GROUP BY status")
-            .fetch_all(&state.db)
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM approval_requests WHERE tenant_id = $1")
+            .bind(user.tenant_id)
+            .fetch_one(&state.db)
             .await?;
-    let type_rows: Vec<(Option<String>, i64)> = sqlx::query_as(
-        "SELECT request_type, COUNT(*) FROM approval_requests GROUP BY request_type",
+    let status_rows: Vec<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT status, COUNT(*) FROM approval_requests WHERE tenant_id = $1 GROUP BY status",
     )
+    .bind(user.tenant_id)
+    .fetch_all(&state.db)
+    .await?;
+    let type_rows: Vec<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT request_type, COUNT(*) FROM approval_requests \
+         WHERE tenant_id = $1 GROUP BY request_type",
+    )
+    .bind(user.tenant_id)
     .fetch_all(&state.db)
     .await?;
     let expired_pending: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM approval_requests \
-         WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= $1",
+         WHERE tenant_id = $1 AND status = 'pending' \
+           AND expires_at IS NOT NULL AND expires_at <= $2",
     )
+    .bind(user.tenant_id)
     .bind(now)
     .fetch_one(&state.db)
     .await?;
     let week_ago = now - chrono::Duration::days(7);
-    let last_7_days: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM approval_requests WHERE created_at >= $1")
-            .bind(week_ago)
-            .fetch_one(&state.db)
-            .await?;
+    let last_7_days: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM approval_requests WHERE tenant_id = $1 AND created_at >= $2",
+    )
+    .bind(user.tenant_id)
+    .bind(week_ago)
+    .fetch_one(&state.db)
+    .await?;
 
     Ok(Json(serde_json::json!({
         "total": total,
@@ -1481,17 +1507,37 @@ mod tests {
         request_type: &str,
         required: i32,
     ) -> i32 {
+        seed_approval_in_tenant(
+            state,
+            crate::routes::test_support::default_tenant_id(),
+            requester_id,
+            request_type,
+            required,
+        )
+        .await
+    }
+
+    /// Like [`seed_approval`] but stamps an explicit `tenant_id` — used by
+    /// the cross-tenant isolation tests below.
+    async fn seed_approval_in_tenant(
+        state: &AppState,
+        tenant_id: uuid::Uuid,
+        requester_id: i32,
+        request_type: &str,
+        required: i32,
+    ) -> i32 {
         let (id,): (i32,) = sqlx::query_as(
             "INSERT INTO approval_requests \
              (request_type, resource_id, resource_type, requester_id, status, \
               required_approvals, current_approvals, approvers, approval_history, metadata, \
-              expires_at, created_at, updated_at) \
+              expires_at, tenant_id, created_at, updated_at) \
              VALUES ($1, 'res-1', 'thing', $2, 'pending', $3, 0, '[]', '[]', '{}', \
-                     now() + interval '1 day', now(), now()) RETURNING id",
+                     now() + interval '1 day', $4, now(), now()) RETURNING id",
         )
         .bind(request_type)
         .bind(requester_id)
         .bind(required)
+        .bind(tenant_id)
         .fetch_one(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed_approval: {e}"));
@@ -1756,5 +1802,79 @@ mod tests {
         assert!(body["by_status"]["pending"].as_i64().unwrap_or(0) >= 1);
         assert!(body["by_type"]["certificate"].as_i64().unwrap_or(0) >= 1);
         assert!(body["last_7_days"].as_i64().unwrap_or(0) >= 1);
+    }
+
+    // -- tenant isolation (docs/v2-port/tenancy-model.md) -------------------
+
+    use crate::routes::test_support::{authed_user_in_tenant, seed_tenant};
+
+    #[tokio::test]
+    async fn tenant_a_cannot_list_get_decide_or_cancel_tenant_bs_approval() {
+        let state = db_state(dev_license()).await;
+        let tenant_b = seed_tenant(&state.db, "appr-tenant-b").await;
+        let (requester_b, _) =
+            authed_user_in_tenant(&state, "appr-req-b@example.com", "maintainer", tenant_b).await;
+        let id_b = seed_approval_in_tenant(&state, tenant_b, requester_b, "user", 1).await;
+        let (_, admin_a) = authed_user(&state, "appr-admin-a@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let list = server
+            .get("/api/v1/approvals")
+            .authorization_bearer(&admin_a)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        let items = body["items"].as_array().cloned().unwrap_or_default();
+        assert!(items.iter().all(|i| i["id"] != id_b));
+
+        let get = server
+            .get(&format!("/api/v1/approvals/{id_b}"))
+            .authorization_bearer(&admin_a)
+            .await;
+        get.assert_status(StatusCode::NOT_FOUND);
+
+        let decide = server
+            .post(&format!("/api/v1/approvals/{id_b}/decide"))
+            .authorization_bearer(&admin_a)
+            .json(&serde_json::json!({"approved": true}))
+            .await;
+        decide.assert_status(StatusCode::NOT_FOUND);
+
+        let cancel = server
+            .post(&format!("/api/v1/approvals/{id_b}/cancel"))
+            .authorization_bearer(&admin_a)
+            .await;
+        cancel.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn pending_list_and_statistics_are_scoped_to_the_caller_tenant() {
+        let state = db_state(dev_license()).await;
+        let tenant_b = seed_tenant(&state.db, "appr-tenant-b-2").await;
+        let (requester_b, _) =
+            authed_user_in_tenant(&state, "appr-req-b2@example.com", "maintainer", tenant_b).await;
+        let id_b = seed_approval_in_tenant(&state, tenant_b, requester_b, "certificate", 1).await;
+        let (requester_a, _) = authed_user(&state, "appr-req-a@example.com", "maintainer").await;
+        seed_approval(&state, requester_a, "user", 1).await;
+        let (_, admin_a) = authed_user(&state, "appr-admin-a2@example.com", "admin").await;
+        let server = server_for(state).await;
+
+        let pending = server
+            .get("/api/v1/approvals/pending")
+            .authorization_bearer(&admin_a)
+            .await;
+        pending.assert_status_ok();
+        let body: serde_json::Value = pending.json();
+        let items = body["items"].as_array().cloned().unwrap_or_default();
+        assert!(items.iter().all(|i| i["id"] != id_b));
+
+        let stats = server
+            .get("/api/v1/approvals/statistics")
+            .authorization_bearer(&admin_a)
+            .await;
+        stats.assert_status_ok();
+        let body: serde_json::Value = stats.json();
+        assert_eq!(body["by_type"]["certificate"], 0);
+        assert!(body["by_type"]["user"].as_i64().unwrap_or(0) >= 1);
     }
 }

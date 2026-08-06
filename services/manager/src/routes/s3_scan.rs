@@ -41,6 +41,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{NaiveDateTime, Utc};
 use serde::Deserialize;
+use skauswatch_s3::credentials::{BucketCredentialConfig, CredentialError, is_aws_endpoint};
+use skauswatch_vault::EnvelopeEncryption;
 use sqlx::{Postgres, QueryBuilder};
 
 use crate::auth::CurrentUser;
@@ -64,10 +66,15 @@ const MAX_PER_PAGE: i64 = 500;
 const MAX_UPLOAD_MB: usize = 100;
 const UPLOAD_BODY_LIMIT: usize = (MAX_UPLOAD_MB + 2) * 1024 * 1024;
 
-const BUCKET_COLUMNS: &str = "SELECT id, name, endpoint_url, bucket_name, access_key_id, \
-     secret_access_key, region, use_ssl, path_style, prefix_filter, file_types_filter, \
-     max_file_size_mb, scan_enabled, yara_enabled, created_at, updated_at \
+const BUCKET_COLUMNS: &str = "SELECT id, name, endpoint_url, bucket_name, credential_mode, \
+     credential_enc, role_arn, external_id, region, use_ssl, path_style, prefix_filter, \
+     file_types_filter, max_file_size_mb, scan_enabled, yara_enabled, created_at, updated_at \
      FROM s3_bucket_configs WHERE TRUE";
+
+/// `s3_bucket_configs.credential_mode` CHECK constraint values (hybrid
+/// credential model — security finding #2: plaintext customer AWS keys).
+const CREDENTIAL_MODES: [&str; 2] = ["assume_role", "static"];
+const CREDENTIAL_MODE_MSG: &str = "Input should be 'assume_role' or 'static'";
 
 const JOB_COLUMNS: &str = "SELECT id, bucket_config_id, job_type, status, scanned_objects, \
      infected_objects, pup_objects, error_count, skipped_objects, started_at, \
@@ -209,6 +216,25 @@ fn mask_secret_key(key: &str) -> String {
     format!("{head}{}{tail}", "*".repeat(n.saturating_sub(8)))
 }
 
+/// Validates a `credential_mode` string (defaulting missing input to
+/// `"static"`) and, for `assume_role`, enforces the guard that it is only
+/// valid against a genuine AWS S3 endpoint (S3-compatible third-party
+/// endpoints — MinIO, Wasabi, ... — have no STS to assume a role against).
+fn validate_credential_mode(raw: Option<&str>, endpoint_url: &str) -> Result<String, ApiError> {
+    let mode = raw.unwrap_or("static").to_owned();
+    if !CREDENTIAL_MODES.contains(&mode.as_str()) {
+        return Err(validation("credential_mode", CREDENTIAL_MODE_MSG));
+    }
+    if mode == "assume_role" && !is_aws_endpoint(endpoint_url) {
+        return Err(validation(
+            "credential_mode",
+            "Value error, assume_role requires a genuine AWS S3 endpoint (*.amazonaws.com); \
+             use static credentials for this endpoint",
+        ));
+    }
+    Ok(mode)
+}
+
 /// v1 parity: `row.field or []` — SQL NULL / jsonb null become `[]`.
 fn jsonb_list(v: &Option<serde_json::Value>) -> serde_json::Value {
     match v {
@@ -262,15 +288,19 @@ fn parse_page_params(pairs: &[(String, String)]) -> (i64, i64) {
 // ============================================
 
 /// Full bucket-config row — timestamps as chrono `NaiveDateTime`, filter
-/// list as jsonb.
+/// list as jsonb. Credentials are the hybrid model (security finding #2):
+/// `credential_enc` is envelope ciphertext for `static` mode, never
+/// plaintext; `role_arn`/`external_id` are used for `assume_role` mode.
 #[derive(sqlx::FromRow)]
 struct BucketRow {
     id: i32,
     name: String,
     endpoint_url: String,
     bucket_name: String,
-    access_key_id: String,
-    secret_access_key: String,
+    credential_mode: String,
+    credential_enc: Option<String>,
+    role_arn: Option<String>,
+    external_id: Option<String>,
     region: Option<String>,
     use_ssl: Option<bool>,
     path_style: Option<bool>,
@@ -283,16 +313,45 @@ struct BucketRow {
     updated_at: Option<NaiveDateTime>,
 }
 
+impl BucketRow {
+    /// Maps this row's credential fields onto the shared resolver's input
+    /// shape (`skauswatch_s3::credentials::resolve_client`).
+    fn credential_config(&self) -> BucketCredentialConfig {
+        BucketCredentialConfig {
+            credential_mode: self.credential_mode.clone(),
+            credential_enc: self.credential_enc.clone(),
+            role_arn: self.role_arn.clone(),
+            external_id: self.external_id.clone(),
+            endpoint_url: self.endpoint_url.clone(),
+            region: self
+                .region
+                .clone()
+                .unwrap_or_else(|| "us-east-1".to_owned()),
+            path_style: self.path_style.unwrap_or(false),
+        }
+    }
+}
+
 /// Documentation-only mirror of `bucket_json`'s wire shape (list items and
 /// GET detail share this shape) — credentials are masked, never raw.
+/// `access_key_id`/`secret_access_key` are populated (masked) for `static`
+/// mode only; `role_arn` (shown in full — ARNs aren't secret) for
+/// `assume_role` mode only. `external_id` is the cross-account AssumeRole
+/// shared secret (confused-deputy protection, AWS IAM docs) — write-only:
+/// accepted on create/update, used server-side to call AssumeRole, but
+/// never rendered back in any response, masked or otherwise (unlike
+/// `secret_access_key`, a masked prefix/suffix of `external_id` is often
+/// enough to reconstruct it since it need not be high-entropy).
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct BucketItem {
     id: i32,
     name: String,
     endpoint_url: String,
     bucket_name: String,
-    access_key_id: String,
-    secret_access_key: String,
+    credential_mode: String,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    role_arn: Option<String>,
     region: Option<String>,
     use_ssl: Option<bool>,
     path_style: Option<bool>,
@@ -305,15 +364,75 @@ pub(crate) struct BucketItem {
     updated_at: Option<String>,
 }
 
+/// Masked credential display fields for one row (see [`credential_display`]).
+/// Deliberately has no `external_id` field — see [`BucketItem`]'s doc for
+/// why that value is write-only and never rendered back, masked or not.
+struct CredentialDisplay {
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    role_arn: Option<String>,
+}
+
+/// Masked credential display fields for one row, mode-aware (security
+/// finding #2): `static` mode decrypts `credential_enc` to mask the real
+/// access-key-id/secret-access-key (the decrypted plaintext never leaves
+/// this function); `assume_role` mode shows `role_arn` in full (ARNs
+/// aren't secret) — `external_id` is intentionally omitted entirely, not
+/// masked (see [`BucketItem`]'s doc). Shared by [`bucket_json`] (GET/list)
+/// and `update_bucket`'s response summary.
+fn credential_display(
+    b: &BucketRow,
+    envelope: &EnvelopeEncryption,
+) -> Result<CredentialDisplay, ApiError> {
+    match b.credential_mode.as_str() {
+        "static" => {
+            let blob = b.credential_enc.as_deref().unwrap_or_default();
+            let value = envelope
+                .decrypt_json(blob)
+                .map_err(|e| ApiError::internal("credential decrypt", e))?;
+            let ak = value
+                .get("access_key_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let sk = value
+                .get("secret_access_key")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Ok(CredentialDisplay {
+                access_key_id: Some(mask_access_key(ak)),
+                secret_access_key: Some(mask_secret_key(sk)),
+                role_arn: None,
+            })
+        }
+        "assume_role" => Ok(CredentialDisplay {
+            access_key_id: None,
+            secret_access_key: None,
+            role_arn: b.role_arn.clone(),
+        }),
+        other => Err(ApiError::internal(
+            "credential mode",
+            format!("unknown mode {other}"),
+        )),
+    }
+}
+
 /// v1 full bucket shape (list items + GET detail) with masked credentials.
-fn bucket_json(b: &BucketRow) -> serde_json::Value {
-    serde_json::json!({
+/// `external_id` is deliberately never a key in this body — see
+/// [`BucketItem`]'s doc comment.
+fn bucket_json(
+    b: &BucketRow,
+    envelope: &EnvelopeEncryption,
+) -> Result<serde_json::Value, ApiError> {
+    let cred = credential_display(b, envelope)?;
+    Ok(serde_json::json!({
         "id": b.id,
         "name": b.name,
         "endpoint_url": b.endpoint_url,
         "bucket_name": b.bucket_name,
-        "access_key_id": mask_access_key(&b.access_key_id),
-        "secret_access_key": mask_secret_key(&b.secret_access_key),
+        "credential_mode": b.credential_mode,
+        "access_key_id": cred.access_key_id,
+        "secret_access_key": cred.secret_access_key,
+        "role_arn": cred.role_arn,
         "region": b.region,
         "use_ssl": b.use_ssl,
         "path_style": b.path_style,
@@ -324,22 +443,40 @@ fn bucket_json(b: &BucketRow) -> serde_json::Value {
         "yara_enabled": b.yara_enabled,
         "created_at": skauswatch_streams::py_isoformat_opt(b.created_at),
         "updated_at": skauswatch_streams::py_isoformat_opt(b.updated_at),
-    })
+    }))
 }
 
-async fn fetch_bucket(db: &sqlx::PgPool, bucket_id: i32) -> Result<Option<BucketRow>, ApiError> {
+async fn fetch_bucket(
+    db: &sqlx::PgPool,
+    tenant: uuid::Uuid,
+    bucket_id: i32,
+) -> Result<Option<BucketRow>, ApiError> {
     let mut qb = QueryBuilder::new(BUCKET_COLUMNS);
-    qb.push(" AND id = ").push_bind(bucket_id);
+    qb.push(" AND id = ")
+        .push_bind(bucket_id)
+        .push(" AND tenant_id = ")
+        .push_bind(tenant);
     Ok(qb.build_query_as::<BucketRow>().fetch_optional(db).await?)
 }
 
-/// True when the bucket-config id exists (cheap existence probe shared by
-/// the schedule endpoints).
-async fn bucket_exists(db: &sqlx::PgPool, bucket_id: i32) -> Result<bool, ApiError> {
-    let row: Option<(i32,)> = sqlx::query_as("SELECT id FROM s3_bucket_configs WHERE id = $1")
-        .bind(bucket_id)
-        .fetch_optional(db)
-        .await?;
+/// True when the bucket-config id exists *for this tenant* (cheap existence
+/// probe shared by the schedule endpoints). Tenant-scoped: a bucket
+/// belonging to another tenant behaves exactly like a nonexistent id — this
+/// is no longer a cross-tenant existence oracle (`s3_bucket_configs` is
+/// owned by s3scan, but its own tenancy migration —
+/// `services/s3scan/migrations/0002_s3scan_tenancy.sql` — has landed, so
+/// this can and must filter on it now).
+async fn bucket_exists(
+    db: &sqlx::PgPool,
+    tenant: uuid::Uuid,
+    bucket_id: i32,
+) -> Result<bool, ApiError> {
+    let row: Option<(i32,)> =
+        sqlx::query_as("SELECT id FROM s3_bucket_configs WHERE id = $1 AND tenant_id = $2")
+            .bind(bucket_id)
+            .bind(tenant)
+            .fetch_optional(db)
+            .await?;
     Ok(row.is_some())
 }
 
@@ -370,13 +507,14 @@ pub(crate) struct BucketListResponse {
 )]
 pub(crate) async fn list_buckets(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (page, per_page) = parse_page_params(&params);
     let offset = (page - 1) * per_page;
 
     let mut qb = QueryBuilder::new(BUCKET_COLUMNS);
+    qb.push(" AND tenant_id = ").push_bind(user.tenant_id);
     qb.push(" ORDER BY created_at DESC LIMIT ")
         .push_bind(per_page)
         .push(" OFFSET ")
@@ -385,11 +523,16 @@ pub(crate) async fn list_buckets(
         .build_query_as::<BucketRow>()
         .fetch_all(&state.db)
         .await?;
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM s3_bucket_configs")
-        .fetch_one(&state.db)
-        .await?;
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM s3_bucket_configs WHERE tenant_id = $1")
+            .bind(user.tenant_id)
+            .fetch_one(&state.db)
+            .await?;
 
-    let items: Vec<serde_json::Value> = rows.iter().map(bucket_json).collect();
+    let items: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|b| bucket_json(b, &state.envelope))
+        .collect::<Result<_, _>>()?;
     Ok(Json(serde_json::json!({
         "items": items,
         "total": total,
@@ -401,13 +544,20 @@ pub(crate) async fn list_buckets(
 
 /// BucketConfigCreateRequest — fields optional so missing ones map to the
 /// validation envelope instead of an axum extractor rejection.
+/// `credential_mode` selects the hybrid credential model (security finding
+/// #2): `"static"` (default) requires `access_key_id`/`secret_access_key`;
+/// `"assume_role"` requires `role_arn` (+ optional `external_id`) and is
+/// only valid against a genuine AWS S3 endpoint.
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(crate) struct BucketCreateBody {
     name: Option<String>,
     endpoint_url: Option<String>,
     bucket_name: Option<String>,
+    credential_mode: Option<String>,
     access_key_id: Option<String>,
     secret_access_key: Option<String>,
+    role_arn: Option<String>,
+    external_id: Option<String>,
     region: Option<String>,
     use_ssl: Option<bool>,
     path_style: Option<bool>,
@@ -422,8 +572,14 @@ struct ValidBucketCreate {
     name: String,
     endpoint_url: String,
     bucket_name: String,
-    access_key_id: String,
-    secret_access_key: String,
+    credential_mode: String,
+    /// Plaintext — `Some` only for `static` mode. Encrypted just before the
+    /// INSERT; kept here (rather than round-tripped through the DB) so the
+    /// create-response summary can mask it without a second decrypt.
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    role_arn: Option<String>,
+    external_id: Option<String>,
     region: String,
     use_ssl: bool,
     path_style: bool,
@@ -489,6 +645,8 @@ fn check_max_file_size(v: i64, field: &str) -> Result<(), ApiError> {
 /// Mirrors pydantic BucketConfigCreateRequest (field-definition order),
 /// including its defaults: region us-east-1, use_ssl true, path_style true,
 /// max_file_size_mb 100, scan_enabled true, yara_enabled false.
+/// `credential_mode` defaults to `"static"`; per-mode requiredness is
+/// enforced below (security finding #2 — hybrid credential model).
 fn validate_bucket_create(b: &BucketCreateBody) -> Result<ValidBucketCreate, ApiError> {
     let name = required_str(&b.name, "name", 1, 255)?;
     let Some(raw_endpoint) = b.endpoint_url.as_deref() else {
@@ -496,8 +654,27 @@ fn validate_bucket_create(b: &BucketCreateBody) -> Result<ValidBucketCreate, Api
     };
     let endpoint_url = validate_endpoint_url(raw_endpoint)?;
     let bucket_name = required_str(&b.bucket_name, "bucket_name", 1, 255)?;
-    let access_key_id = required_str(&b.access_key_id, "access_key_id", 1, 255)?;
-    let secret_access_key = required_str(&b.secret_access_key, "secret_access_key", 1, 500)?;
+    let credential_mode = validate_credential_mode(b.credential_mode.as_deref(), &endpoint_url)?;
+    let (access_key_id, secret_access_key, role_arn, external_id) = match credential_mode.as_str() {
+        "static" => (
+            Some(required_str(&b.access_key_id, "access_key_id", 1, 255)?),
+            Some(required_str(
+                &b.secret_access_key,
+                "secret_access_key",
+                1,
+                500,
+            )?),
+            None,
+            None,
+        ),
+        _ => {
+            let role_arn = required_str(&b.role_arn, "role_arn", 1, 2048)?;
+            if let Some(eid) = &b.external_id {
+                check_len(eid, "external_id", 0, 1224)?;
+            }
+            (None, None, Some(role_arn), b.external_id.clone())
+        }
+    };
     let region = b.region.clone().unwrap_or_else(|| "us-east-1".to_owned());
     check_len(&region, "region", 0, 50)?;
     if let Some(p) = &b.prefix_filter {
@@ -513,8 +690,11 @@ fn validate_bucket_create(b: &BucketCreateBody) -> Result<ValidBucketCreate, Api
         name,
         endpoint_url,
         bucket_name,
+        credential_mode,
         access_key_id,
         secret_access_key,
+        role_arn,
+        external_id,
         region,
         use_ssl: b.use_ssl.unwrap_or(true),
         path_style: b.path_style.unwrap_or(true),
@@ -531,17 +711,19 @@ struct CreatedBucketRow {
     id: i32,
     name: String,
     bucket_name: String,
-    access_key_id: String,
     created_at: Option<NaiveDateTime>,
 }
 
-/// Summary embedded in [`BucketCreateResponse`].
+/// Summary embedded in [`BucketCreateResponse`]. `access_key_id`/`role_arn`
+/// mirror the row's credential mode (see [`BucketItem`]).
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub(crate) struct BucketCreateSummary {
     id: i32,
     name: String,
     bucket_name: String,
-    access_key_id: String,
+    credential_mode: String,
+    access_key_id: Option<String>,
+    role_arn: Option<String>,
     created_at: Option<String>,
 }
 
@@ -577,10 +759,12 @@ pub(crate) async fn create_bucket(
     let v = validate_bucket_create(&body)?;
 
     let existing: Option<(i32,)> = sqlx::query_as(
-        "SELECT id FROM s3_bucket_configs WHERE endpoint_url = $1 AND bucket_name = $2",
+        "SELECT id FROM s3_bucket_configs \
+         WHERE endpoint_url = $1 AND bucket_name = $2 AND tenant_id = $3",
     )
     .bind(&v.endpoint_url)
     .bind(&v.bucket_name)
+    .bind(user.tenant_id)
     .fetch_optional(&state.db)
     .await?;
     if let Some((existing_id,)) = existing {
@@ -590,18 +774,39 @@ pub(crate) async fn create_bucket(
         })));
     }
 
+    // `static` mode: envelope-encrypt the pair as one JSON blob (security
+    // finding #2) — plaintext never reaches the INSERT. `assume_role` mode
+    // stores no secret at all.
+    let credential_enc = if v.credential_mode == "static" {
+        Some(
+            state
+                .envelope
+                .encrypt_json(&serde_json::json!({
+                    "access_key_id": v.access_key_id.as_deref().unwrap_or_default(),
+                    "secret_access_key": v.secret_access_key.as_deref().unwrap_or_default(),
+                }))
+                .map_err(|e| ApiError::internal("credential encrypt", e))?,
+        )
+    } else {
+        None
+    };
+
     let row = sqlx::query_as::<_, CreatedBucketRow>(
-        "INSERT INTO s3_bucket_configs (name, endpoint_url, bucket_name, access_key_id, \
-         secret_access_key, region, use_ssl, path_style, prefix_filter, file_types_filter, \
-         max_file_size_mb, scan_enabled, yara_enabled, created_by, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now()) \
-         RETURNING id, name, bucket_name, access_key_id, created_at",
+        "INSERT INTO s3_bucket_configs (name, endpoint_url, bucket_name, credential_mode, \
+         credential_enc, role_arn, external_id, region, use_ssl, path_style, prefix_filter, \
+         file_types_filter, max_file_size_mb, scan_enabled, yara_enabled, created_by, \
+         tenant_id, created_at, updated_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, \
+         now(), now()) \
+         RETURNING id, name, bucket_name, created_at",
     )
     .bind(&v.name)
     .bind(&v.endpoint_url)
     .bind(&v.bucket_name)
-    .bind(&v.access_key_id)
-    .bind(&v.secret_access_key)
+    .bind(&v.credential_mode)
+    .bind(&credential_enc)
+    .bind(&v.role_arn)
+    .bind(&v.external_id)
     .bind(&v.region)
     .bind(v.use_ssl)
     .bind(v.path_style)
@@ -611,6 +816,7 @@ pub(crate) async fn create_bucket(
     .bind(v.scan_enabled)
     .bind(v.yara_enabled)
     .bind(user.id)
+    .bind(user.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -622,7 +828,9 @@ pub(crate) async fn create_bucket(
                 "id": row.id,
                 "name": row.name,
                 "bucket_name": row.bucket_name,
-                "access_key_id": mask_access_key(&row.access_key_id),
+                "credential_mode": v.credential_mode,
+                "access_key_id": v.access_key_id.as_deref().map(mask_access_key),
+                "role_arn": v.role_arn,
                 "created_at": skauswatch_streams::py_isoformat_opt(row.created_at),
             }
         })),
@@ -644,23 +852,31 @@ pub(crate) async fn create_bucket(
 )]
 pub(crate) async fn get_bucket(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(bucket_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let bucket = fetch_bucket(&state.db, bucket_id)
+    let bucket = fetch_bucket(&state.db, user.tenant_id, bucket_id)
         .await?
         .ok_or_else(|| ApiError::NotFound("Bucket configuration not found".to_owned()))?;
-    Ok(Json(bucket_json(&bucket)))
+    Ok(Json(bucket_json(&bucket, &state.envelope)?))
 }
 
 /// BucketConfigUpdateRequest — every field optional; absent fields untouched.
+/// Credential fields (security finding #2 — hybrid model) are coupled: any
+/// one of `credential_mode`/`access_key_id`/`secret_access_key`/`role_arn`/
+/// `external_id` present triggers a full re-resolve (see
+/// `resolve_updated_credentials`), merging with the existing stored values
+/// for whichever sub-fields weren't supplied.
 #[derive(Deserialize, utoipa::ToSchema)]
 pub(crate) struct BucketUpdateBody {
     name: Option<String>,
     endpoint_url: Option<String>,
     bucket_name: Option<String>,
+    credential_mode: Option<String>,
     access_key_id: Option<String>,
     secret_access_key: Option<String>,
+    role_arn: Option<String>,
+    external_id: Option<String>,
     region: Option<String>,
     use_ssl: Option<bool>,
     path_style: Option<bool>,
@@ -675,8 +891,11 @@ struct ValidBucketUpdate {
     name: Option<String>,
     endpoint_url: Option<String>,
     bucket_name: Option<String>,
+    credential_mode: Option<String>,
     access_key_id: Option<String>,
     secret_access_key: Option<String>,
+    role_arn: Option<String>,
+    external_id: Option<String>,
     region: Option<String>,
     use_ssl: Option<bool>,
     path_style: Option<bool>,
@@ -692,8 +911,7 @@ impl ValidBucketUpdate {
         self.name.is_some()
             || self.endpoint_url.is_some()
             || self.bucket_name.is_some()
-            || self.access_key_id.is_some()
-            || self.secret_access_key.is_some()
+            || self.has_credential_updates()
             || self.region.is_some()
             || self.use_ssl.is_some()
             || self.path_style.is_some()
@@ -703,10 +921,24 @@ impl ValidBucketUpdate {
             || self.scan_enabled.is_some()
             || self.yara_enabled.is_some()
     }
+
+    /// True when any credential-shaped field was supplied — these five are
+    /// coupled (one JSON envelope / one mode) and must be re-resolved
+    /// together against the existing row, never patched independently.
+    fn has_credential_updates(&self) -> bool {
+        self.credential_mode.is_some()
+            || self.access_key_id.is_some()
+            || self.secret_access_key.is_some()
+            || self.role_arn.is_some()
+            || self.external_id.is_some()
+    }
 }
 
 /// Mirrors pydantic BucketConfigUpdateRequest — per-field checks only when
-/// the field is present.
+/// the field is present. The `assume_role`-requires-AWS-endpoint guard is
+/// deferred to `update_bucket` itself: it needs the *effective* endpoint
+/// (existing row's, unless this request also changes it), which a pure
+/// validator without DB access can't resolve.
 fn validate_bucket_update(b: &BucketUpdateBody) -> Result<ValidBucketUpdate, ApiError> {
     if let Some(n) = &b.name {
         check_len(n, "name", 1, 255)?;
@@ -718,11 +950,22 @@ fn validate_bucket_update(b: &BucketUpdateBody) -> Result<ValidBucketUpdate, Api
     if let Some(n) = &b.bucket_name {
         check_len(n, "bucket_name", 1, 255)?;
     }
+    if let Some(m) = &b.credential_mode
+        && !CREDENTIAL_MODES.contains(&m.as_str())
+    {
+        return Err(validation("credential_mode", CREDENTIAL_MODE_MSG));
+    }
     if let Some(n) = &b.access_key_id {
         check_len(n, "access_key_id", 1, 255)?;
     }
     if let Some(n) = &b.secret_access_key {
         check_len(n, "secret_access_key", 1, 500)?;
+    }
+    if let Some(n) = &b.role_arn {
+        check_len(n, "role_arn", 1, 2048)?;
+    }
+    if let Some(n) = &b.external_id {
+        check_len(n, "external_id", 0, 1224)?;
     }
     if let Some(n) = &b.region {
         check_len(n, "region", 0, 50)?;
@@ -741,8 +984,11 @@ fn validate_bucket_update(b: &BucketUpdateBody) -> Result<ValidBucketUpdate, Api
         name: b.name.clone(),
         endpoint_url,
         bucket_name: b.bucket_name.clone(),
+        credential_mode: b.credential_mode.clone(),
         access_key_id: b.access_key_id.clone(),
         secret_access_key: b.secret_access_key.clone(),
+        role_arn: b.role_arn.clone(),
+        external_id: b.external_id.clone(),
         region: b.region.clone(),
         use_ssl: b.use_ssl,
         path_style: b.path_style,
@@ -754,11 +1000,108 @@ fn validate_bucket_update(b: &BucketUpdateBody) -> Result<ValidBucketUpdate, Api
     })
 }
 
+/// Fully-resolved credential columns for an UPDATE — always all-or-nothing
+/// (see [`ValidBucketUpdate::has_credential_updates`]).
+struct ResolvedCredentials {
+    mode: String,
+    credential_enc: Option<String>,
+    role_arn: Option<String>,
+    external_id: Option<String>,
+}
+
+/// Merges a partial credential update against the bucket's existing stored
+/// values: any sub-field not supplied in `v` falls back to what `existing`
+/// already has (decrypted for `static` mode), never silently dropped.
+fn resolve_updated_credentials(
+    existing: &BucketRow,
+    v: &ValidBucketUpdate,
+    envelope: &EnvelopeEncryption,
+) -> Result<ResolvedCredentials, ApiError> {
+    let mode = v
+        .credential_mode
+        .clone()
+        .unwrap_or_else(|| existing.credential_mode.clone());
+
+    match mode.as_str() {
+        "static" => {
+            let (mut access_key_id, mut secret_access_key) = if existing.credential_mode == "static"
+            {
+                let blob = existing.credential_enc.as_deref().unwrap_or_default();
+                let value = envelope
+                    .decrypt_json(blob)
+                    .map_err(|e| ApiError::internal("credential decrypt", e))?;
+                (
+                    value
+                        .get("access_key_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    value
+                        .get("secret_access_key")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                )
+            } else {
+                (None, None)
+            };
+            if let Some(x) = &v.access_key_id {
+                access_key_id = Some(x.clone());
+            }
+            if let Some(x) = &v.secret_access_key {
+                secret_access_key = Some(x.clone());
+            }
+            let access_key_id = access_key_id.ok_or_else(|| {
+                validation("access_key_id", "Field required for static credential_mode")
+            })?;
+            let secret_access_key = secret_access_key.ok_or_else(|| {
+                validation(
+                    "secret_access_key",
+                    "Field required for static credential_mode",
+                )
+            })?;
+            let credential_enc = envelope
+                .encrypt_json(&serde_json::json!({
+                    "access_key_id": access_key_id,
+                    "secret_access_key": secret_access_key,
+                }))
+                .map_err(|e| ApiError::internal("credential encrypt", e))?;
+            Ok(ResolvedCredentials {
+                mode,
+                credential_enc: Some(credential_enc),
+                role_arn: None,
+                external_id: None,
+            })
+        }
+        _ => {
+            let role_arn = v
+                .role_arn
+                .clone()
+                .or_else(|| {
+                    (mode == existing.credential_mode)
+                        .then(|| existing.role_arn.clone())
+                        .flatten()
+                })
+                .ok_or_else(|| {
+                    validation("role_arn", "Field required for assume_role credential_mode")
+                })?;
+            let external_id = v.external_id.clone().or_else(|| {
+                (mode == existing.credential_mode)
+                    .then(|| existing.external_id.clone())
+                    .flatten()
+            });
+            Ok(ResolvedCredentials {
+                mode,
+                credential_enc: None,
+                role_arn: Some(role_arn),
+                external_id,
+            })
+        }
+    }
+}
+
 #[derive(sqlx::FromRow)]
 struct UpdatedBucketRow {
     id: i32,
     name: String,
-    access_key_id: String,
     updated_at: Option<NaiveDateTime>,
 }
 
@@ -767,7 +1110,9 @@ struct UpdatedBucketRow {
 pub(crate) struct BucketUpdateSummary {
     id: i32,
     name: String,
-    access_key_id: String,
+    credential_mode: String,
+    access_key_id: Option<String>,
+    role_arn: Option<String>,
     updated_at: Option<String>,
 }
 
@@ -804,11 +1149,37 @@ pub(crate) async fn update_bucket(
     user.require_role(&["admin", "maintainer"])?;
     let v = validate_bucket_update(&body)?;
 
-    if !bucket_exists(&state.db, bucket_id).await? {
-        return Err(ApiError::NotFound(
-            "Bucket configuration not found".to_owned(),
+    let existing = fetch_bucket(&state.db, user.tenant_id, bucket_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("Bucket configuration not found".to_owned()))?;
+
+    // Effective endpoint/mode for the assume_role guard: this request's
+    // values win, falling back to the existing row's. Checked whenever
+    // *either* the endpoint or any credential field changes — an
+    // `assume_role` bucket must never end up pointed at a non-AWS endpoint,
+    // even via an update that only touches `endpoint_url` and leaves
+    // credential fields alone (the resolver re-checks this at use time too,
+    // but rejecting early here beats a fail-safe surprise on the next scan).
+    let effective_endpoint = v.endpoint_url.as_deref().unwrap_or(&existing.endpoint_url);
+    let effective_mode = v
+        .credential_mode
+        .clone()
+        .unwrap_or_else(|| existing.credential_mode.clone());
+    if (v.has_credential_updates() || v.endpoint_url.is_some())
+        && effective_mode == "assume_role"
+        && !is_aws_endpoint(effective_endpoint)
+    {
+        return Err(validation(
+            "credential_mode",
+            "Value error, assume_role requires a genuine AWS S3 endpoint (*.amazonaws.com); \
+             use static credentials for this endpoint",
         ));
     }
+    let resolved_credentials = if v.has_credential_updates() {
+        Some(resolve_updated_credentials(&existing, &v, &state.envelope)?)
+    } else {
+        None
+    };
 
     if v.has_updates() {
         let mut qb =
@@ -822,11 +1193,13 @@ pub(crate) async fn update_bucket(
         if let Some(x) = &v.bucket_name {
             qb.push(", bucket_name = ").push_bind(x.clone());
         }
-        if let Some(x) = &v.access_key_id {
-            qb.push(", access_key_id = ").push_bind(x.clone());
-        }
-        if let Some(x) = &v.secret_access_key {
-            qb.push(", secret_access_key = ").push_bind(x.clone());
+        if let Some(rc) = &resolved_credentials {
+            qb.push(", credential_mode = ").push_bind(rc.mode.clone());
+            qb.push(", credential_enc = ")
+                .push_bind(rc.credential_enc.clone());
+            qb.push(", role_arn = ").push_bind(rc.role_arn.clone());
+            qb.push(", external_id = ")
+                .push_bind(rc.external_id.clone());
         }
         if let Some(x) = &v.region {
             qb.push(", region = ").push_bind(x.clone());
@@ -853,24 +1226,39 @@ pub(crate) async fn update_bucket(
         if let Some(x) = v.yara_enabled {
             qb.push(", yara_enabled = ").push_bind(x);
         }
-        qb.push(" WHERE id = ").push_bind(bucket_id);
+        qb.push(" WHERE id = ")
+            .push_bind(bucket_id)
+            .push(" AND tenant_id = ")
+            .push_bind(user.tenant_id);
         qb.build().execute(&state.db).await?;
     }
 
     let row = sqlx::query_as::<_, UpdatedBucketRow>(
-        "SELECT id, name, access_key_id, updated_at FROM s3_bucket_configs WHERE id = $1",
+        "SELECT id, name, updated_at FROM s3_bucket_configs WHERE id = $1 AND tenant_id = $2",
     )
     .bind(bucket_id)
+    .bind(user.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("Bucket configuration not found".to_owned()))?;
+
+    // Re-derive the masked credential display from whatever is now actually
+    // stored (not just what this particular request touched) — same
+    // decrypt-and-mask path GET uses, so the two never disagree.
+    let refreshed = fetch_bucket(&state.db, user.tenant_id, bucket_id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("Bucket configuration not found".to_owned()))?;
+    let cred = credential_display(&refreshed, &state.envelope)?;
+    let credential_mode = refreshed.credential_mode;
 
     Ok(Json(serde_json::json!({
         "message": "Bucket configuration updated successfully",
         "bucket": {
             "id": row.id,
             "name": row.name,
-            "access_key_id": mask_access_key(&row.access_key_id),
+            "credential_mode": credential_mode,
+            "access_key_id": cred.access_key_id,
+            "role_arn": cred.role_arn,
             "updated_at": skauswatch_streams::py_isoformat_opt(row.updated_at),
         }
     })))
@@ -902,13 +1290,14 @@ pub(crate) async fn delete_bucket(
     Path(bucket_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     user.require_role(&["admin"])?;
-    if !bucket_exists(&state.db, bucket_id).await? {
+    if !bucket_exists(&state.db, user.tenant_id, bucket_id).await? {
         return Err(ApiError::NotFound(
             "Bucket configuration not found".to_owned(),
         ));
     }
-    sqlx::query("DELETE FROM s3_bucket_configs WHERE id = $1")
+    sqlx::query("DELETE FROM s3_bucket_configs WHERE id = $1 AND tenant_id = $2")
         .bind(bucket_id)
+        .bind(user.tenant_id)
         .execute(&state.db)
         .await?;
     Ok(Json(serde_json::json!({
@@ -956,34 +1345,66 @@ pub(crate) async fn test_bucket_connection(
     Path(bucket_id): Path<i32>,
 ) -> Result<Response, ApiError> {
     user.require_role(&["admin", "maintainer"])?;
-    let bucket = fetch_bucket(&state.db, bucket_id)
+    let bucket = fetch_bucket(&state.db, user.tenant_id, bucket_id)
         .await?
         .ok_or_else(|| ApiError::NotFound("Bucket configuration not found".to_owned()))?;
-    Ok(run_head_bucket(&bucket).await.into_response())
+    Ok(
+        run_head_bucket(&bucket, &state.envelope, &state.aws_identity_mode())
+            .await
+            .into_response(),
+    )
 }
 
-/// Builds a per-bucket S3 client from the stored credentials and issues
-/// HeadBucket, mapping outcomes onto the v1 boto3 response shapes.
-async fn run_head_bucket(b: &BucketRow) -> (StatusCode, Json<serde_json::Value>) {
-    use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
+/// Resolves the bucket's hybrid credentials (`assume_role`/`static` — see
+/// `skauswatch_s3::credentials`) into an S3 client and issues HeadBucket,
+/// mapping outcomes onto the v1 boto3 response shapes. Credential
+/// resolution failures (bad config shape, decrypt failure, STS error) map
+/// onto the same failure shapes as a live S3 call would. `identity_mode`
+/// deterministically selects how the `assume_role` branch resolves
+/// manager's own base AWS identity — see
+/// `docs/v2-port/aws-identity-runbook.md` §0.
+async fn run_head_bucket(
+    b: &BucketRow,
+    envelope: &EnvelopeEncryption,
+    identity_mode: &skauswatch_s3::credentials::AwsIdentityMode<'_>,
+) -> (StatusCode, Json<serde_json::Value>) {
     use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 
-    let creds = Credentials::new(
-        b.access_key_id.clone(),
-        b.secret_access_key.clone(),
-        None,
-        None,
-        "s3-bucket-config",
-    );
-    let region = Region::new(b.region.clone().unwrap_or_else(|| "us-east-1".to_owned()));
-    let cfg = aws_sdk_s3::config::Builder::new()
-        .behavior_version(BehaviorVersion::latest())
-        .region(region)
-        .endpoint_url(&b.endpoint_url)
-        .force_path_style(b.path_style.unwrap_or(false))
-        .credentials_provider(creds)
-        .build();
-    let client = aws_sdk_s3::Client::from_conf(cfg);
+    let client = match skauswatch_s3::credentials::resolve_client(
+        envelope,
+        &b.credential_config(),
+        identity_mode,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(
+            e @ (CredentialError::AssumeRoleRequiresAwsEndpoint(_)
+            | CredentialError::MissingRoleArn
+            | CredentialError::MissingStaticCredential
+            | CredentialError::MalformedStaticCredential
+            | CredentialError::UnknownMode(_)),
+        ) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Connection failed: invalid credential configuration",
+                    "details": e.to_string(),
+                })),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "success": false,
+                    "error": "Connection failed",
+                    "details": e.to_string(),
+                })),
+            );
+        }
+    };
 
     match client.head_bucket().bucket(&b.bucket_name).send().await {
         Ok(_) => (
@@ -1038,12 +1459,21 @@ struct ScanTaskMsg<'a> {
     yara_enabled: bool,
     /// Python `datetime.utcnow().isoformat()` publish stamp.
     submitted_at: &'a str,
+    /// Dispatching caller's tenant — stamped from `CurrentUser::tenant_id`,
+    /// never a client-supplied value. Consumed by s3scan/scanner workers
+    /// per docs/v2-port/tenancy-model.md §3 ("Stream field `tenant_id` on
+    /// every entry"); this is manager's half of that contract — the
+    /// worker-side "reject/drop-with-error if absent" enforcement is that
+    /// service's own R2 fan-out work, out of scope here.
+    tenant_id: uuid::Uuid,
 }
 
 /// v1 `s3scan:tasks` message — field names, order, and redis-py xadd
 /// stringification (`{job_id,bucket_config_id,object_key,object_size,
 /// object_etag,scan_enabled,yara_enabled,submitted_at}`; Python renders
-/// bools as "True"/"False" and None as "").
+/// bools as "True"/"False" and None as ""), plus the tenancy-retrofit
+/// `tenant_id` field appended at the end (additive — never renumbers/
+/// reorders the v1-parity fields above it).
 fn scan_task_fields(msg: &ScanTaskMsg<'_>) -> skauswatch_streams::EntryFields {
     vec![
         ("job_id".to_owned(), msg.job_id.to_owned()),
@@ -1065,6 +1495,7 @@ fn scan_task_fields(msg: &ScanTaskMsg<'_>) -> skauswatch_streams::EntryFields {
             skauswatch_streams::py_bool(msg.yara_enabled).to_owned(),
         ),
         ("submitted_at".to_owned(), msg.submitted_at.to_owned()),
+        ("tenant_id".to_owned(), msg.tenant_id.to_string()),
     ]
 }
 
@@ -1138,11 +1569,13 @@ pub(crate) async fn trigger_scan(
     }
     let force_rescan = parsed.force_rescan.unwrap_or(false);
 
-    let bucket: Option<(Option<bool>, Option<bool>)> =
-        sqlx::query_as("SELECT scan_enabled, yara_enabled FROM s3_bucket_configs WHERE id = $1")
-            .bind(bucket_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let bucket: Option<(Option<bool>, Option<bool>)> = sqlx::query_as(
+        "SELECT scan_enabled, yara_enabled FROM s3_bucket_configs WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(bucket_id)
+    .bind(user.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
     let Some((scan_enabled, yara_enabled)) = bucket else {
         return Err(ApiError::NotFound(
             "Bucket configuration not found".to_owned(),
@@ -1161,13 +1594,15 @@ pub(crate) async fn trigger_scan(
     });
     let row = sqlx::query_as::<_, CreatedJobRow>(
         "INSERT INTO s3_scan_jobs (job_id, bucket_config_id, job_type, status, triggered_by, \
-         metadata, created_at) VALUES ($1, $2, 'full_scan', 'pending', $3, $4, now()) \
+         metadata, tenant_id, created_at) \
+         VALUES ($1, $2, 'full_scan', 'pending', $3, $4, $5, now()) \
          RETURNING id, bucket_config_id, job_type, status, created_at",
     )
     .bind(&job_uuid)
     .bind(bucket_id)
     .bind(user.id)
     .bind(&metadata)
+    .bind(user.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -1190,6 +1625,7 @@ pub(crate) async fn trigger_scan(
                 scan_enabled: true,
                 yara_enabled: yara_enabled.unwrap_or(false),
                 submitted_at: &skauswatch_streams::py_now_isoformat(),
+                tenant_id: user.tenant_id,
             }),
         )
         .await;
@@ -1375,13 +1811,14 @@ pub(crate) struct JobListResponse {
 )]
 pub(crate) async fn list_jobs(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let q = parse_jobs_params(&params);
     let offset = (q.page - 1) * q.per_page;
 
     let mut qb = QueryBuilder::new(JOB_COLUMNS);
+    qb.push(" AND tenant_id = ").push_bind(user.tenant_id);
     push_job_filters(&mut qb, &q);
     qb.push(" ORDER BY created_at DESC LIMIT ")
         .push_bind(q.per_page)
@@ -1390,6 +1827,7 @@ pub(crate) async fn list_jobs(
     let rows = qb.build_query_as::<JobRow>().fetch_all(&state.db).await?;
 
     let mut cq = QueryBuilder::new("SELECT COUNT(*) FROM s3_scan_jobs WHERE TRUE");
+    cq.push(" AND tenant_id = ").push_bind(user.tenant_id);
     push_job_filters(&mut cq, &q);
     let total: i64 = cq.build_query_scalar().fetch_one(&state.db).await?;
 
@@ -1444,11 +1882,14 @@ pub(crate) struct JobDetail {
 )]
 pub(crate) async fn get_job(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(job_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut qb = QueryBuilder::new(JOB_COLUMNS);
-    qb.push(" AND id = ").push_bind(job_id);
+    qb.push(" AND id = ")
+        .push_bind(job_id)
+        .push(" AND tenant_id = ")
+        .push_bind(user.tenant_id);
     let row = qb
         .build_query_as::<JobRow>()
         .fetch_optional(&state.db)
@@ -1495,8 +1936,9 @@ pub(crate) async fn cancel_job(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     user.require_role(&["admin", "maintainer"])?;
     let row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT status FROM s3_scan_jobs WHERE id = $1")
+        sqlx::query_as("SELECT status FROM s3_scan_jobs WHERE id = $1 AND tenant_id = $2")
             .bind(job_id)
+            .bind(user.tenant_id)
             .fetch_optional(&state.db)
             .await?;
     let Some((status,)) = row else {
@@ -1508,10 +1950,14 @@ pub(crate) async fn cancel_job(
             "Cannot cancel job with status '{status}'"
         )));
     }
-    sqlx::query("UPDATE s3_scan_jobs SET status = 'cancelled', completed_at = now() WHERE id = $1")
-        .bind(job_id)
-        .execute(&state.db)
-        .await?;
+    sqlx::query(
+        "UPDATE s3_scan_jobs SET status = 'cancelled', completed_at = now() \
+         WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(job_id)
+    .bind(user.tenant_id)
+    .execute(&state.db)
+    .await?;
     Ok(Json(serde_json::json!({
         "message": "Scan job cancelled successfully"
     })))
@@ -1809,7 +2255,7 @@ pub(crate) struct ResultsListResponse {
 )]
 pub(crate) async fn query_results(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Result<Response, ApiError> {
     let q = match parse_results_params(&params) {
@@ -1829,6 +2275,7 @@ pub(crate) async fn query_results(
     let offset = (q.page - 1) * q.per_page;
 
     let mut qb = QueryBuilder::new(RESULT_COLUMNS);
+    qb.push(" AND tenant_id = ").push_bind(user.tenant_id);
     push_result_filters(&mut qb, &q.filters);
     qb.push(" ORDER BY scanned_at DESC LIMIT ")
         .push_bind(q.per_page)
@@ -1840,6 +2287,7 @@ pub(crate) async fn query_results(
         .await?;
 
     let mut cq = QueryBuilder::new("SELECT COUNT(*) FROM s3_scan_results WHERE TRUE");
+    cq.push(" AND tenant_id = ").push_bind(user.tenant_id);
     push_result_filters(&mut cq, &q.filters);
     let total: i64 = cq.build_query_scalar().fetch_one(&state.db).await?;
 
@@ -1869,11 +2317,14 @@ pub(crate) async fn query_results(
 )]
 pub(crate) async fn get_result(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(result_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut qb = QueryBuilder::new(RESULT_COLUMNS);
-    qb.push(" AND id = ").push_bind(result_id);
+    qb.push(" AND id = ")
+        .push_bind(result_id)
+        .push(" AND tenant_id = ")
+        .push_bind(user.tenant_id);
     let row = qb
         .build_query_as::<ResultRow>()
         .fetch_optional(&state.db)
@@ -1919,7 +2370,7 @@ pub(crate) struct S3ScanStatisticsResponse {
 )]
 pub(crate) async fn get_statistics(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let period_days = first(&params, "period_days")
@@ -1932,6 +2383,7 @@ pub(crate) async fn get_statistics(
 
     let push_scope = |qb: &mut QueryBuilder<Postgres>| {
         qb.push_bind(from_date);
+        qb.push(" AND tenant_id = ").push_bind(user.tenant_id);
         if let Some(b) = bucket_config_id {
             qb.push(" AND bucket_config_id = ").push_bind(b);
         }
@@ -1974,9 +2426,10 @@ pub(crate) async fn get_statistics(
             "SELECT b.name, COUNT(*), COUNT(*) FILTER (WHERE r.is_malware), \
              COUNT(*) FILTER (WHERE r.is_pup) FROM s3_scan_results r \
              JOIN s3_bucket_configs b ON b.id = r.bucket_config_id \
-             WHERE r.scanned_at >= $1 GROUP BY b.name",
+             WHERE r.scanned_at >= $1 AND r.tenant_id = $2 GROUP BY b.name",
         )
         .bind(from_date)
+        .bind(user.tenant_id)
         .fetch_all(&state.db)
         .await?;
         for (name, total, infected, pup) in rows {
@@ -2060,10 +2513,17 @@ pub(crate) struct ScheduleDetail {
 )]
 pub(crate) async fn get_schedule(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(bucket_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if !bucket_exists(&state.db, bucket_id).await? {
+    // `s3_bucket_configs` is owned by the s3scan service; its own tenancy
+    // migration (`services/s3scan/migrations/0002_s3scan_tenancy.sql`) has
+    // now landed, so `bucket_exists` is tenant-scoped like every other
+    // query in this file — a bucket belonging to another tenant is
+    // indistinguishable from a nonexistent one. `s3_scan_schedules` is
+    // manager-owned, already had `tenant_id`, and is filtered below too — a
+    // caller can never read another tenant's schedule contents.
+    if !bucket_exists(&state.db, user.tenant_id, bucket_id).await? {
         return Err(ApiError::NotFound(
             "Bucket configuration not found".to_owned(),
         ));
@@ -2071,9 +2531,10 @@ pub(crate) async fn get_schedule(
     let row = sqlx::query_as::<_, ScheduleRow>(
         "SELECT id, bucket_config_id, cron_expression, timezone, enabled, last_run_at, \
          next_run_at, created_at, updated_at \
-         FROM s3_scan_schedules WHERE bucket_config_id = $1",
+         FROM s3_scan_schedules WHERE bucket_config_id = $1 AND tenant_id = $2",
     )
     .bind(bucket_id)
+    .bind(user.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("No schedule configured for this bucket".to_owned()))?;
@@ -2184,18 +2645,22 @@ pub(crate) async fn set_schedule(
     user.require_role(&["admin", "maintainer"])?;
     let (cron, timezone, enabled) = validate_schedule(&body)?;
 
-    if !bucket_exists(&state.db, bucket_id).await? {
+    if !bucket_exists(&state.db, user.tenant_id, bucket_id).await? {
         return Err(ApiError::NotFound(
             "Bucket configuration not found".to_owned(),
         ));
     }
 
+    // ON CONFLICT targets the unique bucket_config_id, so the UPDATE branch
+    // additionally checks tenant_id to ensure a caller can never overwrite a
+    // schedule row that (somehow) belongs to another tenant.
     let row = sqlx::query_as::<_, UpsertedScheduleRow>(
         "INSERT INTO s3_scan_schedules (bucket_config_id, cron_expression, timezone, enabled, \
-         created_at, updated_at) VALUES ($1, $2, $3, $4, now(), now()) \
+         tenant_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, now(), now()) \
          ON CONFLICT (bucket_config_id) DO UPDATE SET \
          cron_expression = EXCLUDED.cron_expression, timezone = EXCLUDED.timezone, \
          enabled = EXCLUDED.enabled, updated_at = now() \
+         WHERE s3_scan_schedules.tenant_id = $5 \
          RETURNING id, bucket_config_id, cron_expression, timezone, enabled, \
          created_at, updated_at",
     )
@@ -2203,8 +2668,10 @@ pub(crate) async fn set_schedule(
     .bind(&cron)
     .bind(&timezone)
     .bind(enabled)
-    .fetch_one(&state.db)
-    .await?;
+    .bind(user.tenant_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("Bucket configuration not found".to_owned()))?;
 
     Ok(Json(serde_json::json!({
         "message": "Schedule configured successfully",
@@ -2246,23 +2713,26 @@ pub(crate) async fn delete_schedule(
     Path(bucket_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     user.require_role(&["admin", "maintainer"])?;
-    if !bucket_exists(&state.db, bucket_id).await? {
+    if !bucket_exists(&state.db, user.tenant_id, bucket_id).await? {
         return Err(ApiError::NotFound(
             "Bucket configuration not found".to_owned(),
         ));
     }
-    let existing: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM s3_scan_schedules WHERE bucket_config_id = $1")
-            .bind(bucket_id)
-            .fetch_optional(&state.db)
-            .await?;
+    let existing: Option<(i32,)> = sqlx::query_as(
+        "SELECT id FROM s3_scan_schedules WHERE bucket_config_id = $1 AND tenant_id = $2",
+    )
+    .bind(bucket_id)
+    .bind(user.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
     if existing.is_none() {
         return Err(ApiError::NotFound(
             "No schedule configured for this bucket".to_owned(),
         ));
     }
-    sqlx::query("DELETE FROM s3_scan_schedules WHERE bucket_config_id = $1")
+    sqlx::query("DELETE FROM s3_scan_schedules WHERE bucket_config_id = $1 AND tenant_id = $2")
         .bind(bucket_id)
+        .bind(user.tenant_id)
         .execute(&state.db)
         .await?;
     Ok(Json(serde_json::json!({
@@ -2394,8 +2864,9 @@ pub(crate) async fn upload_file(
 
     let row = sqlx::query_as::<_, CreatedAdhocRow>(
         "INSERT INTO adhoc_scan_results (scan_id, uploaded_by, original_filename, file_size, \
-         file_md5, file_sha256, scan_status, is_malware, is_pup, is_threat, uploaded_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, 'pending', FALSE, FALSE, FALSE, now()) \
+         file_md5, file_sha256, scan_status, is_malware, is_pup, is_threat, tenant_id, \
+         uploaded_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending', FALSE, FALSE, FALSE, $7, now()) \
          RETURNING id, original_filename, file_size, scan_status, file_sha256, scanned_at",
     )
     .bind(&scan_uuid)
@@ -2404,6 +2875,7 @@ pub(crate) async fn upload_file(
     .bind(size_i32)
     .bind(&md5_hex)
     .bind(&sha256_hex)
+    .bind(user.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -2429,6 +2901,7 @@ pub(crate) async fn upload_file(
                 scan_enabled: true,
                 yara_enabled: true,
                 submitted_at: &skauswatch_streams::py_now_isoformat(),
+                tenant_id: user.tenant_id,
             }),
         )
         .await;
@@ -2478,9 +2951,21 @@ fn check_upload_access(row: &AdhocRow, user: &CurrentUser) -> Result<(), ApiErro
     Ok(())
 }
 
-async fn fetch_adhoc(db: &sqlx::PgPool, scan_id: i32) -> Result<Option<AdhocRow>, ApiError> {
+/// Tenant-scoped fetch — a caller (including an admin) can never look up an
+/// ad-hoc scan belonging to another tenant; [`check_upload_access`]'s
+/// owner-or-admin gate only ever runs against a row already confirmed to be
+/// in the caller's own tenant (admin tokens are tenant-scoped too, per
+/// `security.md` Authentication & Authorization).
+async fn fetch_adhoc(
+    db: &sqlx::PgPool,
+    tenant: uuid::Uuid,
+    scan_id: i32,
+) -> Result<Option<AdhocRow>, ApiError> {
     let mut qb = QueryBuilder::new(ADHOC_COLUMNS);
-    qb.push(" AND id = ").push_bind(scan_id);
+    qb.push(" AND id = ")
+        .push_bind(scan_id)
+        .push(" AND tenant_id = ")
+        .push_bind(tenant);
     Ok(qb.build_query_as::<AdhocRow>().fetch_optional(db).await?)
 }
 
@@ -2535,7 +3020,7 @@ pub(crate) async fn get_upload_result(
     user: CurrentUser,
     Path(scan_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let row = fetch_adhoc(&state.db, scan_id)
+    let row = fetch_adhoc(&state.db, user.tenant_id, scan_id)
         .await?
         .ok_or_else(|| ApiError::NotFound("Scan result not found".to_owned()))?;
     check_upload_access(&row, &user)?;
@@ -2614,6 +3099,7 @@ pub(crate) async fn list_upload_history(
     let scope_to_user = user.role != "admin";
 
     let mut qb = QueryBuilder::new(ADHOC_COLUMNS);
+    qb.push(" AND tenant_id = ").push_bind(user.tenant_id);
     if scope_to_user {
         qb.push(" AND uploaded_by = ").push_bind(user.id);
     }
@@ -2624,6 +3110,7 @@ pub(crate) async fn list_upload_history(
     let rows = qb.build_query_as::<AdhocRow>().fetch_all(&state.db).await?;
 
     let mut cq = QueryBuilder::new("SELECT COUNT(*) FROM adhoc_scan_results WHERE TRUE");
+    cq.push(" AND tenant_id = ").push_bind(user.tenant_id);
     if scope_to_user {
         cq.push(" AND uploaded_by = ").push_bind(user.id);
     }
@@ -2680,12 +3167,13 @@ pub(crate) async fn delete_upload_scan(
     user: CurrentUser,
     Path(scan_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let row = fetch_adhoc(&state.db, scan_id)
+    let row = fetch_adhoc(&state.db, user.tenant_id, scan_id)
         .await?
         .ok_or_else(|| ApiError::NotFound("Scan result not found".to_owned()))?;
     check_upload_access(&row, &user)?;
-    sqlx::query("DELETE FROM adhoc_scan_results WHERE id = $1")
+    sqlx::query("DELETE FROM adhoc_scan_results WHERE id = $1 AND tenant_id = $2")
         .bind(scan_id)
+        .bind(user.tenant_id)
         .execute(&state.db)
         .await?;
     Ok(Json(serde_json::json!({
@@ -2723,13 +3211,15 @@ struct TiSourceRow {
 
 async fn fetch_ti_source(
     db: &sqlx::PgPool,
+    tenant: uuid::Uuid,
     result_id: i32,
 ) -> Result<Option<TiSourceRow>, ApiError> {
     Ok(sqlx::query_as::<_, TiSourceRow>(
         "SELECT bucket_config_id, object_key, is_malware, is_pup, is_threat, \
-         threat_names, file_sha256 FROM s3_scan_results WHERE id = $1",
+         threat_names, file_sha256 FROM s3_scan_results WHERE id = $1 AND tenant_id = $2",
     )
     .bind(result_id)
+    .bind(tenant)
     .fetch_optional(db)
     .await?)
 }
@@ -2747,20 +3237,26 @@ struct IndicatorRow {
     created_at: Option<NaiveDateTime>,
 }
 
-/// Fetches a live (non-expired) `hash` indicator for a value — defect #3
-/// keeps reads and writes on the same type.
+/// Fetches a live (non-expired) `hash` indicator for a value, scoped to
+/// `tenant` (bound from `CurrentUser` — `threat_indicators` is
+/// manager-owned, unlike the s3scan-owned tables this file also queries) —
+/// defect #3 keeps reads and writes on the same type. `value` must already
+/// be case-normalized by the caller (see [`validate_hash_value`] /
+/// `create_ti_indicator`, finding #5).
 async fn fetch_hash_indicator(
     db: &sqlx::PgPool,
+    tenant: uuid::Uuid,
     value: &str,
 ) -> Result<Option<IndicatorRow>, ApiError> {
     Ok(sqlx::query_as::<_, IndicatorRow>(
         "SELECT id, indicator_type, threat_level, confidence, source, tags, metadata, \
          created_at FROM threat_indicators \
-         WHERE indicator_type = $1 AND value = $2 \
-         AND (expires_at IS NULL OR expires_at > $3) LIMIT 1",
+         WHERE indicator_type = $1 AND value = $2 AND tenant_id = $3 \
+         AND (expires_at IS NULL OR expires_at > $4) LIMIT 1",
     )
     .bind(HASH_IOC_TYPE)
     .bind(value)
+    .bind(tenant)
     .bind(Utc::now().naive_utc())
     .fetch_optional(db)
     .await?)
@@ -2816,7 +3312,7 @@ pub(crate) async fn create_ti_indicator(
     Path(result_id): Path<i32>,
 ) -> Result<Response, ApiError> {
     user.require_role(&["admin", "maintainer"])?;
-    let result = fetch_ti_source(&state.db, result_id)
+    let result = fetch_ti_source(&state.db, user.tenant_id, result_id)
         .await?
         .ok_or_else(|| ApiError::NotFound("Scan result not found".to_owned()))?;
     if !result.is_threat.unwrap_or(false) {
@@ -2824,18 +3320,27 @@ pub(crate) async fn create_ti_indicator(
             "Scan result is not marked as threat".to_owned(),
         ));
     }
-    let Some(hash) = result.file_sha256.as_deref().filter(|h| !h.is_empty()) else {
+    let Some(raw_hash) = result.file_sha256.as_deref().filter(|h| !h.is_empty()) else {
         return Err(ApiError::BadRequest(
             "No file hash available in scan result".to_owned(),
         ));
     };
+    // Hash-case normalization (finding #5): store lowercase so this write
+    // path matches `hash_lookup`/`validate_hash_value`'s lowercase
+    // comparison — `file_sha256` is already lowercase in practice (computed
+    // via `hex_lower`), but normalizing defensively here means this
+    // function never depends on that upstream invariant holding.
+    let hash = raw_hash.to_lowercase();
 
-    let existing: Option<(i32,)> =
-        sqlx::query_as("SELECT id FROM threat_indicators WHERE indicator_type = $1 AND value = $2")
-            .bind(HASH_IOC_TYPE)
-            .bind(hash)
-            .fetch_optional(&state.db)
-            .await?;
+    let existing: Option<(i32,)> = sqlx::query_as(
+        "SELECT id FROM threat_indicators \
+         WHERE indicator_type = $1 AND value = $2 AND tenant_id = $3",
+    )
+    .bind(HASH_IOC_TYPE)
+    .bind(&hash)
+    .bind(user.tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
     if let Some((indicator_id,)) = existing {
         return Ok(Json(serde_json::json!({
             "message": "Threat indicator already exists",
@@ -2867,16 +3372,18 @@ pub(crate) async fn create_ti_indicator(
     }
     let row = sqlx::query_as::<_, CreatedIocRow>(
         "INSERT INTO threat_indicators (indicator_type, value, threat_level, confidence, \
-         source, tags, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, now()) \
+         source, tags, metadata, tenant_id, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now()) \
          RETURNING id, indicator_type, value, threat_level, created_at",
     )
     .bind(HASH_IOC_TYPE)
-    .bind(hash)
+    .bind(&hash)
     .bind(threat_level)
     .bind(confidence)
     .bind(format!("s3-scan-result-{result_id}"))
     .bind(jsonb_list(&result.threat_names))
     .bind(&metadata)
+    .bind(user.tenant_id)
     .fetch_one(&state.db)
     .await?;
 
@@ -2913,10 +3420,10 @@ pub(crate) async fn create_ti_indicator(
 )]
 pub(crate) async fn get_ti_enrichment(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Path(result_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let result = fetch_ti_source(&state.db, result_id)
+    let result = fetch_ti_source(&state.db, user.tenant_id, result_id)
         .await?
         .ok_or_else(|| ApiError::NotFound("Scan result not found".to_owned()))?;
     let Some(hash) = result.file_sha256.as_deref().filter(|h| !h.is_empty()) else {
@@ -2924,8 +3431,9 @@ pub(crate) async fn get_ti_enrichment(
             serde_json::json!({"enrichment": serde_json::Value::Null, "found": false}),
         ));
     };
+    let hash = hash.to_lowercase();
 
-    let Some(ioc) = fetch_hash_indicator(&state.db, hash).await? else {
+    let Some(ioc) = fetch_hash_indicator(&state.db, user.tenant_id, &hash).await? else {
         return Ok(Json(
             serde_json::json!({"enrichment": serde_json::Value::Null, "found": false}),
         ));
@@ -2952,14 +3460,18 @@ pub(crate) struct HashLookupBody {
 }
 
 /// Mirrors pydantic HashLookupRequest: raw length 32..=256, then stripped +
-/// UPPERCASED (v1 quirk — lookups are case-sensitive against stored hashes),
-/// hex-only, and exactly MD5 (32) or SHA256 (64) long.
+/// lowercased, hex-only, and exactly MD5 (32) or SHA256 (64) long.
+///
+/// Hash-case normalization (finding #5): this used to uppercase (a v1
+/// quirk), while `hex_lower`/`create_ti_indicator` store hashes lowercase —
+/// so a caller submitting a hash in any case could never match a stored
+/// indicator. Lookup and storage now agree on lowercase.
 fn validate_hash_value(b: &HashLookupBody) -> Result<String, ApiError> {
     let Some(raw) = b.hash_value.as_deref() else {
         return Err(validation("hash_value", "Field required"));
     };
     check_len(raw, "hash_value", 32, 256)?;
-    let v = raw.trim().to_uppercase();
+    let v = raw.trim().to_lowercase();
     if !v.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(validation(
             "hash_value",
@@ -2994,11 +3506,11 @@ fn validate_hash_value(b: &HashLookupBody) -> Result<String, ApiError> {
 )]
 pub(crate) async fn hash_lookup(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     ApiJson(body): ApiJson<HashLookupBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let hash = validate_hash_value(&body)?;
-    let Some(ioc) = fetch_hash_indicator(&state.db, &hash).await? else {
+    let Some(ioc) = fetch_hash_indicator(&state.db, user.tenant_id, &hash).await? else {
         return Ok(Json(serde_json::json!({"found": false, "hash": hash})));
     };
     Ok(Json(serde_json::json!({
@@ -3050,6 +3562,7 @@ mod tests {
             is_active: true,
             mfa_enabled: false,
             created_at: None,
+            tenant_id: uuid::Uuid::nil(),
         }
     }
 
@@ -3069,6 +3582,7 @@ mod tests {
     #[test]
     fn scan_task_fields_match_v1_names_order_and_encoding() {
         // Job-level dispatch (bucket scan trigger).
+        let tenant = uuid::Uuid::nil();
         let fields = scan_task_fields(&ScanTaskMsg {
             job_id: "6f9b7a1c-0000-0000-0000-000000000000",
             bucket_config_id: Some(3),
@@ -3078,6 +3592,7 @@ mod tests {
             scan_enabled: true,
             yara_enabled: false,
             submitted_at: "2026-07-22T09:30:00.000042",
+            tenant_id: tenant,
         });
         assert_eq!(
             fields,
@@ -3091,12 +3606,14 @@ mod tests {
                 ("scan_enabled", "True"),
                 ("yara_enabled", "False"),
                 ("submitted_at", "2026-07-22T09:30:00.000042"),
+                ("tenant_id", &tenant.to_string()),
             ])
         );
     }
 
     #[test]
     fn scan_task_fields_adhoc_dispatch_encodes_none_as_empty() {
+        let tenant = uuid::Uuid::nil();
         let fields = scan_task_fields(&ScanTaskMsg {
             job_id: "adhoc-uuid",
             bucket_config_id: None,
@@ -3106,6 +3623,7 @@ mod tests {
             scan_enabled: true,
             yara_enabled: true,
             submitted_at: "2026-07-22T09:30:00.000042",
+            tenant_id: tenant,
         });
         assert_eq!(
             fields,
@@ -3119,6 +3637,7 @@ mod tests {
                 ("scan_enabled", "True"),
                 ("yara_enabled", "True"),
                 ("submitted_at", "2026-07-22T09:30:00.000042"),
+                ("tenant_id", &tenant.to_string()),
             ])
         );
     }
@@ -3242,8 +3761,11 @@ mod tests {
             name: Some("minio".to_owned()),
             endpoint_url: Some(" https://minio.local:9000 ".to_owned()),
             bucket_name: Some("scans".to_owned()),
+            credential_mode: None,
             access_key_id: Some("AKIA1234".to_owned()),
             secret_access_key: Some("secretsecret".to_owned()),
+            role_arn: None,
+            external_id: None,
             region: None,
             use_ssl: None,
             path_style: None,
@@ -3298,13 +3820,113 @@ mod tests {
         ));
     }
 
+    /// Security finding #2 — hybrid credential model: `assume_role` mode
+    /// requires `role_arn` and only against a genuine AWS S3 endpoint;
+    /// `static` mode (default) still requires access_key_id/secret_access_key.
+    #[test]
+    fn bucket_create_validation_hybrid_credential_modes() {
+        let base = BucketCreateBody {
+            name: Some("aws-bucket".to_owned()),
+            endpoint_url: Some("https://s3.amazonaws.com".to_owned()),
+            bucket_name: Some("scans".to_owned()),
+            credential_mode: Some("assume_role".to_owned()),
+            access_key_id: None,
+            secret_access_key: None,
+            role_arn: Some("arn:aws:iam::123456789012:role/skauswatch-scan".to_owned()),
+            external_id: Some("customer-ext-id".to_owned()),
+            region: None,
+            use_ssl: None,
+            path_style: None,
+            prefix_filter: None,
+            file_types_filter: None,
+            max_file_size_mb: None,
+            scan_enabled: None,
+            yara_enabled: None,
+        };
+        match validate_bucket_create(&base) {
+            Ok(v) => {
+                assert_eq!(v.credential_mode, "assume_role");
+                assert_eq!(
+                    v.role_arn.as_deref(),
+                    Some("arn:aws:iam::123456789012:role/skauswatch-scan")
+                );
+                assert_eq!(v.external_id.as_deref(), Some("customer-ext-id"));
+                assert!(v.access_key_id.is_none());
+                assert!(v.secret_access_key.is_none());
+            }
+            Err(e) => panic!("expected ok, got {e:?}"),
+        }
+
+        // assume_role against a non-AWS S3-compatible endpoint is rejected —
+        // there is no STS to assume a role against (this is the core guard
+        // behind the hybrid model).
+        let non_aws_endpoint = BucketCreateBody {
+            endpoint_url: Some("https://minio.example.com:9000".to_owned()),
+            ..clone_create(&base)
+        };
+        assert!(matches!(
+            validate_bucket_create(&non_aws_endpoint),
+            Err(ApiError::Validation(_))
+        ));
+
+        // assume_role without a role_arn is rejected.
+        let missing_role_arn = BucketCreateBody {
+            role_arn: None,
+            ..clone_create(&base)
+        };
+        assert!(matches!(
+            validate_bucket_create(&missing_role_arn),
+            Err(ApiError::Validation(_))
+        ));
+
+        // Unknown credential_mode value is rejected.
+        let bogus_mode = BucketCreateBody {
+            credential_mode: Some("bogus".to_owned()),
+            ..clone_create(&base)
+        };
+        assert!(matches!(
+            validate_bucket_create(&bogus_mode),
+            Err(ApiError::Validation(_))
+        ));
+
+        // static mode (explicit) still requires access_key_id/secret_access_key.
+        let static_missing_keys = BucketCreateBody {
+            credential_mode: Some("static".to_owned()),
+            access_key_id: None,
+            secret_access_key: None,
+            ..clone_create(&base)
+        };
+        assert!(matches!(
+            validate_bucket_create(&static_missing_keys),
+            Err(ApiError::Validation(_))
+        ));
+
+        // Omitting credential_mode defaults to static.
+        let default_mode = BucketCreateBody {
+            credential_mode: None,
+            access_key_id: Some("AKIA1234".to_owned()),
+            secret_access_key: Some("secretsecret".to_owned()),
+            role_arn: None,
+            external_id: None,
+            endpoint_url: Some("https://minio.example.com:9000".to_owned()),
+            ..clone_create(&base)
+        };
+        match validate_bucket_create(&default_mode) {
+            Ok(v) => assert_eq!(v.credential_mode, "static"),
+            Err(e) => panic!("expected ok, got {e:?}"),
+        }
+    }
+
     fn clone_create(b: &BucketCreateBody) -> BucketCreateBody {
         BucketCreateBody {
             name: b.name.clone(),
             endpoint_url: b.endpoint_url.clone(),
             bucket_name: b.bucket_name.clone(),
+            credential_mode: b.credential_mode.clone(),
             access_key_id: b.access_key_id.clone(),
             secret_access_key: b.secret_access_key.clone(),
+            role_arn: b.role_arn.clone(),
+            external_id: b.external_id.clone(),
             region: b.region.clone(),
             use_ssl: b.use_ssl,
             path_style: b.path_style,
@@ -3322,8 +3944,11 @@ mod tests {
             name: None,
             endpoint_url: None,
             bucket_name: None,
+            credential_mode: None,
             access_key_id: None,
             secret_access_key: None,
+            role_arn: None,
+            external_id: None,
             region: None,
             use_ssl: None,
             path_style: None,
@@ -3365,8 +3990,11 @@ mod tests {
             name: None,
             endpoint_url: None,
             bucket_name: None,
+            credential_mode: None,
             access_key_id: None,
             secret_access_key: None,
+            role_arn: None,
+            external_id: None,
             region: None,
             use_ssl: None,
             path_style: None,
@@ -3376,6 +4004,56 @@ mod tests {
             scan_enabled: None,
             yara_enabled: None,
         }
+    }
+
+    #[test]
+    fn bucket_update_validation_rejects_unknown_credential_mode_and_bad_lengths() {
+        let bogus_mode = BucketUpdateBody {
+            credential_mode: Some("bogus".to_owned()),
+            ..empty_update()
+        };
+        assert!(matches!(
+            validate_bucket_update(&bogus_mode),
+            Err(ApiError::Validation(_))
+        ));
+
+        let role_arn_too_long = BucketUpdateBody {
+            role_arn: Some("x".repeat(2049)),
+            ..empty_update()
+        };
+        assert!(matches!(
+            validate_bucket_update(&role_arn_too_long),
+            Err(ApiError::Validation(_))
+        ));
+
+        let ok = BucketUpdateBody {
+            credential_mode: Some("assume_role".to_owned()),
+            role_arn: Some("arn:aws:iam::123456789012:role/demo".to_owned()),
+            external_id: Some("ext".to_owned()),
+            ..empty_update()
+        };
+        match validate_bucket_update(&ok) {
+            Ok(v) => {
+                assert!(v.has_updates());
+                assert!(v.has_credential_updates());
+                assert_eq!(v.credential_mode.as_deref(), Some("assume_role"));
+            }
+            Err(e) => panic!("expected ok, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn has_credential_updates_true_only_when_credential_fields_present() {
+        let none_touched = validate_bucket_update(&empty_update())
+            .unwrap_or_else(|e| panic!("expected ok: {e:?}"));
+        assert!(!none_touched.has_credential_updates());
+
+        let access_key_touched = validate_bucket_update(&BucketUpdateBody {
+            access_key_id: Some("AK".to_owned()),
+            ..empty_update()
+        })
+        .unwrap_or_else(|e| panic!("expected ok: {e:?}"));
+        assert!(access_key_touched.has_credential_updates());
     }
 
     #[test]
@@ -3427,8 +4105,8 @@ mod tests {
         let body = |v: &str| HashLookupBody {
             hash_value: Some(v.to_owned()),
         };
-        match validate_hash_value(&body("d41d8cd98f00b204e9800998ecf8427e")) {
-            Ok(v) => assert_eq!(v, "D41D8CD98F00B204E9800998ECF8427E"),
+        match validate_hash_value(&body("D41D8CD98F00B204E9800998ECF8427E")) {
+            Ok(v) => assert_eq!(v, "d41d8cd98f00b204e9800998ecf8427e"),
             Err(e) => panic!("expected ok, got {e:?}"),
         }
         let sha = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -3666,7 +4344,9 @@ mod tests {
 
     use axum_test::multipart::{MultipartForm, Part};
 
-    use crate::routes::test_support::{authed_user, db_state_with_s3scan};
+    use crate::routes::test_support::{
+        authed_user, authed_user_in_tenant, db_state_with_s3scan, default_tenant_id, seed_tenant,
+    };
 
     fn dev_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
         skauswatch_testkit::license::dev_license("skauswatch")
@@ -3679,38 +4359,79 @@ mod tests {
         axum_test::TestServer::new(app)
     }
 
+    /// [`seed_bucket`] pinned to the seeded default tenant — the common case
+    /// for tests that exercise role/CRUD behavior, not tenant isolation.
     async fn seed_bucket(state: &AppState, name: &str, created_by: i32) -> i32 {
+        seed_bucket_in_tenant(state, name, created_by, default_tenant_id()).await
+    }
+
+    /// Seeds a `static`-mode bucket row with a real envelope-encrypted
+    /// credential blob (via `state.envelope`, the fixed test MEK — see
+    /// `state::test_envelope`) — security finding #2: no plaintext key ever
+    /// written, even in tests. `s3_bucket_configs.tenant_id` is NOT NULL
+    /// (`services/s3scan/migrations/0002_s3scan_tenancy.sql`), so every seed
+    /// stamps one explicitly — never left to a column default.
+    async fn seed_bucket_in_tenant(
+        state: &AppState,
+        name: &str,
+        created_by: i32,
+        tenant_id: uuid::Uuid,
+    ) -> i32 {
+        let credential_enc = state
+            .envelope
+            .encrypt_json(&serde_json::json!({
+                "access_key_id": "AKIATESTKEY123456",
+                "secret_access_key": "supersecretvalue1234",
+            }))
+            .unwrap_or_else(|e| panic!("seed_bucket: encrypt: {e}"));
         let (id,): (i32,) = sqlx::query_as(
             "INSERT INTO s3_bucket_configs \
-             (name, endpoint_url, bucket_name, access_key_id, secret_access_key, region, \
-              use_ssl, path_style, scan_enabled, yara_enabled, created_by, created_at, updated_at) \
-             VALUES ($1, 'http://parity-stub:9999', 'bucket', 'AKIATESTKEY123456', \
-                     'supersecretvalue1234', 'us-east-1', false, true, true, false, $2, \
+             (name, endpoint_url, bucket_name, credential_mode, credential_enc, region, \
+              use_ssl, path_style, scan_enabled, yara_enabled, created_by, tenant_id, \
+              created_at, updated_at) \
+             VALUES ($1, 'http://parity-stub:9999', 'bucket', 'static', $3, \
+                     'us-east-1', false, true, true, false, $2, $4, \
                      now(), now()) RETURNING id",
         )
         .bind(name)
         .bind(created_by)
+        .bind(credential_enc)
+        .bind(tenant_id)
         .fetch_one(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed_bucket: {e}"));
         id
     }
 
+    /// [`seed_job_in_tenant`] pinned to the seeded default tenant.
     async fn seed_job(state: &AppState, bucket_id: i32, status: &str) -> (i32, String) {
+        seed_job_in_tenant(state, bucket_id, status, default_tenant_id()).await
+    }
+
+    /// `s3_scan_jobs.tenant_id` is NOT NULL — see [`seed_bucket_in_tenant`].
+    async fn seed_job_in_tenant(
+        state: &AppState,
+        bucket_id: i32,
+        status: &str,
+        tenant_id: uuid::Uuid,
+    ) -> (i32, String) {
         let job_uuid = uuid::Uuid::new_v4().to_string();
         let (id,): (i32,) = sqlx::query_as(
             "INSERT INTO s3_scan_jobs (job_id, bucket_config_id, job_type, status, \
-             triggered_by, created_at) VALUES ($1, $2, 'full_scan', $3, 1, now()) RETURNING id",
+             triggered_by, tenant_id, created_at) \
+             VALUES ($1, $2, 'full_scan', $3, 1, $4, now()) RETURNING id",
         )
         .bind(&job_uuid)
         .bind(bucket_id)
         .bind(status)
+        .bind(tenant_id)
         .fetch_one(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed_job: {e}"));
         (id, job_uuid)
     }
 
+    /// [`seed_result_in_tenant`] pinned to the seeded default tenant.
     #[allow(clippy::too_many_arguments)]
     async fn seed_result(
         state: &AppState,
@@ -3720,11 +4441,34 @@ mod tests {
         is_threat: bool,
         sha256: Option<&str>,
     ) -> i32 {
+        seed_result_in_tenant(
+            state,
+            job_id,
+            bucket_id,
+            object_key,
+            is_threat,
+            sha256,
+            default_tenant_id(),
+        )
+        .await
+    }
+
+    /// `s3_scan_results.tenant_id` is NOT NULL — see [`seed_bucket_in_tenant`].
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_result_in_tenant(
+        state: &AppState,
+        job_id: i32,
+        bucket_id: i32,
+        object_key: &str,
+        is_threat: bool,
+        sha256: Option<&str>,
+        tenant_id: uuid::Uuid,
+    ) -> i32 {
         let (id,): (i32,) = sqlx::query_as(
             "INSERT INTO s3_scan_results \
              (job_id, bucket_config_id, object_key, scan_status, is_malware, is_pup, \
-              is_threat, threat_names, file_sha256, scanned_at) \
-             VALUES ($1, $2, $3, 'completed', $4, false, $4, '[\"Eicar\"]', $5, now()) \
+              is_threat, threat_names, file_sha256, tenant_id, scanned_at) \
+             VALUES ($1, $2, $3, 'completed', $4, false, $4, '[\"Eicar\"]', $5, $6, now()) \
              RETURNING id",
         )
         .bind(job_id)
@@ -3732,6 +4476,7 @@ mod tests {
         .bind(object_key)
         .bind(is_threat)
         .bind(sha256)
+        .bind(tenant_id)
         .fetch_one(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed_result: {e}"));
@@ -3839,6 +4584,106 @@ mod tests {
         delete.assert_status_ok();
 
         let _ = admin_id;
+    }
+
+    /// Security finding #2 — hybrid credential model, full HTTP round trip:
+    /// `assume_role` create/read never stores or returns a secret, and is
+    /// rejected outright against a non-AWS S3-compatible endpoint.
+    #[tokio::test]
+    async fn bucket_assume_role_crud_never_persists_or_returns_a_secret() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let (_, admin_tok) = authed_user(&state, "assume-role-admin@example.com", "admin").await;
+        let db = state.db.clone();
+        let server = server_for(state).await;
+
+        // Rejected: no STS against a non-AWS S3-compatible endpoint.
+        let rejected = server
+            .post("/api/v1/s3-scan/buckets")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({
+                "name": "role-minio",
+                "endpoint_url": "https://minio.example.com:9000",
+                "bucket_name": "role-bucket",
+                "credential_mode": "assume_role",
+                "role_arn": "arn:aws:iam::123456789012:role/skauswatch-scan",
+            }))
+            .await;
+        rejected.assert_status(StatusCode::BAD_REQUEST);
+
+        let create = server
+            .post("/api/v1/s3-scan/buckets")
+            .authorization_bearer(&admin_tok)
+            .json(&serde_json::json!({
+                "name": "role-aws",
+                "endpoint_url": "https://s3.amazonaws.com",
+                "bucket_name": "role-bucket",
+                "credential_mode": "assume_role",
+                "role_arn": "arn:aws:iam::123456789012:role/skauswatch-scan",
+                "external_id": "customer-secret-ext-id",
+            }))
+            .await;
+        create.assert_status(StatusCode::CREATED);
+        let created: serde_json::Value = create.json();
+        let bucket_id = created["bucket"]["id"].as_i64().unwrap_or_default();
+        assert_eq!(created["bucket"]["credential_mode"], "assume_role");
+        assert_eq!(
+            created["bucket"]["role_arn"],
+            "arn:aws:iam::123456789012:role/skauswatch-scan"
+        );
+        assert!(created["bucket"]["access_key_id"].is_null());
+
+        let get = server
+            .get(&format!("/api/v1/s3-scan/buckets/{bucket_id}"))
+            .authorization_bearer(&admin_tok)
+            .await;
+        get.assert_status_ok();
+        let fetched: serde_json::Value = get.json();
+        assert_eq!(fetched["credential_mode"], "assume_role");
+        assert!(fetched["access_key_id"].is_null());
+        assert!(fetched["secret_access_key"].is_null());
+        // external_id is the cross-account AssumeRole shared secret
+        // (confused-deputy protection) — write-only, never rendered back at
+        // all (not even masked: unlike secret_access_key it need not be
+        // high-entropy, so a masked prefix/suffix can be enough to
+        // reconstruct it). Regression coverage: the key itself must be
+        // absent from both the create response and the GET/list bodies.
+        assert!(
+            !created["bucket"]
+                .as_object()
+                .is_some_and(|m| m.contains_key("external_id")),
+            "create response must never expose external_id: {created}"
+        );
+        assert!(
+            !fetched
+                .as_object()
+                .is_some_and(|m| m.contains_key("external_id")),
+            "GET bucket response must never expose external_id: {fetched}"
+        );
+
+        let list = server
+            .get("/api/v1/s3-scan/buckets")
+            .authorization_bearer(&admin_tok)
+            .await;
+        list.assert_status_ok();
+        let listed: serde_json::Value = list.json();
+        for item in listed["items"].as_array().into_iter().flatten() {
+            assert!(
+                !item
+                    .as_object()
+                    .is_some_and(|m| m.contains_key("external_id")),
+                "list bucket item must never expose external_id: {item}"
+            );
+        }
+
+        // The row itself never persists a credential_enc blob for
+        // assume_role mode — check the raw DB row, not just the API surface.
+        let raw: (Option<String>,) =
+            sqlx::query_as("SELECT credential_enc FROM s3_bucket_configs WHERE id = $1")
+                .bind(bucket_id as i32)
+                .fetch_one(&db)
+                .await
+                .unwrap_or_else(|e| panic!("select: {e}"));
+        assert!(raw.0.is_none());
     }
 
     #[tokio::test]
@@ -4256,18 +5101,18 @@ mod tests {
     async fn hash_lookup_validates_and_finds_live_indicator() {
         let state = db_state_with_s3scan(dev_license()).await;
         let (_, token) = authed_user(&state, "hl@example.com", "viewer").await;
-        // `validate_hash_value` uppercases before querying (documented v1
-        // quirk: case-sensitive lookup) — the stored value must already be
-        // uppercase for an exact match, regardless of the case the caller
-        // submits it in.
-        let hash = "C".repeat(64);
+        // Hash-case normalization (finding #5): storage and lookup both
+        // normalize to lowercase now, so a caller submitting the hash in ANY
+        // case must still match the stored (lowercase) value.
+        let hash = "c".repeat(64);
         sqlx::query(
             "INSERT INTO threat_indicators \
              (indicator_type, value, threat_level, confidence, source, tags, metadata, \
-              created_at, updated_at) \
-             VALUES ('hash', $1, 'high', 0.9, 's3-scan-result-1', '[]', '{}', now(), now())",
+              tenant_id, created_at, updated_at) \
+             VALUES ('hash', $1, 'high', 0.9, 's3-scan-result-1', '[]', '{}', $2, now(), now())",
         )
         .bind(&hash)
+        .bind(crate::routes::test_support::default_tenant_id())
         .execute(&state.db)
         .await
         .unwrap_or_else(|e| panic!("seed indicator: {e}"));
@@ -4283,12 +5128,12 @@ mod tests {
         let found = server
             .post("/api/v1/s3-scan/hash-lookup")
             .authorization_bearer(&token)
-            .json(&serde_json::json!({"hash_value": hash.to_lowercase()}))
+            .json(&serde_json::json!({"hash_value": hash.to_uppercase()}))
             .await;
         found.assert_status_ok();
         let body: serde_json::Value = found.json();
         assert_eq!(body["found"], true);
-        assert_eq!(body["hash"], hash.to_uppercase());
+        assert_eq!(body["hash"], hash);
 
         let not_found = server
             .post("/api/v1/s3-scan/hash-lookup")
@@ -4298,5 +5143,236 @@ mod tests {
         not_found.assert_status_ok();
         let body: serde_json::Value = not_found.json();
         assert_eq!(body["found"], false);
+    }
+
+    /// Closes the manager-side gap left by the R2a-2 sweep: `s3_bucket_configs`/
+    /// `s3_scan_jobs`/`s3_scan_results` are owned by s3scan, but its own
+    /// tenancy migration (`services/s3scan/migrations/0002_s3scan_tenancy.sql`)
+    /// has landed, so every read/write manager issues against them must be
+    /// tenant-scoped. Covers: bucket get/list/update/delete/scan-trigger,
+    /// schedule get/set, job get/cancel, result get, and create-indicator —
+    /// all as a 404 indistinguishable from "doesn't exist" (no existence
+    /// oracle), plus create stamping the caller's own tenant.
+    #[tokio::test]
+    async fn s3_scan_tables_are_isolated_across_tenants() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let tenant_a = default_tenant_id();
+        let tenant_b = seed_tenant(&state.db, "s3-scan-cross-tenant-b").await;
+
+        let (admin_a_id, admin_a_tok) =
+            authed_user_in_tenant(&state, "iso-a-admin@example.com", "admin", tenant_a).await;
+        let (admin_b_id, admin_b_tok) =
+            authed_user_in_tenant(&state, "iso-b-admin@example.com", "admin", tenant_b).await;
+
+        let bucket_a = seed_bucket_in_tenant(&state, "iso-bucket-a", admin_a_id, tenant_a).await;
+        let bucket_b = seed_bucket_in_tenant(&state, "iso-bucket-b", admin_b_id, tenant_b).await;
+        let (job_b, _) = seed_job_in_tenant(&state, bucket_b, "pending", tenant_b).await;
+        let result_b = seed_result_in_tenant(
+            &state,
+            job_b,
+            bucket_b,
+            "tenant-b-secret.exe",
+            true,
+            Some(&"f".repeat(64)),
+            tenant_b,
+        )
+        .await;
+        let server = server_for(state).await;
+
+        // Sanity: tenant A can still read its own bucket.
+        let own = server
+            .get(&format!("/api/v1/s3-scan/buckets/{bucket_a}"))
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        own.assert_status_ok();
+
+        // GET single bucket cross-tenant → 404, never tenant B's config.
+        let get_bucket = server
+            .get(&format!("/api/v1/s3-scan/buckets/{bucket_b}"))
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        get_bucket.assert_status(StatusCode::NOT_FOUND);
+
+        // List never includes tenant B's bucket.
+        let list = server
+            .get("/api/v1/s3-scan/buckets")
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        list.assert_status_ok();
+        let body: serde_json::Value = list.json();
+        let ids: Vec<i64> = body["items"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|i| i["id"].as_i64())
+            .collect();
+        assert!(!ids.contains(&i64::from(bucket_b)));
+
+        // Update cross-tenant → 404, never silently applied.
+        let update = server
+            .put(&format!("/api/v1/s3-scan/buckets/{bucket_b}"))
+            .authorization_bearer(&admin_a_tok)
+            .json(&serde_json::json!({"scan_enabled": false}))
+            .await;
+        update.assert_status(StatusCode::NOT_FOUND);
+
+        // Delete cross-tenant → 404: `bucket_exists` is no longer an
+        // existence oracle — the response is identical whether bucket_b's
+        // id is unknown or simply belongs to another tenant.
+        let delete = server
+            .delete(&format!("/api/v1/s3-scan/buckets/{bucket_b}"))
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        delete.assert_status(StatusCode::NOT_FOUND);
+
+        // Trigger scan cross-tenant → 404, never dispatches against another
+        // tenant's bucket.
+        let trigger = server
+            .post(&format!("/api/v1/s3-scan/buckets/{bucket_b}/scan"))
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        trigger.assert_status(StatusCode::NOT_FOUND);
+
+        // Schedule endpoints cross-tenant → 404 (bucket_exists path).
+        let get_sched = server
+            .get(&format!("/api/v1/s3-scan/buckets/{bucket_b}/schedule"))
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        get_sched.assert_status(StatusCode::NOT_FOUND);
+        let set_sched = server
+            .put(&format!("/api/v1/s3-scan/buckets/{bucket_b}/schedule"))
+            .authorization_bearer(&admin_a_tok)
+            .json(&serde_json::json!({"cron_expression": "0 2 * * *"}))
+            .await;
+        set_sched.assert_status(StatusCode::NOT_FOUND);
+
+        // Job cross-tenant → 404 for get/cancel.
+        let get_job_res = server
+            .get(&format!("/api/v1/s3-scan/jobs/{job_b}"))
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        get_job_res.assert_status(StatusCode::NOT_FOUND);
+
+        let cancel_job_res = server
+            .post(&format!("/api/v1/s3-scan/jobs/{job_b}/cancel"))
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        cancel_job_res.assert_status(StatusCode::NOT_FOUND);
+
+        // Result cross-tenant → 404 for get; create-indicator never
+        // promotes another tenant's file hash into the caller's own
+        // threat_indicators.
+        let get_result_res = server
+            .get(&format!("/api/v1/s3-scan/results/{result_b}"))
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        get_result_res.assert_status(StatusCode::NOT_FOUND);
+
+        let create_ioc = server
+            .post(&format!(
+                "/api/v1/s3-scan/results/{result_b}/create-indicator"
+            ))
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        create_ioc.assert_status(StatusCode::NOT_FOUND);
+
+        // Create-bucket stamps the caller's own tenant — tenant B's admin
+        // can read it back, tenant A's admin cannot.
+        let create = server
+            .post("/api/v1/s3-scan/buckets")
+            .authorization_bearer(&admin_b_tok)
+            .json(&serde_json::json!({
+                "name": "iso-created-by-b",
+                "endpoint_url": "http://parity-stub:9999",
+                "bucket_name": "iso-created-bucket",
+                "access_key_id": "AKIAISOTEST0000000",
+                "secret_access_key": "isosecretvalue1234",
+            }))
+            .await;
+        create.assert_status(StatusCode::CREATED);
+        let created: serde_json::Value = create.json();
+        let created_id = created["bucket"]["id"].as_i64().unwrap_or_default();
+
+        let cross_get = server
+            .get(&format!("/api/v1/s3-scan/buckets/{created_id}"))
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        cross_get.assert_status(StatusCode::NOT_FOUND);
+
+        let own_get = server
+            .get(&format!("/api/v1/s3-scan/buckets/{created_id}"))
+            .authorization_bearer(&admin_b_tok)
+            .await;
+        own_get.assert_status_ok();
+    }
+
+    /// Ad-hoc uploads (`adhoc_scan_results`) are tenant-scoped independently
+    /// of the owner-or-admin gate: an admin in tenant A must never see, list,
+    /// or delete an upload that belongs to tenant B, even though the
+    /// existing role check alone (`uploaded_by == caller || role == admin`)
+    /// would otherwise let any admin reach it.
+    #[tokio::test]
+    async fn adhoc_upload_history_and_detail_are_tenant_scoped() {
+        let state = db_state_with_s3scan(dev_license()).await;
+        let tenant_a = default_tenant_id();
+        let tenant_b = seed_tenant(&state.db, "s3-scan-adhoc-tenant-b").await;
+        let (_, viewer_a_tok) =
+            authed_user_in_tenant(&state, "adhoc-a-viewer@example.com", "viewer", tenant_a).await;
+        let (_, admin_a_tok) =
+            authed_user_in_tenant(&state, "adhoc-a-admin@example.com", "admin", tenant_a).await;
+        let (_, uploader_b_tok) =
+            authed_user_in_tenant(&state, "adhoc-b-uploader@example.com", "viewer", tenant_b).await;
+        let server = server_for(state).await;
+
+        let form = MultipartForm::new().add_part(
+            "file",
+            Part::bytes(b"tenant-b-secret".as_slice())
+                .file_name("secret.bin")
+                .mime_type("application/octet-stream"),
+        );
+        let upload = server
+            .post("/api/v1/s3-scan/upload")
+            .authorization_bearer(&uploader_b_tok)
+            .multipart(form)
+            .await;
+        upload.assert_status(StatusCode::CREATED);
+        let body: serde_json::Value = upload.json();
+        let scan_id = body["scan"]["id"].as_i64().unwrap_or_default();
+
+        // Tenant A cannot read tenant B's ad-hoc upload — the tenant filter
+        // excludes it before the owner/admin check ever runs, for a viewer
+        // AND for an admin (admin tokens are tenant-scoped too).
+        for tok in [&viewer_a_tok, &admin_a_tok] {
+            let cross_get = server
+                .get(&format!("/api/v1/s3-scan/upload/{scan_id}"))
+                .authorization_bearer(tok)
+                .await;
+            cross_get.assert_status(StatusCode::NOT_FOUND);
+        }
+
+        // Tenant A's history list (including as admin) never includes
+        // tenant B's upload.
+        let history = server
+            .get("/api/v1/s3-scan/upload/history")
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        history.assert_status_ok();
+        let body: serde_json::Value = history.json();
+        assert_eq!(body["total"], 0);
+
+        // Tenant A's admin cannot delete tenant B's upload either.
+        let cross_delete = server
+            .delete(&format!("/api/v1/s3-scan/upload/{scan_id}"))
+            .authorization_bearer(&admin_a_tok)
+            .await;
+        cross_delete.assert_status(StatusCode::NOT_FOUND);
+
+        // Tenant B's own uploader can still read it.
+        let own_get = server
+            .get(&format!("/api/v1/s3-scan/upload/{scan_id}"))
+            .authorization_bearer(&uploader_b_tok)
+            .await;
+        own_get.assert_status_ok();
     }
 }

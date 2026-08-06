@@ -23,10 +23,14 @@ skauswatch-streams = { path = "crates/skauswatch-streams" }
 skauswatch-proto = { path = "crates/skauswatch-proto" }
 skauswatch-ai = { path = "crates/skauswatch-ai" }
 skauswatch-s3 = { path = "crates/skauswatch-s3" }
+skauswatch-spire-entry = { path = "crates/skauswatch-spire-entry" }
 # Test-only harness (isolated-schema DB pools, JWT minting, LicenseClient
 # builders) — see docs/v2-port/testing-pattern.md. Added as a dev-dependency
 # by service crates, never a runtime dependency.
 skauswatch-testkit = { path = "crates/skauswatch-testkit" }
+# SPIFFE Workload API integration (SVID-based mTLS, AWS federation) shared
+# by every service — see crates/skauswatch-identity.
+skauswatch-identity = { path = "crates/skauswatch-identity" }
 
 # Async runtime
 tokio = { version = "=1.52.3", features = ["full"] }
@@ -48,6 +52,12 @@ prost = "=0.14.4"
 prost-types = "=0.14.4"
 tonic-prost-build = "=0.14.6"
 protox = "=0.9.1"
+# TokioIo: bridges a manually-built tokio_rustls::TlsStream into hyper's
+# rt::Read/Write for tonic::transport::Endpoint::connect_with_connector — see
+# crates/skauswatch-spire-entry, the first manager-as-gRPC-client mTLS
+# transport in this workspace (server side already does the mirror-image
+# TlsAcceptor wiring in services/manager/src/grpc/mod.rs::mtls_incoming).
+hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
 
 # Database
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "chrono", "uuid", "json", "macros", "migrate"] }
@@ -79,6 +89,17 @@ aws-config = { version = "=1.9.0", default-features = false, features = [
 aws-sdk-s3 = { version = "=1.138.0", default-features = false, features = [
     "sigv4a",
     "http-1x",
+    "default-https-client",
+    "rt-tokio",
+] }
+# aws-sdk-sts: hybrid S3 bucket-credential model (crates/skauswatch-s3
+# credentials.rs) — sts:AssumeRole is the preferred credential path for
+# real-AWS buckets (envelope-encrypted static keys are the fallback for
+# S3-compatible endpoints with no STS, e.g. MinIO/Wasabi). Already present
+# transitively via aws-config's "sso" feature at a compatible version; same
+# trim as aws-sdk-s3/aws-sdk-secretsmanager above — no sigv4a/http-1x needed
+# for a low-volume control-plane API like STS.
+aws-sdk-sts = { version = "=1.108.0", default-features = false, features = [
     "default-https-client",
     "rt-tokio",
 ] }
@@ -121,6 +142,15 @@ serde_yaml = "=0.9.34"
 sysinfo = { version = "=0.39.6", default-features = false, features = ["system", "user"] }
 netstat2 = "=0.11.2"
 walkdir = "=2.5.0"
+
+# Monitor log collectors (phase 12): audit/syslog/journald/file-log
+# classification patterns (auditd/file/journald/lxc collectors — see
+# services/monitor/src/collectors) and dev-only file-tail fixtures.
+# Both versions already resolve transitively elsewhere in the tree
+# (see `cargo tree -i regex@1.13.0` / `-i tempfile@3.27.0`) — pinning them
+# as direct deps here does not move anything already locked.
+regex = "=1.13.0"
+tempfile = "=3.27.0"
 
 
 # Content scanning (s3scan): magic-byte file typing + SHA1 (md-5/sha2 above)
@@ -170,6 +200,50 @@ tokio-cron-scheduler = "=0.15.1"
 wiremock = "=0.6.5"
 mockall = "=0.15.0"
 axum-test = "=21.0.0"
+
+# SPIFFE Workload API (skauswatch-identity): SVID-based mTLS + JWT-SVID
+# federation. rustls/tokio-rustls are pinned to the exact versions already
+# resolved transitively elsewhere in the tree (reqwest's "rustls" feature,
+# sqlx's "tls-rustls" feature) — see `cargo tree -i rustls@0.23.42` — so
+# adding them as direct dependencies here does not move anything already
+# locked. tokio-rustls is dev-only (mTLS handshake tests); rustls itself is
+# a runtime dependency (building `rustls::ServerConfig`/`ClientConfig`).
+spiffe = { version = "=0.16.0", default-features = false, features = ["workload-api"] }
+rustls = "=0.23.42"
+tokio-rustls = "=0.26.4"
+
+# Vault cloud-sync (Phase 12): Azure Key Vault / GCP Secret Manager /
+# Kubernetes Secrets providers via their actively-maintained SDKs — see
+# services/worker-vault-sync/src/providers/{azure,gcp,kubernetes}.rs.
+# `azure_security_keyvault` (legacy, homepage points at the
+# azure-sdk-for-rust "legacy" branch) is deliberately NOT used —
+# `azure_security_keyvault_secrets` is the current, actively developed
+# replacement (same org, modern azure_core 1.x generated-client stack).
+# OCI has no mature Rust SDK at all — reqwest + hand-rolled RSA-SHA256
+# request signing (`rsa` crate) instead; see providers/oracle.rs.
+azure_security_keyvault_secrets = "=1.0.0"
+azure_identity = "=1.0.0"
+azure_core = "=1.1.0"
+# Test-only: azure_core doesn't re-export `Transport` (used by
+# `worker-vault-sync`'s Azure tests to redirect the pipeline's terminal
+# transport at a wiremock server — see providers/azure.rs test module).
+# Pinned to the exact version azure_core 1.1.0 itself resolves to.
+typespec_client_core = "=1.1.0"
+google-cloud-secretmanager-v1 = "=1.12.0"
+google-cloud-auth = "=1.15.0"
+google-cloud-gax = "=1.13.0"
+kube = { version = "=4.2.0", default-features = false, features = ["client", "rustls-tls"] }
+k8s-openapi = { version = "=0.28.0", features = ["v1_34"] }
+# kube::Config::auth_info.token needs a secrecy::SecretString directly —
+# already in the dependency graph transitively via kube-client, pinned here
+# as a direct dep since providers/kubernetes.rs constructs one explicitly.
+secrecy = "=0.10.3"
+# rsa 0.10 is still release-candidate-only (0.10.0-rc.x) — pre-release,
+# forbidden (same policy already applied to `ssh-key` above); 0.9.10 is the
+# latest stable line. `sha2` feature re-exports the `sha2` crate (used for
+# OCI's RSA-SHA256 request signing) at a version guaranteed compatible with
+# the `Sha256`/digest traits `rsa`'s own signing types expect.
+rsa = { version = "=0.9.10", features = ["sha2"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

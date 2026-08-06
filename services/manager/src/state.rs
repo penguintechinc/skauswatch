@@ -5,8 +5,29 @@
 use std::sync::Arc;
 
 use penguin_licensing::{LicenseClient, LicenseConfig};
+use skauswatch_identity::IdentityProvider;
 use skauswatch_streams::StreamProducer;
+use skauswatch_vault::EnvelopeEncryption;
 use sqlx::PgPool;
+
+/// Reads an env var, falling back to `default` when unset or empty.
+fn env_or(key: &str, default: &str) -> String {
+    match std::env::var(key) {
+        Ok(v) if !v.is_empty() => v,
+        _ => default.to_owned(),
+    }
+}
+
+/// Deployment environment segment used both in this workload's own SPIFFE
+/// ID and in the peer identities it trusts (`spiffe://penguintech.io/<env>/
+/// ...` — `docs/v2-port/service-auth-model.md` §1). Read from `SPIFFE_ENV`,
+/// defaulting to `"beta"` — mirrors `skauswatch-pki`'s identical
+/// `config::spiffe_env` convention exactly (this crate has no `config.rs`
+/// module of its own, so the helper lives here alongside the other
+/// `from_env()`-adjacent settings).
+pub(crate) fn spiffe_env() -> String {
+    env_or("SPIFFE_ENV", "beta")
+}
 
 /// Auth settings mirroring the v1 `AuthConfig` defaults.
 #[derive(Debug, Clone)]
@@ -77,10 +98,46 @@ pub struct AppStateInner {
     /// (tests) — v1 guards every publish with `if stream_manager:` and its
     /// healthz reports `not initialized` in the same situation.
     pub streams: Option<StreamProducer>,
+    /// Envelope-encryption engine for `static`-mode S3 bucket credentials
+    /// (security finding #2 — see `routes::s3_scan` and
+    /// `skauswatch_s3::credentials`). Same `VAULT_MEK*` env vars as the
+    /// `vault`/`worker-vault-sync`/`s3scan` services.
+    pub envelope: EnvelopeEncryption,
+    /// SPIFFE Workload API identity (`docs/v2-port/service-auth-model.md`
+    /// §2) — presents manager's own X.509-SVID for gRPC mTLS (server) and,
+    /// once a real caller lands, as a client dialing pki. `None` only in
+    /// test constructors that don't exercise mTLS at all (`grpc::serve`
+    /// treats that identically to a held-but-degraded provider: fall back
+    /// to the pre-mTLS plaintext+HS256 behavior — see that module's docs).
+    /// Real `from_env()` startup always populates `Some`; production
+    /// hard-fails inside `IdentityProvider::connect` itself before this
+    /// field would ever be `None` in prod.
+    pub identity: Option<Arc<IdentityProvider>>,
+    /// Explicit `awsIdentity.mode` selection (`AWS_IDENTITY_MODE`) —
+    /// deterministically selects how manager resolves its own base AWS
+    /// identity for `assume_role`-mode S3 bucket credentials (the
+    /// `/buckets/{id}/test` connection check); see
+    /// `docs/v2-port/aws-identity-runbook.md` §0.
+    pub aws_identity_mode: skauswatch_s3::credentials::AwsIdentityModeKind,
+    /// This service's own federation IAM role ARN (`AWS_FEDERATION_ROLE_ARN`)
+    /// — never a customer's `role_arn`. `None` disables federation
+    /// regardless of `aws_identity_mode` (see
+    /// `skauswatch_s3::credentials::AwsIdentityMode::from_kind`'s fail-safe
+    /// degrade-to-`Irsa` behavior).
+    pub aws_federation_role_arn: Option<String>,
 }
 
 /// Cheap-to-clone handle used as axum state.
 pub type AppState = Arc<AppStateInner>;
+
+/// Lets `skauswatch_auth::tenant_middleware`/`AuthenticatedCaller` verify
+/// tokens against this service's `JWT_SECRET_KEY` without re-threading the
+/// secret through every call site — see `crates/skauswatch-auth`.
+impl skauswatch_auth::JwtSecretSource for AppStateInner {
+    fn jwt_secret(&self) -> &str {
+        &self.auth.jwt_secret
+    }
+}
 
 impl AppStateInner {
     /// Builds state from environment configuration. DB connects with
@@ -107,6 +164,26 @@ impl AppStateInner {
             .await
             .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
 
+        // Same fail-fast policy as `vault`/`worker-vault-sync`/`s3scan`: a
+        // manager that can never decrypt a static S3 credential must not
+        // start silently.
+        let envelope = EnvelopeEncryption::from_env()
+            .map_err(|e| anyhow::anyhow!("envelope encryption init failed: {e}"))?;
+
+        // SPIFFE Workload API identity for gRPC mTLS
+        // (docs/v2-port/service-auth-model.md §2). Fails fast in production
+        // if no SPIRE agent is attestable — same fail-safe posture as the
+        // JWT secret and license client above. Deliberately `connect()`,
+        // not a domain-gated variant — see `skauswatch_identity`'s
+        // crate-level docs and `skauswatch-pki`'s identical call site for
+        // the full rationale (a deployment-domain bypass is for
+        // license/feature-flag gating only, never authentication).
+        let identity = Arc::new(
+            IdentityProvider::connect()
+                .await
+                .map_err(|e| anyhow::anyhow!("identity provider: {e}"))?,
+        );
+
         // v1 env semantics: REDIS_URL (default redis://redis:6379/0),
         // optional REDIS_PASSWORD, REDIS_KEY_PREFIX (default skauswatch).
         // v1 raises out of startup when the broker is unreachable — match.
@@ -123,7 +200,34 @@ impl AppStateInner {
             db,
             auth,
             streams: Some(streams),
+            envelope,
+            identity: Some(identity),
+            aws_identity_mode: skauswatch_s3::credentials::AwsIdentityModeKind::from_env(),
+            aws_federation_role_arn: std::env::var("AWS_FEDERATION_ROLE_ARN")
+                .ok()
+                .filter(|v| !v.is_empty()),
         }))
+    }
+
+    /// Builds the explicit [`skauswatch_s3::credentials::AwsIdentityMode`]
+    /// manager should resolve `assume_role`-mode S3 base credentials with,
+    /// from the held `identity`/`aws_identity_mode`/
+    /// `aws_federation_role_arn` — see `docs/v2-port/aws-identity-runbook.md`
+    /// §0. `Spire` degrades to `Irsa` (never errors) when either the
+    /// identity or the role ARN is unavailable — same fail-safe posture as
+    /// every other identity-adjacent fallback in this service.
+    pub fn aws_identity_mode(&self) -> skauswatch_s3::credentials::AwsIdentityMode<'_> {
+        let federation = self
+            .identity
+            .as_deref()
+            .zip(self.aws_federation_role_arn.as_deref())
+            .map(|(identity, role_arn)| {
+                (
+                    identity as &dyn skauswatch_s3::credentials::JwtSvidSource,
+                    role_arn,
+                )
+            });
+        skauswatch_s3::credentials::AwsIdentityMode::from_kind(self.aws_identity_mode, federation)
     }
 
     /// Publishes ordered fields to a `skauswatch:*` stream, swallowing every
@@ -168,8 +272,71 @@ impl AppStateInner {
                 lockout_minutes: 15,
             },
             streams: None,
+            envelope: test_envelope(),
+            identity: None,
+            aws_identity_mode: skauswatch_s3::credentials::AwsIdentityModeKind::Irsa,
+            aws_federation_role_arn: None,
         })
     }
+
+    /// Like [`Self::for_tests`], but with a caller-supplied
+    /// [`IdentityProvider`] — used by `grpc`/`grpc::pki_client` tests that
+    /// need to exercise the SPIFFE-identity-aware code paths (degraded-
+    /// provider fallback, matcher wiring, real mTLS handshakes) rather than
+    /// the `identity: None` shortcut every other test constructor uses,
+    /// which skips the identity check entirely instead of exercising its
+    /// degraded branch. Mirrors `skauswatch-pki`'s identical
+    /// `for_tests_with_identity` constructor.
+    #[cfg(test)]
+    #[allow(clippy::panic)] // test-only constructor fails loudly by design
+    pub(crate) fn for_tests_with_identity(
+        license: Arc<LicenseClient>,
+        identity: Arc<IdentityProvider>,
+    ) -> AppState {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://test:test@127.0.0.1:1/test")
+            .unwrap_or_else(|e| panic!("lazy test pool: {e}"));
+        Arc::new(Self {
+            license,
+            db,
+            auth: AuthSettings {
+                jwt_secret: "test-secret".to_owned(),
+                access_expires_minutes: 30,
+                refresh_expires_days: 7,
+                max_login_attempts: 5,
+                lockout_minutes: 15,
+            },
+            streams: None,
+            envelope: test_envelope(),
+            identity: Some(identity),
+            aws_identity_mode: skauswatch_s3::credentials::AwsIdentityModeKind::Irsa,
+            aws_federation_role_arn: None,
+        })
+    }
+}
+
+/// Fixed single-MEK envelope shared by every manager test (mirrors the
+/// identical fixture pattern in `skauswatch-vault`/`skauswatch-s3`'s own
+/// tests) — good enough since no manager test exercises MEK rotation.
+/// Not `#[cfg(test)]`-gated: [`AppStateInner::for_tests_with_db`] (which
+/// calls this) is itself only `#[allow(dead_code)]`-suppressed outside
+/// tests, not `cfg(test)`-gated, so this must compile in every profile too.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn test_envelope() -> EnvelopeEncryption {
+    use std::collections::HashMap;
+
+    use skauswatch_vault::MekVersion;
+
+    EnvelopeEncryption::new(
+        HashMap::from([(
+            1,
+            MekVersion {
+                version: 1,
+                key_bytes: [3u8; 32],
+            },
+        )]),
+        1,
+    )
 }
 
 #[cfg(test)]
@@ -203,5 +370,11 @@ mod tests {
         // doesn't require mutating global env state); this test only
         // exercises that a valid secret is *always* accepted regardless.
         assert!(validate_endpoint_secret_for_production("a-real-random-secret").is_ok());
+    }
+
+    #[test]
+    fn spiffe_env_defaults_to_beta_when_unset() {
+        assert!(std::env::var("SPIFFE_ENV").is_err());
+        assert_eq!(spiffe_env(), "beta");
     }
 }

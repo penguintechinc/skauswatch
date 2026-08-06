@@ -6,9 +6,8 @@ use std::sync::Arc;
 
 use penguin_licensing::{LicenseClient, LicenseConfig};
 use skauswatch_streams::StreamProducer;
+use skauswatch_vault::CredentialCipher;
 use sqlx::PgPool;
-
-use crate::crypto::CredentialCipher;
 
 /// JWT settings — this service only verifies tokens issued by the manager,
 /// so only the shared signing secret is needed (no issuance/expiry config).
@@ -19,13 +18,22 @@ pub struct AuthSettings {
 }
 
 impl AuthSettings {
-    fn from_env() -> Self {
-        Self {
-            jwt_secret: std::env::var("JWT_SECRET_KEY").unwrap_or_else(|_| {
-                tracing::warn!("JWT_SECRET_KEY not set — using ephemeral dev secret");
-                format!("dev-{}", std::process::id())
-            }),
-        }
+    /// Loads the shared signing secret via the house fail-fast policy
+    /// (`skauswatch_auth::load_jwt_secret`): a missing/empty value FAILS
+    /// STARTUP in production rather than falling back to a
+    /// process-id-derived, guessable secret — this service verifies every
+    /// non-public request's tenant boundary against this secret, so a weak
+    /// fallback was a real auth bypass risk, not just a dev convenience.
+    fn from_env() -> anyhow::Result<Self> {
+        Ok(Self {
+            jwt_secret: skauswatch_auth::load_jwt_secret().map_err(|e| anyhow::anyhow!("{e}"))?,
+        })
+    }
+}
+
+impl skauswatch_auth::JwtSecretSource for AppStateInner {
+    fn jwt_secret(&self) -> &str {
+        &self.auth.jwt_secret
     }
 }
 
@@ -81,7 +89,7 @@ impl AppStateInner {
         Ok(Arc::new(Self {
             license,
             db,
-            auth: AuthSettings::from_env(),
+            auth: AuthSettings::from_env()?,
             crypto: Arc::new(crypto),
             streams: Some(streams),
         }))

@@ -52,3 +52,9 @@ configMapData:
   db-pool-size: "20"
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
+
+# MUST be enabled: pki hard-requires a live SVID whenever RELEASE_MODE is
+# "true" — without this mount, pki crash-loops in production. See
+# k8s/helm/spire/README.md "Service-pod SVID pattern".
+spire:
+  enabled: true

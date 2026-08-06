@@ -16,12 +16,39 @@ serviceAccount:
   annotations: {}
   name: ""
 
+# AWS identity mechanism backing services/worker-vault-sync's aws-sdk
+# credential chain (providers/aws.rs). Neither mode uses static AWS keys —
+# see docs/v2-port/aws-identity-runbook.md.
+#   - "spire" (default): SPIRE-issued JWT-SVID federated into AWS via OIDC
+#     (sts:AssumeRoleWithWebIdentity) — renders no ServiceAccount
+#     annotation. Requires SPIFFE_ENDPOINT_SOCKET wired into this pod,
+#     which is a separate, not-yet-done pass
+#     (k8s/helm/spire/README.md "deliberately deferred" #5). Matches
+#     skauswatch's on-prem dal2 clusters (alpha/beta/gamma).
+#   - "irsa": EKS Pod Identity / IRSA — annotates the ServiceAccount with
+#     eks.amazonaws.com/role-arn; the aws-sdk default credential provider
+#     chain picks it up automatically, no code change needed. Set
+#     awsIdentity.irsa.roleArn and override awsIdentity.mode: "irsa" in
+#     the target environment's values file only if that environment's
+#     cluster is EKS.
+#   - "static": legacy S3-compatible-only path (MinIO/Wasabi/B2) — no AWS
+#     role assumption; envelope-encrypted static credentials at rest.
+awsIdentity:
+  mode: "spire"
+  irsa:
+    roleArn: ""
+
 podAnnotations: {}
 
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
   fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and
+  # good practice under "baseline") -- see k8s/helm/README.md "Cluster
+  # security baseline".
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false
@@ -29,6 +56,12 @@ securityContext:
     drop:
       - ALL
   readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
 
 healthPort: 8080
 metricsPort: 9090
@@ -156,6 +189,28 @@ readinessProbe:
 volumeMounts: []
 
 volumes: []
+
+# --- SPIFFE Workload API socket (SPIRE) --------------------------------
+# Wires SPIFFE_ENDPOINT_SOCKET + the agent Workload API socket into this
+# pod so skauswatch-identity::IdentityProvider can fetch an SVID at
+# runtime (see k8s/helm/spire/README.md "Service-pod SVID pattern") — the
+# mechanism awsIdentity.mode: "spire" above depends on. NECESSARY BUT NOT
+# SUFFICIENT: the socket is only populated once a spire-agent DaemonSet
+# is actually running on the node — enabling this toggle without a live
+# agent still leaves the mount empty/absent (agent rollout is cutover
+# ops, not this chart). MUST be enabled wherever RELEASE_MODE=true:
+# identity-consuming services hard-fail without a live SVID in release
+# mode — beta/gamma/production all set spire.enabled: true; alpha stays
+# off (no release-mode, no SPIRE agent in local MicroK8s by default).
+spire:
+  enabled: false
+  socketDir: /run/spire/sockets
+  # CSI driver variant — DISABLED BY DEFAULT, matches k8s/helm/spire's own
+  # csiDriver.enabled default. The SPIFFE CSI Driver DaemonSet runs
+  # privileged: true (ROOT EXCEPTION per devops-containers.md) — do not
+  # set true in any env file without explicit user approval first.
+  csiDriver:
+    enabled: false
 
 configMapData:
   log-level: "info"

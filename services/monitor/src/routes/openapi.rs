@@ -8,11 +8,14 @@
 //! split here: the entire generated spec sits behind the same `AuthedUser`
 //! extractor every authenticated route in this service uses. That's an
 //! independent decision from what the *business* routes themselves require:
-//! most of this service's routes (health/version/dashboard/events/alert
-//! search) are intentionally unauthenticated (matching v1 — see each
-//! module's docs), and their `#[utoipa::path]` annotations correctly omit
-//! `security(...)` to document that accurately. Only the doc route itself,
-//! and `alerts::update_alert_status`, actually require a bearer token.
+//! health/version/dashboard and the alert-search routes are intentionally
+//! unauthenticated (matching v1 — see each module's docs), and their
+//! `#[utoipa::path]` annotations correctly omit `security(...)` to document
+//! that accurately. The doc route itself, `alerts::update_alert_status`, and
+//! — as of the tenant-isolation hardening pass — every `events::*` route
+//! (search/get/stream, gated by `skauswatch_auth::tenant_middleware` rather
+//! than `AuthedUser`; see `events.rs` module docs) all require a bearer
+//! token.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -26,9 +29,10 @@ use crate::auth::AuthedUser;
 use crate::error::{ApiError, ErrorResponse};
 use crate::models::{
     Alert, AlertSearchRequest, AlertSearchResponse, BaseEvent, DashboardMetrics,
-    EventSearchRequest, EventSearchResponse, EventType, LogSource, Severity,
+    EventSearchRequest, EventSearchResponse, EventType, LogSource, Severity, ThreatFeed,
 };
 use crate::state::AppState;
+use crate::threat_intel::routes as threat_intel_routes;
 
 /// PostHog flag gating the *live* `/api/v1/openapi.json` route — independent
 /// of `crate::flags::MONITOR_FLAG`, since serving API documentation is a
@@ -61,6 +65,9 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         alerts::search_alerts,
         alerts::get_alert,
         alerts::update_alert_status,
+        threat_intel_routes::search_indicators,
+        threat_intel_routes::get_indicator,
+        threat_intel_routes::list_feeds,
     ),
     components(schemas(
         ErrorResponse,
@@ -78,9 +85,14 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         AlertSearchResponse,
         alerts::UpdateAlertStatusRequest,
         alerts::UpdateAlertStatusResponse,
+        crate::models::ThreatLevel,
+        crate::models::Ioc,
+        ThreatFeed,
+        threat_intel_routes::IndicatorSearchResponse,
     )),
     tags(
         (name = "monitor", description = "Health/version, dashboard metrics, event search, and alert management"),
+        (name = "threat-intel", description = "TAXII feed status and threat indicator search — see crate::threat_intel::mod for how this differs from manager's IOC CRUD"),
     ),
     modifiers(&SecurityAddon),
 )]
