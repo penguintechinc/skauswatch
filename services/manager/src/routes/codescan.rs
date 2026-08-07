@@ -12,7 +12,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
 
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ErrorResponse};
@@ -245,256 +244,20 @@ async fn proxy(
     .await
 }
 
-/// Re-serializes a successful (`2xx`) proxied response through `T`, so any
-/// upstream field not modeled by `T` is silently dropped before it reaches
-/// the caller. Defense-in-depth: `codescan-backend` is audit-clean today, but
-/// this proxy has no way to know if that stays true, so it only ever re-emits
-/// the fields it explicitly models rather than forwarding whatever upstream
-/// happens to return. Error/non-2xx bodies (`{"error": ...}` from upstream,
-/// or the `{"raw": ...}` wrapper [`forward`] builds for non-JSON bodies) pass
-/// through completely unchanged — only success bodies have a modeled shape,
-/// matching each handler's documented `responses(...)` schema.
-///
-/// A `2xx` body that fails to deserialize as `T` (an upstream contract break
-/// this proxy has never seen) fails closed as a `502` rather than forwarding
-/// an unrecognized shape verbatim.
-async fn allowlist<T>(resp: Response) -> Response
-where
-    T: serde::de::DeserializeOwned + Serialize,
-{
-    let status = resp.status();
-    if !status.is_success() {
-        return resp;
-    }
-    let bytes = match axum::body::to_bytes(resp.into_body(), usize::MAX).await {
-        Ok(b) => b,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({ "error": format!("worker-codescan response: {e}") })),
-            )
-                .into_response();
-        }
-    };
-    match serde_json::from_slice::<T>(&bytes) {
-        Ok(value) => (status, Json(value)).into_response(),
-        Err(_) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({ "error": "Unexpected response shape from worker-codescan" })),
-        )
-            .into_response(),
-    }
-}
-
-/// `{status, queue_depth}` — mirrors
-/// `services/codescan-backend/src/routes/status.rs::StatusResponse`; also the
-/// field allowlist [`allowlist`] enforces on the proxied response.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct StatusResponse {
-    status: String,
-    queue_depth: i64,
-}
-
-/// One `codescan_repo_configs` row — mirrors
-/// `services/codescan-backend/src/routes/repos.rs::RepoConfig`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct RepoConfig {
-    id: i64,
-    tenant_id: uuid::Uuid,
-    team_id: Option<i64>,
-    owner_id: Option<i64>,
-    provider: String,
-    repo_url: String,
-    repo_name: String,
-    enabled: bool,
-    auto_review: bool,
-    review_on_open: bool,
-    review_on_sync: bool,
-    default_categories: Option<serde_json::Value>,
-    default_ai_provider: Option<String>,
-    ignored_paths: Option<serde_json::Value>,
-    custom_rules: Option<serde_json::Value>,
-    display_name: Option<String>,
-    description: Option<String>,
-    is_active: bool,
-    credential_id: Option<i64>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
-}
-
-/// GET /codescan/repos — mirrors `repos.rs::RepoListResponse`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct RepoListResponse {
-    data: Vec<RepoConfig>,
-    total: i64,
-    page: i64,
-    per_page: i64,
-}
-
-/// POST /codescan/repos — mirrors `repos.rs::RepoCreateResponse`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct RepoCreateResponse {
-    message: String,
-    config: RepoConfig,
-}
-
-/// PUT /codescan/repos/{repo_id} — mirrors `repos.rs::RepoUpdateResponse`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct RepoUpdateResponse {
-    message: String,
-    config: RepoConfig,
-}
-
-/// DELETE /codescan/repos/{repo_id} — mirrors `repos.rs::RepoDeleteResponse`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct RepoDeleteResponse {
-    message: String,
-    deleted: bool,
-}
-
-/// One `codescan_reviews` row — mirrors `reviews.rs::ReviewRow`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct ReviewRow {
-    id: i64,
-    external_id: Option<String>,
-    tenant_id: uuid::Uuid,
-    team_id: Option<i64>,
-    triggered_by: Option<i64>,
-    repo_config_id: i64,
-    pr_number: Option<i32>,
-    pr_title: Option<String>,
-    pr_url: Option<String>,
-    base_sha: Option<String>,
-    head_sha: Option<String>,
-    review_type: String,
-    categories: Option<serde_json::Value>,
-    ai_provider: Option<String>,
-    ai_model: Option<String>,
-    status: String,
-    error_message: Option<String>,
-    files_reviewed: i32,
-    comments_count: i32,
-    summary: Option<String>,
-    started_at: Option<String>,
-    completed_at: Option<String>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
-}
-
-/// Shared pagination envelope — mirrors `reviews.rs::PaginationMeta`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct PaginationMeta {
-    page: i64,
-    per_page: i64,
-    total: i64,
-    pages: i64,
-}
-
-/// GET /codescan/reviews — mirrors `reviews.rs::ReviewListResponse`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct ReviewListResponse {
-    data: Vec<ReviewRow>,
-    pagination: PaginationMeta,
-}
-
-/// One `codescan_review_comments` row — mirrors `reviews.rs::ReviewComment`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct ReviewComment {
-    id: i64,
-    file_path: Option<String>,
-    line_number: Option<i32>,
-    comment: Option<String>,
-    category: Option<String>,
-    severity: Option<String>,
-    created_at: Option<String>,
-}
-
-/// One `codescan_review_detections` row — mirrors
-/// `reviews.rs::ReviewDetection`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct ReviewDetection {
-    id: i64,
-    detection_type: Option<String>,
-    name: Option<String>,
-    confidence: Option<f64>,
-    file_count: Option<i32>,
-    created_at: Option<String>,
-}
-
-/// One `codescan_license_violations` row — mirrors
-/// `reviews.rs::ReviewLicenseViolation`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct ReviewLicenseViolation {
-    id: i64,
-    license_name: Option<String>,
-    package_name: Option<String>,
-    policy: Option<String>,
-    severity: Option<String>,
-    status: String,
-    created_at: Option<String>,
-}
-
-/// GET /codescan/reviews/{review_id} — mirrors
-/// `reviews.rs::ReviewDetailResponse` (the review row flattened, plus
-/// `comments`/`detections`/`license_violations` arrays).
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct ReviewDetailResponse {
-    #[serde(flatten)]
-    review: ReviewRow,
-    comments: Vec<ReviewComment>,
-    detections: Vec<ReviewDetection>,
-    license_violations: Vec<ReviewLicenseViolation>,
-}
-
-/// One `codescan_issue_plans` row — mirrors `plans.rs::PlanRow`. Deliberately
-/// has no `tenant_id` field: upstream never exposes it in the plan response
-/// (see `plans.rs`'s own `NOTE` on `PlanRow`), so it isn't part of this
-/// allowlist either.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct PlanRow {
-    id: i64,
-    external_id: String,
-    platform: String,
-    repository: String,
-    issue_number: i32,
-    issue_url: Option<String>,
-    issue_title: Option<String>,
-    plan_content: Option<String>,
-    plan_steps: Option<serde_json::Value>,
-    ai_provider: Option<String>,
-    ai_model: Option<String>,
-    status: String,
-    error_message: Option<String>,
-    comment_posted: bool,
-    created_at: Option<String>,
-    updated_at: Option<String>,
-}
-
-/// GET /codescan/plans — mirrors `plans.rs::PlanListResponse`.
-#[derive(Deserialize, Serialize, utoipa::ToSchema)]
-pub(crate) struct PlanListResponse {
-    plans: Vec<PlanRow>,
-    total: i64,
-    page: i64,
-    per_page: i64,
-}
-
 /// GET /darwin/status — CodeScan service status, proxied verbatim.
 ///
 /// This whole router is a thin authenticated proxy to worker-codescan — only
 /// the canonical `/codescan/*` paths are documented here (the deprecated
-/// `/darwin/*` aliases mount the same handlers, see `legacy_router`). Every
-/// successful response is re-serialized through an explicit DTO (see
-/// [`allowlist`]) before it reaches the caller — defense-in-depth so a field
-/// upstream never intended to expose is dropped rather than forwarded, even
-/// though `codescan-backend` is audit-clean today.
+/// `/darwin/*` aliases mount the same handlers, see `legacy_router`).
+/// Response bodies are generic JSON objects (`serde_json::Value`) since the
+/// wire shape is whatever worker-codescan returns.
 #[utoipa::path(
     get,
     path = "/api/v1/codescan/status",
     tag = "codescan",
     security(("bearer_jwt" = [])),
     responses(
-        (status = 200, description = "Service status and review queue depth", body = StatusResponse),
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
         (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
@@ -509,8 +272,7 @@ pub(crate) async fn codescan_status(
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
-    let resp = proxy(&headers, reqwest::Method::GET, "/status", &[], None).await;
-    Ok(allowlist::<StatusResponse>(resp).await)
+    Ok(proxy(&headers, reqwest::Method::GET, "/status", &[], None).await)
 }
 
 /// GET /darwin/repos — list repository configurations; query params forward
@@ -521,7 +283,7 @@ pub(crate) async fn codescan_status(
     tag = "codescan",
     security(("bearer_jwt" = [])),
     responses(
-        (status = 200, description = "Repository configurations", body = RepoListResponse),
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
         (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
@@ -538,8 +300,7 @@ pub(crate) async fn list_repos(
         return Ok(denied);
     }
     let params = dedupe_first(&params);
-    let resp = proxy(&headers, reqwest::Method::GET, "/repos", &params, None).await;
-    Ok(allowlist::<RepoListResponse>(resp).await)
+    Ok(proxy(&headers, reqwest::Method::GET, "/repos", &params, None).await)
 }
 
 /// POST /darwin/repos — add a repository configuration (admin only); the
@@ -551,7 +312,7 @@ pub(crate) async fn list_repos(
     security(("bearer_jwt" = [])),
     request_body = serde_json::Value,
     responses(
-        (status = 201, description = "Repository configuration created", body = RepoCreateResponse),
+        (status = 201, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 400, description = "Invalid JSON body", body = ErrorResponse),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed, or insufficient permissions", body = ErrorResponse),
@@ -570,15 +331,14 @@ pub(crate) async fn create_repo(
         return Ok(denied);
     }
     let payload = parse_body(&body)?;
-    let resp = proxy(
+    Ok(proxy(
         &headers,
         reqwest::Method::POST,
         "/repos",
         &[],
         Some(&payload),
     )
-    .await;
-    Ok(allowlist::<RepoCreateResponse>(resp).await)
+    .await)
 }
 
 /// GET /darwin/repos/{repo_id} — fetch one repository configuration.
@@ -589,7 +349,7 @@ pub(crate) async fn create_repo(
     security(("bearer_jwt" = [])),
     params(("repo_id" = i32, Path, description = "worker-codescan repository configuration id")),
     responses(
-        (status = 200, description = "Repository configuration", body = RepoConfig),
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
         (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
@@ -605,15 +365,14 @@ pub(crate) async fn get_repo(
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
-    let resp = proxy(
+    Ok(proxy(
         &headers,
         reqwest::Method::GET,
         &format!("/repos/{repo_id}"),
         &[],
         None,
     )
-    .await;
-    Ok(allowlist::<RepoConfig>(resp).await)
+    .await)
 }
 
 /// PUT /darwin/repos/{repo_id} — update a repository configuration (admin
@@ -626,7 +385,7 @@ pub(crate) async fn get_repo(
     params(("repo_id" = i32, Path, description = "worker-codescan repository configuration id")),
     request_body = serde_json::Value,
     responses(
-        (status = 200, description = "Repository configuration updated", body = RepoUpdateResponse),
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 400, description = "Invalid JSON body", body = ErrorResponse),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed, or insufficient permissions", body = ErrorResponse),
@@ -646,15 +405,14 @@ pub(crate) async fn update_repo(
         return Ok(denied);
     }
     let payload = parse_body(&body)?;
-    let resp = proxy(
+    Ok(proxy(
         &headers,
         reqwest::Method::PUT,
         &format!("/repos/{repo_id}"),
         &[],
         Some(&payload),
     )
-    .await;
-    Ok(allowlist::<RepoUpdateResponse>(resp).await)
+    .await)
 }
 
 /// DELETE /darwin/repos/{repo_id} — delete a repository configuration
@@ -666,7 +424,7 @@ pub(crate) async fn update_repo(
     security(("bearer_jwt" = [])),
     params(("repo_id" = i32, Path, description = "worker-codescan repository configuration id")),
     responses(
-        (status = 200, description = "Repository configuration deleted", body = RepoDeleteResponse),
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed, or insufficient permissions", body = ErrorResponse),
         (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
@@ -683,15 +441,14 @@ pub(crate) async fn delete_repo(
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
-    let resp = proxy(
+    Ok(proxy(
         &headers,
         reqwest::Method::DELETE,
         &format!("/repos/{repo_id}"),
         &[],
         None,
     )
-    .await;
-    Ok(allowlist::<RepoDeleteResponse>(resp).await)
+    .await)
 }
 
 /// GET /darwin/reviews — list code reviews; query params forward upstream.
@@ -701,7 +458,7 @@ pub(crate) async fn delete_repo(
     tag = "codescan",
     security(("bearer_jwt" = [])),
     responses(
-        (status = 200, description = "Paginated review list", body = ReviewListResponse),
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
         (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
@@ -718,8 +475,7 @@ pub(crate) async fn list_reviews(
         return Ok(denied);
     }
     let params = dedupe_first(&params);
-    let resp = proxy(&headers, reqwest::Method::GET, "/reviews", &params, None).await;
-    Ok(allowlist::<ReviewListResponse>(resp).await)
+    Ok(proxy(&headers, reqwest::Method::GET, "/reviews", &params, None).await)
 }
 
 /// POST /darwin/reviews — queue a code review. v1 quirk replicated: the gate
@@ -732,7 +488,7 @@ pub(crate) async fn list_reviews(
     security(("bearer_jwt" = [])),
     request_body = serde_json::Value,
     responses(
-        (status = 201, description = "Review created and enqueued", body = ReviewRow),
+        (status = 201, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 400, description = "Invalid JSON body", body = ErrorResponse),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed, or caller is not the maintainer role", body = ErrorResponse),
@@ -751,15 +507,14 @@ pub(crate) async fn create_review(
         return Ok(denied);
     }
     let payload = parse_body(&body)?;
-    let resp = proxy(
+    Ok(proxy(
         &headers,
         reqwest::Method::POST,
         "/reviews",
         &[],
         Some(&payload),
     )
-    .await;
-    Ok(allowlist::<ReviewRow>(resp).await)
+    .await)
 }
 
 /// GET /darwin/reviews/{review_id} — fetch a code review with comments.
@@ -770,7 +525,7 @@ pub(crate) async fn create_review(
     security(("bearer_jwt" = [])),
     params(("review_id" = i32, Path, description = "worker-codescan review id")),
     responses(
-        (status = 200, description = "Review detail with comments", body = ReviewDetailResponse),
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
         (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
@@ -786,15 +541,14 @@ pub(crate) async fn get_review(
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
-    let resp = proxy(
+    Ok(proxy(
         &headers,
         reqwest::Method::GET,
         &format!("/reviews/{review_id}"),
         &[],
         None,
     )
-    .await;
-    Ok(allowlist::<ReviewDetailResponse>(resp).await)
+    .await)
 }
 
 /// GET /darwin/plans — list issue plans; query params forward upstream.
@@ -804,7 +558,7 @@ pub(crate) async fn get_review(
     tag = "codescan",
     security(("bearer_jwt" = [])),
     responses(
-        (status = 200, description = "Paginated issue-plan list", body = PlanListResponse),
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
         (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
@@ -821,8 +575,7 @@ pub(crate) async fn list_plans(
         return Ok(denied);
     }
     let params = dedupe_first(&params);
-    let resp = proxy(&headers, reqwest::Method::GET, "/plans", &params, None).await;
-    Ok(allowlist::<PlanListResponse>(resp).await)
+    Ok(proxy(&headers, reqwest::Method::GET, "/plans", &params, None).await)
 }
 
 /// POST /darwin/plans — queue an issue-plan generation (any authenticated
@@ -834,7 +587,7 @@ pub(crate) async fn list_plans(
     security(("bearer_jwt" = [])),
     request_body = serde_json::Value,
     responses(
-        (status = 201, description = "Issue plan created", body = PlanRow),
+        (status = 201, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 400, description = "Invalid JSON body", body = ErrorResponse),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
@@ -852,15 +605,14 @@ pub(crate) async fn create_plan(
         return Ok(denied);
     }
     let payload = parse_body(&body)?;
-    let resp = proxy(
+    Ok(proxy(
         &headers,
         reqwest::Method::POST,
         "/plans",
         &[],
         Some(&payload),
     )
-    .await;
-    Ok(allowlist::<PlanRow>(resp).await)
+    .await)
 }
 
 /// GET /darwin/plans/{plan_id} — fetch one issue plan.
@@ -871,7 +623,7 @@ pub(crate) async fn create_plan(
     security(("bearer_jwt" = [])),
     params(("plan_id" = i32, Path, description = "worker-codescan issue plan id")),
     responses(
-        (status = 200, description = "Issue plan detail", body = PlanRow),
+        (status = 200, description = "Proxied worker-codescan response", body = serde_json::Value),
         (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
         (status = 403, description = "CodeScan feature not licensed", body = ErrorResponse),
         (status = 503, description = "Cannot connect to worker-codescan", body = ErrorResponse),
@@ -887,15 +639,14 @@ pub(crate) async fn get_plan(
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
-    let resp = proxy(
+    Ok(proxy(
         &headers,
         reqwest::Method::GET,
         &format!("/plans/{plan_id}"),
         &[],
         None,
     )
-    .await;
-    Ok(allowlist::<PlanRow>(resp).await)
+    .await)
 }
 
 #[cfg(test)]
@@ -1189,113 +940,6 @@ mod tests {
         let (status, body) = response_parts(resp).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, serde_json::json!({"raw": "plain text"}));
-    }
-
-    /// Defense-in-depth regression: an unmodeled field ("internal_secret")
-    /// that `codescan-backend` has no business exposing must never survive
-    /// `allowlist` — only fields declared on the DTO reach the caller.
-    #[tokio::test]
-    async fn allowlist_strips_unknown_field_from_status_response() {
-        let upstream = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/codescan/status"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "status": "ok",
-                "queue_depth": 4,
-                "internal_secret": "leak-me-not",
-            })))
-            .mount(&upstream)
-            .await;
-
-        let resp = forward(
-            &format!("{}/api/v1/codescan", upstream.uri()),
-            Duration::from_secs(5),
-            reqwest::Method::GET,
-            "/status",
-            None,
-            &[],
-            None,
-        )
-        .await;
-        let stripped = allowlist::<StatusResponse>(resp).await;
-        let (status, body) = response_parts(stripped).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, serde_json::json!({"status": "ok", "queue_depth": 4}));
-        assert!(
-            body.get("internal_secret").is_none(),
-            "unmodeled upstream field must be stripped, got {body}"
-        );
-    }
-
-    /// Non-2xx bodies are error/diagnostic shapes, not modeled response DTOs
-    /// — `allowlist` must leave them completely untouched even though they
-    /// wouldn't deserialize as the success-path DTO at all.
-    #[tokio::test]
-    async fn allowlist_passes_non_success_status_through_unchanged() {
-        let upstream = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/codescan/reviews"))
-            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
-                "error": "invalid repo_id",
-                "internal_debug": "should still pass through on errors",
-            })))
-            .mount(&upstream)
-            .await;
-
-        let resp = forward(
-            &format!("{}/api/v1/codescan", upstream.uri()),
-            Duration::from_secs(5),
-            reqwest::Method::POST,
-            "/reviews",
-            None,
-            &[],
-            Some(&serde_json::json!({})),
-        )
-        .await;
-        let passed = allowlist::<ReviewRow>(resp).await;
-        let (status, body) = response_parts(passed).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(
-            body,
-            serde_json::json!({
-                "error": "invalid repo_id",
-                "internal_debug": "should still pass through on errors",
-            })
-        );
-    }
-
-    /// A 2xx body that doesn't match the modeled DTO at all (an upstream
-    /// contract break) fails closed as a 502 rather than forwarding a shape
-    /// the caller was never promised.
-    #[tokio::test]
-    async fn allowlist_fails_closed_on_a_2xx_body_that_does_not_match_the_dto() {
-        let upstream = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/codescan/status"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"unexpected": "shape"})),
-            )
-            .mount(&upstream)
-            .await;
-
-        let resp = forward(
-            &format!("{}/api/v1/codescan", upstream.uri()),
-            Duration::from_secs(5),
-            reqwest::Method::GET,
-            "/status",
-            None,
-            &[],
-            None,
-        )
-        .await;
-        let stripped = allowlist::<StatusResponse>(resp).await;
-        let (status, body) = response_parts(stripped).await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert_eq!(
-            body,
-            serde_json::json!({"error": "Unexpected response shape from worker-codescan"})
-        );
     }
 
     #[tokio::test]
