@@ -68,6 +68,11 @@ pub struct WorkerConfig {
     /// crates.io base URL override for license lookups
     /// (`CRATES_REGISTRY_URL`); `None` uses the public registry.
     pub crates_registry_url: Option<String>,
+    /// deps.dev base URL override for Go (`go.mod`) license lookups
+    /// (`GO_REGISTRY_URL`); `None` uses the public deps.dev API. Go has no
+    /// registry of its own with a per-module license field, so this scans
+    /// via deps.dev instead (see `crate::license_scan`).
+    pub go_registry_url: Option<String>,
 }
 
 impl WorkerConfig {
@@ -100,6 +105,7 @@ impl WorkerConfig {
             env::var("NPM_REGISTRY_URL").ok().as_deref(),
             env::var("PYPI_REGISTRY_URL").ok().as_deref(),
             env::var("CRATES_REGISTRY_URL").ok().as_deref(),
+            env::var("GO_REGISTRY_URL").ok().as_deref(),
         ))
     }
 
@@ -127,6 +133,7 @@ impl WorkerConfig {
         npm_registry_url: Option<&str>,
         pypi_registry_url: Option<&str>,
         crates_registry_url: Option<&str>,
+        go_registry_url: Option<&str>,
     ) -> Self {
         Self {
             redis_url: redis_url.unwrap_or("redis://localhost:6379").to_owned(),
@@ -155,6 +162,7 @@ impl WorkerConfig {
             npm_registry_url: npm_registry_url.map(str::to_owned),
             pypi_registry_url: pypi_registry_url.map(str::to_owned),
             crates_registry_url: crates_registry_url.map(str::to_owned),
+            go_registry_url: go_registry_url.map(str::to_owned),
         }
     }
 }
@@ -172,6 +180,7 @@ mod tests {
             None,
             None,
             "consumer-1",
+            None,
             None,
             None,
             None,
@@ -208,6 +217,7 @@ mod tests {
         assert_eq!(cfg.npm_registry_url, None);
         assert_eq!(cfg.pypi_registry_url, None);
         assert_eq!(cfg.crates_registry_url, None);
+        assert_eq!(cfg.go_registry_url, None);
     }
 
     #[test]
@@ -233,6 +243,7 @@ mod tests {
             Some("http://npm.example.com"),
             Some("http://pypi.example.com"),
             Some("http://crates.example.com"),
+            Some("http://depsdev.example.com"),
         );
         assert_eq!(cfg.redis_url, "redis://cache:6379");
         assert_eq!(cfg.redis_password.as_deref(), Some("s3cr3t"));
@@ -270,6 +281,10 @@ mod tests {
             cfg.crates_registry_url.as_deref(),
             Some("http://crates.example.com")
         );
+        assert_eq!(
+            cfg.go_registry_url.as_deref(),
+            Some("http://depsdev.example.com")
+        );
     }
 
     #[test]
@@ -290,6 +305,7 @@ mod tests {
             None,
             None,
             Some("nope"),
+            None,
             None,
             None,
             None,

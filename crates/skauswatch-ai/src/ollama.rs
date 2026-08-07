@@ -79,3 +79,113 @@ impl CompletionProvider for OllamaProvider {
         })
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::panic)] // tests fail loudly by design
+mod tests {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    fn req() -> CompletionRequest {
+        CompletionRequest {
+            model: "llama3".to_owned(),
+            messages: vec![crate::Message {
+                role: "user".to_owned(),
+                content: "hello".to_owned(),
+            }],
+            max_tokens: 128,
+        }
+    }
+
+    #[test]
+    fn new_rejects_an_empty_base_url() {
+        assert!(OllamaProvider::new(String::new()).is_err());
+    }
+
+    #[tokio::test]
+    async fn complete_returns_content_and_the_request_model_on_success() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": {"content": "hi there"},
+            })))
+            .mount(&mock)
+            .await;
+
+        // Trailing slash on the configured base_url must not double up in
+        // the request path.
+        let provider = OllamaProvider::new(format!("{}/", mock.uri()))
+            .unwrap_or_else(|e| panic!("provider: {e}"));
+        let resp = provider
+            .complete(req())
+            .await
+            .unwrap_or_else(|e| panic!("complete: {e}"));
+        assert_eq!(resp.content, "hi there");
+        // Ollama's response never carries its own `model` field — the
+        // provider always echoes the request's.
+        assert_eq!(resp.model, "llama3");
+    }
+
+    #[tokio::test]
+    async fn complete_maps_a_non_success_status_to_a_provider_error() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock)
+            .await;
+
+        let provider = OllamaProvider::new(mock.uri()).unwrap_or_else(|e| panic!("provider: {e}"));
+        match provider.complete(req()).await {
+            Err(AiError::Provider(msg)) => assert!(msg.contains("500")),
+            other => panic!("expected Provider error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_maps_a_response_missing_content_to_a_provider_error() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock)
+            .await;
+
+        let provider = OllamaProvider::new(mock.uri()).unwrap_or_else(|e| panic!("provider: {e}"));
+        match provider.complete(req()).await {
+            Err(AiError::Provider(msg)) => assert_eq!(msg, "malformed response"),
+            other => panic!("expected Provider error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_maps_a_non_json_body_to_a_transport_error() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&mock)
+            .await;
+
+        let provider = OllamaProvider::new(mock.uri()).unwrap_or_else(|e| panic!("provider: {e}"));
+        match provider.complete(req()).await {
+            Err(AiError::Transport(_)) => {}
+            other => panic!("expected Transport error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_maps_an_unreachable_endpoint_to_a_transport_error() {
+        // Nothing listens on this loopback port — `.send()` itself fails
+        // before a response is ever received.
+        let provider = OllamaProvider::new("http://127.0.0.1:1".to_owned())
+            .unwrap_or_else(|e| panic!("provider: {e}"));
+        match provider.complete(req()).await {
+            Err(AiError::Transport(_)) => {}
+            other => panic!("expected Transport error, got {other:?}"),
+        }
+    }
+}

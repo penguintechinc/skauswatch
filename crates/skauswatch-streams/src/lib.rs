@@ -339,6 +339,35 @@ mod tests {
         assert_eq!(prefixed_key("custom", STREAM_AI_TASKS), "custom:ai:tasks");
     }
 
+    /// Real-Valkey coverage for `StreamProducer::connect`/`publish`/`ping` —
+    /// same "test against the real broker, don't mock it" convention as
+    /// `consumer::tests` (see that module's doc comment). `REDIS_URL`
+    /// defaults to `redis://127.0.0.1:6379/0` for local runs outside the
+    /// CI/dev-container network.
+    fn redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/0".to_owned())
+    }
+
+    #[tokio::test]
+    async fn producer_connects_publishes_and_pings_a_real_broker() {
+        let producer = StreamProducer::connect(&redis_url(), None, "skauswatch-test")
+            .await
+            .unwrap_or_else(|e| panic!("connect: {e}"));
+
+        producer
+            .ping()
+            .await
+            .unwrap_or_else(|e| panic!("ping: {e}"));
+
+        let stream = format!("lib-test-{}", Uuid::new_v4());
+        let id = producer
+            .publish(&stream, vec![("k".to_owned(), "v".to_owned())])
+            .await
+            .unwrap_or_else(|e| panic!("publish: {e}"));
+        assert!(!id.is_empty(), "XADD must return a non-empty entry id");
+        assert_eq!(producer.key(&stream), format!("skauswatch-test:{stream}"));
+    }
+
     #[test]
     fn redis_url_password_injection_matches_v1_full_url() {
         // Password set, no userinfo → inject `default:{pass}@`.

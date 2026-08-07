@@ -36,6 +36,7 @@ impl CodeScanReviewHandler {
             config.npm_registry_url.clone(),
             config.pypi_registry_url.clone(),
             config.crates_registry_url.clone(),
+            config.go_registry_url.clone(),
         );
         Self {
             pool,
@@ -708,6 +709,7 @@ mod tests {
             npm_registry_url: None,
             pypi_registry_url: None,
             crates_registry_url: None,
+            go_registry_url: None,
         }
     }
 
