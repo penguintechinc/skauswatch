@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-// @ts-nocheck
 import { useState, useEffect } from 'react';
 import { rolesApi } from './api';
 import type { Role, Scope } from './types';
@@ -7,6 +5,12 @@ import Card from '../../components/Card';
 import Button from '../../components/Button';
 
 type RoleLevel = 'global' | 'tenant' | 'team' | 'resource';
+
+const ROLE_LEVELS: readonly RoleLevel[] = ['global', 'tenant', 'team', 'resource'];
+
+function isRoleLevel(value: string | undefined): value is RoleLevel {
+  return !!value && (ROLE_LEVELS as readonly string[]).includes(value);
+}
 
 export default function Roles() {
   const [roles, setRoles] = useState<Role[]>([]);
@@ -31,8 +35,11 @@ export default function Roles() {
   const fetchRoles = async () => {
     setIsLoading(true);
     try {
-      const response = await rolesApi.listRoles(filterLevel || undefined);
-      setRoles((response as any).items || []);
+      // NOTE: rolesApi.listRoles only accepts (page, perPage) — the backend
+      // contract has no server-side level filter. filterLevel drives the
+      // dropdown/refetch but cannot be forwarded to the API call.
+      const response = await rolesApi.listRoles();
+      setRoles((response.items || []) as Role[]);
       setError(null);
     } catch (err) {
       setError('Failed to load roles');
@@ -45,7 +52,7 @@ export default function Roles() {
   const fetchScopes = async () => {
     try {
       const scopeList = await rolesApi.listScopes();
-      setScopes(scopeList);
+      setScopes(scopeList as Scope[]);
     } catch (err) {
       console.error('Error loading scopes:', err);
     }
@@ -79,11 +86,11 @@ export default function Roles() {
   const openEditModal = (role: Role) => {
     setFormData({
       name: role.name,
-      slug: role.slug,
+      slug: role.slug || '',
       description: role.description || '',
-      level: role.level,
+      level: isRoleLevel(role.level) ? role.level : 'global',
       scope_ids: role.scopes?.map((s) => s.id) || [],
-      is_active: role.is_active,
+      is_active: role.is_active ?? true,
     });
     setEditingRole(role);
     setShowCreateModal(true);

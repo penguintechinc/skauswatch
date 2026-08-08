@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-// @ts-nocheck
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { repositoriesApi } from './api';
@@ -66,7 +64,7 @@ export default function Repositories() {
     }
   };
 
-  const getPlatformBadgeColor = (platform: string) => {
+  const getPlatformBadgeColor = (platform: string | undefined) => {
     switch (platform) {
       case 'github':
         return 'bg-purple-900/30 text-purple-400 border-purple-700';
