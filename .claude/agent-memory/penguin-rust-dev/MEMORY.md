@@ -6,5 +6,5 @@
 - [clippy expect_used per-module allow](feedback_clippy_expect_used_per_module_allow.md) — test modules need their own `#[allow(clippy::expect_used)]`; not blanket-exempted
 - [no sudo for docker chown](feedback_no_sudo_for_docker_chown.md) — never `sudo chown` root-owned scratch/target dirs; use `docker run --user` or `docker exec` chown instead
 - [async client ctor blocking risk](feedback_async_client_ctor_blocking_risk.md) — don't `block_on` a real async network client (aws_sdk_s3 etc.) inside a sync handler `::new()`; build it in `main.rs::serve()` and pass it in
-- [streams fred nil-decode gap](project_streams_fred_nil_decode_gap.md) — StreamConsumer::read_new errors on genuinely-empty XREADGROUP reply; fred needs default-nil-types feature; found not fixed 2026-08-06
+- [streams fred nil-decode gap](project_streams_fred_nil_decode_gap.md) — FIXED 2026-08-08: fred default-nil-types feature added; read_new no longer errors on idle XREADGROUP poll
 - [functions metric panic-closure ceiling](feedback_functions_metric_panic_closures.md) — `.unwrap_or_else(\|e\| panic!())` test idiom inflates Functions denominator with never-fired closures; workspace has a structural ~87% ceiling, don't chase 90% with more tests in the same style
