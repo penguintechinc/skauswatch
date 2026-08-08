@@ -3,16 +3,20 @@
 //! `_do_push`/`_do_delete`/`_load_integration`/`_update_sync_state`/
 //! `_remove_sync_state`).
 //!
-//! **Preserved v1 gap** (not a v2 regression): the only producer of sync
-//! stream events, `vault` service's `POST /sync/integrations/{id}/trigger`,
-//! publishes only `{integration_id, event_type, timestamp}` — never
-//! `action`/`secret_id`/`encrypted_value`. `_do_push`/`_do_delete` and this
-//! handler default a missing `action` to `"push"` and a missing
-//! `encrypted_value` to `""`, so a manual trigger logs a decrypt failure and
-//! skips rather than syncing anything, exactly like v1. Wiring a real
-//! secret payload into the publish path is tracked in
-//! `docs/v2-port/v2.1-backlog.md` as a pre-existing v1 functional gap, not
-//! new v2.0 scope.
+//! **Payload plumbing** (fixes a pre-existing v1 defect — see
+//! `docs/v2-port/phase12-scope-infra.md` §1): the producer, `vault` service's
+//! `POST /sync/integrations/{id}/trigger`, publishes one real `action=push`
+//! message per in-scope secret, carrying `secret_id`/`secret_name`/
+//! `encrypted_value`/`encrypted_dek`/`dek_version` (see `vault`'s
+//! `routes/sync.rs::push_fields`). `do_push` below reads those fields and
+//! decrypts the forwarded ciphertext with the same envelope MEK before
+//! calling the provider (a decrypt failure logs and skips that one secret,
+//! not the whole batch). In v1 the producer sent only `{integration_id,
+//! event_type, timestamp}`, so every manual trigger silently failed to
+//! decrypt and skipped — that gap is now closed, covered end-to-end by
+//! `sync.rs`'s
+//! `trigger_sync_publishes_a_real_decryptable_secret_payload_to_the_stream`
+//! and this module's own `do_push` tests.
 
 use std::collections::HashMap;
 
