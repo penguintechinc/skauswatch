@@ -446,23 +446,15 @@ mod tests {
             .unwrap_or_else(|e| panic!("second ensure_group (BUSYGROUP): {e}"));
     }
 
-    /// Documents a real gap found while writing this suite (2026-08-06), not
-    /// the intended behavior: when `XREADGROUP` genuinely has nothing to
-    /// deliver (block times out with zero new entries), Valkey/Redis replies
-    /// with a bare nil. `fred`'s generic map decode only treats nil as an
-    /// empty map when the crate's `default-nil-types` feature is enabled —
-    /// this workspace's `fred = "=10.1.0"` dependency (`Cargo.toml`) does not
-    /// enable it, so `read_new` currently surfaces this as a transport error
-    /// instead of a clean `Ok(())`. In production this routes through
-    /// `run()`'s `Err(e) => { warn!(...); sleep(block_ms) }` arm, so a worker
-    /// never crashes, but every idle poll cycle logs a spurious warning and
-    /// sleeps an extra `block_ms` — this is a real behavior gap, not a test
-    /// bug, and out of scope for this test-coverage pass to fix (a
-    /// `default-nil-types` feature flip is a workspace-wide `fred` behavior
-    /// change, not a test-only tweak). Tracked as a follow-up rather than
-    /// silently fixed or silently ignored.
+    /// When `XREADGROUP` genuinely has nothing to deliver (block times out
+    /// with zero new entries), Valkey/Redis replies with a bare nil. The
+    /// workspace's `fred` dependency enables the `default-nil-types` feature
+    /// (`Cargo.toml`), so `fred`'s generic map decode treats that nil as an
+    /// empty map and `read_new` returns a clean `Ok(())` with no dispatch —
+    /// no spurious transport error, no extra `run()` retry sleep, on an
+    /// otherwise-idle poll cycle.
     #[tokio::test]
-    async fn read_new_currently_errors_when_no_new_entries_are_pending() {
+    async fn read_new_returns_empty_when_no_new_entries_are_pending() {
         let stream = format!("streams-test-{}", Uuid::new_v4());
         let prefix = "skauswatch-test".to_owned();
         let consumer = StreamConsumer::connect(&redis_url(), None, &prefix)
@@ -480,12 +472,13 @@ mod tests {
         let handler = RecordingHandler::new(false);
         let result = consumer.read_new(&cfg, &handler).await;
         assert!(
-            result.is_err(),
-            "expected the known nil-decode gap (see doc comment); read_new returned {result:?} — \
-             if this now passes, fred's default-nil-types behavior changed and this test (and its \
-             doc comment) should be updated to assert Ok(()) instead"
+            result.is_ok(),
+            "an idle poll (no new entries) must return Ok(()), not a transport error: {result:?}"
         );
-        assert!(handler.calls.lock().await.is_empty());
+        assert!(
+            handler.calls.lock().await.is_empty(),
+            "an idle poll must not dispatch to the handler"
+        );
     }
 
     #[tokio::test]
