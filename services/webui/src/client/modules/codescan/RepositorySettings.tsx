@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-// @ts-nocheck
 import { useState, useEffect } from 'react';
 import { repositoriesApi } from './api';
 import type { RepositoryConfig } from './types';
@@ -26,8 +24,8 @@ export default function RepositorySettings() {
       setError(null);
       try {
         const result = await repositoriesApi.list(page, 20);
-        setRepositories(result.items);
-        setTotalPages(result.pages);
+        setRepositories(result.items || result.repositories || []);
+        setTotalPages(result.pages || result.pagination?.pages || 0);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to fetch repositories');
       } finally {

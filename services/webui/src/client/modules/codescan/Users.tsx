@@ -1,11 +1,9 @@
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-// @ts-nocheck
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { usersApi } from './api';
 import Card from '../../components/Card';
 import Button from '../../components/Button';
-import type { User } from './types';
+import type { User, UserRole } from './types';
 
 export default function Users() {
   const [users, setUsers] = useState<User[]>([]);
@@ -14,11 +12,16 @@ export default function Users() {
   const [showCreateModal, setShowCreateModal] = useState(false);
 
   // Create user form state
-  const [newUser, setNewUser] = useState({
+  const [newUser, setNewUser] = useState<{
+    email: string;
+    password: string;
+    full_name: string;
+    role: UserRole;
+  }>({
     email: '',
     password: '',
     full_name: '',
-    role: 'viewer' as const,
+    role: 'viewer',
   });
   const [createLoading, setCreateLoading] = useState(false);
 

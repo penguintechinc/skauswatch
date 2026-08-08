@@ -1,10 +1,8 @@
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-// @ts-nocheck
 import { useState, useEffect } from 'react';
 import { teamsApi } from './api';
 import Card from '../../components/Card';
 import Button from '../../components/Button';
-import type { Team, TeamMember, User } from './types';
+import type { Team, TeamMember, User, UserRole } from './types';
 
 export default function Teams() {
   const [teams, setTeams] = useState<Team[]>([]);
@@ -27,9 +25,9 @@ export default function Teams() {
   const [membersLoading, setMembersLoading] = useState(false);
   const [showAddMemberModal, setShowAddMemberModal] = useState(false);
   const [allUsers, _setAllUsers] = useState<User[]>([]);
-  const [newMemberData, setNewMemberData] = useState({
+  const [newMemberData, setNewMemberData] = useState<{ user_id: number; role: UserRole }>({
     user_id: 0,
-    role: 'viewer' as const,
+    role: 'viewer',
   });
   const [addMemberLoading, setAddMemberLoading] = useState(false);
 

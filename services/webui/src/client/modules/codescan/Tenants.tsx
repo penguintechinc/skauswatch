@@ -1,11 +1,9 @@
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-// @ts-nocheck
 import { useState, useEffect } from 'react';
 import { tenantsApi } from './api';
 import { usersApi } from './api';
 import Card from '../../components/Card';
 import Button from '../../components/Button';
-import type { Tenant, TenantMember, User } from './types';
+import type { Tenant, TenantMember, User, UserRole } from './types';
 
 export default function Tenants() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
@@ -28,19 +26,24 @@ export default function Tenants() {
   const [membersLoading, setMembersLoading] = useState(false);
   const [showAddMemberModal, setShowAddMemberModal] = useState(false);
   const [allUsers, _setAllUsers] = useState<User[]>([]);
-  const [newMemberData, setNewMemberData] = useState({
+  const [newMemberData, setNewMemberData] = useState<{ user_id: number; role: UserRole }>({
     user_id: 0,
-    role: 'viewer' as const,
+    role: 'viewer',
   });
   const [addMemberLoading, setAddMemberLoading] = useState(false);
 
   // Create new user state
   const [showCreateUserModal, setShowCreateUserModal] = useState(false);
-  const [newUserData, setNewUserData] = useState({
+  const [newUserData, setNewUserData] = useState<{
+    email: string;
+    password: string;
+    full_name: string;
+    role: UserRole;
+  }>({
     email: '',
     password: '',
     full_name: '',
-    role: 'viewer' as const,
+    role: 'viewer',
   });
   const [createUserLoading, setCreateUserLoading] = useState(false);
 
