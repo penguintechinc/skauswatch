@@ -1,0 +1,51 @@
+# SkausWatch is a Rust workspace + Node/React webui — see Makefile header.
+# The only Python in this repo is the legacy/parity test suite under tests/
+# (see tests/e2e Makefile note: "legacy pytest, pre-Rust-migration"). This
+# file exists solely to give ruff/bandit a canonical, repo-wide config to
+# lint that Python against — see backend-python.md.
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "D", "UP", "B", "ASYNC", "S"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+# Assert usage (S101) is idiomatic pytest and expected throughout — every
+# Python file in this repo lives under tests/ or examples/. Ruff's own docs
+# document per-file-ignores as the standard way to relax S101 for test dirs
+# (mirrors the bandit skip below, which the standalone `bandit` hook uses).
+#
+# D100-D107 (missing docstring on module/class/method/function/__init__) are
+# also relaxed for tests/: pytest test names (test_update_retention_valid,
+# etc.) are self-documenting, and this suite is legacy/pre-Rust-migration
+# (see Makefile test-e2e note) — docstring formatting rules (D2xx/D4xx) still
+# apply to whatever docstrings do exist.
+#
+# S105/S106 (hardcoded password string/argument) are relaxed for tests/ too:
+# every hit is a literal test-only credential (mock JWT secret, local MinIO
+# dev creds) fed to fixtures/mocks, never a real secret — gitleaks (mandatory,
+# unconditional, see devops.md) is the actual safety net for a committed
+# credential, not this heuristic.
+"tests/*" = [
+    "S101",
+    "S105",
+    "S106",
+    "D100",
+    "D101",
+    "D102",
+    "D103",
+    "D104",
+    "D105",
+    "D106",
+    "D107",
+]
+
+[tool.bandit]
+# Assert usage (B101) is idiomatic in pytest test files, which is the only
+# Python surface in this repo — not a real security finding.
+skips = ["B101"]

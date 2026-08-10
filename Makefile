@@ -6,7 +6,7 @@
 	test-functional test-parity smoke-test coverage test-coverage db-test-up db-test-down \
 	seed-mock-data docker-build docker-push dev deploy-alpha deploy-beta clean version-update \
 	version-update-minor version-update-major version-show license-validate \
-	license-check-features pre-commit info env
+	license-check-features pre-commit info env setup install-hooks verify-hooks
 
 .DEFAULT_GOAL := help
 
@@ -259,3 +259,13 @@ info: ## Info - Show project information and deployment hosts
 env: ## Info - Show relevant environment variables
 	@echo "$(BLUE)Environment Variables:$(RESET)"
 	@env | grep -E "^(LICENSE_|SKAUSWATCH_|AWS_|DATABASE_|DB_)" | sort
+
+# === Setup Commands ===
+setup: install-hooks ## Setup - Prepare local dev environment (installs git hooks)
+	@echo "$(GREEN)Setup complete.$(RESET)"
+
+install-hooks: ## Setup - Install pre-commit framework + register pre-commit and pre-push hooks
+	@./scripts/install-pre-commit.sh
+
+verify-hooks: ## Setup - Report whether pre-commit/pre-push hooks are installed and non-empty
+	@./scripts/install-pre-commit.sh --verify
