@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Golden parity runner: replays the corpus against v1 (Quart) and v2 (Rust)
-managers side by side and diffs status + JSON body structurally.
+"""Golden parity runner.
+
+Replays the corpus against v1 (Quart) and v2 (Rust) managers side by side
+and diffs status + JSON body structurally.
 
 Normalization rule (see README.md): values are byte-compared, except when a
 leaf differs on both sides AND both sides match the SAME nondeterminism
@@ -86,7 +88,10 @@ def diff_json(a, b, path=""):
     elif isinstance(a, list) and isinstance(b, list):
         if len(a) != len(b):
             diffs.append({"path": f"{path}#len", "v1": len(a), "v2": len(b)})
-        for i, (ia, ib) in enumerate(zip(a, b)):
+        # strict=False: the length mismatch is already recorded above (#len);
+        # this loop only diffs the common prefix, so a shorter list must not
+        # raise here.
+        for i, (ia, ib) in enumerate(zip(a, b, strict=False)):
             diffs.extend(diff_json(ia, ib, f"{path}[{i}]"))
     elif isinstance(a, (dict, list)) or isinstance(b, (dict, list)):
         diffs.append({"path": path, "v1": a, "v2": b})
@@ -215,7 +220,9 @@ def recover_v1():
     pooled sqlx connections recover per query.)
     """
     cmd = os.environ.get("PARITY_V1_RESTART_CMD", "docker restart parity-v1")
-    subprocess.run(cmd.split(), check=True, capture_output=True)
+    # Local test-harness config (env var, default literal), argv list (no
+    # shell=True) — not attacker-controlled input.
+    subprocess.run(cmd.split(), check=True, capture_output=True)  # noqa: S603
     deadline = time.time() + 120
     while time.time() < deadline:
         try:

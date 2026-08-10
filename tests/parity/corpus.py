@@ -979,7 +979,7 @@ CASES = [
             "severity": "low",
             "process_name": "ls",
             "command_line": "ls -la",
-            "details": {"cwd": "/tmp"},
+            "details": {"cwd": "/tmp"},  # noqa: S108 - fixture data, not a real temp-file path
         },
     },
     {

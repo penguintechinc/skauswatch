@@ -47,13 +47,16 @@ class StubHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     do_GET = _respond  # noqa: N815 - http.server API
-    do_POST = _respond
-    do_PUT = _respond
-    do_DELETE = _respond
+    do_POST = _respond  # noqa: N815 - http.server API
+    do_PUT = _respond  # noqa: N815 - http.server API
+    do_DELETE = _respond  # noqa: N815 - http.server API
 
     def log_message(self, *args) -> None:
         """Silence per-request logging (keeps container output clean)."""
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", 9999), StubHandler).serve_forever()
+    # Binds all interfaces intentionally: this stub runs inside a throwaway
+    # test container and must be reachable from the v1/v2 manager containers
+    # under parity test — see module docstring.
+    ThreadingHTTPServer(("0.0.0.0", 9999), StubHandler).serve_forever()  # noqa: S104

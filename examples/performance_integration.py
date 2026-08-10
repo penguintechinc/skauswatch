@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SkausWatch Performance Integration Examples
+"""SkausWatch Performance Integration Examples.
 
 This file demonstrates how to integrate and use the comprehensive async/threading
 performance optimizations across all SkausWatch services.
@@ -40,11 +40,14 @@ logger = logging.getLogger(__name__)
 
 
 class SkausWatchIntegrationExample:
-    """Comprehensive integration example showing how all performance optimizations
-    work together across SkausWatch services.
+    """Comprehensive integration example.
+
+    Shows how all performance optimizations work together across
+    SkausWatch services.
     """
 
     def __init__(self):
+        """Initialize shared performance managers and service processor slots."""
         # Initialize shared performance managers
         self.thread_manager = ThreadPoolManager()
         self.connection_manager = ConnectionPoolManager()
@@ -377,7 +380,10 @@ class SkausWatchIntegrationExample:
         duration = (end_time - start_time).total_seconds()
 
         logger.info(
-            f"Load test completed: {successful_tasks} successful, {failed_tasks} failed, {duration:.2f}s duration"
+            "Load test completed: %d successful, %d failed, %.2fs duration",
+            successful_tasks,
+            failed_tasks,
+            duration,
         )
 
         return {
@@ -392,7 +398,8 @@ class SkausWatchIntegrationExample:
         """Generate high-volume database operations."""
         for i in range(100):
             await self.db_manager.execute_query(
-                f"SELECT * FROM users WHERE username LIKE '{prefix}_%' LIMIT 10"
+                "SELECT * FROM users WHERE username LIKE %s LIMIT 10",
+                (f"{prefix}_%",),
             )
             if i % 20 == 0:
                 await asyncio.sleep(0.01)  # Brief pause to prevent overwhelming

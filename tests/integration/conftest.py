@@ -26,8 +26,10 @@ def pytest_configure(config):
 def _is_k8s_cluster_accessible() -> bool:
     """Check if kubectl can access local-alpha K8s cluster."""
     try:
-        result = subprocess.run(
-            ["kubectl", "--context", "local-alpha", "get", "pods", "-n", "skauswatch"],
+        # kubectl resolved via PATH intentionally (dev/CI tooling, not user
+        # input); argv list (no shell=True) — nothing here is attacker input.
+        result = subprocess.run(  # noqa: S603
+            ["kubectl", "--context", "local-alpha", "get", "pods", "-n", "skauswatch"],  # noqa: S607
             capture_output=True,
             timeout=5,
         )
@@ -55,8 +57,10 @@ def _setup_port_forward(
     """
     local_port = _find_free_port()
     try:
-        process = subprocess.Popen(
-            [
+        # kubectl resolved via PATH intentionally (dev/CI tooling, not user
+        # input); argv list (no shell=True) — nothing here is attacker input.
+        process = subprocess.Popen(  # noqa: S603
+            [  # noqa: S607
                 "kubectl",
                 "--context",
                 "local-alpha",
@@ -88,7 +92,10 @@ def _is_service_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
 
 
 async def _is_http_service_ready(
-    host: str, port: int, endpoint: str = "/health", timeout: float = 2.0
+    host: str,
+    port: int,
+    endpoint: str = "/health",
+    timeout: float = 2.0,  # noqa: ASYNC109 - forwarded to httpx.AsyncClient's own timeout, not custom cancellation
 ) -> bool:
     """Check if an HTTP service is ready by testing health endpoint."""
     url = f"http://{host}:{port}{endpoint}"
