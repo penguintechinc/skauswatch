@@ -45,7 +45,7 @@ We are committed to making participation in this project a harassment-free exper
    # Create virtual environment
    python -m venv venv
    source venv/bin/activate  # On Windows: venv\Scripts\activate
-   
+
    # Install development dependencies
    pip install -e ".[dev]"
    ```
@@ -64,10 +64,10 @@ We are committed to making participation in this project a harassment-free exper
    ```bash
    # Run tests to ensure everything works
    pytest
-   
+
    # Check code quality
    ruff check .
-   black --check .
+   ruff format --check .
    mypy .
    ```
 
@@ -146,20 +146,20 @@ Use Google-style docstrings:
 ```python
 def example_function(param1: str, param2: int = 0) -> bool:
     """Brief description of function.
-    
+
     Longer description if needed, explaining the purpose and behavior
     of the function.
-    
+
     Args:
         param1: Description of param1.
         param2: Description of param2. Defaults to 0.
-        
+
     Returns:
         Description of return value.
-        
+
     Raises:
         ValueError: Description of when this exception is raised.
-        
+
     Example:
         >>> example_function("test", 42)
         True
@@ -205,10 +205,10 @@ class TestManagerService:
         """Test that ManagerService creates a valid instance."""
         # Arrange
         config = {"database_url": "sqlite:///:memory:"}
-        
+
         # Act
         service = ManagerService(config)
-        
+
         # Assert
         assert service is not None
         assert service.config == config
