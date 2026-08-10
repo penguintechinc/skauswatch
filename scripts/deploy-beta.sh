@@ -204,7 +204,9 @@ do_deploy_helm() {
     log_header "Deploying Applications (Helm)"
 
     for service_spec in "${SERVICES[@]}"; do
-        IFS=':' read -r service_name service_path <<< "$service_spec"
+        # Second field (service path) isn't needed here — chart_path below is
+        # derived from CHART_PATH + service_name instead.
+        IFS=':' read -r service_name _ <<< "$service_spec"
 
         # Skip if specific service requested and this isn't it
         if [ -n "$SPECIFIC_SERVICE" ] && [ "$SPECIFIC_SERVICE" != "$service_name" ]; then
@@ -304,7 +306,8 @@ verify_deployment() {
 
         local all_ready=true
         for deployment in $deployments; do
-            local ready=$(kubectl --context "${KUBE_CONTEXT}" get deployment "$deployment" -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
+            local ready
+            ready=$(kubectl --context "${KUBE_CONTEXT}" get deployment "$deployment" -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
             if [ "$ready" != "True" ]; then
                 all_ready=false
                 log_info "  Waiting for deployment: $deployment"
@@ -332,7 +335,9 @@ do_rollback() {
     log_header "Rolling Back Deployment"
 
     for service_spec in "${SERVICES[@]}"; do
-        IFS=':' read -r service_name service_path <<< "$service_spec"
+        # Second field (service path) isn't needed for a rollback — only the
+        # release name is derived from service_name.
+        IFS=':' read -r service_name _ <<< "$service_spec"
 
         local release_name="${RELEASE_NAME}-${service_name}"
 

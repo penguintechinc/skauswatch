@@ -92,7 +92,7 @@ cleanup() {
   if [ ${#CLEANUP_SCAN_IDS[@]} -gt 0 ]; then
     echo ""
     echo "Cleaning up scan records..."
-    for id in "${CLEANUP_SCAN_IDS[@]}"; do
+    for _ in "${CLEANUP_SCAN_IDS[@]}"; do
       # Note: Scan records may not have delete endpoint, so this is best-effort
       : # Placeholder for potential cleanup
     done
@@ -181,7 +181,7 @@ echo "3. Uploading clean test file..."
 # Create a temporary clean file
 CLEAN_FILE=$(mktemp)
 echo "This is a clean text file for testing." > "$CLEAN_FILE"
-trap "rm -f $CLEAN_FILE" EXIT
+trap 'rm -f "$CLEAN_FILE"' EXIT
 
 clean_response=$(curl -s -w "\n%{http_code}" \
   -X POST \

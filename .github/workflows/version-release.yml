@@ -26,21 +26,21 @@ jobs:
         run: |
           if [ ! -f .version ]; then
             echo "0.0.0" > .version
-            echo "version=0.0.0" >> $GITHUB_OUTPUT
-            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "version=0.0.0" >> "$GITHUB_OUTPUT"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
           else
-            VERSION=$(cat .version | tr -d '[:space:]')
+            VERSION=$(tr -d '[:space:]' < .version)
             # Extract semantic version (strip build timestamp if present)
             SEMVER=$(echo "$VERSION" | cut -d'.' -f1-3)
-            echo "version=$SEMVER" >> $GITHUB_OUTPUT
-            echo "full_version=$VERSION" >> $GITHUB_OUTPUT
+            echo "version=$SEMVER" >> "$GITHUB_OUTPUT"
+            echo "full_version=$VERSION" >> "$GITHUB_OUTPUT"
 
             # Check if version is default
             if [ "$SEMVER" = "0.0.0" ]; then
-              echo "should_release=false" >> $GITHUB_OUTPUT
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
               echo "Version is default (0.0.0), skipping release"
             else
-              echo "should_release=true" >> $GITHUB_OUTPUT
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
               echo "Version is $SEMVER, proceeding with release"
             fi
           fi
@@ -53,10 +53,10 @@ jobs:
         run: |
           VERSION="${{ steps.check_version.outputs.version }}"
           if gh release view "v$VERSION" > /dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Release v$VERSION already exists"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "Release v$VERSION does not exist, will create"
           fi
 

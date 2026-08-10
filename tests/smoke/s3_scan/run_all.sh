@@ -47,6 +47,7 @@ fi
 
 # Export all variables from config
 set -a
+# shellcheck disable=SC1090 # path picked at runtime by $ENVIRONMENT (alpha|beta)
 source "$CONFIG_FILE"
 set +a
 
@@ -183,7 +184,7 @@ run_test() {
 
   # Run test and capture output
   test_output=$(mktemp)
-  trap "rm -f $test_output" EXIT
+  trap 'rm -f "$test_output"' EXIT
 
   if bash "$test_script" > "$test_output" 2>&1; then
     echo -e "${GREEN}PASS${NC}"

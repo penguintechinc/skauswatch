@@ -76,6 +76,9 @@ run_check() {
 
 # Main execution
 main() {
+    # Accepted per the Usage comment above but not yet used to scope checks
+    # to a single service — reserved for future use.
+    # shellcheck disable=SC2034
     local target_service="$1"
     local all_passed=true
 
