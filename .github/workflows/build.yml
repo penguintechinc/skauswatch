@@ -63,25 +63,35 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           if [ "${EVENT_NAME}" = "pull_request" ]; then
-            echo "tag=pr-${SHA:0:12}" >> "$GITHUB_OUTPUT"
-            echo "push=false" >> "$GITHUB_OUTPUT"
-            echo "rolling=" >> "$GITHUB_OUTPUT"
+            {
+              echo "tag=pr-${SHA:0:12}"
+              echo "push=false"
+              echo "rolling="
+            } >> "$GITHUB_OUTPUT"
           elif [[ "${REF}" == refs/tags/v* ]]; then
-            echo "tag=${REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "push=true" >> "$GITHUB_OUTPUT"
-            echo "rolling=" >> "$GITHUB_OUTPUT"
+            {
+              echo "tag=${REF_NAME}"
+              echo "push=true"
+              echo "rolling="
+            } >> "$GITHUB_OUTPUT"
           elif [ "${REF}" = "refs/heads/main" ]; then
-            echo "tag=gamma-$(date +%s)000" >> "$GITHUB_OUTPUT"
-            echo "push=true" >> "$GITHUB_OUTPUT"
-            echo "rolling=gamma-latest" >> "$GITHUB_OUTPUT"
+            {
+              echo "tag=gamma-$(date +%s)000"
+              echo "push=true"
+              echo "rolling=gamma-latest"
+            } >> "$GITHUB_OUTPUT"
           elif [[ "${REF}" == refs/heads/release/* ]]; then
-            echo "tag=beta-$(date +%s)000" >> "$GITHUB_OUTPUT"
-            echo "push=true" >> "$GITHUB_OUTPUT"
-            echo "rolling=beta-latest" >> "$GITHUB_OUTPUT"
+            {
+              echo "tag=beta-$(date +%s)000"
+              echo "push=true"
+              echo "rolling=beta-latest"
+            } >> "$GITHUB_OUTPUT"
           else
-            echo "tag=alpha-$(date +%s)000" >> "$GITHUB_OUTPUT"
-            echo "push=false" >> "$GITHUB_OUTPUT"
-            echo "rolling=" >> "$GITHUB_OUTPUT"
+            {
+              echo "tag=alpha-$(date +%s)000"
+              echo "push=false"
+              echo "rolling="
+            } >> "$GITHUB_OUTPUT"
           fi
 
   build-platform:

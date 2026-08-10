@@ -9,7 +9,6 @@ source "$(dirname "$0")/run_all.sh" --source-only
 # Color codes for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Counters
@@ -20,6 +19,9 @@ FAILED=0
 test_endpoint() {
   local method=$1
   local endpoint=$2
+  # Accepted for call-site readability (e.g. "List buckets") but not
+  # currently rendered in output.
+  # shellcheck disable=SC2034
   local description=$3
 
   echo -n "Testing $method $endpoint ... "

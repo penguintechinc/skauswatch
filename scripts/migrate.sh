@@ -251,7 +251,7 @@ start_port_forward
 
 FAILED=()
 for svc_spec in "${MIGRATION_SERVICES[@]}"; do
-  IFS=':' read -r svc_name svc_dir alembic_ini <<< "$svc_spec"
+  IFS=':' read -r svc_name _ alembic_ini <<< "$svc_spec"
 
   # Skip if --service filter is active and doesn't match
   if [[ -n "$SPECIFIC_SERVICE" && "$SPECIFIC_SERVICE" != "$svc_name" ]]; then

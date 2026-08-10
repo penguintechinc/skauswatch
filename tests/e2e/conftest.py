@@ -1,7 +1,6 @@
 """E2E test fixtures and configuration for SkausWatch."""
 
 import os
-from typing import Optional
 from urllib.parse import urljoin
 
 import pytest
@@ -65,13 +64,13 @@ def minio_credentials() -> dict:
 
 
 @pytest.fixture(scope="session")
-def jwt_token() -> Optional[str]:
+def jwt_token() -> str | None:
     """JWT authentication token for API requests."""
     token = os.getenv("JWT_TOKEN")
     return token
 
 
-def get_auth_headers(token: Optional[str]) -> dict:
+def get_auth_headers(token: str | None) -> dict:
     """Build authorization headers."""
     if not token:
         return {}
@@ -79,7 +78,7 @@ def get_auth_headers(token: Optional[str]) -> dict:
 
 
 @pytest.fixture
-def auth_headers(jwt_token: Optional[str]) -> dict:
+def auth_headers(jwt_token: str | None) -> dict:
     """Authorization headers for API requests."""
     return get_auth_headers(jwt_token)
 

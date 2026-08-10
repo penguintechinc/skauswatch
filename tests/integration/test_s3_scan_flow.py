@@ -4,7 +4,6 @@ Tests the complete flow: file upload -> scan -> result retrieval.
 Requires MinIO and Worker S3 service to be running.
 """
 
-import io
 import uuid
 
 import pytest
@@ -131,7 +130,9 @@ class TestS3ScanFlow:
         s3_client.delete_bucket(Bucket=bucket)
 
     @pytest.mark.asyncio
-    async def test_scan_status_polling(self, async_http_client, manager_service_ready, minio_reachable):
+    async def test_scan_status_polling(
+        self, async_http_client, manager_service_ready, minio_reachable
+    ):
         """Test polling scan status until completion."""
         if not manager_service_ready:
             pytest.skip("Manager service not available")

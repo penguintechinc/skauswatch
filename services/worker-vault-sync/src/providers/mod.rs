@@ -273,9 +273,17 @@ mod tests {
         // `SecretManagerService::from_stub` for the full request/response
         // round trip (this SDK's first-class mock support — see that
         // module's doc comment for why not wiremock).
-        let sa_key: Value =
-            serde_json::from_str(include_str!("../../tests/fixtures/gcp_test_sa_key.json"))
-                .expect("valid fixture json");
+        // Fixture is base64-encoded at rest (not a `.json` file) so this
+        // fake-but-PEM-shaped test key's PEM header/footer markers never
+        // appear as literal substrings in the repo — avoids tripping
+        // detect-private-key / gitleaks on a string that, however fake, is
+        // byte-for-byte indistinguishable from a real PEM-encoded key.
+        use base64::Engine as _;
+        let fixture_b64 = include_str!("../../tests/fixtures/gcp_test_sa_key.json.b64");
+        let fixture_json = base64::engine::general_purpose::STANDARD
+            .decode(fixture_b64.trim())
+            .expect("valid base64 fixture");
+        let sa_key: Value = serde_json::from_slice(&fixture_json).expect("valid fixture json");
         let credentials = serde_json::json!({
             "project_id": "test-project",
             "service_account_json": sa_key,

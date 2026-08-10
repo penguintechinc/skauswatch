@@ -10,7 +10,7 @@ import atexit
 import socket
 import subprocess
 import time
-from typing import Dict, Generator, Optional, Tuple
+from collections.abc import Generator
 
 import httpx
 import pytest
@@ -26,8 +26,10 @@ def pytest_configure(config):
 def _is_k8s_cluster_accessible() -> bool:
     """Check if kubectl can access local-alpha K8s cluster."""
     try:
-        result = subprocess.run(
-            ["kubectl", "--context", "local-alpha", "get", "pods", "-n", "skauswatch"],
+        # kubectl resolved via PATH intentionally (dev/CI tooling, not user
+        # input); argv list (no shell=True) — nothing here is attacker input.
+        result = subprocess.run(  # noqa: S603
+            ["kubectl", "--context", "local-alpha", "get", "pods", "-n", "skauswatch"],  # noqa: S607
             capture_output=True,
             timeout=5,
         )
@@ -47,7 +49,7 @@ def _find_free_port() -> int:
 
 def _setup_port_forward(
     service_name: str, service_port: int, namespace: str = "skauswatch"
-) -> Tuple[int, Optional[subprocess.Popen]]:
+) -> tuple[int, subprocess.Popen | None]:
     """Set up kubectl port-forward and return (local_port, process).
 
     Returns (local_port, process) or (None, None) if setup fails.
@@ -55,8 +57,10 @@ def _setup_port_forward(
     """
     local_port = _find_free_port()
     try:
-        process = subprocess.Popen(
-            [
+        # kubectl resolved via PATH intentionally (dev/CI tooling, not user
+        # input); argv list (no shell=True) — nothing here is attacker input.
+        process = subprocess.Popen(  # noqa: S603
+            [  # noqa: S607
                 "kubectl",
                 "--context",
                 "local-alpha",
@@ -88,7 +92,10 @@ def _is_service_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
 
 
 async def _is_http_service_ready(
-    host: str, port: int, endpoint: str = "/health", timeout: float = 2.0
+    host: str,
+    port: int,
+    endpoint: str = "/health",
+    timeout: float = 2.0,  # noqa: ASYNC109 - forwarded to httpx.AsyncClient's own timeout, not custom cancellation
 ) -> bool:
     """Check if an HTTP service is ready by testing health endpoint."""
     url = f"http://{host}:{port}{endpoint}"
@@ -101,7 +108,7 @@ async def _is_http_service_ready(
 
 
 # Global tracking of port-forward processes for cleanup
-_port_forward_processes: Dict[str, subprocess.Popen] = {}
+_port_forward_processes: dict[str, subprocess.Popen] = {}
 
 
 def _cleanup_port_forwards():
@@ -132,7 +139,7 @@ def k8s_available() -> bool:
 
 
 @pytest.fixture(scope="session")
-def service_urls(k8s_available) -> Dict[str, str]:
+def service_urls(k8s_available) -> dict[str, str]:
     """Provide service URLs, using K8s port-forward or localhost fallback."""
     urls = {}
 
@@ -264,14 +271,14 @@ async def monitor_service_ready(service_urls) -> bool:
 
 
 @pytest.fixture
-def http_client() -> Generator[httpx.Client, None, None]:
+def http_client() -> Generator[httpx.Client]:
     """Provide synchronous HTTP client."""
     with httpx.Client() as client:
         yield client
 
 
 @pytest.fixture
-async def async_http_client() -> Generator[httpx.AsyncClient, None, None]:
+async def async_http_client() -> Generator[httpx.AsyncClient]:
     """Provide asynchronous HTTP client."""
     async with httpx.AsyncClient() as client:
         yield client

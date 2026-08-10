@@ -1,10 +1,7 @@
-"""
-Unit tests for SkausWatch Manager configuration loading.
+"""Unit tests for SkausWatch Manager configuration loading.
 
 Tests basic config initialization with environment variables and defaults.
 """
-
-import os
 
 import pytest
 

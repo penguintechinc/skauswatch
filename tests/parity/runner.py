@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Golden parity runner: replays the corpus against v1 (Quart) and v2 (Rust)
-managers side by side and diffs status + JSON body structurally.
+"""Golden parity runner.
+
+Replays the corpus against v1 (Quart) and v2 (Rust) managers side by side
+and diffs status + JSON body structurally.
 
 Normalization rule (see README.md): values are byte-compared, except when a
 leaf differs on both sides AND both sides match the SAME nondeterminism
@@ -18,8 +20,8 @@ import json
 import os
 import re
 import subprocess
-import time
 import sys
+import time
 
 import requests
 
@@ -74,17 +76,24 @@ def diff_json(a, b, path=""):
             pb = b.get(key, MISSING)
             sub = f"{path}.{key}" if path else key
             if pa is MISSING or pb is MISSING:
-                diffs.append({"path": sub,
-                              "v1": "<absent>" if pa is MISSING else pa,
-                              "v2": "<absent>" if pb is MISSING else pb})
+                diffs.append(
+                    {
+                        "path": sub,
+                        "v1": "<absent>" if pa is MISSING else pa,
+                        "v2": "<absent>" if pb is MISSING else pb,
+                    }
+                )
             else:
                 diffs.extend(diff_json(pa, pb, sub))
     elif isinstance(a, list) and isinstance(b, list):
         if len(a) != len(b):
             diffs.append({"path": f"{path}#len", "v1": len(a), "v2": len(b)})
-        for i, (ia, ib) in enumerate(zip(a, b)):
+        # strict=False: the length mismatch is already recorded above (#len);
+        # this loop only diffs the common prefix, so a shorter list must not
+        # raise here.
+        for i, (ia, ib) in enumerate(zip(a, b, strict=False)):
             diffs.extend(diff_json(ia, ib, f"{path}[{i}]"))
-    elif isinstance(a, (dict, list)) or isinstance(b, (dict, list)):
+    elif isinstance(a, dict | list) or isinstance(b, dict | list):
         diffs.append({"path": path, "v1": a, "v2": b})
     else:
         if not leaves_equal(a, b):
@@ -119,8 +128,9 @@ class Side:
                 timeout=TIMEOUT,
             )
             if r.status_code != 200:
-                raise RuntimeError(f"{self.name}: setup login {role} failed: "
-                                   f"{r.status_code} {r.text[:300]}")
+                raise RuntimeError(
+                    f"{self.name}: setup login {role} failed: {r.status_code} {r.text[:300]}"
+                )
             body = r.json()
             self.tokens[role] = body["access_token"]
             if role == "viewer":
@@ -210,7 +220,9 @@ def recover_v1():
     pooled sqlx connections recover per query.)
     """
     cmd = os.environ.get("PARITY_V1_RESTART_CMD", "docker restart parity-v1")
-    subprocess.run(cmd.split(), check=True, capture_output=True)
+    # Local test-harness config (env var, default literal), argv list (no
+    # shell=True) — not attacker-controlled input.
+    subprocess.run(cmd.split(), check=True, capture_output=True)  # noqa: S603
     deadline = time.time() + 120
     while time.time() < deadline:
         try:
@@ -259,8 +271,7 @@ def classify(case_id, s1, s2, b1, b2, diffs, allowlist):
         if prefixes is None:
             remaining = []
         else:
-            remaining = [d for d in remaining
-                         if not any(d["path"].startswith(p) for p in prefixes)]
+            remaining = [d for d in remaining if not any(d["path"].startswith(p) for p in prefixes)]
         if len(remaining) != before:
             used.append(entry["id"])
         if not remaining:
@@ -297,8 +308,14 @@ def main():
         diffs = diff_json(b1, b2)
         verdict, extra = classify(case["id"], s1, s2, b1, b2, diffs, allowlist)
         counts[verdict] += 1
-        rec = {"id": case["id"], "method": case["method"], "path": case["path"],
-               "v1_status": s1, "v2_status": s2, "verdict": verdict}
+        rec = {
+            "id": case["id"],
+            "method": case["method"],
+            "path": case["path"],
+            "v1_status": s1,
+            "v2_status": s2,
+            "verdict": verdict,
+        }
         if verdict == "ALLOWLISTED":
             rec["allowlist_entries"] = extra
         elif verdict == "FINDING":
@@ -315,25 +332,35 @@ def main():
     with open(os.path.join(REPORT_DIR, "report.json"), "w") as f:
         json.dump({"counts": counts, "results": results}, f, indent=2, default=str)
 
-    lines = ["# Golden parity diff report", "",
-             f"- cases: {len(results)}",
-             f"- pass: {counts['PASS']}",
-             f"- allowlisted (documented contract decisions): {counts['ALLOWLISTED']}",
-             f"- findings: {counts['FINDING']}", ""]
+    lines = [
+        "# Golden parity diff report",
+        "",
+        f"- cases: {len(results)}",
+        f"- pass: {counts['PASS']}",
+        f"- allowlisted (documented contract decisions): {counts['ALLOWLISTED']}",
+        f"- findings: {counts['FINDING']}",
+        "",
+    ]
     for rec in results:
         if rec["verdict"] != "FINDING":
             continue
-        lines.append(f"## FINDING {rec['id']} — {rec['method']} {rec['path']} "
-                     f"[v1={rec['v1_status']} v2={rec['v2_status']}]")
+        lines.append(
+            f"## FINDING {rec['id']} — {rec['method']} {rec['path']} "
+            f"[v1={rec['v1_status']} v2={rec['v2_status']}]"
+        )
         for d in rec["diffs"][:40]:
-            lines.append(f"- `{d['path']}`: v1=`{json.dumps(d['v1'], default=str)[:300]}` "
-                         f"v2=`{json.dumps(d['v2'], default=str)[:300]}`")
+            lines.append(
+                f"- `{d['path']}`: v1=`{json.dumps(d['v1'], default=str)[:300]}` "
+                f"v2=`{json.dumps(d['v2'], default=str)[:300]}`"
+            )
         lines.append("")
     with open(os.path.join(REPORT_DIR, "report.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
 
-    print(f"\ncases={len(results)} pass={counts['PASS']} "
-          f"allowlisted={counts['ALLOWLISTED']} findings={counts['FINDING']}")
+    print(
+        f"\ncases={len(results)} pass={counts['PASS']} "
+        f"allowlisted={counts['ALLOWLISTED']} findings={counts['FINDING']}"
+    )
     print(f"report: {os.path.join(REPORT_DIR, 'report.md')}")
     return 1 if counts["FINDING"] else 0
 

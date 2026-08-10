@@ -1,5 +1,4 @@
-"""
-Shared pytest fixtures for unit tests.
+"""Shared pytest fixtures for unit tests.
 
 Provides mock configurations, Redis clients, and database sessions.
 """
