@@ -1,0 +1,11 @@
+# hadolint config — see devops-containers.md.
+#
+# PenguinTech standards mandate SHA256-digest pinning for external base
+# images (enforced — hadolint still fails on DL3006/DL3007/etc at error
+# tier), but do NOT mandate pinning individual apt/gem package versions
+# inside a Dockerfile (DL3008/DL3028) — that's hadolint's own opinion, not
+# an org rule. With 12 services on Debian bookworm-slim, blocking every
+# commit on those warnings (and the DL3059/SC-info consolidation hints)
+# would gate on a check that was never a stated requirement. Real errors
+# (syntax errors, missing pins on external images, etc.) still fail.
+failure-threshold: error

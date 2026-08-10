@@ -46,6 +46,21 @@ convention = "google"
 ]
 
 [tool.bandit]
-# Assert usage (B101) is idiomatic in pytest test files, which is the only
-# Python surface in this repo — not a real security finding.
-skips = ["B101"]
+# bandit has no per-file-ignore mechanism (unlike ruff's [tool.ruff.lint.
+# per-file-ignores] above) and doesn't read `# noqa` — these skips are the
+# bandit-side equivalent of the same, already-justified exceptions applied
+# per-line/per-file for ruff's overlapping S-rules elsewhere in this repo:
+#   B101         assert — idiomatic pytest, the only Python surface here
+#   B105/B106    hardcoded password string/funcarg — literal test-only
+#                creds (mock JWT secret, local MinIO dev creds), never a
+#                real secret; gitleaks (mandatory, unconditional) is the
+#                actual safety net for a committed credential
+#   B104         bind-all-interfaces — the parity harness's throwaway stub
+#                server, must be reachable from sibling test containers
+#   B108         hardcoded /tmp — fixture payload data, not a real path
+#   B603/B607    subprocess without shell=True / partial executable path —
+#                argv-list kubectl/docker calls to known dev tooling, no
+#                attacker-controlled input
+#   B404         "subprocess imported" — purely informational noise once
+#                the specific B603/B607 call sites above are accepted
+skips = ["B101", "B105", "B106", "B104", "B108", "B603", "B607", "B404"]

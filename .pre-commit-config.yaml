@@ -25,6 +25,11 @@ repos:
         args: [--maxkb=1024]
       - id: check-yaml
         args: [--allow-multiple-documents]
+        # Helm templates use Go template syntax ({{ ... }}) inside YAML,
+        # which isn't valid plain YAML until rendered — standard exclude,
+        # not a real defect. Chart values files (alpha.yml, etc.) aren't
+        # under templates/ and stay checked.
+        exclude: ^k8s/helm/.*/templates/
       - id: check-json
       - id: check-toml
       - id: check-executables-have-shebangs
