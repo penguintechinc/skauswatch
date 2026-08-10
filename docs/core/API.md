@@ -186,8 +186,8 @@ POST /certificates
   "key_type": "rsa-4096"
 }
 Response: {
-  "certificate_pem": "-----BEGIN CERTIFICATE-----\n...",
-  "private_key_pem": "-----BEGIN PRIVATE KEY-----\n...",
+  "certificate_pem": "<PEM-encoded certificate>",
+  "private_key_pem": "<PEM-encoded private key>",
   "serial_number": "0x123...",
   "not_before": "2026-03-10T00:00:00Z",
   "not_after": "2027-03-10T00:00:00Z"
