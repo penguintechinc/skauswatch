@@ -283,8 +283,7 @@ mod tests {
         let fixture_json = base64::engine::general_purpose::STANDARD
             .decode(fixture_b64.trim())
             .expect("valid base64 fixture");
-        let sa_key: Value =
-            serde_json::from_slice(&fixture_json).expect("valid fixture json");
+        let sa_key: Value = serde_json::from_slice(&fixture_json).expect("valid fixture json");
         let credentials = serde_json::json!({
             "project_id": "test-project",
             "service_account_json": sa_key,
