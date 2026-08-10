@@ -1,7 +1,8 @@
 """Tests for the SIEM API blueprint (/api/v1/siem/*)."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 pytestmark = pytest.mark.api
 
@@ -18,7 +19,11 @@ class TestSIEMHealth:
         assert data["status"] == "ok"
 
     async def test_health_receiver_down(self, siem_client):
-        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=Exception("Connection refused")):
+        with patch(
+            "httpx.AsyncClient.get",
+            new_callable=AsyncMock,
+            side_effect=Exception("Connection refused"),
+        ):
             resp = await siem_client.get("/api/v1/siem/health")
         assert resp.status_code == 200
         data = resp.get_json()

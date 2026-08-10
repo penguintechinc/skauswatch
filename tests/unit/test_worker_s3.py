@@ -1,5 +1,4 @@
-"""
-Unit tests for SkausWatch S3 scan worker.
+"""Unit tests for SkausWatch S3 scan worker.
 
 Tests basic worker initialization and task workflow scaffolding.
 """

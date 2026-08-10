@@ -1,7 +1,7 @@
 """Shared fixtures for API-level tests against the manager service."""
 
-import sys
 import os
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,10 +25,10 @@ def manager_app():
     mock_db.users = MagicMock()
     mock_db.users.count = MagicMock(return_value=0)
 
-    with patch("models.db.init_database_schema"), \
-         patch("models.db.get_db", return_value=mock_db):
+    with patch("models.db.init_database_schema"), patch("models.db.get_db", return_value=mock_db):
         from main import create_app
-        from config import ManagerConfig, SIEMConfig, AuthConfig
+
+        from config import AuthConfig, ManagerConfig, SIEMConfig
 
         test_cfg = ManagerConfig(
             environment="test",
@@ -57,8 +57,9 @@ def manager_test_client(manager_app):
 @pytest.fixture
 def admin_token(manager_app):
     """Generate a valid admin JWT for use in test requests."""
-    import jwt as pyjwt
     from datetime import datetime, timedelta
+
+    import jwt as pyjwt
 
     cfg = manager_app.config["MANAGER_CONFIG"]
     payload = {

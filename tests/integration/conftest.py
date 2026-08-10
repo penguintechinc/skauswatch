@@ -10,7 +10,7 @@ import atexit
 import socket
 import subprocess
 import time
-from typing import Dict, Generator, Optional, Tuple
+from collections.abc import Generator
 
 import httpx
 import pytest
@@ -47,7 +47,7 @@ def _find_free_port() -> int:
 
 def _setup_port_forward(
     service_name: str, service_port: int, namespace: str = "skauswatch"
-) -> Tuple[int, Optional[subprocess.Popen]]:
+) -> tuple[int, subprocess.Popen | None]:
     """Set up kubectl port-forward and return (local_port, process).
 
     Returns (local_port, process) or (None, None) if setup fails.
@@ -101,7 +101,7 @@ async def _is_http_service_ready(
 
 
 # Global tracking of port-forward processes for cleanup
-_port_forward_processes: Dict[str, subprocess.Popen] = {}
+_port_forward_processes: dict[str, subprocess.Popen] = {}
 
 
 def _cleanup_port_forwards():
@@ -132,7 +132,7 @@ def k8s_available() -> bool:
 
 
 @pytest.fixture(scope="session")
-def service_urls(k8s_available) -> Dict[str, str]:
+def service_urls(k8s_available) -> dict[str, str]:
     """Provide service URLs, using K8s port-forward or localhost fallback."""
     urls = {}
 
@@ -264,14 +264,14 @@ async def monitor_service_ready(service_urls) -> bool:
 
 
 @pytest.fixture
-def http_client() -> Generator[httpx.Client, None, None]:
+def http_client() -> Generator[httpx.Client]:
     """Provide synchronous HTTP client."""
     with httpx.Client() as client:
         yield client
 
 
 @pytest.fixture
-async def async_http_client() -> Generator[httpx.AsyncClient, None, None]:
+async def async_http_client() -> Generator[httpx.AsyncClient]:
     """Provide asynchronous HTTP client."""
     async with httpx.AsyncClient() as client:
         yield client
