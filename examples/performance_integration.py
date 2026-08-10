@@ -16,12 +16,6 @@ import logging
 from datetime import datetime
 from typing import Any
 
-# Import service-specific optimizations
-from services.manager.async_database import AsyncDatabaseManager
-from services.monitor.async_log_collector import AsyncLogCollector
-from services.pki.async_certificate_processor import AsyncCertificateProcessor
-from services.sshca.async_ssh_processor import AsyncSSHProcessor
-
 # Import shared performance utilities
 from shared.performance import (
     CacheManager,
@@ -31,6 +25,12 @@ from shared.performance import (
     RateLimiter,
     ThreadPoolManager,
 )
+
+# Import service-specific optimizations
+from services.manager.async_database import AsyncDatabaseManager
+from services.monitor.async_log_collector import AsyncLogCollector
+from services.pki.async_certificate_processor import AsyncCertificateProcessor
+from services.sshca.async_ssh_processor import AsyncSSHProcessor
 
 # Configure logging
 logging.basicConfig(

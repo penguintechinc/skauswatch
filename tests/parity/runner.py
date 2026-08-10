@@ -93,7 +93,7 @@ def diff_json(a, b, path=""):
         # raise here.
         for i, (ia, ib) in enumerate(zip(a, b, strict=False)):
             diffs.extend(diff_json(ia, ib, f"{path}[{i}]"))
-    elif isinstance(a, (dict, list)) or isinstance(b, (dict, list)):
+    elif isinstance(a, dict | list) or isinstance(b, dict | list):
         diffs.append({"path": path, "v1": a, "v2": b})
     else:
         if not leaves_equal(a, b):

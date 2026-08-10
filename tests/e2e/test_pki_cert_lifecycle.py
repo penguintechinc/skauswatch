@@ -47,9 +47,10 @@ class TestPKICertificateLifecycle:
         )
         if response.status_code in (404, 502, 503):
             pytest.skip(f"PKI certificate endpoint not available: {response.status_code}")
-        assert response.status_code in (200, 201), (
-            f"Expected 200/201, got {response.status_code}: {response.text}"
-        )
+        assert response.status_code in (
+            200,
+            201,
+        ), f"Expected 200/201, got {response.status_code}: {response.text}"
         data = response.json()
         assert "id" in data or "cert_id" in data or "certificate_pem" in data
         return data.get("id") or data.get("cert_id")
@@ -77,9 +78,10 @@ class TestPKICertificateLifecycle:
         )
         if response.status_code in (404, 502, 503):
             pytest.skip(f"PKI certificate endpoint not available: {response.status_code}")
-        assert response.status_code in (200, 201), (
-            f"Expected 200/201, got {response.status_code}: {response.text}"
-        )
+        assert response.status_code in (
+            200,
+            201,
+        ), f"Expected 200/201, got {response.status_code}: {response.text}"
         data = response.json()
         assert any(k in data for k in ("id", "cert_id", "certificate_pem", "serial_number"))
         assert "certificate_pem" in data or "id" in data or "cert_id" in data
@@ -123,9 +125,9 @@ class TestPKICertificateLifecycle:
         )
         if get_response.status_code in (404, 502, 503):
             pytest.skip(f"Certificate retrieval endpoint not available: {get_response.status_code}")
-        assert get_response.status_code == 200, (
-            f"Expected 200, got {get_response.status_code}: {get_response.text}"
-        )
+        assert (
+            get_response.status_code == 200
+        ), f"Expected 200, got {get_response.status_code}: {get_response.text}"
 
         retrieved = get_response.json()
         assert "certificate_pem" in retrieved or "id" in retrieved
@@ -171,9 +173,10 @@ class TestPKICertificateLifecycle:
             pytest.skip(
                 f"Certificate revocation endpoint not available: {revoke_response.status_code}"
             )
-        assert revoke_response.status_code in (200, 204), (
-            f"Expected 200/204, got {revoke_response.status_code}: {revoke_response.text}"
-        )
+        assert revoke_response.status_code in (
+            200,
+            204,
+        ), f"Expected 200/204, got {revoke_response.status_code}: {revoke_response.text}"
 
     def test_verify_revocation_in_crl(self, pki_url: str, serial_number: str | None = None):
         """Verify revoked certificate appears in CRL (Certificate Revocation List).
@@ -186,9 +189,9 @@ class TestPKICertificateLifecycle:
         )
         if response.status_code in (404, 502, 503):
             pytest.skip(f"CA info endpoint not available: {response.status_code}")
-        assert response.status_code == 200, (
-            f"Expected 200, got {response.status_code}: {response.text}"
-        )
+        assert (
+            response.status_code == 200
+        ), f"Expected 200, got {response.status_code}: {response.text}"
         data = response.json()
         assert "ca_cert" in data or "issuer" in data or "dn" in data
 
@@ -204,6 +207,6 @@ class TestPKICertificateLifecycle:
             f"{pki_url}/healthz",
             timeout=5,
         )
-        assert response.status_code == 200, (
-            f"PKI server health check failed: {response.status_code}"
-        )
+        assert (
+            response.status_code == 200
+        ), f"PKI server health check failed: {response.status_code}"
