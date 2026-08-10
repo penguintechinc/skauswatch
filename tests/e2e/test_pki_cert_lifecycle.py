@@ -7,7 +7,6 @@ Tests the complete PKI workflow:
 4. Revoke the certificate
 """
 
-
 import pytest
 import requests
 
@@ -132,9 +131,7 @@ class TestPKICertificateLifecycle:
         assert "certificate_pem" in retrieved or "id" in retrieved
         assert "serial_number" in retrieved or "id" in retrieved
 
-    def test_revoke_certificate(
-        self, pki_url: str, auth_headers: dict, cert_id: str | None = None
-    ):
+    def test_revoke_certificate(self, pki_url: str, auth_headers: dict, cert_id: str | None = None):
         """Revoke an issued certificate.
 
         Verifies the certificate is added to the revocation list.

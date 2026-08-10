@@ -3,7 +3,6 @@
 Tests basic config initialization with environment variables and defaults.
 """
 
-
 import pytest
 
 
