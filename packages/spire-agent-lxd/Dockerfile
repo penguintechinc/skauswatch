@@ -44,23 +44,21 @@ COPY files/agent.conf.template /tmp/package/etc/spire-agent/agent.conf.template
 RUN mkdir -p /tmp/scripts
 
 # Pre-install script
-RUN cat > /tmp/scripts/before-install.sh <<'EOF'
+RUN cat > /tmp/scripts/before-install.sh <<'EOF' && chmod 755 /tmp/scripts/before-install.sh
 #!/bin/sh
 if ! id -u spire > /dev/null 2>&1; then
   useradd -r -s /bin/false -d /var/lib/spire-agent spire || true
 fi
 EOF
-chmod 755 /tmp/scripts/before-install.sh
 
 # Post-install script
-RUN cat > /tmp/scripts/after-install.sh <<'EOF'
+RUN cat > /tmp/scripts/after-install.sh <<'EOF' && chmod 755 /tmp/scripts/after-install.sh
 #!/bin/sh
 systemctl daemon-reload || true
 if systemctl is-enabled spire-agent > /dev/null 2>&1; then
   systemctl restart spire-agent || true
 fi
 EOF
-chmod 755 /tmp/scripts/after-install.sh
 
 # Build .deb package
 RUN fpm \
