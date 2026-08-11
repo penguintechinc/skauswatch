@@ -42,7 +42,9 @@ spec:
       serviceAccountName: {{ include "skauswatch-spire.csiDriverServiceAccountName" . }}
       containers:
       - name: spiffe-csi-driver
-        image: "{{ .Values.spire.csiDriver.image.repository }}:{{ .Values.spire.csiDriver.image.tag }}"
+        # repository already carries @sha256:<digest> (see values.yaml) — do
+        # not append :tag, that produces an invalid "name@sha256:x:tag" ref.
+        image: "{{ .Values.spire.csiDriver.image.repository }}"
         imagePullPolicy: {{ .Values.spire.csiDriver.image.pullPolicy }}
         args:
           - "-workload-api-socket-dir={{ .Values.spire.agent.socketDir }}"

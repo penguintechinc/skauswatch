@@ -39,7 +39,9 @@ spec:
       - name: spire-server
         securityContext:
           {{- toYaml .Values.spire.server.securityContext | nindent 12 }}
-        image: "{{ .Values.spire.server.image.repository }}:{{ .Values.spire.server.image.tag | default .Chart.AppVersion }}"
+        # repository already carries @sha256:<digest> (see values.yaml) — do
+        # not append :tag, that produces an invalid "name@sha256:x:tag" ref.
+        image: "{{ .Values.spire.server.image.repository }}"
         imagePullPolicy: {{ .Values.spire.server.image.pullPolicy }}
         ports:
         - name: grpc
@@ -110,7 +112,9 @@ spec:
         {{- end }}
       {{- if $nested }}
       - name: downstream-agent
-        image: "{{ .Values.spire.agent.image.repository }}:{{ .Values.spire.agent.image.tag }}"
+        # repository already carries @sha256:<digest> (see values.yaml) — do
+        # not append :tag, that produces an invalid "name@sha256:x:tag" ref.
+        image: "{{ .Values.spire.agent.image.repository }}"
         imagePullPolicy: {{ .Values.spire.agent.image.pullPolicy }}
         securityContext:
           {{- toYaml .Values.spire.agent.securityContext | nindent 12 }}
