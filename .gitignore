@@ -224,3 +224,8 @@ services/*/dist/
 # Claude Code crash-recovery state (never commit)
 .PLAN
 .TODO
+
+# scripts/lib/ holds shell helper libraries (e.g. detect-os.sh), not the
+# stale Python packaging `lib/` pattern above — un-ignore it explicitly.
+!scripts/lib/
+!scripts/lib/**

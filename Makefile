@@ -6,7 +6,7 @@
 	test-functional test-parity smoke-test coverage test-coverage db-test-up db-test-down \
 	seed-mock-data docker-build docker-push dev deploy-alpha deploy-beta clean version-update \
 	version-update-minor version-update-major version-show license-validate \
-	license-check-features pre-commit info env
+	license-check-features pre-commit info env setup install-hooks verify-hooks
 
 .DEFAULT_GOAL := help
 
@@ -56,6 +56,15 @@ dev: ## Development - Deploy the workspace to local alpha (MicroK8s/Docker Deskt
 	@echo "$(BLUE)Deploying $(PROJECT_NAME) to local-alpha...$(RESET)"
 	@echo "$(YELLOW)Docker Compose is deprecated — this deploys via Helm to the local-alpha K8s context.$(RESET)"
 	@$(MAKE) deploy-alpha
+
+# === Setup Commands ===
+setup: install-hooks ## Setup - Full local dev environment setup (git hooks)
+
+install-hooks: ## Setup - Install pre-commit + pre-push git hooks
+	@./scripts/install-pre-commit.sh
+
+verify-hooks: ## Setup - Verify git hooks are installed and non-stubbed
+	@./scripts/install-pre-commit.sh --verify
 
 # === Testing Commands ===
 # DB-backed handler/repo tests (skauswatch-testkit) need a real reachable
