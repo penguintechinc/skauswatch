@@ -35,7 +35,9 @@ spec:
           readOnlyRootFilesystem: true
           capabilities:
             drop: [ALL]
-        image: "{{ .Values.spire.oidcProvider.image.repository }}:{{ .Values.spire.oidcProvider.image.tag | default .Chart.AppVersion }}"
+        # repository already carries @sha256:<digest> (see values.yaml) — do
+        # not append :tag, that produces an invalid "name@sha256:x:tag" ref.
+        image: "{{ .Values.spire.oidcProvider.image.repository }}"
         imagePullPolicy: {{ .Values.spire.oidcProvider.image.pullPolicy }}
         ports:
         - name: http

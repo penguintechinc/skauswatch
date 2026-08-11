@@ -34,6 +34,20 @@ spec:
       - name: init-server-bundle
         image: busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
         imagePullPolicy: IfNotPresent
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        resources:
+          requests:
+            cpu: 25m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
         command:
           - sh
           - -c
@@ -44,7 +58,9 @@ spec:
             done
       containers:
       - name: spire-agent
-        image: "{{ .Values.spire.agent.image.repository }}:{{ .Values.spire.agent.image.tag }}"
+        # repository already carries @sha256:<digest> (see values.yaml) — do
+        # not append :tag, that produces an invalid "name@sha256:x:tag" ref.
+        image: "{{ .Values.spire.agent.image.repository }}"
         imagePullPolicy: {{ .Values.spire.agent.image.pullPolicy }}
         securityContext:
           {{- toYaml .Values.spire.agent.securityContext | nindent 12 }}
