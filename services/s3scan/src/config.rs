@@ -121,10 +121,17 @@ pub struct WorkerConfig {
     pub virustotal_api_key: Option<String>,
     /// AlienVault OTX API key (`OTX_API_KEY`).
     pub otx_api_key: Option<String>,
-    /// YARA toggle (`YARA_ENABLED`, default false). Carried for parity; the
-    /// engine lives in scanner (see the port notes), so s3scan does
-    /// not run YARA.
+    /// YARA toggle (`YARA_ENABLED`, default false). Carried for v1 env-var
+    /// parity only — it does not itself gate scanning. The real switch is
+    /// [`Self::yara_rules_path`] (whether the shared scan engine has rules
+    /// loaded at all) combined with each task's/bucket's own `yara_enabled`
+    /// column (`docs/v2-port/v2.1-depgate.md` §3).
     pub yara_enabled: bool,
+    /// Directory or single-file path to YARA rules (`YARA_RULES_PATH`,
+    /// unset by default). `None` disables YARA on this worker's scan engine
+    /// entirely, regardless of any per-bucket/per-task `yara_enabled` flag —
+    /// mirrors `services/scanner`'s `YARA_RULES_PATH` convention.
+    pub yara_rules_path: Option<String>,
     /// Health/readiness HTTP port (`HEALTH_PORT`, default 8080).
     pub health_port: u16,
     /// Optional MinIO/S3 endpoint for ad-hoc uploads (`S3_ENDPOINT_URL`).
@@ -174,6 +181,7 @@ impl WorkerConfig {
             virustotal_api_key: env_opt("VIRUSTOTAL_API_KEY"),
             otx_api_key: env_opt("OTX_API_KEY"),
             yara_enabled: env_bool("YARA_ENABLED", false),
+            yara_rules_path: env_opt("YARA_RULES_PATH"),
             health_port: env_num("HEALTH_PORT", 8080),
             s3_endpoint_url: env_opt("S3_ENDPOINT_URL"),
             s3_region: env_or("S3_REGION", "us-east-1"),
@@ -202,9 +210,9 @@ pub enum ConfigError {
 
 #[cfg(test)]
 impl WorkerConfig {
-    /// Fixed test configuration shared by `db.rs`/`s3ops.rs`/`clamav.rs`/
-    /// `handler.rs` test modules — mirrors the `for_tests()` builder
-    /// convention used for `AppState` elsewhere in the workspace (see
+    /// Fixed test configuration shared by `db.rs`/`s3ops.rs`/`handler.rs`
+    /// test modules — mirrors the `for_tests()` builder convention used for
+    /// `AppState` elsewhere in the workspace (see
     /// `docs/v2-port/testing-pattern.md`). `clamd_socket` points at a path
     /// nothing listens on (ClamAV verdicts degrade to "clean" by default);
     /// individual tests override fields with struct-update syntax.
@@ -224,6 +232,7 @@ impl WorkerConfig {
             virustotal_api_key: None,
             otx_api_key: None,
             yara_enabled: false,
+            yara_rules_path: None,
             health_port: 0,
             s3_endpoint_url: None,
             s3_region: "us-east-1".to_owned(),

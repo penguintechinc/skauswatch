@@ -1,53 +1,11 @@
-//! Content-analysis primitives ported from v1 `scanner/` and `s3/tagger.py`:
-//! magic-byte file typing (v1 libmagic → `infer`), MD5/SHA1/SHA256 hashing,
-//! and the S3 tag set written after a scan. These operate on the in-memory
-//! object bytes (bounded by `MAX_FILE_SIZE_MB`), so no temp files are needed.
+//! S3 tag-writing helper ported from v1 `s3/tagger.py`. The underlying
+//! content-analysis primitives (magic-byte file typing, MD5/SHA1/SHA256
+//! hashing) moved to `skauswatch-scan-core` — re-exported here unchanged so
+//! every existing `scan::compute_hashes`/`scan::detect_file_type`/
+//! `scan::Hashes`/`scan::UNKNOWN_MIME` call site in this crate keeps working
+//! byte-for-byte (see `docs/v2-port/v2.1-depgate.md` §3).
 
-// md-5 (digest 0.11) and sha1/sha2 (digest 0.10) expose distinct `Digest`
-// traits; sha1 and sha2 share theirs, so one import covers both.
-use md5::Digest as _;
-use sha1::Digest as _;
-
-/// MIME reported when magic-byte detection yields nothing (v1's libmagic would
-/// usually return `text/plain`; `infer` has no text heuristics, so the neutral
-/// octet-stream is used).
-pub const UNKNOWN_MIME: &str = "application/octet-stream";
-
-/// The three digests v1 recorded for every scanned object.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Hashes {
-    /// Lowercase hex MD5.
-    pub md5: String,
-    /// Lowercase hex SHA1.
-    pub sha1: String,
-    /// Lowercase hex SHA256.
-    pub sha256: String,
-}
-
-/// Lowercase hex rendering of digest bytes.
-fn hex_lower(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
-}
-
-/// Computes MD5/SHA1/SHA256 over `data` (v1 `FileHasher.compute_all`).
-pub fn compute_hashes(data: &[u8]) -> Hashes {
-    Hashes {
-        md5: hex_lower(&md5::Md5::digest(data)),
-        sha1: hex_lower(&sha1::Sha1::digest(data)),
-        sha256: hex_lower(&sha2::Sha256::digest(data)),
-    }
-}
-
-/// Detects the MIME type from magic bytes, falling back to [`UNKNOWN_MIME`].
-pub fn detect_file_type(data: &[u8]) -> String {
-    infer::get(data).map_or_else(|| UNKNOWN_MIME.to_owned(), |t| t.mime_type().to_owned())
-}
+pub use skauswatch_scan_core::{Hashes, UNKNOWN_MIME, compute_hashes, detect_file_type};
 
 /// v1 threat label: `malware`, `pup`, or `clean`.
 pub fn threat_label(is_malware: bool, is_pup: bool) -> &'static str {

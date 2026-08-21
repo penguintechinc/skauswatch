@@ -21,15 +21,12 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Canonical `s3_scan_results.scan_status` value for a verdict — one of the
-/// manager's result-filter enum values (`clean`/`infected`/`pup`).
+/// manager's result-filter enum values (`clean`/`infected`/`pup`). Delegates
+/// to `skauswatch-scan-core`'s [`skauswatch_scan_core::Verdict`] so this
+/// worker's string literal and the shared enum's precedence can never drift
+/// (see `docs/v2-port/v2.1-depgate.md` §3's hardening note).
 pub fn scan_status_for(is_malware: bool, is_pup: bool) -> &'static str {
-    if is_malware {
-        "infected"
-    } else if is_pup {
-        "pup"
-    } else {
-        "clean"
-    }
+    skauswatch_scan_core::Verdict::from_malware_pup(is_malware, is_pup).as_str()
 }
 
 /// Resolved bucket configuration (hybrid credentials + enumeration filters).

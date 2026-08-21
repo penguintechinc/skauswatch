@@ -6216,17 +6216,14 @@ dependencies = [
  "chrono",
  "clap",
  "fred",
- "infer",
- "md-5 0.11.0",
  "reqwest",
  "serde",
  "serde_json",
- "sha1 0.10.7",
- "sha2 0.10.9",
  "skauswatch-common",
  "skauswatch-db",
  "skauswatch-identity",
  "skauswatch-s3",
+ "skauswatch-scan-core",
  "skauswatch-streams",
  "skauswatch-telemetry",
  "skauswatch-testkit",
@@ -6237,6 +6234,26 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "skauswatch-scan-core"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "glob",
+ "infer",
+ "md-5 0.11.0",
+ "serde",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "yara-x",
 ]
 
 [[package]]
@@ -6252,7 +6269,6 @@ dependencies = [
  "clap",
  "fred",
  "futures",
- "glob",
  "metrics",
  "rcgen",
  "reqwest",
@@ -6263,6 +6279,7 @@ dependencies = [
  "skauswatch-common",
  "skauswatch-db",
  "skauswatch-s3",
+ "skauswatch-scan-core",
  "skauswatch-streams",
  "skauswatch-telemetry",
  "skauswatch-testkit",
@@ -6278,7 +6295,6 @@ dependencies = [
  "uuid",
  "wiremock",
  "x509-parser",
- "yara-x",
 ]
 
 [[package]]

@@ -3,7 +3,6 @@
 //! standard health/metrics endpoints; `healthcheck` is the container-native
 //! probe (no curl in images, per container standards).
 
-mod clamav;
 mod config;
 mod db;
 mod enumerate;
@@ -51,11 +50,35 @@ async fn serve() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("metrics exporter: {e}"))?;
 
     let cfg = WorkerConfig::from_env()?;
+
+    // Shared ClamAV+YARA-X scan engine (`skauswatch-scan-core`) — replaces
+    // this worker's own `clamav.rs` and finally wires the `yara_enabled`
+    // flag that was previously plumbed through end-to-end but never invoked
+    // (see docs/v2-port/v2.1-depgate.md §3). YARA rules are compiled once at
+    // startup; a bad `YARA_RULES_PATH` fails the boot loudly rather than
+    // silently degrading, since — unlike ClamAV — nothing in this worker's
+    // history depends on a missing/misconfigured rules path being tolerated.
+    let scan_engine =
+        skauswatch_scan_core::ScanEngine::new(skauswatch_scan_core::ScanEngineConfig {
+            clamd_socket: Some(cfg.clamd_socket.clone()),
+            clamd_tcp: None,
+            clamd_timeout: std::time::Duration::from_secs(cfg.clamd_timeout),
+            yara_rules_path: cfg.yara_rules_path.clone(),
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("scan engine init failed: {e}"))?;
+
     tracing::info!(
         consumer = %cfg.consumer_name, group = %cfg.consumer_group,
         prefix = %cfg.redis_prefix, ti_enabled = cfg.ti_enabled,
-        yara_enabled = cfg.yara_enabled, scan_timeout_sec = cfg.scan_timeout_sec,
-        "starting S3 scan worker (YARA runs in scanner, not s3scan)"
+        yara_enabled = scan_engine.yara_enabled(),
+        // `cfg.yara_enabled` (`YARA_ENABLED`) is legacy v1 env-var parity
+        // only and does not itself gate the engine — logged so a mismatch
+        // (set but `yara_rules_path` unset, or vice versa) is visible at
+        // startup rather than silently confusing an operator.
+        legacy_yara_enabled_flag = cfg.yara_enabled,
+        scan_timeout_sec = cfg.scan_timeout_sec,
+        "starting S3 scan worker"
     );
 
     // DB pool (per-service account, shared v1 schema) with retry/backoff.
@@ -99,7 +122,7 @@ async fn serve() -> anyhow::Result<()> {
         c.batch = cfg.max_concurrent_tasks.max(1);
         c
     };
-    let handler = S3ScanHandler::new(pool, producer, cfg.clone(), envelope);
+    let handler = S3ScanHandler::new(pool, producer, cfg.clone(), envelope, scan_engine);
     let handler = match own_aws_federation().await {
         Some((identity, role_arn)) => handler.with_federation(identity, role_arn),
         None => handler,

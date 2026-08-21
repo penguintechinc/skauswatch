@@ -28,7 +28,6 @@ use skauswatch_streams::{
 use skauswatch_vault::EnvelopeEncryption;
 use sqlx::PgPool;
 
-use crate::clamav;
 use crate::config::WorkerConfig;
 use crate::db;
 use crate::enumerate::{Decision, classify_object, dispatch_fields};
@@ -82,15 +81,19 @@ struct Federation {
 
 /// Worker task handler holding the shared DB pool, stream producer
 /// (re-dispatch and onward events), an HTTP client for TI, the loaded
-/// config, and the envelope-encryption engine used to decrypt `static`-mode
-/// stored bucket credentials (security finding #2 — see
-/// `skauswatch_s3::credentials`).
+/// config, the shared ClamAV+YARA-X scan engine, and the envelope-encryption
+/// engine used to decrypt `static`-mode stored bucket credentials (security
+/// finding #2 — see `skauswatch_s3::credentials`).
 pub struct S3ScanHandler {
     pool: PgPool,
     producer: StreamProducer,
     http: reqwest::Client,
     cfg: WorkerConfig,
     envelope: EnvelopeEncryption,
+    /// Shared ClamAV+YARA-X engine (`skauswatch-scan-core`). Built once in
+    /// `main.rs::serve` (YARA rule compilation happens there, not per
+    /// request) and handed in — see [`S3ScanHandler::new`].
+    scan_engine: skauswatch_scan_core::ScanEngine,
     /// Own-AWS federation for `adhoc_client`'s default-chain fallback.
     /// `None` (the only value [`S3ScanHandler::new`] ever sets) preserves
     /// today's behavior exactly — see [`S3ScanHandler::with_federation`].
@@ -104,6 +107,7 @@ impl S3ScanHandler {
         producer: StreamProducer,
         cfg: WorkerConfig,
         envelope: EnvelopeEncryption,
+        scan_engine: skauswatch_scan_core::ScanEngine,
     ) -> Self {
         Self {
             pool,
@@ -111,6 +115,7 @@ impl S3ScanHandler {
             http: reqwest::Client::new(),
             cfg,
             envelope,
+            scan_engine,
             federation: None,
         }
     }
@@ -173,33 +178,49 @@ impl S3ScanHandler {
         })
     }
 
-    /// Runs the content pipeline (file type, hashes, ClamAV, TI) over `data`.
-    /// ClamAV/TI degrade to "clean"/empty when unavailable, and the whole
-    /// external-scan phase is bounded by `SCAN_TIMEOUT_SEC` (v1 parity); a
-    /// timeout yields a clean verdict with default enrichment.
-    async fn scan_content(&self, data: &[u8]) -> Verdict {
-        let file_type = scan::detect_file_type(data);
-        let hashes = scan::compute_hashes(data);
+    /// Runs the content pipeline (file type, hashes, ClamAV, YARA, TI) over
+    /// `data`, delegating malware detection to the shared
+    /// [`skauswatch_scan_core::ScanEngine`]. `yara_enabled` is the caller's
+    /// per-task/per-bucket flag (`t.yara_enabled`, already OR'd with the
+    /// bucket's own flag at dispatch time — see `enumerate`); YARA only
+    /// actually runs when this is `true` *and* the engine has rules loaded
+    /// (`YARA_RULES_PATH` configured). ClamAV/YARA/TI degrade to
+    /// "clean"/empty when unavailable, and the whole external-scan phase is
+    /// bounded by `SCAN_TIMEOUT_SEC` (v1 parity); a timeout yields a clean
+    /// verdict with default enrichment.
+    async fn scan_content(&self, data: &[u8], yara_enabled: bool) -> Verdict {
+        let options = skauswatch_scan_core::ScanOptions {
+            run_clamav: true,
+            run_yara: yara_enabled,
+        };
 
         let external = async {
-            let (is_malware, is_pup, threat_names, clamav_result) = match clamav::scan_bytes(
-                &self.cfg.clamd_socket,
-                std::time::Duration::from_secs(self.cfg.clamd_timeout),
-                data,
-            )
-            .await
+            let outcome = match self
+                .scan_engine
+                .scan_bytes_with_options(data, options)
+                .await
             {
-                Ok(v) => {
-                    let clamav_json = serde_json::json!({
-                        "is_malware": v.is_malware,
-                        "is_pup": v.is_pup,
-                        "threats": v.threat_names,
-                    });
-                    (v.is_malware, v.is_pup, v.threat_names, Some(clamav_json))
-                }
+                Ok(o) => o,
                 Err(e) => {
-                    tracing::debug!(error = %e, "ClamAV unavailable — scanning skipped (clean)");
-                    (false, false, Vec::new(), None)
+                    // Only a mechanical YARA-execution failure reaches here
+                    // (ClamAV daemon failures already degrade to clean
+                    // inside the engine) — treat it the same way: log and
+                    // fall back to a clean verdict for this attempt, still
+                    // carrying real file type/hashes.
+                    tracing::warn!(error = %e, "scan engine error — recording clean verdict");
+                    skauswatch_scan_core::ScanOutcome {
+                        verdict: skauswatch_scan_core::Verdict::Clean,
+                        is_malware: false,
+                        is_pup: false,
+                        is_threat: false,
+                        threat_names: Vec::new(),
+                        file_type: scan::detect_file_type(data),
+                        hashes: scan::compute_hashes(data),
+                        clamav_result: None,
+                        yara_matches: Vec::new(),
+                        engines_run: skauswatch_scan_core::EnginesRun::default(),
+                        scan_time_ms: 0,
+                    }
                 }
             };
             let ti_enrichment = if self.cfg.ti_enabled {
@@ -208,31 +229,41 @@ impl S3ScanHandler {
                         &self.http,
                         self.cfg.virustotal_api_key.as_deref(),
                         self.cfg.otx_api_key.as_deref(),
-                        &hashes,
-                        &threat_names,
+                        &outcome.hashes,
+                        &outcome.threat_names,
                     )
                     .await,
                 )
             } else {
                 None
             };
-            (
-                is_malware,
-                is_pup,
-                threat_names,
-                clamav_result,
-                ti_enrichment,
-            )
+            (outcome, ti_enrichment)
         };
 
         let timeout = std::time::Duration::from_secs(self.cfg.scan_timeout_sec);
-        let (is_malware, is_pup, threat_names, clamav_result, ti_enrichment) =
+        let (file_type, hashes, is_malware, is_pup, threat_names, clamav_result, ti_enrichment) =
             match tokio::time::timeout(timeout, external).await {
-                Ok(t) => t,
+                Ok((outcome, ti_enrichment)) => (
+                    outcome.file_type,
+                    outcome.hashes,
+                    outcome.is_malware,
+                    outcome.is_pup,
+                    outcome.threat_names,
+                    outcome.clamav_result,
+                    ti_enrichment,
+                ),
                 Err(_) => {
                     tracing::warn!("content scan timed out — recording clean verdict");
                     let ti = self.cfg.ti_enabled.then(|| ti::default_result(&[]));
-                    (false, false, Vec::new(), None, ti)
+                    (
+                        scan::detect_file_type(data),
+                        scan::compute_hashes(data),
+                        false,
+                        false,
+                        Vec::new(),
+                        None,
+                        ti,
+                    )
                 }
             };
 
@@ -361,7 +392,7 @@ impl S3ScanHandler {
             return self.record_skipped(job.pk, t).await;
         };
 
-        let verdict = self.scan_content(&bytes).await;
+        let verdict = self.scan_content(&bytes, t.yara_enabled).await;
         let duration_ms = i32::try_from(start.elapsed().as_millis()).unwrap_or(i32::MAX);
         let record = self.result_record(
             job.pk,
@@ -422,7 +453,7 @@ impl S3ScanHandler {
             tracing::info!(object = %t.object_key, "inline object too large — skipped");
             return Ok(());
         };
-        let verdict = self.scan_content(&bytes).await;
+        let verdict = self.scan_content(&bytes, t.yara_enabled).await;
         let duration_ms = i32::try_from(start.elapsed().as_millis()).unwrap_or(i32::MAX);
 
         if let Some(job) = self.lookup_job(&t.job_id, t.tenant_id).await? {
@@ -496,7 +527,7 @@ impl S3ScanHandler {
             }
         };
 
-        let verdict = self.scan_content(&bytes).await;
+        let verdict = self.scan_content(&bytes, t.yara_enabled).await;
         let duration_ms = i32::try_from(start.elapsed().as_millis()).unwrap_or(i32::MAX);
         db::finish_adhoc(
             &self.pool,
@@ -776,7 +807,23 @@ mod tests {
         let producer = StreamProducer::connect(&redis_url(), None, prefix)
             .await
             .expect("producer connect");
-        S3ScanHandler::new(pool, producer, cfg, test_envelope())
+        let scan_engine = test_scan_engine(&cfg).await;
+        S3ScanHandler::new(pool, producer, cfg, test_envelope(), scan_engine)
+    }
+
+    /// Builds the scan engine from a test [`WorkerConfig`] the same way
+    /// `main.rs::serve` does — `clamd_socket` points nowhere by default
+    /// (ClamAV degrades to clean), and `yara_rules_path` is `None` unless a
+    /// test explicitly sets it (see `handles_yara_hit_as_infected` below).
+    async fn test_scan_engine(cfg: &WorkerConfig) -> skauswatch_scan_core::ScanEngine {
+        skauswatch_scan_core::ScanEngine::new(skauswatch_scan_core::ScanEngineConfig {
+            clamd_socket: Some(cfg.clamd_socket.clone()),
+            clamd_tcp: None,
+            clamd_timeout: std::time::Duration::from_secs(cfg.clamd_timeout),
+            yara_rules_path: cfg.yara_rules_path.clone(),
+        })
+        .await
+        .expect("test scan engine config must build")
     }
 
     async fn raw_client() -> fred::clients::Client {
@@ -1658,6 +1705,163 @@ mod tests {
             .await
             .expect("select job");
         assert_eq!(job.0, 1);
+    }
+
+    /// Regression: fixes dead `yara_enabled` (v2.1-depgate.md §3) — before
+    /// the `skauswatch-scan-core` adoption, this flag was parsed all the way
+    /// through to `BucketObjectTask::yara_enabled` and then never consulted;
+    /// ClamAV was the only engine that ever ran. This proves YARA now
+    /// actually executes against real (EICAR) content and its hit lands as
+    /// an `infected` verdict, exactly like a ClamAV hit does above.
+    #[tokio::test]
+    async fn bucket_object_yara_hit_bumps_infected_when_task_requests_it() {
+        const EICAR: &[u8] =
+            b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/yara-bucket/eicar.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(EICAR.to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/yara-bucket/eicar.bin"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let pool = db_pool().await;
+        let tenant = test_tenant();
+        // `bucket.yara_enabled=true` here documents intent only — this test
+        // dispatches a pre-built `BucketObjectTask`-shaped entry directly
+        // (bypassing `enumerate`'s own `t.yara_enabled || bucket.yara_enabled`
+        // OR), so the entry's own `yara_enabled` field below is what
+        // actually drives `scan_content`.
+        let bucket_id = seed_bucket(
+            &pool,
+            tenant,
+            &server.uri(),
+            "yara-bucket",
+            100,
+            true,
+            true,
+            None,
+        )
+        .await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_running_job(&pool, tenant, bucket_id, &job_uuid, 1).await;
+        let prefix = unique_prefix();
+        let cfg = WorkerConfig {
+            yara_rules_path: Some(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/yara_rules").to_owned(),
+            ),
+            ..WorkerConfig::for_tests()
+        };
+        let handler = build_handler(pool.clone(), cfg, &prefix).await;
+
+        let bcid = bucket_id.to_string();
+        let tid = tenant.to_string();
+        let entry = stream_entry(&[
+            ("job_id", &job_uuid),
+            ("bucket_config_id", &bcid),
+            ("object_key", "eicar.bin"),
+            ("object_size", "68"),
+            ("object_etag", "\"etag\""),
+            ("yara_enabled", "True"),
+            ("tenant_id", &tid),
+        ]);
+
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let row: (String, bool, serde_json::Value) = sqlx::query_as(
+            "SELECT scan_status, is_malware, threat_names FROM s3_scan_results WHERE job_id = $1",
+        )
+        .bind(pk)
+        .fetch_one(&pool)
+        .await
+        .expect("select result");
+        assert_eq!(row.0, "infected");
+        assert!(row.1);
+        let names = row.2.as_array().expect("threat_names is a json array");
+        assert!(
+            names
+                .iter()
+                .any(|n| n.as_str() == Some("YARA.EICAR_Test_File")),
+            "expected a YARA. -prefixed threat name, got {names:?}"
+        );
+
+        let job: (i32,) = sqlx::query_as("SELECT infected_objects FROM s3_scan_jobs WHERE id = $1")
+            .bind(pk)
+            .fetch_one(&pool)
+            .await
+            .expect("select job");
+        assert_eq!(job.0, 1);
+    }
+
+    /// Same content, but the task does not request YARA (`yara_enabled:
+    /// "False"`, the default `bucket_object_entry` shape) and no ClamAV
+    /// daemon is reachable — proves YARA is opt-in per task/bucket, not
+    /// always-on just because the engine has rules loaded.
+    #[tokio::test]
+    async fn bucket_object_yara_configured_but_not_requested_stays_clean() {
+        const EICAR: &[u8] =
+            b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/yara-bucket-off/eicar.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(EICAR.to_vec()))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/yara-bucket-off/eicar.bin"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let pool = db_pool().await;
+        let tenant = test_tenant();
+        let bucket_id = seed_bucket(
+            &pool,
+            tenant,
+            &server.uri(),
+            "yara-bucket-off",
+            100,
+            true,
+            false,
+            None,
+        )
+        .await;
+        let job_uuid = uuid::Uuid::new_v4().to_string();
+        let pk = seed_running_job(&pool, tenant, bucket_id, &job_uuid, 1).await;
+        let prefix = unique_prefix();
+        let cfg = WorkerConfig {
+            yara_rules_path: Some(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/../../config/yara_rules").to_owned(),
+            ),
+            ..WorkerConfig::for_tests()
+        };
+        let handler = build_handler(pool.clone(), cfg, &prefix).await;
+
+        let result = handler
+            .handle(&bucket_object_entry(
+                &job_uuid,
+                bucket_id,
+                "eicar.bin",
+                tenant,
+            ))
+            .await;
+        assert!(result.is_ok(), "{result:?}");
+
+        let row: (String, bool) =
+            sqlx::query_as("SELECT scan_status, is_malware FROM s3_scan_results WHERE job_id = $1")
+                .bind(pk)
+                .fetch_one(&pool)
+                .await
+                .expect("select result");
+        assert_eq!(row.0, "clean");
+        assert!(!row.1);
     }
 
     // ── InlineObject ─────────────────────────────────────────────────────
