@@ -24,6 +24,9 @@ skauswatch-proto = { path = "crates/skauswatch-proto" }
 skauswatch-ai = { path = "crates/skauswatch-ai" }
 skauswatch-s3 = { path = "crates/skauswatch-s3" }
 skauswatch-spire-entry = { path = "crates/skauswatch-spire-entry" }
+# Shared ClamAV+YARA-X scan engine (s3scan/scanner adopt it; DepGate/Sentinel
+# foundation) — see docs/v2-port/v2.1-depgate.md §3.
+skauswatch-scan-core = { path = "crates/skauswatch-scan-core" }
 # Test-only harness (isolated-schema DB pools, JWT minting, LicenseClient
 # builders) — see docs/v2-port/testing-pattern.md. Added as a dev-dependency
 # by service crates, never a runtime dependency.

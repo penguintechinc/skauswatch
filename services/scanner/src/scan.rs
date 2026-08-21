@@ -48,7 +48,17 @@ pub async fn execute_scan(
                 if let Some(fpath) = file_path {
                     match tokio::fs::read(fpath).await {
                         Ok(data) => {
-                            match crate::clamav::scan_bytes(host, port, clamav_timeout, &data).await
+                            // ClamAV protocol/transport logic lives in
+                            // `skauswatch-scan-core` (shared with `s3scan`)
+                            // — see docs/v2-port/v2.1-depgate.md §3.
+                            let transport =
+                                skauswatch_scan_core::ClamdTransport::Tcp(host.to_owned(), port);
+                            match skauswatch_scan_core::clamav::scan_bytes(
+                                &transport,
+                                clamav_timeout,
+                                &data,
+                            )
+                            .await
                             {
                                 Ok(verdict) => {
                                     let count = if verdict.is_malware { 1 } else { 0 };
