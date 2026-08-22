@@ -10,9 +10,19 @@ read that doc's §3/§6 conventions if anything here seems to duplicate it;
 tenancy and service-auth are deliberately orthogonal (a request can be
 tenant-valid and caller-unauthenticated, or vice versa).
 
-**Current state confirmed by inspection:** `skauswatch-identity` has zero
-consumers anywhere in the workspace (`grep -rl skauswatch_identity` across
-`services/`/`crates/` hits only its own `Cargo.toml`). Every gRPC server
+**Current state confirmed by inspection (updated — depgate now a real
+consumer):** as of the `depgate` service landing (`services/depgate`,
+`k8s/helm/depgate`, chart-registered SPIRE entry
+`spiffe://penguintech.io/<env>/depgate`), `skauswatch-identity` is **no
+longer** consumer-free — `services/depgate/src/mesh_admin.rs` wires
+`skauswatch_identity::IdentityProvider` into a dedicated, fail-safe-degrade
+mTLS admin listener (`GET /api/v1/depgate/mesh/stats`) that binds only when
+a live SVID is available and stays unbound otherwise (see that file's own
+doc comment for the full fail-safe rationale) — this is the mTLS-server
+pattern §2/§3 of this doc describe for pki/manager, implemented ahead of
+the R2c/R3 rollout order below for a service that didn't exist when that
+order was written. Every other gRPC server in the repo remains on the
+pre-mTLS shared-HS256-secret path described next. Every gRPC server
 (manager's `ManagerService`+`S3ScanService`, pki's `PkiService`) runs on
 plaintext TCP gated by a single shared HS256 secret (`JWT_SECRET_KEY`, via
 `skauswatch_auth::verify_grpc_bearer`/`ServiceClaims`) — anyone who can
@@ -54,7 +64,9 @@ per-tenant/customer federated one — out of scope for this doc, flagged).
 | `spiffe://penguintech.io/<env>/monitor` | `services/monitor` | REST only, no gRPC/AWS client role identified — out of scope |
 | `spiffe://penguintech.io/<env>/codescan-backend` | `services/codescan-backend` | REST only, no gRPC/AWS client role identified — out of scope |
 | `spiffe://penguintech.io/<env>/logs` | `services/logs` | No role identified — out of scope |
-| `spiffe://penguintech.io/<env>/endpoint-agent-maintenance` | N/A (operator/CLI identity, not a long-running service) | The maintenance/super-admin identity for pki's `expiring`/`cleanup` — see §3. Not tied to the ENDPOINT fleet-agent binary; the name is deliberately distinct from `endpoint-agent` (§5) to avoid confusion between "a customer's EDR sensor" and "an internal ops identity" |
+| `spiffe://penguintech.io/<env>/depgate` | `services/depgate` | REST only, no gRPC server — presents its own SVID and verifies same-trust-domain peers on a dedicated mesh-only mTLS admin listener (`src/mesh_admin.rs`) serving a cross-tenant fleet summary *alongside* the existing JWT/tenant-scoped `/api/v1/depgate/*` admin API; `/v2/*` (OCI proxy) stays JWT/tenant-only — see that module's docs for the full rationale |
+| `spiffe://penguintech.io/<env>/endpoint-agent` | `services/endpoint-agent` | The in-cluster fleet-agent DaemonSet (`k8s/helm/endpoint-agent`, node monitoring), registered in the SPIRE chart's `autoEnroll.services` — **not** the customer-installed EDR sensor binary (that binary runs on arbitrary customer endpoints outside skauswatch's own trust domain and is tenant-scoped via enrollment tokens instead, §5). No gRPC/AWS client role identified for this identity today — out of scope for R2c/R3, listed here for completeness against the chart's registration-entry list |
+| `spiffe://penguintech.io/<env>/endpoint-agent-maintenance` | N/A (operator/CLI identity, not a long-running service) | The maintenance/super-admin identity for pki's `expiring`/`cleanup` — see §3. Not tied to the ENDPOINT fleet-agent binary; the name is deliberately distinct from `endpoint-agent` (above) to avoid confusion between "a customer's EDR sensor" and "an internal ops identity" |
 
 **Who-calls-whom allowlist** (the `SpiffeIdMatcher` each server builds):
 
@@ -63,6 +75,7 @@ per-tenant/customer federated one — out of scope for this doc, flagged).
 | pki's `PkiService` (gRPC) | `allow_exact(spiffe://penguintech.io/<env>/manager)` only | Manager is pki's sole in-repo caller-to-be (issuance on behalf of authenticated users); no other service issues certificates |
 | manager's `ManagerService`+`S3ScanService` (gRPC) | `allow_path_prefix(penguintech.io, "/<env>")` — any workload in this env's trust domain — **not** narrowed further in R2c | These RPCs have zero real callers today (confirmed); a broad same-trust-domain allow avoids over-fitting a matcher to callers that don't exist yet. Narrow to specific identities (e.g. `s3scan`, `worker-vault-sync`) once a real caller is implemented — tracked as an R3-follow-up, not blocking |
 | pki's `expiring`/`cleanup` maintenance ops | `allow_exact(spiffe://penguintech.io/<env>/endpoint-agent-maintenance)` (REST — see §3, not a gRPC matcher) | The one deliberate cross-tenant surface; §3 below |
+| depgate's mesh admin listener (`GET /api/v1/depgate/mesh/stats`, REST) | `allow_path_prefix(penguintech.io, "/<env>")` — any workload in this env's trust domain | Same "zero real callers today" rationale as manager's RPCs above; narrow to a specific identity once a real caller (e.g. a cross-tenant reporting aggregator) is implemented |
 
 No service today calls sshca, s3scan, or worker-vault-sync's identity as a
 *peer to authenticate against* (they're callers, not gRPC servers), so

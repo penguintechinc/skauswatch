@@ -21,7 +21,22 @@ spire:
       tag: "1.9.4"  # Reference only
       pullPolicy: Always
     dataStore:
-      type: sqlite
+      # Match production's postgresql datastore (see production.yml). sqlite on
+      # the server pod's emptyDir loses the SPIRE CA on any restart, which
+      # silently breaks mesh mTLS for every workload — unacceptable for a soak
+      # that is meant to be representative of prod. Host follows this repo's
+      # in-cluster convention (`db-host: "postgres"` in every other chart's
+      # beta.yml). sslMode `require` (encrypt, no cert verification) is the
+      # in-cluster posture the values.yaml comment permits; production keeps
+      # verify-full.
+      type: postgresql
+      postgresql:
+        host: "postgres"
+        port: 5432
+        dbName: spire
+        sslMode: "require"
+        sslRootCert: ""
+        secretName: spire-db-credentials
     nodeAttestation:
       k8sPsat:
         enabled: true
