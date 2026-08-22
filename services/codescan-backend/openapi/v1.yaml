@@ -10,6 +10,115 @@ info:
     identifier: AGPL-3.0-only
   version: '1'
 paths:
+  /api/v1/codescan/findings:
+    get:
+      tags:
+      - codescan-sentinel
+      summary: GET /codescan/findings — paginated, filterable list of SCA/CVE findings.
+      operationId: list_findings
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: per_page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: repo_config_id
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: branch
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: kind
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: severity
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: status
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      responses:
+        '200':
+          description: Findings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FindingListResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan Sentinel not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/codescan/findings/summary:
+    get:
+      tags:
+      - codescan-sentinel
+      summary: |-
+        GET /codescan/findings/summary — exec-view counts by severity/kind/
+        ecosystem, open findings only (spec §8).
+      operationId: findings_summary
+      responses:
+        '200':
+          description: Findings summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FindingsSummaryResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan Sentinel not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
   /api/v1/codescan/plans:
     get:
       tags:
@@ -1362,6 +1471,103 @@ components:
         error:
           type: string
           description: Human-readable error message.
+    Finding:
+      type: object
+      description: |-
+        One `codescan_findings` row, as returned by `list_findings` — an
+        explicit DTO (not a raw table passthrough), matching every other
+        response shape in this service (`security.md` Output Validation).
+      required:
+      - id
+      - repo_config_id
+      - branch
+      - kind
+      - ecosystem
+      - package_name
+      - current_version
+      - advisory_id
+      - severity
+      - source
+      - status
+      properties:
+        advisory_id:
+          type: string
+        branch:
+          type: string
+        current_version:
+          type: string
+        ecosystem:
+          type: string
+        first_seen:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        fixed_version:
+          type:
+          - string
+          - 'null'
+        id:
+          type: integer
+          format: int64
+        kind:
+          type: string
+        last_seen:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        latest_version:
+          type:
+          - string
+          - 'null'
+        package_name:
+          type: string
+        repo_config_id:
+          type: integer
+          format: int64
+        severity:
+          type: string
+        source:
+          type: string
+        status:
+          type: string
+    FindingListResponse:
+      type: object
+      description: Documentation-only mirror of `list_findings`'s `serde_json::json!` body.
+      required:
+      - data
+      - total
+      - page
+      - per_page
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Finding'
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
+    FindingsSummaryResponse:
+      type: object
+      description: Documentation-only mirror of `findings_summary`'s `serde_json::json!` body.
+      required:
+      - total_open
+      - by_bucket
+      properties:
+        by_bucket:
+          type: array
+          items:
+            $ref: '#/components/schemas/SeverityCount'
+        total_open:
+          type: integer
+          format: int64
     LicensePolicy:
       type: object
       description: License-policy row shape returned by list/get/create/update.
@@ -1941,6 +2147,24 @@ components:
           - string
           - 'null'
           format: date-time
+    SeverityCount:
+      type: object
+      description: One `(severity, kind, ecosystem)` bucket count for the exec/summary view.
+      required:
+      - severity
+      - kind
+      - ecosystem
+      - count
+      properties:
+        count:
+          type: integer
+          format: int64
+        ecosystem:
+          type: string
+        kind:
+          type: string
+        severity:
+          type: string
     StatusResponse:
       type: object
       description: Documentation-only mirror of `codescan_status`'s `serde_json::json!` body.
@@ -2080,3 +2304,5 @@ tags:
   description: Git credential storage for private repo access
 - name: license-policies
   description: OSS license-compliance policy configuration
+- name: codescan-sentinel
+  description: Scheduled SCA/CVE dependency scanning and reports (report-only, no AI)

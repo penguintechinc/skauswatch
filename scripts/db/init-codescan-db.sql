@@ -29,8 +29,19 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   codescan_provider_usage,
   codescan_license_policies,
   codescan_license_detections,
-  codescan_license_violations
+  codescan_license_violations,
+  codescan_scan_runs,
+  codescan_findings
 TO codescan;
+
+-- CodeScan Sentinel (docs/v2-port/v2.1-codescan-sentinel.md §9/§12) writes
+-- alert rows directly into manager's shared `alerts` table for
+-- critical/high CVE findings — the same shared-database, per-service-grant
+-- pattern every other cross-table write in this stack uses (see
+-- backend-database.md "Per-Service Database Accounts"). INSERT-only: this
+-- worker never reads or mutates alerts it didn't create, and never touches
+-- any other manager-owned table.
+GRANT INSERT ON alerts TO codescan;
 
 -- Grant sequence access so PyDAL INSERT can fetch next IDs
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO codescan;

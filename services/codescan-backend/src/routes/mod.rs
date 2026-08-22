@@ -20,6 +20,7 @@
 //! `routes/*.rs` tests, which never mount it.
 
 mod credentials;
+mod findings;
 mod license_policies;
 pub(crate) mod openapi;
 mod plans;
@@ -42,6 +43,17 @@ pub(crate) const CODESCAN_FLAG: &str = "skauswatch.codescan";
 /// v1 bare 403 body text when the codescan feature is not licensed.
 const LICENSE_MSG: &str = "CodeScan AI review requires a CodeScan license.";
 
+/// PostHog flag gating CodeScan Sentinel's report endpoints
+/// (docs/v2-port/v2.1-codescan-sentinel.md §13) — independent of
+/// `CODESCAN_FLAG`: Sentinel's deterministic SCA/CVE scanning stands alone
+/// at Professional tier without the AI-review feature (or WaddleAI, which
+/// only gates Sentinel's *AI-assisted* triage in a later phase). Must match
+/// `worker-codescan`'s `sentinel::SENTINEL_FLAG` literal exactly — the same
+/// flag gates the scheduler that produces the data this flag gates reading.
+pub(crate) const SENTINEL_FLAG: &str = "skauswatch.codescan.sentinel";
+/// 403 body text when Sentinel is not licensed/enabled.
+const SENTINEL_LICENSE_MSG: &str = "CodeScan Sentinel requires the Sentinel feature to be enabled.";
+
 /// Builds the full /api/v1 application router.
 pub fn router(state: AppState) -> Router {
     let protected = status::router()
@@ -50,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .merge(plans::router())
         .merge(credentials::router())
         .merge(license_policies::router())
+        .merge(findings::router())
         .merge(openapi::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -70,6 +83,21 @@ pub(crate) async fn license_denied(state: &AppState) -> Option<Response> {
             (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({ "error": LICENSE_MSG })),
+            )
+                .into_response(),
+        )
+    }
+}
+
+/// Same pattern as [`license_denied`], gating on [`SENTINEL_FLAG`] instead.
+pub(crate) async fn sentinel_denied(state: &AppState) -> Option<Response> {
+    if state.license.flag_enabled(SENTINEL_FLAG).await {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": SENTINEL_LICENSE_MSG })),
             )
                 .into_response(),
         )
