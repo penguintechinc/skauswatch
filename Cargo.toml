@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/manager", "services/s3scan", "services/sshca", "services/logs", "services/pki", "services/worker-codescan", "services/scanner", "services/vault", "services/worker-vault-sync", "services/endpoint-agent", "services/monitor", "services/codescan-backend"]
+members = ["crates/*", "services/manager", "services/s3scan", "services/sshca", "services/logs", "services/pki", "services/worker-codescan", "services/scanner", "services/vault", "services/worker-vault-sync", "services/endpoint-agent", "services/monitor", "services/codescan-backend", "services/depgate"]
 
 [workspace.package]
 version = "2.0.0"
@@ -73,7 +73,11 @@ sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-toki
 # every stream consumer (s3scan/scanner/worker-codescan/worker-vault-sync)
 # was surfacing a spurious transport error + extra retry sleep on every idle
 # cycle — see crates/skauswatch-streams/src/consumer.rs::read_new.
-fred = { version = "=10.1.0", features = ["default-nil-types"] }
+# "i-scripts" adds EVAL support — used by worker-codescan's Sentinel lease
+# (crate::lease::LeaseClient::release) for a compare-and-delete Lua script;
+# purely additive (Cargo features never subtract capability from other
+# workspace members already depending on this shared entry).
+fred = { version = "=10.1.0", features = ["default-nil-types", "i-scripts"] }
 
 # Object storage
 # RUSTSEC-2026-0098/0099/0104 (rustls-webpki 0.101.7 name-constraint bypass +

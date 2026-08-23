@@ -1,0 +1,66 @@
+[package]
+publish = false
+name = "skauswatch-depgate"
+description = "SkausWatch DepGate — OCI/docker pull-through registry proxy: scan-on-ingest, content-addressed cache, verdict-as-object-tags (docs/v2-port/v2.1-depgate.md P1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "skauswatch-depgate"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+metrics = { workspace = true }
+penguin-licensing = { workspace = true, features = ["axum"] }
+# "stream" adds Response::bytes_stream(), used by src/upstream.rs to enforce
+# the size guard while reading rather than fully buffering an unbounded body
+# first — not part of the workspace's base reqwest feature set.
+reqwest = { workspace = true, features = ["stream"] }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+skauswatch-auth = { workspace = true }
+skauswatch-common = { workspace = true }
+skauswatch-db = { workspace = true }
+# SPIFFE Workload API identity (docs/v2-port/service-auth-model.md §1) —
+# backs the mesh-only mTLS admin listener (`src/mesh_admin.rs`).
+skauswatch-identity = { workspace = true }
+skauswatch-s3 = { workspace = true }
+skauswatch-scan-core = { workspace = true }
+skauswatch-telemetry = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+# mTLS termination for the mesh admin listener — ServerConfig itself is
+# built by skauswatch-identity, not this crate directly; mirrors
+# services/pki's `tokio-rustls` usage in its maintenance listener.
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+utoipa = { workspace = true, features = ["yaml"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+axum-test = { workspace = true }
+# testutil feature: constructs an IdentityProvider from injected SVID/bundle
+# material without a live SPIRE agent — see crates/skauswatch-identity's
+# testutil module.
+skauswatch-identity = { workspace = true, features = ["testutil"] }
+skauswatch-testkit = { workspace = true }
+wiremock = { workspace = true }
+
+[lints]
+workspace = true

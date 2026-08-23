@@ -14,6 +14,64 @@ See `docs/v2-port/tenancy-model.md` for the tenant model this sits above,
 and `crates/skauswatch-identity/src/lib.rs` (`IdentityProvider::fetch_jwt_svid`)
 for the JWT-SVID primitive the SPIRE path federates into AWS.
 
+## Validated (this session) — both STS exchanges proven against real AWS
+
+Both keyless exchanges this runbook describes have been run end-to-end
+against a real AWS account, not just documented/wiremocked:
+
+- **`sts:AssumeRole`** (§2's customer cross-account hop) — an IAM role
+  trusting the test caller's own ambient identity, gated by `ExternalId`,
+  successfully assumed.
+- **`sts:AssumeRoleWithWebIdentity`** (§1's SPIFFE-federation hop) — a
+  hand-minted RS256 JWT (`sub=spiffe://penguintech.io/test/awslive`,
+  `aud=sts.amazonaws.com`, the exact shape `fetch_jwt_svid` produces)
+  successfully exchanged for AWS credentials via a **throwaway,
+  self-hosted OIDC issuer** (a public S3 bucket serving
+  `.well-known/openid-configuration` + `jwks.json`), registered as a real
+  `aws_iam_openid_connect_provider` and trusted by a real IAM role with
+  the exact `aud`/`sub` `StringEquals` trust-policy shape §1 Step B
+  documents.
+
+Test coverage: `services/scanner/tests/aws_live.rs` (gated on
+`SKAUSWATCH_AWS_LIVE=1`, proves the S3 client + production YARA-X engine
+against a real bucket) and `tests/smoke/aws_identity/run.sh` (gated,
+requires AWS credentials in the environment — owns all AWS setup/teardown,
+self-sweeping via a `${PREFIX}-*` naming convention, drives
+`crates/skauswatch-s3/tests/aws_live_identity.rs` against the two roles it
+provisions). Neither test is part of the default `cargo test`/CI run —
+both no-op without explicit opt-in env vars and real AWS credentials; run
+manually per the doc comment in `aws_live.rs`.
+
+**What this does and does not prove:** the AWS-side trust-policy shape and
+the Rust-side credential-exchange code path are now proven correct
+end-to-end. It does **not** mean §5's live-ops checklist is done — the
+smoke test's OIDC issuer, IAM roles, and bucket are throwaway
+(`skauswatch-awslive-*`, torn down on exit every run), not the permanent
+`skauswatch_base`/`skauswatch_scan` roles or a real SPIRE
+`oidc-discovery-provider` deployment this runbook's §1/§2 Terraform
+describes. §5 remains outstanding; see
+`docs/v2-port/phase11-r3-r4-cutover-checklist.md` for the ordered
+remaining steps.
+
+**One thing the validation corrected**: §5's checklist bullet about
+thumbprint rotation. AWS does **not** actually validate the
+`thumbprint_list` value for an OIDC issuer whose TLS certificate chains to
+a CA already in AWS's trusted root store (confirmed live — the smoke
+test's S3-hosted issuer uses an AWS-issued cert, and `aws iam
+create-open-id-connect-provider` accepted an arbitrary computed thumbprint
+without rejecting a mismatch). This is documented AWS behavior for
+well-known CAs, not a skauswatch-specific finding, but it changes the
+checklist: thumbprint-rotation-tracking is only load-bearing if the SPIRE
+OIDC endpoint's TLS cert comes from a private/self-signed CA. If it's
+issued by a public CA (Let's Encrypt, AWS ACM, etc. — the "real CA"
+requirement already recommended below), the thumbprint is a required
+field on the API call but not an enforced trust check on AWS's side, so
+the "re-derive on every cert rotation" step is a defense-in-depth nicety
+rather than a hard requirement. §5's bullet is left as the safer default
+(re-derive anyway — it's cheap and doesn't rely on this AWS behavior
+staying the same), but this nuance was previously undocumented and is now
+called out explicitly.
+
 ## 0. SPIRE vs Pod-Identity/IRSA — and/or, not either/or
 
 skauswatch supports **two keyless AWS identity mechanisms side by side**.

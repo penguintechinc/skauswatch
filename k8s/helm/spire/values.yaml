@@ -136,6 +136,11 @@ spire:
       sqlite:
         path: "/run/spire/data/datastore.sqlite"
       postgresql:
+        # NOTE: `marchproxy` is a RETIRED product (repo archived). This default
+        # is inherited from the original chart and is almost certainly wrong —
+        # every environment that sets `type: postgresql` overrides it
+        # (beta/gamma use the in-cluster `postgres` service; production must be
+        # set explicitly — see production.yml).
         host: "marchproxy.nest.svc"
         port: 5432
         dbName: spire
@@ -372,16 +377,34 @@ spire:
     enabled: true
     # Known SkausWatch + PenguinCloud services registered on post-install.
     # Best-effort — entries skipped silently if namespace/SA absent.
+    #
+    # IMPORTANT — `serviceAccount:` MUST be the actual rendered K8s
+    # ServiceAccount name (used in the auto-enroll Job's `-selector
+    # k8s:sa:<serviceAccount>` workload-attestor match), NOT the bare
+    # service/chart directory name. Every skauswatch service chart leaves
+    # `fullnameOverride`/`nameOverride` empty, and every one of these
+    # services is deployed via `make deploy-alpha`/`deploy-beta`
+    # (`helm upgrade --install <svc> ./k8s/helm/<svc>` — release name ==
+    # chart dir name), so each chart's `<chart>.fullname` helper produces
+    # `<release>-<chart-name>` == `<svc>-skauswatch-<svc>` (chart name is
+    # `skauswatch-<svc>` in every Chart.yaml, and it is never a substring
+    # of the bare release name, so the helper's "skip the prefix if
+    # already contained" branch never triggers). Verified against real
+    # rendered output (`helm template <svc> k8s/helm/<svc>`) for every
+    # entry below, not assumed. A bare `serviceAccount: <svc>` value here
+    # silently breaks k8s workload attestation for that service — the
+    # SPIRE entry exists, but no real pod's ServiceAccount ever matches
+    # the selector, so the workload never gets an SVID.
     services:
       - name: monitor
         namespace: skauswatch
-        serviceAccount: monitor
+        serviceAccount: monitor-skauswatch-monitor
       - name: endpoint-agent
         namespace: skauswatch
-        serviceAccount: endpoint-agent
+        serviceAccount: endpoint-agent-skauswatch-endpoint-agent
       - name: manager
         namespace: skauswatch
-        serviceAccount: manager
+        serviceAccount: manager-skauswatch-manager
         # Sole admin-flagged identity in this chart: manager's SVID (minted
         # from this entry) is authorized to call the SPIRE Server Entry API
         # (UpdateEntry) at runtime to adjust SVID TTLs — see README
@@ -390,35 +413,44 @@ spire:
         admin: true
       - name: pki
         namespace: skauswatch
-        serviceAccount: pki
+        serviceAccount: pki-skauswatch-pki
       - name: sshca
         namespace: skauswatch
-        serviceAccount: sshca
+        serviceAccount: sshca-skauswatch-sshca
       - name: webui
         namespace: skauswatch
-        serviceAccount: webui
+        serviceAccount: webui-skauswatch-webui
       - name: worker-codescan
         namespace: skauswatch
-        serviceAccount: worker-codescan
+        serviceAccount: worker-codescan-skauswatch-worker-codescan
       - name: s3scan
         namespace: skauswatch
-        serviceAccount: s3scan
+        serviceAccount: s3scan-skauswatch-s3scan
       - name: scanner
         namespace: skauswatch
-        serviceAccount: scanner
+        serviceAccount: scanner-skauswatch-scanner
       - name: codescan-backend
         namespace: skauswatch
-        serviceAccount: codescan-backend
+        serviceAccount: codescan-backend-skauswatch-codescan-backend
       - name: worker-vault-sync
         namespace: skauswatch
-        serviceAccount: worker-vault-sync
+        serviceAccount: worker-vault-sync-skauswatch-worker-vault-sync
       - name: vault
         namespace: skauswatch
-        serviceAccount: vault
+        serviceAccount: vault-skauswatch-vault
       - name: logs
         namespace: skauswatch
-        serviceAccount: logs
-    # Cross-suite PenguinCloud services — enrolled only if namespace exists
+        serviceAccount: logs-skauswatch-logs
+      - name: depgate
+        namespace: skauswatch
+        serviceAccount: depgate-skauswatch-depgate
+    # Cross-suite PenguinCloud services — enrolled only if namespace exists.
+    # NOTE: serviceAccount values below are NOT independently verified
+    # against the `nest` repo's own chart fullname conventions the way the
+    # skauswatch-owned entries above are (no access to that repo's charts
+    # from here) — flag to nest's chart owner to confirm the same
+    # `<svc>-<chart-name>` fullname pattern does or doesn't apply there
+    # before relying on these entries in a live cutover.
     suiteServices:
       - name: nest-api
         namespace: nest
@@ -426,9 +458,6 @@ spire:
       - name: nest-gateway
         namespace: nest
         serviceAccount: nest-gateway
-      - name: marchproxy
-        namespace: nest
-        serviceAccount: marchproxy
 
   imagePullSecrets: []
   nameOverride: ""

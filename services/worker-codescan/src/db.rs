@@ -395,6 +395,187 @@ pub struct RepoConfigRecord {
     pub credential_id: Option<i64>,
 }
 
+// ── CodeScan Sentinel (docs/v2-port/v2.1-codescan-sentinel.md §9/§10) ─────
+// findings/scan-run persistence + the `alerts` bridge. Additive alongside
+// the AI-review functions above; see migrations/0004_codescan_sentinel_findings.sql.
+
+/// Post-upsert state of one `codescan_findings` row, used by the caller
+/// (`handler::CodeScanReviewHandler::handle_sentinel_scan`) to decide
+/// whether to bridge an `alerts` row.
+#[derive(Debug, Clone, Copy)]
+pub struct UpsertedFinding {
+    pub id: i64,
+    /// `true` when this finding has never been alerted during its current
+    /// open lifetime — brand new, or freshly reopened from `resolved` (the
+    /// upsert clears `alerted_at` on reopen so it can alert again).
+    pub needs_alert: bool,
+}
+
+/// Inserts or refreshes one `codescan_findings` row for the
+/// `(tenant_id, repo_config_id, branch, package_name, advisory_id)` dedupe
+/// key. A previously `resolved` finding that reappears is reopened and its
+/// `alerted_at` cleared — see migrations/0004's column doc comment.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_finding(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    repo_config_id: i64,
+    branch: &str,
+    kind: &str,
+    ecosystem: &str,
+    package_name: &str,
+    current_version: &str,
+    latest_version: Option<&str>,
+    advisory_id: &str,
+    severity: &str,
+) -> anyhow::Result<UpsertedFinding> {
+    let row = sqlx::query(
+        "INSERT INTO codescan_findings \
+         (tenant_id, repo_config_id, branch, kind, ecosystem, package_name, \
+          current_version, latest_version, advisory_id, severity, status, \
+          first_seen, last_seen, created_at, updated_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'open',now(),now(),now(),now()) \
+         ON CONFLICT (tenant_id, repo_config_id, branch, package_name, advisory_id) \
+         DO UPDATE SET \
+           kind = EXCLUDED.kind, \
+           latest_version = EXCLUDED.latest_version, \
+           severity = EXCLUDED.severity, \
+           last_seen = now(), \
+           updated_at = now(), \
+           status = 'open', \
+           alerted_at = CASE WHEN codescan_findings.status = 'resolved' \
+                              THEN NULL ELSE codescan_findings.alerted_at END \
+         RETURNING id, alerted_at",
+    )
+    .bind(tenant_id)
+    .bind(repo_config_id)
+    .bind(branch)
+    .bind(kind)
+    .bind(ecosystem)
+    .bind(package_name)
+    .bind(current_version)
+    .bind(latest_version)
+    .bind(advisory_id)
+    .bind(severity)
+    .fetch_one(pool)
+    .await?;
+
+    let id: i64 = row.get(0);
+    let alerted_at: Option<chrono::DateTime<chrono::Utc>> = row.get(1);
+    Ok(UpsertedFinding {
+        id,
+        needs_alert: alerted_at.is_none(),
+    })
+}
+
+/// Marks a finding as alerted — called immediately after the `alerts` row
+/// bridge succeeds, so a later scan of the same still-open finding does not
+/// alert again on every run.
+pub async fn mark_finding_alerted(pool: &PgPool, finding_id: i64) -> anyhow::Result<()> {
+    sqlx::query("UPDATE codescan_findings SET alerted_at = now() WHERE id = $1")
+        .bind(finding_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Marks every currently-`open` finding for `(tenant_id, repo_config_id,
+/// branch)` NOT in `seen_ids` as `resolved` — the dependency was either
+/// removed from the manifest or is no longer flagged. Called once per scan
+/// after every dependency in the branch has been upserted, mirroring how
+/// Dependabot auto-closes alerts for fixed dependencies.
+pub async fn resolve_stale_findings(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    repo_config_id: i64,
+    branch: &str,
+    seen_ids: &[i64],
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE codescan_findings SET status = 'resolved', updated_at = now() \
+         WHERE tenant_id = $1 AND repo_config_id = $2 AND branch = $3 \
+           AND status = 'open' AND NOT (id = ANY($4))",
+    )
+    .bind(tenant_id)
+    .bind(repo_config_id)
+    .bind(branch)
+    .bind(seen_ids)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Starts a `codescan_scan_runs` row, returning its id for
+/// [`finish_scan_run`].
+pub async fn start_scan_run(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    repo_config_id: i64,
+    branch: &str,
+) -> anyhow::Result<i64> {
+    let row = sqlx::query(
+        "INSERT INTO codescan_scan_runs (tenant_id, repo_config_id, branch, status, started_at) \
+         VALUES ($1, $2, $3, 'running', now()) RETURNING id",
+    )
+    .bind(tenant_id)
+    .bind(repo_config_id)
+    .bind(branch)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get::<i64, _>(0))
+}
+
+/// Closes out a `codescan_scan_runs` row with its final status.
+pub async fn finish_scan_run(
+    pool: &PgPool,
+    run_id: i64,
+    status: &str,
+    findings_count: i64,
+    error: Option<&str>,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE codescan_scan_runs SET status = $1, findings_count = $2, error = $3, \
+         finished_at = now() WHERE id = $4",
+    )
+    .bind(status)
+    .bind(findings_count)
+    .bind(error)
+    .bind(run_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Writes one alert row directly into manager's shared `alerts` table
+/// (docs/v2-port/v2.1-codescan-sentinel.md §9/§12) — the same
+/// shared-database, per-service-grant pattern as every other cross-table
+/// write in this stack (see `scripts/db/init-codescan-db.sql`'s `codescan`
+/// grant). Manager owns the table's schema and REST surface; this worker
+/// only ever inserts, matching its INSERT-only grant — it never reads back
+/// or mutates a row once written.
+pub async fn insert_sentinel_alert(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    title: &str,
+    description: &str,
+    severity: &str,
+    indicators: &serde_json::Value,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO alerts (title, description, severity, status, source, indicators, \
+          tenant_id, created_at, updated_at) \
+         VALUES ($1, $2, $3, 'pending', 'codescan_sentinel', $4, $5, now(), now())",
+    )
+    .bind(title)
+    .bind(description)
+    .bind(severity)
+    .bind(indicators)
+    .bind(tenant_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -928,5 +1109,382 @@ mod tests {
         assert_eq!(row.get::<String, _>(4), "critical");
         assert_eq!(row.get::<String, _>(5), "open");
         assert_eq!(row.get::<Uuid, _>(6), test_tenant());
+    }
+
+    // ── Sentinel: findings / scan runs / alerts bridge ────────────────────
+
+    #[tokio::test]
+    async fn upsert_finding_inserts_a_new_open_row_needing_alert() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+
+        let result = upsert_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            "cve",
+            "npm",
+            "left-pad",
+            "1.0.0",
+            Some("1.3.0"),
+            "GHSA-aaaa",
+            "high",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert: {e}"));
+        assert!(result.id > 0);
+        assert!(result.needs_alert, "a brand new finding must need an alert");
+
+        let row = sqlx::query(
+            "SELECT status, severity, latest_version FROM codescan_findings WHERE id = $1",
+        )
+        .bind(result.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<String, _>(0), "open");
+        assert_eq!(row.get::<String, _>(1), "high");
+        assert_eq!(row.get::<Option<String>, _>(2).as_deref(), Some("1.3.0"));
+    }
+
+    #[tokio::test]
+    async fn upsert_finding_is_idempotent_on_the_dedupe_key_and_does_not_re_alert() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+
+        let first = upsert_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            "cve",
+            "npm",
+            "left-pad",
+            "1.0.0",
+            Some("1.3.0"),
+            "GHSA-aaaa",
+            "high",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("first upsert: {e}"));
+        mark_finding_alerted(&pool, first.id)
+            .await
+            .unwrap_or_else(|e| panic!("mark alerted: {e}"));
+
+        let second = upsert_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            "cve",
+            "npm",
+            "left-pad",
+            "1.0.0",
+            Some("1.4.0"),
+            "GHSA-aaaa",
+            "critical",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("second upsert: {e}"));
+
+        assert_eq!(
+            second.id, first.id,
+            "same dedupe key must update, not duplicate"
+        );
+        assert!(
+            !second.needs_alert,
+            "a finding already alerted this lifetime must not re-alert on every scan"
+        );
+
+        let row =
+            sqlx::query("SELECT severity, latest_version FROM codescan_findings WHERE id = $1")
+                .bind(first.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<String, _>(0), "critical");
+        assert_eq!(row.get::<Option<String>, _>(1).as_deref(), Some("1.4.0"));
+    }
+
+    #[tokio::test]
+    async fn upsert_finding_reopens_a_resolved_finding_and_allows_re_alerting() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+
+        let first = upsert_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            "cve",
+            "npm",
+            "left-pad",
+            "1.0.0",
+            Some("1.3.0"),
+            "GHSA-aaaa",
+            "high",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert: {e}"));
+        mark_finding_alerted(&pool, first.id)
+            .await
+            .unwrap_or_else(|e| panic!("mark alerted: {e}"));
+        resolve_stale_findings(&pool, test_tenant(), repo, "main", &[])
+            .await
+            .unwrap_or_else(|e| panic!("resolve stale: {e}"));
+
+        let row = sqlx::query("SELECT status FROM codescan_findings WHERE id = $1")
+            .bind(first.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<String, _>(0), "resolved");
+
+        let reopened = upsert_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            "cve",
+            "npm",
+            "left-pad",
+            "1.0.0",
+            Some("1.5.0"),
+            "GHSA-aaaa",
+            "high",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("reopen upsert: {e}"));
+        assert_eq!(reopened.id, first.id);
+        assert!(
+            reopened.needs_alert,
+            "a reopened finding must be able to alert again"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_findings_only_touches_findings_missing_from_seen_ids() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+
+        let stale = upsert_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            "sca",
+            "npm",
+            "stale-pkg",
+            "1.0.0",
+            Some("1.0.0"),
+            "",
+            "low",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert stale: {e}"));
+        let kept = upsert_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            "sca",
+            "npm",
+            "kept-pkg",
+            "1.0.0",
+            Some("2.0.0"),
+            "",
+            "low",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert kept: {e}"));
+
+        resolve_stale_findings(&pool, test_tenant(), repo, "main", &[kept.id])
+            .await
+            .unwrap_or_else(|e| panic!("resolve stale: {e}"));
+
+        let stale_status: String =
+            sqlx::query_scalar("SELECT status FROM codescan_findings WHERE id = $1")
+                .bind(stale.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("select stale: {e}"));
+        let kept_status: String =
+            sqlx::query_scalar("SELECT status FROM codescan_findings WHERE id = $1")
+                .bind(kept.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("select kept: {e}"));
+        assert_eq!(stale_status, "resolved");
+        assert_eq!(kept_status, "open");
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_findings_does_not_touch_a_different_tenants_or_branchs_rows() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+
+        let same_branch = upsert_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            "sca",
+            "npm",
+            "pkg-a",
+            "1.0.0",
+            Some("1.0.0"),
+            "",
+            "low",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert: {e}"));
+        let other_branch = upsert_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "release/v1.0.x",
+            "sca",
+            "npm",
+            "pkg-b",
+            "1.0.0",
+            Some("1.0.0"),
+            "",
+            "low",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert other branch: {e}"));
+
+        resolve_stale_findings(&pool, test_tenant(), repo, "main", &[])
+            .await
+            .unwrap_or_else(|e| panic!("resolve stale: {e}"));
+
+        let same_branch_status: String =
+            sqlx::query_scalar("SELECT status FROM codescan_findings WHERE id = $1")
+                .bind(same_branch.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("select: {e}"));
+        let other_branch_status: String =
+            sqlx::query_scalar("SELECT status FROM codescan_findings WHERE id = $1")
+                .bind(other_branch.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(same_branch_status, "resolved");
+        assert_eq!(
+            other_branch_status, "open",
+            "resolving one branch's stale findings must never touch another branch's rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_and_finish_scan_run_round_trip() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+
+        let run_id = start_scan_run(&pool, test_tenant(), repo, "main")
+            .await
+            .unwrap_or_else(|e| panic!("start: {e}"));
+        assert!(run_id > 0);
+
+        finish_scan_run(&pool, run_id, "completed", 3, None)
+            .await
+            .unwrap_or_else(|e| panic!("finish: {e}"));
+
+        let row = sqlx::query(
+            "SELECT status, findings_count, error, finished_at FROM codescan_scan_runs \
+             WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<String, _>(0), "completed");
+        assert_eq!(row.get::<i32, _>(1), 3);
+        assert_eq!(row.get::<Option<String>, _>(2), None);
+        assert!(
+            row.get::<Option<chrono::DateTime<chrono::Utc>>, _>(3)
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_scan_run_records_an_error_on_failure() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let run_id = start_scan_run(&pool, test_tenant(), repo, "main")
+            .await
+            .unwrap_or_else(|e| panic!("start: {e}"));
+
+        finish_scan_run(&pool, run_id, "failed", 0, Some("git provider unreachable"))
+            .await
+            .unwrap_or_else(|e| panic!("finish: {e}"));
+
+        let row = sqlx::query("SELECT status, error FROM codescan_scan_runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<String, _>(0), "failed");
+        assert_eq!(
+            row.get::<Option<String>, _>(1).as_deref(),
+            Some("git provider unreachable")
+        );
+    }
+
+    /// Mirrors manager's `alerts` table shape closely enough to exercise
+    /// `insert_sentinel_alert`'s real INSERT statement, without pulling in
+    /// manager's own (concurrently-evolving) migrations — this worker's
+    /// tests only ever need to prove the INSERT is well-formed and scoped
+    /// correctly, not manager's full schema.
+    async fn seed_alerts_fixture_table(pool: &PgPool) {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS alerts ( \
+                id SERIAL PRIMARY KEY, \
+                title VARCHAR(255) NOT NULL, \
+                description TEXT, \
+                severity VARCHAR(20) NOT NULL, \
+                status VARCHAR(20) DEFAULT 'pending', \
+                source VARCHAR(100), \
+                indicators JSONB, \
+                tenant_id UUID NOT NULL, \
+                created_at TIMESTAMPTZ DEFAULT now(), \
+                updated_at TIMESTAMPTZ \
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("create alerts fixture table: {e}"));
+    }
+
+    #[tokio::test]
+    async fn insert_sentinel_alert_writes_a_tenant_scoped_row() {
+        let pool = test_pool().await;
+        seed_alerts_fixture_table(&pool).await;
+
+        insert_sentinel_alert(
+            &pool,
+            test_tenant(),
+            "Critical CVE in left-pad",
+            "GHSA-aaaa affecting left-pad@1.0.0 on acme/widgets:main",
+            "critical",
+            &serde_json::json!(["left-pad", "GHSA-aaaa"]),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("insert alert: {e}"));
+
+        let row = sqlx::query(
+            "SELECT title, severity, status, source, tenant_id FROM alerts WHERE title = $1",
+        )
+        .bind("Critical CVE in left-pad")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<String, _>(0), "Critical CVE in left-pad");
+        assert_eq!(row.get::<String, _>(1), "critical");
+        assert_eq!(row.get::<String, _>(2), "pending");
+        assert_eq!(row.get::<String, _>(3), "codescan_sentinel");
+        assert_eq!(row.get::<Uuid, _>(4), test_tenant());
     }
 }

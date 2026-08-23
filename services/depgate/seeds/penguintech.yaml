@@ -1,0 +1,27 @@
+# DepGate seed manifest — warm-starts the vetted cache ahead of demand
+# (docs/v2-port/v2.1-depgate.md §2, §9 P1 "seed-manifest warm-start
+# (pinned)"). `skauswatch-depgate seed --manifest seeds/penguintech.yaml`
+# pulls, scans, tags, and pins every entry below.
+#
+# Deviation from the spec's illustrative filename: the spec names this file
+# `penguintech.toml`, but `toml` is not yet a workspace dependency and
+# `serde_yaml` already is (pinned in the root Cargo.toml for
+# `endpoint-agent`'s config) — reusing it here avoids adding a new
+# dependency for what is otherwise a plain key/value list. Content and
+# purpose are unchanged from the spec's intent.
+#
+# Kept small but real: every entry is a base image this repo's own
+# Dockerfiles already pull from Docker Hub (see services/*/Dockerfile),
+# so seeding this list warms exactly the images DepGate's own CI/dev
+# builds need.
+images:
+  - name: library/rust
+    reference: "1.97-slim-bookworm"
+  - name: library/debian
+    reference: "bookworm-slim"
+  - name: library/postgres
+    reference: "17-bookworm"
+  - name: valkey/valkey
+    reference: "8-bookworm"
+  - name: library/node
+    reference: "26-bookworm-slim"

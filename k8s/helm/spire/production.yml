@@ -24,6 +24,13 @@ spire:
       # Preferred: NEST-hosted PostgreSQL. Fallback: any PG host.
       type: postgresql
       postgresql:
+        # !! MUST BE SET BEFORE PROD CUTOVER !!
+        # `marchproxy.nest.svc` names a RETIRED product (marchproxy: repo
+        # archived, capability folded into Envoy / owning repos). If that
+        # Service no longer exists, the SPIRE server cannot reach its
+        # datastore and will not start — taking the whole mesh with it.
+        # Replace with the real prod PostgreSQL host before cutover; tracked
+        # as a blocking item in docs/v2-port/phase11-r3-r4-cutover-checklist.md.
         host: "marchproxy.nest.svc"
         port: 5432
         dbName: spire

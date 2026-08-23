@@ -18,7 +18,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use utoipa::OpenApi;
 
-use super::{credentials, license_policies, plans, repos, reviews, status};
+use super::{credentials, findings, license_policies, plans, repos, reviews, status};
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
@@ -67,6 +67,8 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         license_policies::get_policy,
         license_policies::update_policy,
         license_policies::delete_policy,
+        findings::list_findings,
+        findings::findings_summary,
     ),
     components(schemas(
         ErrorResponse,
@@ -106,11 +108,16 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         license_policies::UpdatePolicyRequest,
         license_policies::PolicyUpdateResponse,
         license_policies::PolicyDeleteResponse,
+        findings::Finding,
+        findings::FindingListResponse,
+        findings::SeverityCount,
+        findings::FindingsSummaryResponse,
     )),
     tags(
         (name = "codescan", description = "Repo configs, AI code reviews, and issue plans"),
         (name = "credentials", description = "Git credential storage for private repo access"),
         (name = "license-policies", description = "OSS license-compliance policy configuration"),
+        (name = "codescan-sentinel", description = "Scheduled SCA/CVE dependency scanning and reports (report-only, no AI)"),
     ),
     modifiers(&SecurityAddon),
 )]

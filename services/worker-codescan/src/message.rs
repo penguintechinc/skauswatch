@@ -82,6 +82,80 @@ impl CodeScanReviewTask {
     }
 }
 
+/// Discriminates which task shape a `codescan:tasks` entry carries.
+/// `CodeScanReviewTask` entries (the pre-existing AI-review pipeline) omit
+/// this field entirely, so its absence means `"review"` — only the new
+/// Sentinel scheduler (`crate::scheduler::tick`) ever stamps
+/// `"sentinel_scan"`. See `handler::CodeScanReviewHandler::handle`, which
+/// reads this before deciding which task type to parse the entry as.
+pub fn stream_task_type(entry: &StreamEntry) -> &str {
+    entry.get("task_type").unwrap_or("review")
+}
+
+/// A CodeScan Sentinel scan task from the `codescan:tasks` stream
+/// (docs/v2-port/v2.1-codescan-sentinel.md §10) — enqueued by
+/// `crate::scheduler::tick`, one per (repo, scheduling tick). Unlike
+/// [`CodeScanReviewTask`] this is scoped to a whole repo, not one PR/MR;
+/// `crate::sentinel::scan_repo` resolves the actual branches to scan
+/// (default + latest `release/*`) itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SentinelScanTask {
+    /// `codescan_repo_configs.id` — the repo to scan.
+    pub repo_config_id: i64,
+    /// Validated tenant UUID this task belongs to — sourced from the
+    /// scheduler's own tenant-scoped `codescan_repo_configs` query, never
+    /// client-supplied. Same nil-UUID rejection as [`CodeScanReviewTask`].
+    pub tenant_id: uuid::Uuid,
+    /// Git provider (`github`/`gitlab`).
+    pub provider: String,
+    /// Repository name (display/logging only — `repo_url` is what the
+    /// git-provider calls actually parse for owner/project identity).
+    pub repo_name: String,
+    /// Repository URL, e.g. `https://github.com/acme/widgets`.
+    pub repo_url: String,
+}
+
+impl SentinelScanTask {
+    /// Parses a `task_type = "sentinel_scan"` stream entry. Callers must
+    /// check [`stream_task_type`] first — this does not itself re-check the
+    /// discriminator field.
+    pub fn from_stream_entry(entry: &StreamEntry) -> anyhow::Result<Self> {
+        let repo_config_id = entry
+            .get("repo_config_id")
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| anyhow::anyhow!("missing/invalid repo_config_id"))?;
+
+        let tenant_id: uuid::Uuid = entry
+            .get("tenant_id")
+            .and_then(|v| v.parse::<uuid::Uuid>().ok())
+            .filter(|id| !id.is_nil())
+            .ok_or_else(|| anyhow::anyhow!("missing/invalid tenant_id"))?;
+
+        let provider = entry
+            .get("provider")
+            .ok_or_else(|| anyhow::anyhow!("missing provider"))?
+            .to_string();
+
+        let repo_name = entry
+            .get("repo_name")
+            .ok_or_else(|| anyhow::anyhow!("missing repo_name"))?
+            .to_string();
+
+        let repo_url = entry
+            .get("repo_url")
+            .ok_or_else(|| anyhow::anyhow!("missing repo_url"))?
+            .to_string();
+
+        Ok(Self {
+            repo_config_id,
+            tenant_id,
+            provider,
+            repo_name,
+            repo_url,
+        })
+    }
+}
+
 /// Result of a code review (published to codescan:results stream).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
@@ -239,6 +313,67 @@ mod tests {
             CodeScanReviewTask::from_stream_entry(&entry(&fields)).is_err(),
             "the nil UUID must never be treated as a valid tenant"
         );
+    }
+
+    #[test]
+    fn stream_task_type_defaults_to_review_when_absent() {
+        assert_eq!(stream_task_type(&entry(&full_fields())), "review");
+    }
+
+    #[test]
+    fn stream_task_type_reads_the_explicit_discriminator() {
+        let e = entry(&[("task_type", "sentinel_scan")]);
+        assert_eq!(stream_task_type(&e), "sentinel_scan");
+    }
+
+    fn sentinel_fields() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("repo_config_id", "7"),
+            ("tenant_id", TEST_TENANT_ID),
+            ("provider", "github"),
+            ("repo_name", "acme/widgets"),
+            ("repo_url", "https://github.com/acme/widgets"),
+        ]
+    }
+
+    #[test]
+    fn sentinel_scan_task_parses_a_well_formed_entry() {
+        let task = SentinelScanTask::from_stream_entry(&entry(&sentinel_fields()))
+            .expect("parse should succeed");
+        assert_eq!(task.repo_config_id, 7);
+        assert_eq!(task.tenant_id, test_tenant());
+        assert_eq!(task.provider, "github");
+        assert_eq!(task.repo_name, "acme/widgets");
+        assert_eq!(task.repo_url, "https://github.com/acme/widgets");
+    }
+
+    #[test]
+    fn sentinel_scan_task_missing_repo_config_id_is_an_error() {
+        let fields: Vec<_> = sentinel_fields()
+            .into_iter()
+            .filter(|(k, _)| *k != "repo_config_id")
+            .collect();
+        assert!(SentinelScanTask::from_stream_entry(&entry(&fields)).is_err());
+    }
+
+    #[test]
+    fn sentinel_scan_task_nil_tenant_id_is_an_error() {
+        let mut fields = sentinel_fields();
+        fields.retain(|(k, _)| *k != "tenant_id");
+        fields.push(("tenant_id", "00000000-0000-0000-0000-000000000000"));
+        assert!(
+            SentinelScanTask::from_stream_entry(&entry(&fields)).is_err(),
+            "the nil UUID must never be treated as a valid tenant"
+        );
+    }
+
+    #[test]
+    fn sentinel_scan_task_missing_repo_url_is_an_error() {
+        let fields: Vec<_> = sentinel_fields()
+            .into_iter()
+            .filter(|(k, _)| *k != "repo_url")
+            .collect();
+        assert!(SentinelScanTask::from_stream_entry(&entry(&fields)).is_err());
     }
 
     #[test]

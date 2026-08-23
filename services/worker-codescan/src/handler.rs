@@ -1,4 +1,7 @@
-//! Stream handler for CodeScan review tasks.
+//! Stream handler for CodeScan review tasks and (net-new) CodeScan Sentinel
+//! scan tasks — both arrive on the same `codescan:tasks` stream,
+//! discriminated by `message::stream_task_type` (spec
+//! docs/v2-port/v2.1-codescan-sentinel.md §10).
 
 use chrono::Utc;
 use skauswatch_ai::{
@@ -7,6 +10,7 @@ use skauswatch_ai::{
 };
 use skauswatch_streams::{StreamEntry, StreamHandler, StreamProducer};
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use skauswatch_vault::CredentialCipher;
 
@@ -15,8 +19,9 @@ use crate::db::{self, RepoConfigRecord};
 use crate::detection;
 use crate::git_provider::{self, GitCredentials};
 use crate::license_scan::RegistryClient;
-use crate::message::CodeScanReviewTask;
+use crate::message::{CodeScanReviewTask, SentinelScanTask, stream_task_type};
 use crate::review::ReviewOutput;
+use crate::sentinel;
 
 /// Handler for CodeScan review stream entries.
 pub struct CodeScanReviewHandler {
@@ -46,19 +51,46 @@ impl CodeScanReviewHandler {
         }
     }
 
-    /// Resolves which git credential to use for `task`'s repo: a per-repo
+    /// Resolves which git credential to use for `task`'s repo — thin
+    /// wrapper over [`Self::resolve_credentials`] logging by `review_id`.
+    /// See that function for the fallback semantics.
+    async fn resolve_git_credentials(
+        &self,
+        task: &CodeScanReviewTask,
+        repo_config: &RepoConfigRecord,
+    ) -> GitCredentials {
+        self.resolve_credentials(task.tenant_id, repo_config, task.review_id)
+            .await
+    }
+
+    /// Resolves which git credential to use for a Sentinel scan's repo —
+    /// thin wrapper over [`Self::resolve_credentials`] logging by
+    /// `repo_config_id` (Sentinel tasks have no `review_id`).
+    async fn resolve_sentinel_git_credentials(
+        &self,
+        task: &crate::message::SentinelScanTask,
+        repo_config: &RepoConfigRecord,
+    ) -> GitCredentials {
+        self.resolve_credentials(task.tenant_id, repo_config, task.repo_config_id)
+            .await
+    }
+
+    /// Shared core of git-credential resolution: prefers a per-repo
     /// `codescan_git_credentials` row (via `repo_config.credential_id`) when
     /// one is configured and usable, falling back to the worker-wide
     /// `GIT_TOKEN`/`GIT_API_BASE_URL` config otherwise. Every failure mode
     /// (no credential configured, missing encryption key, credential not
     /// found/inactive/expired/wrong-type, decrypt failure) degrades to the
-    /// fallback with a warning rather than failing the review — mirrors how
+    /// fallback with a warning rather than failing the caller — mirrors how
     /// `git_provider::fetch_pr_diff` failures degrade to an empty diff
-    /// rather than aborting (see `execute_pipeline`).
-    async fn resolve_git_credentials(
+    /// rather than aborting. `log_id` is purely a tracing field (the
+    /// review id for the AI-review pipeline, the repo config id for
+    /// Sentinel) — it has no effect on which credential is chosen.
+    async fn resolve_credentials(
         &self,
-        task: &CodeScanReviewTask,
+        tenant_id: Uuid,
         repo_config: &RepoConfigRecord,
+        log_id: i64,
     ) -> GitCredentials {
         let fallback = || GitCredentials {
             provider: repo_config._provider.clone(),
@@ -72,7 +104,7 @@ impl CodeScanReviewHandler {
 
         let Some(key) = &self.config.credential_encryption_key else {
             tracing::warn!(
-                review_id = task.review_id,
+                log_id,
                 credential_id,
                 "repo has a git credential configured but CREDENTIAL_ENCRYPTION_KEY is unset, \
                  falling back to the worker-wide GIT_TOKEN"
@@ -84,7 +116,7 @@ impl CodeScanReviewHandler {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
-                    review_id = task.review_id,
+                    log_id,
                     error = ?e,
                     "invalid CREDENTIAL_ENCRYPTION_KEY, falling back to the worker-wide GIT_TOKEN"
                 );
@@ -92,13 +124,11 @@ impl CodeScanReviewHandler {
             }
         };
 
-        let credential = match db::get_git_credential(&self.pool, credential_id, task.tenant_id)
-            .await
-        {
+        let credential = match db::get_git_credential(&self.pool, credential_id, tenant_id).await {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(
-                    review_id = task.review_id,
+                    log_id,
                     credential_id,
                     error = %e,
                     "git credential not found for this tenant, falling back to the worker-wide GIT_TOKEN"
@@ -109,7 +139,7 @@ impl CodeScanReviewHandler {
 
         if !credential.is_active {
             tracing::warn!(
-                review_id = task.review_id,
+                log_id,
                 credential_id,
                 "git credential is inactive, falling back to the worker-wide GIT_TOKEN"
             );
@@ -117,7 +147,7 @@ impl CodeScanReviewHandler {
         }
         if credential.credential_type != "token" {
             tracing::warn!(
-                review_id = task.review_id,
+                log_id,
                 credential_id,
                 credential_type = %credential.credential_type,
                 "only 'token' credentials are usable for API-based diff fetching, \
@@ -127,7 +157,7 @@ impl CodeScanReviewHandler {
         }
         if credential.platform != repo_config._provider {
             tracing::warn!(
-                review_id = task.review_id,
+                log_id,
                 credential_id,
                 credential_platform = %credential.platform,
                 repo_provider = %repo_config._provider,
@@ -140,7 +170,7 @@ impl CodeScanReviewHandler {
             && expires_at < Utc::now()
         {
             tracing::warn!(
-                review_id = task.review_id,
+                log_id,
                 credential_id,
                 "git credential has expired, falling back to the worker-wide GIT_TOKEN"
             );
@@ -155,7 +185,7 @@ impl CodeScanReviewHandler {
             },
             Err(e) => {
                 tracing::warn!(
-                    review_id = task.review_id,
+                    log_id,
                     credential_id,
                     error = ?e,
                     "failed to decrypt git credential, falling back to the worker-wide GIT_TOKEN"
@@ -454,6 +484,241 @@ impl CodeScanReviewHandler {
             );
         }
     }
+
+    // ── CodeScan Sentinel (docs/v2-port/v2.1-codescan-sentinel.md §9-§12) ──
+
+    /// Orchestrates one Sentinel scan task: resolves the repo's default +
+    /// latest release branch and scans each independently. One branch
+    /// failing to resolve credentials/branches is a hard error (retried by
+    /// the stream consumer); a single branch's *scan* failing is recorded
+    /// on its own `codescan_scan_runs` row and never blocks the other
+    /// branch (see `scan_and_persist_branch`).
+    async fn handle_sentinel_scan(
+        &self,
+        entry: &StreamEntry,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let task = SentinelScanTask::from_stream_entry(entry)
+            .map_err(|e| format!("parse sentinel task: {}", e))?;
+
+        tracing::info!(
+            repo_config_id = task.repo_config_id,
+            repo = %task.repo_name,
+            "processing CodeScan Sentinel scan task"
+        );
+
+        let repo_config =
+            match db::get_repo_config(&self.pool, task.repo_config_id, task.tenant_id).await {
+                Ok(rc) => rc,
+                Err(e) => {
+                    tracing::error!(
+                        repo_config_id = task.repo_config_id,
+                        error = %e,
+                        "sentinel: repo config not found"
+                    );
+                    return Err(format!("get repo config: {}", e).into());
+                }
+            };
+
+        let git_creds = self
+            .resolve_sentinel_git_credentials(&task, &repo_config)
+            .await;
+        if git_creds.token.is_empty() {
+            tracing::warn!(
+                repo_config_id = task.repo_config_id,
+                "sentinel: no usable git credential (neither a per-repo credential nor \
+                 GIT_TOKEN), skipping scan"
+            );
+            return Ok(());
+        }
+
+        let branches =
+            match sentinel::resolve_target_branches(&task.provider, &task.repo_url, &git_creds)
+                .await
+            {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::error!(
+                        repo_config_id = task.repo_config_id,
+                        error = %e,
+                        "sentinel: failed to resolve target branches"
+                    );
+                    return Err(format!("resolve target branches: {}", e).into());
+                }
+            };
+
+        for branch in branches {
+            self.scan_and_persist_branch(&task, &branch, &git_creds)
+                .await;
+        }
+
+        Ok(())
+    }
+
+    /// Scans one (repo, branch), upserts every computed finding, resolves
+    /// findings that vanished this run, records the `codescan_scan_runs`
+    /// row, and bridges any newly-alertable critical/high CVE finding into
+    /// `alerts`. Every failure here is logged and swallowed rather than
+    /// propagated — one branch's persistence trouble must never abort the
+    /// other branch's scan.
+    async fn scan_and_persist_branch(
+        &self,
+        task: &SentinelScanTask,
+        branch: &str,
+        git_creds: &GitCredentials,
+    ) {
+        let run_id =
+            match db::start_scan_run(&self.pool, task.tenant_id, task.repo_config_id, branch).await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!(
+                        repo_config_id = task.repo_config_id,
+                        branch,
+                        error = %e,
+                        "sentinel: failed to start scan run"
+                    );
+                    return;
+                }
+            };
+
+        let findings = sentinel::scan_branch(
+            &task.provider,
+            &task.repo_url,
+            branch,
+            git_creds,
+            &self.registry_client,
+        )
+        .await;
+
+        let mut seen_ids = Vec::with_capacity(findings.len());
+        for finding in &findings {
+            let upserted = match db::upsert_finding(
+                &self.pool,
+                task.tenant_id,
+                task.repo_config_id,
+                branch,
+                finding.kind,
+                finding.ecosystem,
+                &finding.package_name,
+                &finding.current_version,
+                finding.latest_version.as_deref(),
+                &finding.advisory_id,
+                &finding.severity,
+            )
+            .await
+            {
+                Ok(u) => u,
+                Err(e) => {
+                    tracing::warn!(
+                        repo_config_id = task.repo_config_id,
+                        branch,
+                        package = %finding.package_name,
+                        error = %e,
+                        "sentinel: failed to upsert finding"
+                    );
+                    continue;
+                }
+            };
+            seen_ids.push(upserted.id);
+
+            if upserted.needs_alert
+                && finding.kind == "cve"
+                && matches!(finding.severity.as_str(), "critical" | "high")
+            {
+                self.bridge_alert(task, branch, finding, upserted.id).await;
+            }
+        }
+
+        if let Err(e) = db::resolve_stale_findings(
+            &self.pool,
+            task.tenant_id,
+            task.repo_config_id,
+            branch,
+            &seen_ids,
+        )
+        .await
+        {
+            tracing::warn!(
+                repo_config_id = task.repo_config_id,
+                branch,
+                error = %e,
+                "sentinel: failed to resolve stale findings"
+            );
+        }
+
+        let findings_count = i64::try_from(findings.len()).unwrap_or(i64::MAX);
+        if let Err(e) =
+            db::finish_scan_run(&self.pool, run_id, "completed", findings_count, None).await
+        {
+            tracing::warn!(
+                repo_config_id = task.repo_config_id,
+                branch,
+                error = %e,
+                "sentinel: failed to finish scan run"
+            );
+        }
+    }
+
+    /// Writes one `alerts` row for a newly-alertable critical/high CVE
+    /// finding and marks the finding alerted. Never propagates a failure —
+    /// an alert-bridge problem must not fail the scan that found the CVE in
+    /// the first place (the finding itself is already persisted).
+    async fn bridge_alert(
+        &self,
+        task: &SentinelScanTask,
+        branch: &str,
+        finding: &sentinel::ScanFinding,
+        finding_id: i64,
+    ) {
+        let title = format!(
+            "{} in {}@{} ({})",
+            finding.advisory_id, finding.package_name, finding.current_version, task.repo_name
+        );
+        let description = format!(
+            "CodeScan Sentinel found {} affecting {} {} on {}:{} (ecosystem: {}, latest: {})",
+            finding.advisory_id,
+            finding.package_name,
+            finding.current_version,
+            task.repo_name,
+            branch,
+            finding.ecosystem,
+            finding.latest_version.as_deref().unwrap_or("unknown"),
+        );
+        let indicators = serde_json::json!([
+            task.repo_name,
+            branch,
+            finding.package_name,
+            finding.advisory_id,
+        ]);
+
+        match db::insert_sentinel_alert(
+            &self.pool,
+            task.tenant_id,
+            &title,
+            &description,
+            &finding.severity,
+            &indicators,
+        )
+        .await
+        {
+            Ok(()) => {
+                if let Err(e) = db::mark_finding_alerted(&self.pool, finding_id).await {
+                    tracing::warn!(
+                        finding_id,
+                        error = %e,
+                        "sentinel: alert written but failed to mark finding alerted"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    finding_id,
+                    error = %e,
+                    "sentinel: failed to write alert for a critical/high finding"
+                );
+            }
+        }
+    }
 }
 
 /// `chars / 4` token-count approximation — see `record_provider_usage`'s doc
@@ -486,6 +751,13 @@ impl StreamHandler for CodeScanReviewHandler {
         &self,
         entry: &StreamEntry,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // `codescan:tasks` carries two task shapes; entries with no
+        // task_type field (the pre-existing AI-review pipeline) fall
+        // through to the review parse below unchanged.
+        if stream_task_type(entry) == "sentinel_scan" {
+            return self.handle_sentinel_scan(entry).await;
+        }
+
         // Parse the task from stream entry.
         let task = CodeScanReviewTask::from_stream_entry(entry)
             .map_err(|e| format!("parse task: {}", e))?;
@@ -1706,5 +1978,295 @@ mod tests {
         .await
         .unwrap_or_else(|e| panic!("count violations: {e}"));
         assert_eq!(violation_count, 0);
+    }
+
+    // ── CodeScan Sentinel dispatch/orchestration ───────────────────────────
+
+    fn sentinel_task_entry(repo_config_id: i64) -> StreamEntry {
+        let mut fields = HashMap::new();
+        fields.insert("task_type".to_string(), "sentinel_scan".to_string());
+        fields.insert("repo_config_id".to_string(), repo_config_id.to_string());
+        fields.insert("tenant_id".to_string(), TEST_TENANT_ID.to_string());
+        fields.insert("provider".to_string(), "github".to_string());
+        fields.insert("repo_name".to_string(), "acme/widgets".to_string());
+        fields.insert(
+            "repo_url".to_string(),
+            "https://github.com/acme/widgets".to_string(),
+        );
+        StreamEntry {
+            id: "2-0".to_string(),
+            fields,
+        }
+    }
+
+    /// Mounts the GitHub repo-identity mocks (`default_branch` + branch
+    /// list, no `release/*` branch) every Sentinel handler test needs.
+    async fn mount_github_repo_mocks(mock: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"default_branch": "main"})),
+            )
+            .mount(mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/branches"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{"name": "main"}])),
+            )
+            .mount(mock)
+            .await;
+    }
+
+    fn sentinel_config(mock_uri: &str) -> WorkerConfig {
+        let mut cfg = base_config("ollama");
+        cfg.git_token = Some("test-token".to_string());
+        cfg.git_api_base_url = Some(mock_uri.to_string());
+        cfg.go_registry_url = Some(mock_uri.to_string());
+        cfg
+    }
+
+    #[tokio::test]
+    async fn handle_dispatches_sentinel_scan_and_completes_with_no_manifests() {
+        let pool = test_pool().await;
+        let producer = test_producer().await;
+        let repo = seed_repo_config(&pool, "github").await;
+
+        let mock = MockServer::start().await;
+        mount_github_repo_mocks(&mock).await;
+        for manifest in crate::sentinel::MANIFEST_FILES {
+            Mock::given(method("GET"))
+                .and(path(format!("/repos/acme/widgets/contents/{manifest}")))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&mock)
+                .await;
+        }
+
+        let handler =
+            CodeScanReviewHandler::new(pool.clone(), producer, sentinel_config(&mock.uri()));
+        let entry = sentinel_task_entry(repo);
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let run = sqlx::query(
+            "SELECT status, findings_count FROM codescan_scan_runs WHERE repo_config_id = $1",
+        )
+        .bind(repo)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select scan run: {e}"));
+        assert_eq!(run.get::<String, _>(0), "completed");
+        assert_eq!(run.get::<i32, _>(1), 0);
+    }
+
+    #[tokio::test]
+    async fn handle_sentinel_scan_errors_when_repo_config_does_not_exist() {
+        let pool = test_pool().await;
+        let producer = test_producer().await;
+        let handler = CodeScanReviewHandler::new(
+            pool.clone(),
+            producer,
+            sentinel_config("http://127.0.0.1:1"),
+        );
+        let entry = sentinel_task_entry(999_999_999);
+        let result = handler.handle(&entry).await;
+        assert!(result.is_err(), "a missing repo config must be an error");
+    }
+
+    #[tokio::test]
+    async fn handle_sentinel_scan_records_an_outdated_dependency_as_an_sca_finding() {
+        let pool = test_pool().await;
+        let producer = test_producer().await;
+        let repo = seed_repo_config(&pool, "github").await;
+
+        let mock = MockServer::start().await;
+        mount_github_repo_mocks(&mock).await;
+        for manifest in crate::sentinel::MANIFEST_FILES {
+            if *manifest == "package.json" {
+                continue;
+            }
+            Mock::given(method("GET"))
+                .and(path(format!("/repos/acme/widgets/contents/{manifest}")))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&mock)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/contents/package.json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    "{\n  \"dependencies\": {\n    \"left-pad\": \"1.0.0\"\n  }\n}\n",
+                ),
+            )
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/NPM/packages/left-pad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [{"versionKey": {"version": "1.3.0"}, "isDefault": true}]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/NPM/packages/left-pad/versions/1.0.0"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"advisoryKeys": []})),
+            )
+            .mount(&mock)
+            .await;
+
+        let handler =
+            CodeScanReviewHandler::new(pool.clone(), producer, sentinel_config(&mock.uri()));
+        let entry = sentinel_task_entry(repo);
+        let result = handler.handle(&entry).await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+
+        let row = sqlx::query(
+            "SELECT kind, severity, latest_version, advisory_id FROM codescan_findings \
+             WHERE repo_config_id = $1 AND package_name = 'left-pad'",
+        )
+        .bind(repo)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select finding: {e}"));
+        assert_eq!(row.get::<String, _>(0), "sca");
+        assert_eq!(row.get::<String, _>(1), "low");
+        assert_eq!(row.get::<Option<String>, _>(2).as_deref(), Some("1.3.0"));
+        assert_eq!(row.get::<String, _>(3), "");
+    }
+
+    /// Mirrors manager's `alerts` table shape closely enough to exercise the
+    /// alert bridge, without pulling in manager's own (concurrently
+    /// evolving) migrations — see `db::tests::seed_alerts_fixture_table`.
+    async fn seed_alerts_fixture_table(pool: &PgPool) {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS alerts ( \
+                id SERIAL PRIMARY KEY, \
+                title VARCHAR(255) NOT NULL, \
+                description TEXT, \
+                severity VARCHAR(20) NOT NULL, \
+                status VARCHAR(20) DEFAULT 'pending', \
+                source VARCHAR(100), \
+                indicators JSONB, \
+                tenant_id UUID NOT NULL, \
+                created_at TIMESTAMPTZ DEFAULT now(), \
+                updated_at TIMESTAMPTZ \
+            )",
+        )
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("create alerts fixture table: {e}"));
+    }
+
+    #[tokio::test]
+    async fn handle_sentinel_scan_bridges_one_alert_for_a_critical_cve_and_never_double_alerts() {
+        let pool = test_pool().await;
+        seed_alerts_fixture_table(&pool).await;
+        let repo = seed_repo_config(&pool, "github").await;
+
+        let mock = MockServer::start().await;
+        mount_github_repo_mocks(&mock).await;
+        for manifest in crate::sentinel::MANIFEST_FILES {
+            if *manifest == "package.json" {
+                continue;
+            }
+            Mock::given(method("GET"))
+                .and(path(format!("/repos/acme/widgets/contents/{manifest}")))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&mock)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/widgets/contents/package.json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    "{\n  \"dependencies\": {\n    \"axios\": \"1.0.0\"\n  }\n}\n",
+                ),
+            )
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/NPM/packages/axios"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [{"versionKey": {"version": "1.7.0"}, "isDefault": true}]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/NPM/packages/axios/versions/1.0.0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "advisoryKeys": [{"id": "GHSA-critical-axios"}]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/advisories/GHSA-critical-axios"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "title": "Remote code execution",
+                "cvss3Score": 9.8
+            })))
+            .mount(&mock)
+            .await;
+
+        let cfg = sentinel_config(&mock.uri());
+        let handler = CodeScanReviewHandler::new(pool.clone(), test_producer().await, cfg.clone());
+        let entry = sentinel_task_entry(repo);
+
+        handler
+            .handle(&entry)
+            .await
+            .unwrap_or_else(|e| panic!("first scan should succeed: {e:?}"));
+
+        let alert_count_after_first: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM alerts WHERE source = 'codescan_sentinel'")
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("count alerts: {e}"));
+        assert_eq!(
+            alert_count_after_first, 1,
+            "a critical CVE finding must bridge exactly one alert"
+        );
+
+        // Second scan of the same still-open finding must not alert again.
+        let handler2 = CodeScanReviewHandler::new(pool.clone(), test_producer().await, cfg);
+        handler2
+            .handle(&entry)
+            .await
+            .unwrap_or_else(|e| panic!("second scan should succeed: {e:?}"));
+        let alert_count_after_second: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM alerts WHERE source = 'codescan_sentinel'")
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("count alerts: {e}"));
+        assert_eq!(
+            alert_count_after_second, 1,
+            "an already-alerted, still-open finding must never alert twice"
+        );
+
+        let finding_row = sqlx::query(
+            "SELECT kind, severity FROM codescan_findings \
+             WHERE repo_config_id = $1 AND package_name = 'axios' AND kind = 'cve'",
+        )
+        .bind(repo)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select cve finding: {e}"));
+        assert_eq!(finding_row.get::<String, _>(0), "cve");
+        assert_eq!(finding_row.get::<String, _>(1), "critical");
+
+        // axios is also outdated (1.0.0 -> 1.7.0), so a separate 'sca'
+        // finding must exist alongside the 'cve' one — a package can be
+        // both outdated and vulnerable at once (see
+        // `sentinel::dependency_findings`'s doc comment).
+        let sca_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM codescan_findings \
+             WHERE repo_config_id = $1 AND package_name = 'axios' AND kind = 'sca'",
+        )
+        .bind(repo)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("count sca finding: {e}"));
+        assert_eq!(sca_count, 1);
     }
 }

@@ -1,0 +1,143 @@
+# Cilium default-deny + explicit allow for {{ include "skauswatch-depgate.fullname" . }}.
+# Selecting this pod with ANY CiliumNetworkPolicy makes Cilium deny every
+# ingress/egress path not explicitly listed below (Cilium per-endpoint
+# default-deny model) -- there is no separate blanket "default-deny" object
+# needed alongside this one. See k8s/helm/README.md "Cluster security
+# baseline" for the full policy.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "skauswatch-depgate.fullname" . }}
+  labels:
+    {{- include "skauswatch-depgate.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "skauswatch-depgate.selectorLabels" . | nindent 6 }}
+  ingress:
+    # kubelet liveness/readiness probes originate from the node, not a pod
+    # identity -- must be explicitly allowed or probes fail closed once this
+    # pod is selected by any CiliumNetworkPolicy.
+    - fromEntities:
+        - host
+        - remote-node
+    # Same-namespace callers (manager, CI runners, other internal services
+    # invoking the /v2/* OCI proxy or /api/v1/depgate/* admin API) -- an
+    # empty endpoint selector matches every pod in this policy's own
+    # namespace, per Cilium's implicit namespace-scoping.
+    - fromEndpoints:
+        - {}
+    # External docker/OCI clients arrive via the cluster ingress/gateway
+    # (see values.yaml ingress/httproute -- disabled by default, see
+    # k8s/helm/README.md "No direct external access"). Label is the
+    # cluster's shared ingress-controller/gateway convention -- verify
+    # against the actual deployed pod/Service labels before relying on
+    # this in a live cluster (same caveat as the Postgres/Valkey egress
+    # rules below).
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: cilium-gateway
+      toPorts:
+        - ports:
+            - port: {{ .Values.httpPort | quote }}
+              protocol: TCP
+    # Mesh-only mTLS admin listener (src/mesh_admin.rs) -- SPIFFE-readiness
+    # for the admin/report API. No confirmed in-repo caller yet (same
+    # "zero real callers today" posture as manager's gRPC RPCs -- see
+    # docs/v2-port/service-auth-model.md §1 who-calls-whom table), so this
+    # stays same-namespace-broad rather than pinned to one caller's label;
+    # narrow once a real caller is implemented. The mTLS handshake itself
+    # (SpiffeIdMatcher, same-trust-domain) is the actual authorization gate,
+    # not this network policy -- see that module's docs.
+    - fromEndpoints:
+        - {}
+      toPorts:
+        - ports:
+            - port: {{ .Values.meshAdminPort | quote }}
+              protocol: TCP
+    # Prometheus scrape (same-namespace collector -- adjust label if the
+    # cluster's Prometheus/Alloy runs in a dedicated monitoring namespace).
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+  egress:
+    # DNS resolution (kube-dns) -- required for any Service/FQDN egress below.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # Postgres (same-namespace dependency; NOT owned by this chart -- see
+    # k8s/helm/README.md "Dependency label assumption"). Labels are the
+    # Bitnami postgresql chart convention per devops-kubernetes.md; verify
+    # against the actual deployed Postgres Service/pod labels before relying
+    # on this in a live cluster.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: postgresql
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # MinIO cache bucket (alpha/beta/gamma -- awsIdentity.mode: "static";
+    # same-namespace dependency, NOT owned by this chart).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: minio
+      toPorts:
+        - ports:
+            - port: "9000"
+              protocol: TCP
+    # ClamAV sidecar/daemonset (see values.yaml CLAMD_SOCKET note -- no
+    # sidecar ships in this chart yet).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: clamav
+      toPorts:
+        - ports:
+            - port: "3310"
+              protocol: TCP
+    # Real AWS S3 cache bucket (production -- awsIdentity.mode: "irsa").
+    - toFQDNs:
+        - matchPattern: "*.amazonaws.com"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # PenguinTech license/feature-flag server (all environments except
+    # domain-bypassed *.penguintech.cloud/*.penguincloud.io deploys still
+    # call out for entitlement checks in the common case).
+    - toFQDNs:
+        - matchName: "license.penguintech.io"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # Configured upstream OCI registry + its token-auth endpoint (default
+    # Docker Hub -- DEPGATE_UPSTREAM_BASE_URL/DEPGATE_UPSTREAM_AUTH_URL in
+    # configMapData). ghcr.io included as the other commonly configured
+    # upstream; update this list if a deployment points at a different
+    # registry (P1 supports exactly one configured upstream -- see
+    # src/upstream.rs module docs).
+    - toFQDNs:
+        - matchName: "registry-1.docker.io"
+        - matchName: "auth.docker.io"
+        - matchName: "ghcr.io"
+        - matchName: "pkg-containers.githubusercontent.com"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

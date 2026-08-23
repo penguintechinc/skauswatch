@@ -47,15 +47,48 @@ pub struct LicenseFinding {
     pub confidence: f64,
 }
 
+/// Ecosystem discriminator shared by diff-based license scanning
+/// ([`RegistryClient::scan_diff`]) and whole-file Sentinel dependency
+/// extraction (`crate::sentinel::extract_manifest_dependencies`) — `pub(crate)`
+/// so both call sites share one set of per-ecosystem line parsers rather than
+/// forking them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Ecosystem {
+pub(crate) enum Ecosystem {
     Npm,
     PyPi,
     Crates,
     Go,
 }
 
-fn ecosystem_for_file(path: &str) -> Option<Ecosystem> {
+impl Ecosystem {
+    /// deps.dev "system" path segment for this ecosystem (`GET
+    /// /v3/systems/{system}/packages/...`) — used both by the existing Go
+    /// license lookup below and by the Sentinel latest-version/OSV-advisory
+    /// lookups (`latest_version`/`advisories`), which query deps.dev for
+    /// every ecosystem, not just Go.
+    pub(crate) fn deps_dev_system(self) -> &'static str {
+        match self {
+            Ecosystem::Npm => "NPM",
+            Ecosystem::PyPi => "PYPI",
+            Ecosystem::Crates => "CARGO",
+            Ecosystem::Go => "GO",
+        }
+    }
+
+    /// Short lowercase label persisted in `codescan_findings.ecosystem` by
+    /// `crate::sentinel` — distinct from [`deps_dev_system`], which is the
+    /// API's own uppercase path segment.
+    pub(crate) fn wire_name(self) -> &'static str {
+        match self {
+            Ecosystem::Npm => "npm",
+            Ecosystem::PyPi => "pypi",
+            Ecosystem::Crates => "cargo",
+            Ecosystem::Go => "go",
+        }
+    }
+}
+
+pub(crate) fn ecosystem_for_file(path: &str) -> Option<Ecosystem> {
     let lower = path.to_lowercase();
     if lower.ends_with("package.json") {
         Some(Ecosystem::Npm)
@@ -93,7 +126,7 @@ const NPM_METADATA_KEYS: &[&str] = &[
     "packageManager",
 ];
 
-fn parse_npm_dep_line(line: &str) -> Option<(String, String)> {
+pub(crate) fn parse_npm_dep_line(line: &str) -> Option<(String, String)> {
     let content = line.trim().trim_end_matches(',');
     let content = content.strip_prefix('"')?;
     let (key, rest) = content.split_once('"')?;
@@ -114,13 +147,13 @@ fn parse_npm_dep_line(line: &str) -> Option<(String, String)> {
     Some((key.to_owned(), val.to_owned()))
 }
 
-fn is_valid_pkg_name(s: &str) -> bool {
+pub(crate) fn is_valid_pkg_name(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-fn parse_pypi_dep_line(line: &str) -> Option<(String, String)> {
+pub(crate) fn parse_pypi_dep_line(line: &str) -> Option<(String, String)> {
     let content = line.trim();
     if content.is_empty() || content.starts_with('#') {
         return None;
@@ -172,7 +205,7 @@ const CARGO_METADATA_KEYS: &[&str] = &[
     "include",
 ];
 
-fn parse_cargo_dep_line(line: &str) -> Option<(String, String)> {
+pub(crate) fn parse_cargo_dep_line(line: &str) -> Option<(String, String)> {
     let content = line.trim();
     let (key_part, rest) = content.split_once('=')?;
     let key = key_part.trim();
@@ -208,7 +241,7 @@ fn parse_cargo_dep_line(line: &str) -> Option<(String, String)> {
 /// this is what lets a bare two-token line like `go 1.21` or
 /// `module example.com/foo` fall through to the version-shape check below
 /// instead of needing an explicit directive-keyword denylist.
-fn is_valid_go_module_path(s: &str) -> bool {
+pub(crate) fn is_valid_go_module_path(s: &str) -> bool {
     s.contains('.')
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '-' | '_'))
@@ -219,7 +252,7 @@ fn is_valid_go_module_path(s: &str) -> bool {
 /// (`v0.0.0-20200101000000-abcdef123456`), and `+incompatible` suffixes.
 /// Deliberately loose (no full semver validation) since go.mod versions are
 /// always toolchain-generated, never hand-typed ranges like npm/PyPI.
-fn is_valid_go_module_version(s: &str) -> bool {
+pub(crate) fn is_valid_go_module_version(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some('v')) && matches!(chars.next(), Some(c) if c.is_ascii_digit())
 }
@@ -233,7 +266,7 @@ fn is_valid_go_module_version(s: &str) -> bool {
 /// `replace`/`exclude`/`retract` directives and the block delimiters
 /// (`require (`, `)`) are rejected by the module-path/version shape checks
 /// below rather than an explicit keyword list.
-fn parse_go_mod_dep_line(line: &str) -> Option<(String, String)> {
+pub(crate) fn parse_go_mod_dep_line(line: &str) -> Option<(String, String)> {
     let content = match line.trim().split_once("//") {
         Some((before, _comment)) => before.trim(),
         None => line.trim(),
@@ -417,6 +450,171 @@ async fn lookup_go_license(
     }
 }
 
+/// One OSV/deps.dev security advisory affecting a specific resolved
+/// dependency version. `severity` is a best-effort CVSS-score bucket
+/// (`critical`/`high`/`medium`/`low`) or `"unknown"` when deps.dev has no
+/// score for it — never dropped just because it can't be scored (see module
+/// docs' fail-safe rule, extended to Sentinel's CVE findings).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AdvisoryRef {
+    /// OSV/GHSA advisory id (e.g. `"GHSA-xxxx-xxxx-xxxx"`).
+    pub id: String,
+    /// `critical` | `high` | `medium` | `low` | `unknown`.
+    pub severity: String,
+    /// Short human-readable title, when deps.dev's advisory detail lookup
+    /// succeeds; `None` if that lookup failed (the advisory id itself is
+    /// still recorded — see [`deps_dev_advisory_detail`]).
+    pub summary: Option<String>,
+}
+
+/// Result of a Sentinel latest-version + OSV-advisory lookup for one
+/// dependency (`RegistryClient::lookup_latest_and_advisories`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DepsDevLookup {
+    /// The ecosystem's current default/latest release, when deps.dev has
+    /// package metadata for this name at all.
+    pub latest_version: Option<String>,
+    /// Advisories tied to the manifest-declared version specifically (only
+    /// resolvable when that specifier is an exact version deps.dev
+    /// recognizes, not a range like `^1.3.0` — a range simply yields no
+    /// advisories, which is not the same as `lookup_failed`).
+    pub advisories: Vec<AdvisoryRef>,
+    /// `true` when deps.dev has no record of this package at all (unknown
+    /// name, transport error, rate limit, etc.) — the caller must still
+    /// record a fail-safe "unknown severity" finding rather than dropping
+    /// the dependency (see `sentinel::scan_branch`).
+    pub lookup_failed: bool,
+}
+
+/// Buckets a CVSS score into the house severity vocabulary (matches
+/// `manager`'s `alerts.severity` set minus `"info"`, which Sentinel never
+/// emits). `None` (no score published) maps to `"unknown"`, not `"low"` —
+/// silently downgrading an unscored advisory would be a false negative.
+fn severity_from_cvss(score: Option<f64>) -> &'static str {
+    match score {
+        Some(s) if s >= 9.0 => "critical",
+        Some(s) if s >= 7.0 => "high",
+        Some(s) if s >= 4.0 => "medium",
+        Some(s) if s >= 0.0 => "low",
+        _ => "unknown",
+    }
+}
+
+/// `GET /v3/systems/{system}/packages/{name}` — deps.dev's package-level
+/// endpoint, listing every known version. Returns the version flagged
+/// `isDefault: true` (deps.dev's own notion of "current release"), or
+/// `None` if the package is unknown to deps.dev or the request fails.
+async fn deps_dev_latest_version(
+    client: &reqwest::Client,
+    base: &str,
+    system: &str,
+    name: &str,
+) -> Option<String> {
+    let url = format!(
+        "{}/v3/systems/{}/packages/{}",
+        base.trim_end_matches('/'),
+        system,
+        urlencoding::encode(name)
+    );
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    json.get("versions")?.as_array()?.iter().find_map(|v| {
+        if v.get("isDefault").and_then(serde_json::Value::as_bool) != Some(true) {
+            return None;
+        }
+        v.get("versionKey")?
+            .get("version")?
+            .as_str()
+            .map(str::to_owned)
+    })
+}
+
+/// `GET /v3/advisories/{id}` — resolves one advisory id to a severity
+/// bucket and title. Never fails the caller: a lookup failure still yields
+/// the advisory (severity `"unknown"`, no summary) rather than dropping it,
+/// since the id itself already came from a real `advisoryKeys` entry on the
+/// dependency's version.
+async fn deps_dev_advisory_detail(client: &reqwest::Client, base: &str, id: &str) -> AdvisoryRef {
+    let url = format!(
+        "{}/v3/advisories/{}",
+        base.trim_end_matches('/'),
+        urlencoding::encode(id)
+    );
+    let fallback = || AdvisoryRef {
+        id: id.to_owned(),
+        severity: "unknown".to_owned(),
+        summary: None,
+    };
+    let Ok(resp) = client.get(&url).send().await else {
+        return fallback();
+    };
+    if !resp.status().is_success() {
+        return fallback();
+    }
+    let Ok(json) = resp.json::<serde_json::Value>().await else {
+        return fallback();
+    };
+    let score = json
+        .get("cvss3Score")
+        .or_else(|| json.get("cvssScore"))
+        .and_then(serde_json::Value::as_f64);
+    AdvisoryRef {
+        id: id.to_owned(),
+        severity: severity_from_cvss(score).to_owned(),
+        summary: json
+            .get("title")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+    }
+}
+
+/// `GET /v3/systems/{system}/packages/{name}/versions/{version}` — the same
+/// endpoint [`lookup_go_license`] already calls for license data, extended
+/// to also read `advisoryKeys` (each `{id: "GHSA-..."}`) and resolve every
+/// one via [`deps_dev_advisory_detail`]. `None` means the version-specific
+/// lookup itself failed (unknown/unrecognized version — routine for a
+/// manifest range specifier like `^1.3.0`, not treated as `lookup_failed`
+/// by the caller); `Some(vec![])` means the lookup succeeded and the
+/// version simply has no known advisories.
+async fn deps_dev_advisories_for_version(
+    client: &reqwest::Client,
+    base: &str,
+    system: &str,
+    name: &str,
+    version: &str,
+) -> Option<Vec<AdvisoryRef>> {
+    let url = format!(
+        "{}/v3/systems/{}/packages/{}/versions/{}",
+        base.trim_end_matches('/'),
+        system,
+        urlencoding::encode(name),
+        urlencoding::encode(version)
+    );
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let ids: Vec<String> = json
+        .get("advisoryKeys")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|a| a.get("id").and_then(|v| v.as_str()))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut advisories = Vec::with_capacity(ids.len());
+    for id in ids {
+        advisories.push(deps_dev_advisory_detail(client, base, &id).await);
+    }
+    Some(advisories)
+}
+
 /// Resolves dependency licenses against the public npm/PyPI/crates.io
 /// registries (or test doubles, via the base-URL overrides). One instance is
 /// built once at worker startup (`handler::CodeScanReviewHandler::new`) and
@@ -426,6 +624,10 @@ pub struct RegistryClient {
     npm_base: String,
     pypi_base: String,
     crates_base: String,
+    /// deps.dev base URL. Doubles as the general Sentinel latest-version/
+    /// OSV-advisory lookup base for *every* ecosystem (`lookup_latest_and_advisories`),
+    /// not just the original Go-license use (`lookup_go_license`) the field
+    /// name predates.
     go_base: String,
 }
 
@@ -493,6 +695,30 @@ impl RegistryClient {
             });
         }
         findings
+    }
+
+    /// Sentinel SCA/CVE lookup (docs/v2-port/v2.1-codescan-sentinel.md §9,
+    /// §12): resolves `name`'s latest published version and any OSV
+    /// advisories tied to the manifest-declared `version`, both via
+    /// deps.dev. Always returns — never a `Result` the caller must unwrap —
+    /// per the module's fail-safe convention; see [`DepsDevLookup::lookup_failed`].
+    pub(crate) async fn lookup_latest_and_advisories(
+        &self,
+        ecosystem: Ecosystem,
+        name: &str,
+        version: &str,
+    ) -> DepsDevLookup {
+        let system = ecosystem.deps_dev_system();
+        let latest_version = deps_dev_latest_version(&self.http, &self.go_base, system, name).await;
+        let advisories =
+            deps_dev_advisories_for_version(&self.http, &self.go_base, system, name, version)
+                .await
+                .unwrap_or_default();
+        DepsDevLookup {
+            lookup_failed: latest_version.is_none(),
+            latest_version,
+            advisories,
+        }
     }
 }
 
@@ -815,5 +1041,159 @@ mod tests {
         let client = RegistryClient::new(None, None, None, None);
         let diff = "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-x\n+y\n";
         assert!(client.scan_diff(diff).await.is_empty());
+    }
+
+    #[test]
+    fn deps_dev_system_maps_every_ecosystem() {
+        assert_eq!(Ecosystem::Npm.deps_dev_system(), "NPM");
+        assert_eq!(Ecosystem::PyPi.deps_dev_system(), "PYPI");
+        assert_eq!(Ecosystem::Crates.deps_dev_system(), "CARGO");
+        assert_eq!(Ecosystem::Go.deps_dev_system(), "GO");
+    }
+
+    #[test]
+    fn severity_from_cvss_buckets_scores() {
+        assert_eq!(severity_from_cvss(Some(9.8)), "critical");
+        assert_eq!(severity_from_cvss(Some(7.5)), "high");
+        assert_eq!(severity_from_cvss(Some(5.0)), "medium");
+        assert_eq!(severity_from_cvss(Some(1.0)), "low");
+        assert_eq!(severity_from_cvss(None), "unknown");
+    }
+
+    #[tokio::test]
+    async fn lookup_latest_and_advisories_resolves_latest_version_and_advisories() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/NPM/packages/left-pad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [
+                    {"versionKey": {"version": "1.2.0"}, "isDefault": false},
+                    {"versionKey": {"version": "1.3.0"}, "isDefault": true},
+                ]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/NPM/packages/left-pad/versions/1.1.0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "advisoryKeys": [{"id": "GHSA-aaaa-bbbb-cccc"}]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/advisories/GHSA-aaaa-bbbb-cccc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "title": "Prototype pollution",
+                "cvss3Score": 8.1
+            })))
+            .mount(&mock)
+            .await;
+
+        let client = RegistryClient::new(None, None, None, Some(mock.uri()));
+        let result = client
+            .lookup_latest_and_advisories(Ecosystem::Npm, "left-pad", "1.1.0")
+            .await;
+        assert_eq!(result.latest_version.as_deref(), Some("1.3.0"));
+        assert!(!result.lookup_failed);
+        assert_eq!(result.advisories.len(), 1);
+        assert_eq!(result.advisories[0].id, "GHSA-aaaa-bbbb-cccc");
+        assert_eq!(result.advisories[0].severity, "high");
+        assert_eq!(
+            result.advisories[0].summary.as_deref(),
+            Some("Prototype pollution")
+        );
+    }
+
+    #[tokio::test]
+    async fn lookup_latest_and_advisories_marks_lookup_failed_when_package_unknown() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/PYPI/packages/ghost-pkg"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/PYPI/packages/ghost-pkg/versions/1.0.0"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        let client = RegistryClient::new(None, None, None, Some(mock.uri()));
+        let result = client
+            .lookup_latest_and_advisories(Ecosystem::PyPi, "ghost-pkg", "1.0.0")
+            .await;
+        assert!(
+            result.lookup_failed,
+            "an unknown package must be flagged lookup_failed, never silently treated as clean"
+        );
+        assert_eq!(result.latest_version, None);
+        assert!(result.advisories.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lookup_latest_and_advisories_records_advisory_with_unknown_severity_when_detail_fetch_fails()
+     {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/CARGO/packages/some-crate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [{"versionKey": {"version": "2.0.0"}, "isDefault": true}]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/CARGO/packages/some-crate/versions/1.0.0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "advisoryKeys": [{"id": "RUSTSEC-2020-0001"}]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/advisories/RUSTSEC-2020-0001"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&mock)
+            .await;
+
+        let client = RegistryClient::new(None, None, None, Some(mock.uri()));
+        let result = client
+            .lookup_latest_and_advisories(Ecosystem::Crates, "some-crate", "1.0.0")
+            .await;
+        assert!(!result.lookup_failed, "the package itself resolved fine");
+        assert_eq!(result.advisories.len(), 1);
+        assert_eq!(result.advisories[0].id, "RUSTSEC-2020-0001");
+        assert_eq!(
+            result.advisories[0].severity, "unknown",
+            "an advisory whose detail lookup fails must still be recorded, not dropped"
+        );
+        assert_eq!(result.advisories[0].summary, None);
+    }
+
+    #[tokio::test]
+    async fn lookup_latest_and_advisories_tolerates_a_manifest_range_version() {
+        // The manifest-declared version is often a range (`^1.3.0`), which
+        // deps.dev's exact-version endpoint 404s on — this must not be
+        // treated as lookup_failed as long as the package-level lookup
+        // itself succeeded.
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/NPM/packages/axios"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [{"versionKey": {"version": "1.7.0"}, "isDefault": true}]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/NPM/packages/axios/versions/%5E1.3.0"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        let client = RegistryClient::new(None, None, None, Some(mock.uri()));
+        let result = client
+            .lookup_latest_and_advisories(Ecosystem::Npm, "axios", "^1.3.0")
+            .await;
+        assert!(!result.lookup_failed);
+        assert_eq!(result.latest_version.as_deref(), Some("1.7.0"));
+        assert!(result.advisories.is_empty());
     }
 }

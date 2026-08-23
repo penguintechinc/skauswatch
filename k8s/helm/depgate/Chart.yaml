@@ -1,0 +1,15 @@
+apiVersion: v2
+name: skauswatch-depgate
+description: SkausWatch DepGate — OCI/docker pull-through registry proxy (scan-on-ingest, content-addressed cache)
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skauswatch
+  - depgate
+  - registry
+  - oci
+  - rust
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io
