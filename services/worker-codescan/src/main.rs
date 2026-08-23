@@ -16,11 +16,14 @@ mod handler;
 mod lease;
 mod license_scan;
 mod message;
+mod policy;
+mod reachability;
 mod review;
 mod scanner_tool;
 mod scheduler;
 mod sentinel;
 mod tree_fetch;
+mod triage;
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -108,7 +111,20 @@ async fn serve() -> anyhow::Result<()> {
         c.batch = cfg.max_concurrent_tasks.max(1);
         c
     };
-    let handler = CodeScanReviewHandler::new(pool, producer, cfg.clone());
+
+    // Gates CodeScan Sentinel's P3 AI triage + policy engine (Enterprise
+    // only, spec §13) — see `CodeScanReviewHandler`'s license-tier check.
+    // Fails safe: an unreachable license server degrades to `Tier::Free`
+    // (`penguin_licensing::LicenseClient::tier`), never Enterprise.
+    let license_cfg = penguin_licensing::LicenseConfig::from_env("skauswatch")
+        .map_err(|e| anyhow::anyhow!("license config: {e}"))?
+        .with_bypass_domain("skauswatch.app");
+    let license = penguin_licensing::LicenseClient::new(license_cfg)
+        .map_err(|e| anyhow::anyhow!("license client: {e}"))?;
+    let _ = license.refresh().await;
+    let _license_bg = license.spawn_refresh();
+
+    let handler = CodeScanReviewHandler::new(pool, producer, cfg.clone(), license);
 
     // Health/readiness + metrics endpoints (standard telemetry surface).
     let readiness = skauswatch_telemetry::Readiness::new();

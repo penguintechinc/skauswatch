@@ -166,6 +166,34 @@ impl PypiUpstreamConfig {
     }
 }
 
+/// How `crate::scanpipe::ScanPipeline::ingest` treats a scan-engine failure
+/// (`ScanError` — the YARA-X engine itself erroring, not a plain
+/// ClamAV-unreachable degrade-to-clean; see `skauswatch_scan_core::engine`'s
+/// docs) — `docs/v2-port/v2.1-depgate.md` §6's configurable fail posture.
+/// `infected`/`pup` verdicts are always blocked regardless of this setting;
+/// it only governs the "scanning itself couldn't run" case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailPosture {
+    /// Hardened default: a scan failure is treated as untrusted — refused,
+    /// never cached or served.
+    Closed,
+    /// Dev convenience: a scan failure is logged and passed through
+    /// best-effort, but never persisted as a vetted cache entry (an
+    /// unscanned artifact must never become part of the trusted set).
+    Open,
+}
+
+impl FailPosture {
+    /// Parses `DEPGATE_FAIL_POSTURE` (`"closed"`/`"open"`, case-insensitive)
+    /// — anything else (including unset) falls back to [`FailPosture::Closed`].
+    fn from_env_str(v: Option<&str>) -> Self {
+        match v.map(str::to_ascii_lowercase).as_deref() {
+            Some("open") => FailPosture::Open,
+            _ => FailPosture::Closed,
+        }
+    }
+}
+
 /// Cache-bucket + scan-engine + serving settings.
 #[derive(Debug, Clone)]
 pub struct DepgateConfig {
@@ -197,6 +225,25 @@ pub struct DepgateConfig {
     pub clamd_timeout_secs: u64,
     /// YARA rules directory/file (`YARA_RULES_PATH`) — `None` disables YARA.
     pub yara_rules_path: Option<String>,
+    /// Air-gap serve mode (`DEPGATE_OFFLINE_MODE`, default `false`) — §6b.
+    /// When `true`, every resolve path refuses to contact any upstream
+    /// registry: a cache miss becomes a hard, explicit "not in the vetted
+    /// set" error instead of a pull-through fetch. Unconditional — not
+    /// governed by [`FailPosture`], which only concerns scan-engine
+    /// failures.
+    pub offline_mode: bool,
+    /// Scan-error handling posture (`DEPGATE_FAIL_POSTURE`, default
+    /// `closed`) — see [`FailPosture`].
+    pub fail_posture: FailPosture,
+    /// HMAC-SHA256 key used to sign/verify air-gap bundle manifests
+    /// (`DEPGATE_BUNDLE_SIGNING_KEY`, §6b). `None` disables signing on
+    /// export and signature verification on import (checksum/per-artifact
+    /// hash verification still always applies). A symmetric MAC stands in
+    /// for the spec's eventual cosign/sigstore asymmetric signing (P4,
+    /// `docs/v2-port/v2.1-depgate.md` §9/§11) — reuses this workspace's
+    /// existing `hmac`+`sha2` dependencies rather than adding a new
+    /// signing stack for P3.
+    pub bundle_signing_key: Option<String>,
 }
 
 // One argument per DEPGATE_* env var, mirroring `resolve_upstream` above and
@@ -213,6 +260,9 @@ fn resolve_depgate(
     clamd_socket: Option<&str>,
     clamd_timeout_secs: Option<&str>,
     yara_rules_path: Option<&str>,
+    offline_mode: Option<&str>,
+    fail_posture: Option<&str>,
+    bundle_signing_key: Option<&str>,
 ) -> DepgateConfig {
     let http_port = resolve_num(http_port, DEFAULT_HTTP_PORT);
     DepgateConfig {
@@ -225,6 +275,12 @@ fn resolve_depgate(
         clamd_socket: resolve_opt(clamd_socket),
         clamd_timeout_secs: resolve_num(clamd_timeout_secs, 30),
         yara_rules_path: resolve_opt(yara_rules_path),
+        offline_mode: matches!(
+            offline_mode.map(str::to_ascii_lowercase).as_deref(),
+            Some("true" | "1" | "yes")
+        ),
+        fail_posture: FailPosture::from_env_str(fail_posture),
+        bundle_signing_key: resolve_opt(bundle_signing_key),
     }
 }
 
@@ -241,6 +297,9 @@ impl DepgateConfig {
             std::env::var("CLAMD_SOCKET").ok().as_deref(),
             std::env::var("CLAMD_TIMEOUT").ok().as_deref(),
             std::env::var("YARA_RULES_PATH").ok().as_deref(),
+            std::env::var("DEPGATE_OFFLINE_MODE").ok().as_deref(),
+            std::env::var("DEPGATE_FAIL_POSTURE").ok().as_deref(),
+            std::env::var("DEPGATE_BUNDLE_SIGNING_KEY").ok().as_deref(),
         )
     }
 }
@@ -282,7 +341,9 @@ mod tests {
 
     #[test]
     fn depgate_defaults() {
-        let cfg = resolve_depgate(None, None, None, None, None, None, None, None, None);
+        let cfg = resolve_depgate(
+            None, None, None, None, None, None, None, None, None, None, None, None,
+        );
         assert_eq!(cfg.http_port, DEFAULT_HTTP_PORT);
         assert_eq!(
             cfg.public_base_url,
@@ -295,6 +356,9 @@ mod tests {
         assert_eq!(cfg.clamd_socket, None);
         assert_eq!(cfg.clamd_timeout_secs, 30);
         assert_eq!(cfg.yara_rules_path, None);
+        assert!(!cfg.offline_mode);
+        assert_eq!(cfg.fail_posture, FailPosture::Closed);
+        assert_eq!(cfg.bundle_signing_key, None);
     }
 
     #[test]
@@ -309,6 +373,9 @@ mod tests {
             Some("/var/run/clamd.sock"),
             Some("5"),
             Some("/etc/yara"),
+            Some("true"),
+            Some("open"),
+            Some("sekret"),
         );
         assert_eq!(cfg.http_port, 9090);
         assert_eq!(cfg.public_base_url, "https://depgate.internal");
@@ -319,6 +386,9 @@ mod tests {
         assert_eq!(cfg.clamd_socket.as_deref(), Some("/var/run/clamd.sock"));
         assert_eq!(cfg.clamd_timeout_secs, 5);
         assert_eq!(cfg.yara_rules_path.as_deref(), Some("/etc/yara"));
+        assert!(cfg.offline_mode);
+        assert_eq!(cfg.fail_posture, FailPosture::Open);
+        assert_eq!(cfg.bundle_signing_key.as_deref(), Some("sekret"));
     }
 
     #[test]
@@ -333,8 +403,62 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         );
         assert_eq!(cfg.http_port, DEFAULT_HTTP_PORT);
+    }
+
+    #[test]
+    fn fail_posture_from_env_str_is_case_insensitive_and_defaults_closed() {
+        assert_eq!(FailPosture::from_env_str(Some("OPEN")), FailPosture::Open);
+        assert_eq!(FailPosture::from_env_str(Some("open")), FailPosture::Open);
+        assert_eq!(
+            FailPosture::from_env_str(Some("closed")),
+            FailPosture::Closed
+        );
+        assert_eq!(
+            FailPosture::from_env_str(Some("bogus")),
+            FailPosture::Closed
+        );
+        assert_eq!(FailPosture::from_env_str(None), FailPosture::Closed);
+    }
+
+    #[test]
+    fn offline_mode_accepts_common_truthy_spellings() {
+        for v in ["true", "TRUE", "1", "yes"] {
+            let cfg = resolve_depgate(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(v),
+                None,
+                None,
+            );
+            assert!(cfg.offline_mode, "expected {v:?} to enable offline mode");
+        }
+        let cfg = resolve_depgate(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("false"),
+            None,
+            None,
+        );
+        assert!(!cfg.offline_mode);
     }
 
     #[test]

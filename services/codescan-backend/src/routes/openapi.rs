@@ -18,7 +18,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use utoipa::OpenApi;
 
-use super::{credentials, findings, license_policies, plans, repos, reviews, status};
+use super::{credentials, findings, license_policies, plans, policy_rules, repos, reviews, status};
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
@@ -70,6 +70,11 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         findings::list_findings,
         findings::findings_summary,
         findings::get_sbom,
+        policy_rules::list_rules,
+        policy_rules::create_rule,
+        policy_rules::get_rule,
+        policy_rules::update_rule,
+        policy_rules::delete_rule,
     ),
     components(schemas(
         ErrorResponse,
@@ -114,12 +119,20 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         findings::SeverityCount,
         findings::FindingsSummaryResponse,
         findings::SbomResponse,
+        policy_rules::PolicyRule,
+        policy_rules::PolicyRuleListResponse,
+        policy_rules::CreatePolicyRuleRequest,
+        policy_rules::PolicyRuleCreateResponse,
+        policy_rules::UpdatePolicyRuleRequest,
+        policy_rules::PolicyRuleUpdateResponse,
+        policy_rules::PolicyRuleDeleteResponse,
     )),
     tags(
         (name = "codescan", description = "Repo configs, AI code reviews, and issue plans"),
         (name = "credentials", description = "Git credential storage for private repo access"),
         (name = "license-policies", description = "OSS license-compliance policy configuration"),
         (name = "codescan-sentinel", description = "Scheduled SCA/CVE dependency scanning and reports (report-only, no AI)"),
+        (name = "codescan-sentinel-policy", description = "P3 AI reachability triage + policy engine rule CRUD (Enterprise-gated)"),
     ),
     modifiers(&SecurityAddon),
 )]

@@ -5996,7 +5996,9 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "flate2",
  "futures",
+ "hmac 0.12.1",
  "metrics",
  "penguin-licensing",
  "regex",
@@ -6005,6 +6007,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.10.9",
  "skauswatch-auth",
  "skauswatch-common",
  "skauswatch-db",
@@ -6022,6 +6025,7 @@ dependencies = [
  "utoipa",
  "uuid",
  "wiremock",
+ "zip",
 ]
 
 [[package]]
@@ -6484,6 +6488,7 @@ dependencies = [
  "flate2",
  "fred",
  "penguin-licensing",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

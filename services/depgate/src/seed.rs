@@ -428,6 +428,8 @@ mod tests {
             db: &pool,
             max_artifact_bytes: 1024,
             cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
         };
         let npm = NpmUpstreamClient::new(
             reqwest::Client::new(),
@@ -484,6 +486,8 @@ mod tests {
             db: &pool,
             max_artifact_bytes: 1024,
             cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
         };
         let npm = NpmUpstreamClient::new(
             reqwest::Client::new(),
@@ -564,6 +568,8 @@ mod tests {
             db: &pool,
             max_artifact_bytes: 1024,
             cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
         };
         let pypi = PypiUpstreamClient::new(
             reqwest::Client::new(),
@@ -625,6 +631,8 @@ mod tests {
             db: &pool,
             max_artifact_bytes: 1024,
             cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
         };
         let pypi = PypiUpstreamClient::new(
             reqwest::Client::new(),

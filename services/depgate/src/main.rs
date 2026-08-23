@@ -6,20 +6,26 @@
 //! (no curl in images); `seed` warm-starts the cache from a seed manifest;
 //! `openapi` regenerates the committed spec.
 
+mod auth;
+mod bundle;
 mod cache;
 mod config;
 mod db;
 mod error;
 mod fetch;
+mod heuristics;
 mod mesh_admin;
 mod npm;
 mod npm_path;
 mod oci_path;
+mod policy;
 mod pypi;
+mod rescan;
 mod routes;
 mod scanpipe;
 mod seed;
 mod state;
+mod tarutil;
 mod upstream;
 
 use std::net::SocketAddr;
@@ -52,6 +58,35 @@ enum Command {
     /// Print the generated OpenAPI 3.x spec (YAML) to stdout and exit.
     /// Regenerates `openapi/v1.yaml`: `skauswatch-depgate openapi > openapi/v1.yaml`.
     Openapi,
+    /// Air-gap bundle export/import (`docs/v2-port/v2.1-depgate.md` §6b).
+    Bundle {
+        #[command(subcommand)]
+        action: BundleAction,
+    },
+    /// Re-scans every cached artifact whose recorded scanner version is
+    /// stale, then exits — the CLI trigger for the §6 re-scan sweep. Never
+    /// run on the hot serve path.
+    RescanSweep,
+}
+
+/// `skauswatch-depgate bundle <export|import>` subcommands.
+#[derive(Subcommand)]
+enum BundleAction {
+    /// Exports every vetted (`verdict = clean`) artifact into a portable,
+    /// checksummed (and, if `DEPGATE_BUNDLE_SIGNING_KEY` is set, signed)
+    /// `.zip` bundle.
+    Export {
+        /// Output path for the bundle `.zip` file.
+        #[arg(long)]
+        out: String,
+    },
+    /// Imports a bundle `.zip`, verifying the manifest checksum, optional
+    /// signature, and every artifact's own content hash before admitting
+    /// anything — all-or-nothing.
+    Import {
+        /// Path to the bundle `.zip` file.
+        path: String,
+    },
 }
 
 #[tokio::main]
@@ -61,6 +96,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Healthcheck => healthcheck().await,
         Command::Seed { manifest } => run_seed(&manifest).await,
         Command::Openapi => print_openapi(),
+        Command::Bundle { action } => run_bundle(action).await,
+        Command::RescanSweep => run_rescan_sweep().await,
     }
 }
 
@@ -80,6 +117,68 @@ async fn run_seed(manifest: &str) -> anyhow::Result<()> {
     skauswatch_telemetry::init_tracing("skauswatch-depgate");
     let state = AppStateInner::from_env().await?;
     seed::run(&state, manifest).await
+}
+
+/// Runs `skauswatch-depgate bundle export|import` (§6b).
+async fn run_bundle(action: BundleAction) -> anyhow::Result<()> {
+    skauswatch_telemetry::init_tracing("skauswatch-depgate");
+    let state = AppStateInner::from_env().await?;
+    match action {
+        BundleAction::Export { out } => {
+            let stats = bundle::export_bundle(
+                &state.db,
+                &state.s3,
+                &state.cfg.cache_bucket,
+                &state.cfg.cache_prefix,
+                std::path::Path::new(&out),
+                state.cfg.bundle_signing_key.as_deref(),
+            )
+            .await?;
+            println!(
+                "bundle exported: entries={} unique_blobs={} manifest_sha256={} signed={}",
+                stats.entry_count, stats.unique_blob_count, stats.manifest_sha256, stats.signed
+            );
+            Ok(())
+        }
+        BundleAction::Import { path } => {
+            let tenant_id: uuid::Uuid = seed::BOOTSTRAP_TENANT.parse().map_err(|e| {
+                anyhow::anyhow!("bootstrap tenant literal is not a valid UUID: {e}")
+            })?;
+            let bundle_name = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&path)
+                .to_owned();
+            let stats = bundle::import_bundle(
+                &state.db,
+                &state.s3,
+                &state.cfg.cache_bucket,
+                &state.cfg.cache_prefix,
+                tenant_id,
+                std::path::Path::new(&path),
+                state.cfg.bundle_signing_key.as_deref(),
+                &bundle_name,
+            )
+            .await?;
+            println!(
+                "bundle imported: entries={} unique_blobs={} manifest_sha256={} signature_verified={}",
+                stats.entry_count, stats.unique_blob_count, stats.manifest_sha256, stats.signed
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Runs `skauswatch-depgate rescan-sweep` (§6).
+async fn run_rescan_sweep() -> anyhow::Result<()> {
+    skauswatch_telemetry::init_tracing("skauswatch-depgate");
+    let state = AppStateInner::from_env().await?;
+    let stats = rescan::sweep(&state).await?;
+    println!(
+        "rescan sweep: examined={} rescanned={} verdict_changed={} errors={}",
+        stats.examined, stats.rescanned, stats.verdict_changed, stats.errors
+    );
+    Ok(())
 }
 
 async fn serve() -> anyhow::Result<()> {

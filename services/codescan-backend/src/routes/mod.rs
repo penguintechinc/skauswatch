@@ -24,6 +24,7 @@ mod findings;
 mod license_policies;
 pub(crate) mod openapi;
 mod plans;
+mod policy_rules;
 mod repos;
 mod reviews;
 mod status;
@@ -63,6 +64,7 @@ pub fn router(state: AppState) -> Router {
         .merge(credentials::router())
         .merge(license_policies::router())
         .merge(findings::router())
+        .merge(policy_rules::router())
         .merge(openapi::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -98,6 +100,34 @@ pub(crate) async fn sentinel_denied(state: &AppState) -> Option<Response> {
             (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({ "error": SENTINEL_LICENSE_MSG })),
+            )
+                .into_response(),
+        )
+    }
+}
+
+/// 403 body text when a P3 (AI triage / policy engine) route is used below
+/// Enterprise tier.
+const ENTERPRISE_LICENSE_MSG: &str =
+    "CodeScan Sentinel's AI triage and policy engine require an Enterprise license.";
+
+/// Gates CodeScan Sentinel P3 routes (docs/v2-port/v2.1-codescan-sentinel.md
+/// §13: "AI-assisted capabilities ... gate at Enterprise"). Independent of
+/// (and layered on top of) [`sentinel_denied`] — a route needing this also
+/// calls `sentinel_denied` first, since P3 is meaningless without Sentinel
+/// itself enabled.
+pub(crate) async fn enterprise_denied(state: &AppState) -> Option<Response> {
+    if state
+        .license
+        .check_tier(penguin_licensing::Tier::Enterprise)
+        .await
+    {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": ENTERPRISE_LICENSE_MSG })),
             )
                 .into_response(),
         )

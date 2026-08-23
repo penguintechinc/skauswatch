@@ -45,6 +45,11 @@ zip = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
 flate2 = { workspace = true }
+# CodeScan Sentinel P3 static reachability prefilter (crate::reachability):
+# per-ecosystem import-statement / symbol-reference text matching. Already
+# resolved at this exact version elsewhere in the workspace lockfile (see
+# root Cargo.toml's comment on pinning transitively-resolved deps directly).
+regex = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }

@@ -4,22 +4,47 @@
 //! human/operator-facing reporting API, so unlike the proxy's shared-cache
 //! lookups, every query here filters on the caller's own tenant.
 
-use axum::extract::{Query, State};
-use axum::routing::get;
+use axum::extract::{Path, Query, State};
+use axum::routing::{get, patch};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use skauswatch_auth::TenantContext;
 use uuid::Uuid;
 
-use crate::db::{self, ArtifactFilters};
+use crate::auth::{ADMIN_SCOPE, AuthedUser, READ_SCOPE};
+use crate::db::{self, ArtifactFilters, PolicyRuleInput};
 use crate::error::{ApiError, tenant_uuid};
 use crate::state::AppState;
 
 /// Router for `/api/v1/depgate`.
+///
+/// Every route here is, at minimum, tenant-scoped (`TenantContext`, from
+/// the router-wide `tenant_middleware`). On top of that, every handler
+/// additionally extracts [`crate::auth::AuthedUser`] and enforces
+/// [`READ_SCOPE`] (list/get endpoints) or [`ADMIN_SCOPE`] (quarantine
+/// disposition + policy-rule mutations) — mutating endpoints were
+/// previously reachable by any authenticated tenant member, which for the
+/// quarantine-release path meant any non-admin could re-admit a quarantined
+/// (malware-flagged) artifact.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/depgate/artifacts", get(list_artifacts))
+        .route(
+            "/depgate/artifacts/{sha256}/risk-findings",
+            get(list_risk_findings),
+        )
         .route("/depgate/quarantine", get(list_quarantine))
+        .route("/depgate/quarantine/{id}", patch(update_quarantine))
+        .route(
+            "/depgate/policy-rules",
+            get(list_policy_rules).post(create_policy_rule),
+        )
+        .route(
+            "/depgate/policy-rules/{id}",
+            get(get_policy_rule)
+                .put(update_policy_rule)
+                .delete(delete_policy_rule),
+        )
         .route("/depgate/stats", get(stats))
 }
 
@@ -110,14 +135,16 @@ pub(crate) struct ArtifactListResponse {
     responses(
         (status = 200, description = "Tenant-scoped artifact index, newest-resolved first", body = ArtifactListResponse),
         (status = 401, description = "Missing or invalid authorization header", body = crate::error::ErrorResponse),
-        (status = 403, description = "Missing or invalid tenant claim", body = crate::error::ErrorResponse),
+        (status = 403, description = "Missing or invalid tenant claim, or missing depgate:read scope", body = crate::error::ErrorResponse),
     ),
 )]
 pub(crate) async fn list_artifacts(
     State(state): State<AppState>,
     tenant: TenantContext,
+    auth: AuthedUser,
     Query(q): Query<ListArtifactsQuery>,
 ) -> Result<Json<ArtifactListResponse>, ApiError> {
+    auth.require_scope(READ_SCOPE)?;
     let tenant_id = tenant_uuid(&tenant.tenant)?;
     let filters = ArtifactFilters {
         verdict: q.verdict,
@@ -157,6 +184,10 @@ pub(crate) struct QuarantineItem {
     reason: String,
     threat: String,
     disposition: String,
+    policy_rule_id: Option<Uuid>,
+    resolved_at: Option<String>,
+    resolved_by: Option<String>,
+    resolution_note: Option<String>,
     created_at: String,
 }
 
@@ -171,6 +202,10 @@ impl From<db::QuarantineRow> for QuarantineItem {
             reason: r.reason,
             threat: r.threat,
             disposition: r.disposition,
+            policy_rule_id: r.policy_rule_id,
+            resolved_at: r.resolved_at.map(|t| t.and_utc().to_rfc3339()),
+            resolved_by: r.resolved_by,
+            resolution_note: r.resolution_note,
             created_at: r.created_at.and_utc().to_rfc3339(),
         }
     }
@@ -194,14 +229,16 @@ pub(crate) struct QuarantineListResponse {
     responses(
         (status = 200, description = "Tenant-scoped quarantine log, newest first", body = QuarantineListResponse),
         (status = 401, description = "Missing or invalid authorization header", body = crate::error::ErrorResponse),
-        (status = 403, description = "Missing or invalid tenant claim", body = crate::error::ErrorResponse),
+        (status = 403, description = "Missing or invalid tenant claim, or missing depgate:read scope", body = crate::error::ErrorResponse),
     ),
 )]
 pub(crate) async fn list_quarantine(
     State(state): State<AppState>,
     tenant: TenantContext,
+    auth: AuthedUser,
     Query(q): Query<ListQuarantineQuery>,
 ) -> Result<Json<QuarantineListResponse>, ApiError> {
+    auth.require_scope(READ_SCOPE)?;
     let tenant_id = tenant_uuid(&tenant.tenant)?;
     let limit = clamp_limit(q.limit);
     let offset = clamp_offset(q.offset);
@@ -212,6 +249,421 @@ pub(crate) async fn list_quarantine(
         limit,
         offset,
     }))
+}
+
+/// One risk-finding row, wire shape.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct RiskFindingItem {
+    id: Uuid,
+    sha256: String,
+    ecosystem: String,
+    name: String,
+    reference: String,
+    check_name: String,
+    severity: String,
+    detail: String,
+    created_at: String,
+}
+
+impl From<db::RiskFindingRow> for RiskFindingItem {
+    fn from(r: db::RiskFindingRow) -> Self {
+        Self {
+            id: r.id,
+            sha256: r.sha256,
+            ecosystem: r.ecosystem,
+            name: r.name,
+            reference: r.reference,
+            check_name: r.check_name,
+            severity: r.severity,
+            detail: r.detail,
+            created_at: r.created_at.and_utc().to_rfc3339(),
+        }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/depgate/artifacts/{sha256}/risk-findings",
+    tag = "depgate",
+    security(("bearer_jwt" = [])),
+    params(("sha256" = String, Path, description = "Content digest hex")),
+    responses(
+        (status = 200, description = "Package-risk heuristic findings recorded for this artifact (§5)", body = [RiskFindingItem]),
+        (status = 401, description = "Missing or invalid authorization header", body = crate::error::ErrorResponse),
+        (status = 403, description = "Missing or invalid tenant claim, or missing depgate:read scope", body = crate::error::ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_risk_findings(
+    State(state): State<AppState>,
+    tenant: TenantContext,
+    auth: AuthedUser,
+    Path(sha256): Path<String>,
+) -> Result<Json<Vec<RiskFindingItem>>, ApiError> {
+    auth.require_scope(READ_SCOPE)?;
+    let tenant_id = tenant_uuid(&tenant.tenant)?;
+    let rows = db::list_risk_findings(&state.db, tenant_id, &sha256).await?;
+    Ok(Json(rows.into_iter().map(RiskFindingItem::from).collect()))
+}
+
+/// Request body for `PATCH /api/v1/depgate/quarantine/{id}`.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub(crate) struct UpdateQuarantineRequest {
+    /// New disposition (`confirmed`/`false_positive`/`released`) — `pending`
+    /// is the initial state only, never a valid transition target.
+    disposition: String,
+    /// Free-text resolution note.
+    resolution_note: Option<String>,
+}
+
+fn valid_disposition(d: &str) -> bool {
+    matches!(d, "confirmed" | "false_positive" | "released")
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/depgate/quarantine/{id}",
+    tag = "depgate",
+    security(("bearer_jwt" = [])),
+    params(("id" = Uuid, Path, description = "Quarantine event id")),
+    request_body = UpdateQuarantineRequest,
+    responses(
+        (status = 200, description = "Updated quarantine event; `released` re-admits the artifact to the vetted cache", body = QuarantineItem),
+        (status = 400, description = "Invalid disposition value", body = crate::error::ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = crate::error::ErrorResponse),
+        (status = 403, description = "Missing or invalid tenant claim, or missing depgate:admin scope", body = crate::error::ErrorResponse),
+        (status = 404, description = "No such quarantine event for this tenant", body = crate::error::ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_quarantine(
+    State(state): State<AppState>,
+    tenant: TenantContext,
+    auth: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateQuarantineRequest>,
+) -> Result<Json<QuarantineItem>, ApiError> {
+    auth.require_scope(ADMIN_SCOPE)?;
+    let tenant_id = tenant_uuid(&tenant.tenant)?;
+    if !valid_disposition(&body.disposition) {
+        return Err(ApiError::BadRequest(format!(
+            "invalid disposition {:?}: must be confirmed, false_positive, or released",
+            body.disposition
+        )));
+    }
+    let event = db::get_quarantine(&state.db, tenant_id, id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("no such quarantine event".to_owned()))?;
+
+    // `released` re-admits the artifact: move the object from the
+    // quarantine prefix back into the servable cache prefix and mark the
+    // index row clean again — audit-logged via the same disposition update
+    // below, which always runs regardless of which disposition was set.
+    if body.disposition == "released" {
+        let src_key = crate::cache::object_key(&state.cfg.quarantine_prefix, &event.sha256);
+        if let Some(obj) =
+            crate::cache::get_object(&state.s3, &state.cfg.cache_bucket, &src_key).await?
+        {
+            let dest_key = crate::cache::object_key(&state.cfg.cache_prefix, &event.sha256);
+            crate::cache::put_object(
+                &state.s3,
+                &state.cfg.cache_bucket,
+                &dest_key,
+                obj.bytes,
+                &obj.content_type,
+            )
+            .await?;
+            crate::cache::put_tags(
+                &state.s3,
+                &state.cfg.cache_bucket,
+                &dest_key,
+                &[("threat".to_owned(), "clean".to_owned())],
+            )
+            .await?;
+        }
+        if let Some(row) =
+            db::find_by_reference(&state.db, &event.ecosystem, &event.name, &event.reference)
+                .await?
+        {
+            db::upsert_artifact(
+                &state.db,
+                &db::UpsertArtifact {
+                    ecosystem: &event.ecosystem,
+                    name: &event.name,
+                    reference: &event.reference,
+                    sha256: &event.sha256,
+                    upstream: &row.upstream,
+                    content_type: row.content_type.as_deref(),
+                    size_bytes: row.size_bytes,
+                    verdict: "clean",
+                    scanner_version: &row.scanner_version,
+                    pinned: row.pinned,
+                    tenant_id,
+                },
+            )
+            .await?;
+        }
+    }
+
+    let resolved_by = tenant.tenant.as_str().to_owned();
+    let updated = db::update_quarantine_disposition(
+        &state.db,
+        tenant_id,
+        id,
+        &body.disposition,
+        &resolved_by,
+        body.resolution_note.as_deref(),
+    )
+    .await?
+    .ok_or_else(|| ApiError::NotFound("no such quarantine event".to_owned()))?;
+    Ok(Json(QuarantineItem::from(updated)))
+}
+
+/// One policy-rule row, wire shape.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct PolicyRuleItem {
+    id: Uuid,
+    priority: i32,
+    ecosystem: Option<String>,
+    name_glob: Option<String>,
+    version_glob: Option<String>,
+    verdict: Option<String>,
+    risk_check: Option<String>,
+    min_severity: Option<String>,
+    action: String,
+    description: Option<String>,
+    enabled: bool,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<db::PolicyRuleRow> for PolicyRuleItem {
+    fn from(r: db::PolicyRuleRow) -> Self {
+        Self {
+            id: r.id,
+            priority: r.priority,
+            ecosystem: r.ecosystem,
+            name_glob: r.name_glob,
+            version_glob: r.version_glob,
+            verdict: r.verdict,
+            risk_check: r.risk_check,
+            min_severity: r.min_severity,
+            action: r.action,
+            description: r.description,
+            enabled: r.enabled,
+            created_at: r.created_at.and_utc().to_rfc3339(),
+            updated_at: r.updated_at.and_utc().to_rfc3339(),
+        }
+    }
+}
+
+/// Create/replace request body for a policy rule.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub(crate) struct PolicyRuleRequest {
+    #[serde(default = "default_priority")]
+    priority: i32,
+    ecosystem: Option<String>,
+    name_glob: Option<String>,
+    version_glob: Option<String>,
+    verdict: Option<String>,
+    risk_check: Option<String>,
+    min_severity: Option<String>,
+    action: String,
+    description: Option<String>,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+}
+
+fn default_priority() -> i32 {
+    100
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn validate_policy_rule_request(req: &PolicyRuleRequest) -> Result<(), ApiError> {
+    if req.action.parse::<crate::policy::Action>().is_err() {
+        return Err(ApiError::BadRequest(format!(
+            "invalid action {:?}: must be allow, warn, block, or quarantine",
+            req.action
+        )));
+    }
+    if let Some(sev) = &req.min_severity
+        && sev.parse::<crate::heuristics::Severity>().is_err()
+    {
+        return Err(ApiError::BadRequest(format!(
+            "invalid min_severity {sev:?}: must be info, low, medium, high, or critical"
+        )));
+    }
+    Ok(())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/depgate/policy-rules",
+    tag = "depgate",
+    security(("bearer_jwt" = [])),
+    responses(
+        (status = 200, description = "Tenant's policy rules, highest priority first", body = [PolicyRuleItem]),
+        (status = 401, description = "Missing or invalid authorization header", body = crate::error::ErrorResponse),
+        (status = 403, description = "Missing or invalid tenant claim, or missing depgate:read scope", body = crate::error::ErrorResponse),
+    ),
+)]
+pub(crate) async fn list_policy_rules(
+    State(state): State<AppState>,
+    tenant: TenantContext,
+    auth: AuthedUser,
+) -> Result<Json<Vec<PolicyRuleItem>>, ApiError> {
+    auth.require_scope(READ_SCOPE)?;
+    let tenant_id = tenant_uuid(&tenant.tenant)?;
+    let rows = db::list_policy_rules(&state.db, tenant_id).await?;
+    Ok(Json(rows.into_iter().map(PolicyRuleItem::from).collect()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/depgate/policy-rules",
+    tag = "depgate",
+    security(("bearer_jwt" = [])),
+    request_body = PolicyRuleRequest,
+    responses(
+        (status = 200, description = "Created policy rule", body = PolicyRuleItem),
+        (status = 400, description = "Invalid action/min_severity value", body = crate::error::ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = crate::error::ErrorResponse),
+        (status = 403, description = "Missing or invalid tenant claim, or missing depgate:admin scope", body = crate::error::ErrorResponse),
+    ),
+)]
+pub(crate) async fn create_policy_rule(
+    State(state): State<AppState>,
+    tenant: TenantContext,
+    auth: AuthedUser,
+    Json(req): Json<PolicyRuleRequest>,
+) -> Result<Json<PolicyRuleItem>, ApiError> {
+    auth.require_scope(ADMIN_SCOPE)?;
+    let tenant_id = tenant_uuid(&tenant.tenant)?;
+    validate_policy_rule_request(&req)?;
+    let row = db::insert_policy_rule(
+        &state.db,
+        tenant_id,
+        &PolicyRuleInput {
+            priority: req.priority,
+            ecosystem: req.ecosystem.as_deref(),
+            name_glob: req.name_glob.as_deref(),
+            version_glob: req.version_glob.as_deref(),
+            verdict: req.verdict.as_deref(),
+            risk_check: req.risk_check.as_deref(),
+            min_severity: req.min_severity.as_deref(),
+            action: &req.action,
+            description: req.description.as_deref(),
+            enabled: req.enabled,
+            created_by: Some(tenant.tenant.as_str()),
+        },
+    )
+    .await?;
+    Ok(Json(PolicyRuleItem::from(row)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/depgate/policy-rules/{id}",
+    tag = "depgate",
+    security(("bearer_jwt" = [])),
+    params(("id" = Uuid, Path, description = "Policy rule id")),
+    responses(
+        (status = 200, description = "The policy rule", body = PolicyRuleItem),
+        (status = 401, description = "Missing or invalid authorization header", body = crate::error::ErrorResponse),
+        (status = 403, description = "Missing or invalid tenant claim, or missing depgate:read scope", body = crate::error::ErrorResponse),
+        (status = 404, description = "No such policy rule for this tenant", body = crate::error::ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_policy_rule(
+    State(state): State<AppState>,
+    tenant: TenantContext,
+    auth: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<Json<PolicyRuleItem>, ApiError> {
+    auth.require_scope(READ_SCOPE)?;
+    let tenant_id = tenant_uuid(&tenant.tenant)?;
+    let row = db::get_policy_rule(&state.db, tenant_id, id)
+        .await?
+        .ok_or_else(|| ApiError::NotFound("no such policy rule".to_owned()))?;
+    Ok(Json(PolicyRuleItem::from(row)))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/depgate/policy-rules/{id}",
+    tag = "depgate",
+    security(("bearer_jwt" = [])),
+    params(("id" = Uuid, Path, description = "Policy rule id")),
+    request_body = PolicyRuleRequest,
+    responses(
+        (status = 200, description = "Updated policy rule", body = PolicyRuleItem),
+        (status = 400, description = "Invalid action/min_severity value", body = crate::error::ErrorResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = crate::error::ErrorResponse),
+        (status = 403, description = "Missing or invalid tenant claim, or missing depgate:admin scope", body = crate::error::ErrorResponse),
+        (status = 404, description = "No such policy rule for this tenant", body = crate::error::ErrorResponse),
+    ),
+)]
+pub(crate) async fn update_policy_rule(
+    State(state): State<AppState>,
+    tenant: TenantContext,
+    auth: AuthedUser,
+    Path(id): Path<Uuid>,
+    Json(req): Json<PolicyRuleRequest>,
+) -> Result<Json<PolicyRuleItem>, ApiError> {
+    auth.require_scope(ADMIN_SCOPE)?;
+    let tenant_id = tenant_uuid(&tenant.tenant)?;
+    validate_policy_rule_request(&req)?;
+    let row = db::update_policy_rule(
+        &state.db,
+        tenant_id,
+        id,
+        &PolicyRuleInput {
+            priority: req.priority,
+            ecosystem: req.ecosystem.as_deref(),
+            name_glob: req.name_glob.as_deref(),
+            version_glob: req.version_glob.as_deref(),
+            verdict: req.verdict.as_deref(),
+            risk_check: req.risk_check.as_deref(),
+            min_severity: req.min_severity.as_deref(),
+            action: &req.action,
+            description: req.description.as_deref(),
+            enabled: req.enabled,
+            created_by: Some(tenant.tenant.as_str()),
+        },
+    )
+    .await?
+    .ok_or_else(|| ApiError::NotFound("no such policy rule".to_owned()))?;
+    Ok(Json(PolicyRuleItem::from(row)))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/depgate/policy-rules/{id}",
+    tag = "depgate",
+    security(("bearer_jwt" = [])),
+    params(("id" = Uuid, Path, description = "Policy rule id")),
+    responses(
+        (status = 204, description = "Policy rule deleted"),
+        (status = 401, description = "Missing or invalid authorization header", body = crate::error::ErrorResponse),
+        (status = 403, description = "Missing or invalid tenant claim, or missing depgate:admin scope", body = crate::error::ErrorResponse),
+        (status = 404, description = "No such policy rule for this tenant", body = crate::error::ErrorResponse),
+    ),
+)]
+pub(crate) async fn delete_policy_rule(
+    State(state): State<AppState>,
+    tenant: TenantContext,
+    auth: AuthedUser,
+    Path(id): Path<Uuid>,
+) -> Result<axum::http::StatusCode, ApiError> {
+    auth.require_scope(ADMIN_SCOPE)?;
+    let tenant_id = tenant_uuid(&tenant.tenant)?;
+    let deleted = db::delete_policy_rule(&state.db, tenant_id, id).await?;
+    if deleted {
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound("no such policy rule".to_owned()))
+    }
 }
 
 /// Response for `GET /api/v1/depgate/stats`.
@@ -236,13 +688,15 @@ pub(crate) struct StatsResponse {
     responses(
         (status = 200, description = "Verdict counts and cache hit-rate", body = StatsResponse),
         (status = 401, description = "Missing or invalid authorization header", body = crate::error::ErrorResponse),
-        (status = 403, description = "Missing or invalid tenant claim", body = crate::error::ErrorResponse),
+        (status = 403, description = "Missing or invalid tenant claim, or missing depgate:read scope", body = crate::error::ErrorResponse),
     ),
 )]
 pub(crate) async fn stats(
     State(state): State<AppState>,
     tenant: TenantContext,
+    auth: AuthedUser,
 ) -> Result<Json<StatsResponse>, ApiError> {
+    auth.require_scope(READ_SCOPE)?;
     let tenant_id = tenant_uuid(&tenant.tenant)?;
     let by_verdict = db::verdict_counts(&state.db, tenant_id)
         .await?

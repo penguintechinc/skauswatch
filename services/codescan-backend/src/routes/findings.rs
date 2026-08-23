@@ -68,6 +68,22 @@ pub(crate) struct Finding {
     file_path: Option<String>,
     line: Option<i32>,
     title: String,
+    // ── CodeScan Sentinel P3 additions (migrations/0006) — reachability
+    // triage verdict + the policy engine's resolved action. `None`/`""`
+    // for any finding never triaged (AI disabled, below Enterprise tier,
+    // or the finding predates P3) — see `worker-codescan::triage`/`::policy`.
+    used: Option<bool>,
+    reachable: Option<bool>,
+    exposure: Option<String>,
+    ai_severity: Option<String>,
+    ai_rationale: Option<String>,
+    #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
+    triaged_at: Option<chrono::DateTime<chrono::Utc>>,
+    triage_source: String,
+    /// The policy engine's resolved action (`ignore`/`document`/`alert`/
+    /// `fix`), `""` when never evaluated (spec §6). The alert bridge
+    /// (`worker-codescan::handler`) only ever alerts on `"alert"`.
+    action: String,
     #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
     first_seen: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
@@ -76,7 +92,8 @@ pub(crate) struct Finding {
 
 const FINDING_COLUMNS: &str = "id, repo_config_id, branch, kind, ecosystem, package_name, \
      current_version, latest_version, fixed_version, advisory_id, severity, source, status, \
-     tool, rule_id, file_path, line, title, first_seen, last_seen";
+     tool, rule_id, file_path, line, title, used, reachable, exposure, ai_severity, \
+     ai_rationale, triaged_at, triage_source, action, first_seen, last_seen";
 
 /// Documentation-only mirror of `list_findings`'s `serde_json::json!` body.
 #[derive(Serialize, utoipa::ToSchema)]
@@ -100,6 +117,9 @@ pub(crate) struct ListQuery {
     tool: Option<String>,
     severity: Option<String>,
     status: Option<String>,
+    /// Filters to the policy engine's resolved action (P3) —
+    /// `ignore`/`document`/`alert`/`fix`.
+    action: Option<String>,
 }
 
 /// GET /codescan/findings — paginated, filterable list of SCA/CVE findings.
@@ -148,6 +168,9 @@ pub(crate) async fn list_findings(
     if let Some(v) = &q.status {
         qb.push(" AND status = ").push_bind(v.clone());
     }
+    if let Some(v) = &q.action {
+        qb.push(" AND action = ").push_bind(v.clone());
+    }
     qb.push(" ORDER BY last_seen DESC LIMIT ")
         .push_bind(per_page)
         .push(" OFFSET ")
@@ -175,6 +198,9 @@ pub(crate) async fn list_findings(
     }
     if let Some(v) = &q.status {
         count_qb.push(" AND status = ").push_bind(v.clone());
+    }
+    if let Some(v) = &q.action {
+        count_qb.push(" AND action = ").push_bind(v.clone());
     }
     let total: i64 = count_qb.build_query_scalar().fetch_one(&state.db).await?;
 
@@ -690,6 +716,87 @@ mod tests {
             .await;
         invalid_severity.assert_status_ok();
         assert_eq!(invalid_severity.json::<serde_json::Value>()["total"], 0);
+    }
+
+    /// CodeScan Sentinel P3: the policy engine's resolved `action` column
+    /// (migrations/0006) must be both readable and filterable, and every
+    /// triage column must serialize even when never triaged (`None`/`""`
+    /// defaults — a finding predating P3, or one below Enterprise tier).
+    #[tokio::test]
+    async fn list_findings_filters_by_action_and_exposes_p3_triage_fields() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let tenant: Uuid = crate::routes::test_support::TEST_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("uuid: {e}"));
+        let repo = seed_repo(&state.db, tenant).await;
+
+        seed_finding(
+            &state.db,
+            tenant,
+            repo,
+            "main",
+            "cve",
+            "critical",
+            "pkg-untriaged",
+            "GHSA-a",
+            "open",
+        )
+        .await;
+        seed_finding(
+            &state.db,
+            tenant,
+            repo,
+            "main",
+            "cve",
+            "critical",
+            "pkg-triaged",
+            "GHSA-b",
+            "open",
+        )
+        .await;
+        sqlx::query(
+            "UPDATE codescan_findings SET action = 'alert', used = true, reachable = true, \
+             exposure = 'external', ai_severity = 'high', ai_rationale = 'reachable', \
+             triage_source = 'waddleai', triaged_at = now() \
+             WHERE tenant_id = $1 AND package_name = 'pkg-triaged'",
+        )
+        .bind(tenant)
+        .execute(&state.db)
+        .await
+        .unwrap_or_else(|e| panic!("update finding: {e}"));
+
+        let server = test_server(state);
+
+        let untriaged = server
+            .get("/api/v1/codescan/findings?action=")
+            .authorization_bearer(&admin)
+            .await;
+        untriaged.assert_status_ok();
+        let untriaged_body: serde_json::Value = untriaged.json();
+        assert_eq!(untriaged_body["total"], 1);
+        assert_eq!(untriaged_body["data"][0]["package_name"], "pkg-untriaged");
+        assert_eq!(untriaged_body["data"][0]["used"], serde_json::Value::Null);
+        assert_eq!(untriaged_body["data"][0]["triage_source"], "");
+
+        let triaged = server
+            .get("/api/v1/codescan/findings?action=alert")
+            .authorization_bearer(&admin)
+            .await;
+        triaged.assert_status_ok();
+        let triaged_body: serde_json::Value = triaged.json();
+        assert_eq!(triaged_body["total"], 1);
+        let row = &triaged_body["data"][0];
+        assert_eq!(row["package_name"], "pkg-triaged");
+        assert_eq!(row["used"], true);
+        assert_eq!(row["reachable"], true);
+        assert_eq!(row["exposure"], "external");
+        assert_eq!(row["ai_severity"], "high");
+        assert_eq!(row["triage_source"], "waddleai");
+        assert_eq!(
+            row["severity"], "critical",
+            "the original scanner severity must never be overwritten by ai_severity"
+        );
     }
 
     #[tokio::test]
