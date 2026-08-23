@@ -7,14 +7,25 @@
 //! signature, and every artifact's own content hash — before admitting
 //! anything: **all-or-nothing, no partial trust**.
 //!
-//! Signing is HMAC-SHA256 over the manifest checksum, keyed by
-//! `DEPGATE_BUNDLE_SIGNING_KEY` (`crate::config::DepgateConfig::
-//! bundle_signing_key`) — a symmetric MAC standing in for the spec's
-//! eventual cosign/sigstore asymmetric signing (deferred to P4,
-//! `docs/v2-port/v2.1-depgate.md` §9/§11). Reuses this workspace's existing
-//! `hmac`+`sha2` dependencies (see
-//! `services/manager/src/routes/endpoint.rs` for the same pattern) rather
-//! than adding a new signing stack for P3.
+//! Signing (P4, `docs/v2-port/v2.1-depgate.md` §9/§11): manifests are signed
+//! asymmetrically — RSASSA-PKCS1-v1_5-SHA256 over the manifest checksum,
+//! using `RsaPrivateKey`/`RsaPublicKey` (same primitives `src/provenance.rs`
+//! uses for cosign verification, and `services/worker-vault-sync/src/
+//! providers/oracle.rs` already uses for OCI request signing — no new
+//! crypto stack for this crate). This is the correct shape for a bundle
+//! crossing a trust boundary: the exporting/connected side holds
+//! `DEPGATE_BUNDLE_SIGNING_PRIVATE_KEY_PEM`, the air-gapped importer needs
+//! only `DEPGATE_BUNDLE_VERIFY_PUBLIC_KEY_PEM`.
+//!
+//! **Backward compatibility with P3's HMAC-signed bundles is preserved on
+//! import**: `manifest.signature_algorithm` (added in [`BUNDLE_VERSION`] 2,
+//! `#[serde(default)]` so an old v1 manifest simply has `None`) selects
+//! which scheme to verify a present `signature` against —
+//! `None`/`Some("hmac-sha256")` still verifies via
+//! `DEPGATE_BUNDLE_SIGNING_KEY` (the P3 symmetric key), exactly as before;
+//! `Some("rsa-pkcs1v15-sha256")` verifies via the new asymmetric public key.
+//! Export always signs with RSA when a private key is configured — HMAC is
+//! verify-only from here on.
 //!
 //! Scope: only `verdict = clean` artifacts are ever bundled — quarantined/
 //! infected content has no reason to travel into an air-gapped,
@@ -34,10 +45,20 @@ use crate::db::{self, ArtifactRow};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Bundle format version — bump on any breaking manifest-shape change so an
-/// importer can refuse an incompatible bundle outright instead of
-/// misparsing it.
-pub const BUNDLE_VERSION: u32 = 1;
+/// Bundle format version this build EXPORTS — bumped from 1 to 2 by P4's
+/// `signature_algorithm` field addition.
+pub const BUNDLE_VERSION: u32 = 2;
+
+/// Oldest bundle format version this build still IMPORTS — kept at 1 so a
+/// P3-exported (HMAC-only, no `signature_algorithm` field) bundle continues
+/// to verify exactly as it did before P4.
+pub const MIN_SUPPORTED_BUNDLE_VERSION: u32 = 1;
+
+/// `manifest.signature_algorithm` value for the legacy P3 symmetric scheme —
+/// also the assumed value when the field is absent (a v1 manifest).
+const HMAC_ALGO: &str = "hmac-sha256";
+/// `manifest.signature_algorithm` value for the P4 asymmetric scheme.
+const RSA_ALGO: &str = "rsa-pkcs1v15-sha256";
 
 /// Failures from exporting or importing a bundle.
 #[derive(Debug, thiserror::Error)]
@@ -78,6 +99,15 @@ pub enum BundleError {
     /// The bundle's signature does not verify against the configured key.
     #[error("bundle signature does not verify")]
     SignatureMismatch,
+    /// `manifest.signature_algorithm` names a scheme this build doesn't
+    /// understand.
+    #[error("bundle signature algorithm {0:?} is not supported")]
+    UnsupportedSignatureAlgorithm(String),
+    /// An asymmetric signing/verification key failed to parse (malformed
+    /// PEM, wrong key type) — a configuration error, not a signature
+    /// mismatch.
+    #[error("invalid RSA key for bundle signing: {0}")]
+    InvalidSigningKey(String),
     /// A manifest entry references an artifact the bundle doesn't contain.
     #[error("bundle is missing artifact bytes for sha256 {0}")]
     MissingArtifact(String),
@@ -148,9 +178,16 @@ pub struct BundleManifest {
     /// sha256 over the canonical (sorted) serialization of `entries`,
     /// computed before `signature` is populated.
     pub manifest_sha256: String,
-    /// Base64-free hex HMAC-SHA256 of `manifest_sha256`, present only when
-    /// export was given a signing key.
+    /// Hex-encoded signature over `manifest_sha256`, present only when
+    /// export was given a signing key. Scheme is named by
+    /// [`Self::signature_algorithm`].
     pub signature: Option<String>,
+    /// Which scheme `signature` was produced with. `#[serde(default)]` so a
+    /// P3-exported (`BUNDLE_VERSION` 1) manifest — which has no such field
+    /// at all — parses with this as `None`, treated identically to
+    /// `Some("hmac-sha256")` on import (see module docs).
+    #[serde(default)]
+    pub signature_algorithm: Option<String>,
 }
 
 /// Serializes `entries` (sorted for determinism — export/import order must
@@ -169,6 +206,11 @@ fn compute_manifest_hash(entries: &[BundleManifestEntry]) -> String {
     skauswatch_scan_core::compute_hashes(&canonical_entries_bytes(entries)).sha256
 }
 
+// Signing (not just verifying) via HMAC has no production caller since P4
+// moved export to `rsa_sign` exclusively — kept only to construct
+// legacy-shaped (`signature_algorithm: "hmac-sha256"`) fixtures in this
+// module's own backward-compatibility tests below.
+#[cfg(test)]
 fn hmac_hex(key: &str, message: &str) -> Result<String, BundleError> {
     // A key that fails `Hmac::new_from_slice` (wrong length) never happens
     // for HMAC-SHA256, which accepts any key length — infallible in
@@ -189,6 +231,51 @@ fn hmac_verify(key: &str, message: &str, signature_hex: &str) -> bool {
     };
     mac.update(message.as_bytes());
     mac.verify_slice(&expected).is_ok()
+}
+
+/// Signs `message` with `private_key_pem` (accepts PKCS#8 or PKCS#1 PEM) —
+/// `RSASSA-PKCS1-v1_5`-SHA256, the same scheme+primitives
+/// `src/provenance.rs` uses to verify cosign signatures.
+fn rsa_sign(private_key_pem: &str, message: &str) -> Result<String, BundleError> {
+    use rsa::RsaPrivateKey;
+    use rsa::pkcs1::DecodeRsaPrivateKey as _;
+    use rsa::pkcs1v15::SigningKey;
+    use rsa::pkcs8::DecodePrivateKey as _;
+    use rsa::sha2::Sha256;
+    use rsa::signature::{SignatureEncoding as _, Signer as _};
+
+    let key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)
+        .or_else(|_| RsaPrivateKey::from_pkcs1_pem(private_key_pem))
+        .map_err(|e| BundleError::InvalidSigningKey(e.to_string()))?;
+    let signing_key = SigningKey::<Sha256>::new(key);
+    let signature = signing_key.sign(message.as_bytes());
+    Ok(hex_lower(&signature.to_bytes()))
+}
+
+/// Verifies `signature_hex` against `message` using `public_key_pem`
+/// (accepts PKCS#8 SPKI or PKCS#1 PEM). `false` for any parse or
+/// cryptographic failure.
+fn rsa_verify(public_key_pem: &str, message: &str, signature_hex: &str) -> bool {
+    use rsa::RsaPublicKey;
+    use rsa::pkcs1::DecodeRsaPublicKey as _;
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::pkcs8::DecodePublicKey as _;
+    use rsa::sha2::Sha256;
+    use rsa::signature::Verifier as _;
+
+    let Ok(pub_key) = RsaPublicKey::from_public_key_pem(public_key_pem)
+        .or_else(|_| RsaPublicKey::from_pkcs1_pem(public_key_pem))
+    else {
+        return false;
+    };
+    let Ok(sig_bytes) = hex_decode(signature_hex) else {
+        return false;
+    };
+    let Ok(signature) = Signature::try_from(sig_bytes.as_slice()) else {
+        return false;
+    };
+    let verifying_key = VerifyingKey::<Sha256>::new(pub_key);
+    verifying_key.verify(message.as_bytes(), &signature).is_ok()
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -237,7 +324,7 @@ pub async fn export_bundle(
     bucket: &str,
     cache_prefix: &str,
     out_path: &std::path::Path,
-    signing_key: Option<&str>,
+    signing_private_key_pem: Option<&str>,
 ) -> Result<BundleStats, BundleError> {
     let rows = db::list_clean_artifacts_all_tenants(pool).await?;
     let entries: Vec<BundleManifestEntry> = rows.iter().map(BundleManifestEntry::from).collect();
@@ -265,15 +352,20 @@ pub async fn export_bundle(
     }
 
     let manifest_sha256 = compute_manifest_hash(&bundled_entries);
-    let signature = signing_key
-        .map(|key| hmac_hex(key, &manifest_sha256))
-        .transpose()?;
+    let (signature, signature_algorithm) = match signing_private_key_pem {
+        Some(pem) => (
+            Some(rsa_sign(pem, &manifest_sha256)?),
+            Some(RSA_ALGO.to_owned()),
+        ),
+        None => (None, None),
+    };
     let manifest = BundleManifest {
         version: BUNDLE_VERSION,
         created_at: chrono::Utc::now().to_rfc3339(),
         entries: bundled_entries,
         manifest_sha256: manifest_sha256.clone(),
         signature: signature.clone(),
+        signature_algorithm,
     };
     writer.start_file("manifest.json", options)?;
     writer.write_all(&serde_json::to_vec_pretty(&manifest).unwrap_or_default())?;
@@ -306,7 +398,8 @@ pub async fn import_bundle(
     cache_prefix: &str,
     tenant_id: Uuid,
     in_path: &std::path::Path,
-    verify_key: Option<&str>,
+    hmac_verify_key: Option<&str>,
+    rsa_verify_public_key_pem: Option<&str>,
     bundle_name: &str,
 ) -> Result<BundleStats, BundleError> {
     let file = std::fs::File::open(in_path)?;
@@ -318,7 +411,7 @@ pub async fn import_bundle(
         .map_err(|_| BundleError::MissingManifest)?
         .read_to_end(&mut manifest_bytes)?;
     let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)?;
-    if manifest.version != BUNDLE_VERSION {
+    if manifest.version < MIN_SUPPORTED_BUNDLE_VERSION || manifest.version > BUNDLE_VERSION {
         return Err(BundleError::UnsupportedVersion {
             found: manifest.version,
             expected: BUNDLE_VERSION,
@@ -333,15 +426,43 @@ pub async fn import_bundle(
         });
     }
 
-    let signature_verified = match (verify_key, &manifest.signature) {
-        (Some(key), Some(sig)) => {
-            if !hmac_verify(key, &manifest.manifest_sha256, sig) {
-                return Err(BundleError::SignatureMismatch);
+    // Backward compatibility (module docs): a v1 manifest (or any manifest
+    // omitting the field) is treated as HMAC-signed, exactly as P3 verified
+    // it; only an explicit `"rsa-pkcs1v15-sha256"` switches to the new
+    // asymmetric path.
+    let signature_verified = match &manifest.signature {
+        Some(sig) => {
+            let algo = manifest.signature_algorithm.as_deref().unwrap_or(HMAC_ALGO);
+            match algo {
+                HMAC_ALGO => match hmac_verify_key {
+                    Some(key) => {
+                        if !hmac_verify(key, &manifest.manifest_sha256, sig) {
+                            return Err(BundleError::SignatureMismatch);
+                        }
+                        true
+                    }
+                    None => false,
+                },
+                RSA_ALGO => match rsa_verify_public_key_pem {
+                    Some(pem) => {
+                        if !rsa_verify(pem, &manifest.manifest_sha256, sig) {
+                            return Err(BundleError::SignatureMismatch);
+                        }
+                        true
+                    }
+                    None => false,
+                },
+                other => {
+                    return Err(BundleError::UnsupportedSignatureAlgorithm(other.to_owned()));
+                }
             }
-            true
         }
-        (Some(_), None) => return Err(BundleError::MissingSignature),
-        (None, _) => false,
+        None => {
+            if hmac_verify_key.is_some() || rsa_verify_public_key_pem.is_some() {
+                return Err(BundleError::MissingSignature);
+            }
+            false
+        }
     };
 
     // Pre-flight: verify EVERY unique artifact's content hash before
@@ -613,7 +734,7 @@ mod tests {
             "bkt",
             "sha256/",
             &out_path,
-            Some("test-signing-key"),
+            Some(&crate::test_support::test_keypair().0),
         )
         .await
         .expect("export succeeds");
@@ -638,7 +759,8 @@ mod tests {
             "sha256/",
             dest_tenant,
             &out_path,
-            Some("test-signing-key"),
+            None,
+            Some(&crate::test_support::test_keypair().1),
             "test-bundle.zip",
         )
         .await
@@ -711,6 +833,7 @@ mod tests {
             Uuid::new_v4(),
             &out_path,
             Some("importer-requires-a-key"),
+            None,
             "unsigned.zip",
         )
         .await
@@ -792,6 +915,7 @@ mod tests {
             Uuid::new_v4(),
             &tampered_path,
             None,
+            None,
             "tampered.zip",
         )
         .await
@@ -841,6 +965,7 @@ mod tests {
                 entries,
                 manifest_sha256,
                 signature: None,
+                signature_algorithm: None,
             };
             manifest_bytes = serde_json::to_vec_pretty(&manifest).expect("serialize manifest");
         }
@@ -866,6 +991,7 @@ mod tests {
             Uuid::new_v4(),
             &path,
             None,
+            None,
             "missing-artifact.zip",
         )
         .await
@@ -884,6 +1010,7 @@ mod tests {
             entries: sample_entries(),
             manifest_sha256: "not-the-real-checksum".to_owned(),
             signature: None,
+            signature_algorithm: None,
         };
         {
             let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).expect("create"));
@@ -906,6 +1033,7 @@ mod tests {
             "sha256/",
             Uuid::new_v4(),
             &path,
+            None,
             None,
             "bad-manifest.zip",
         )
@@ -964,5 +1092,268 @@ mod tests {
         assert_eq!(stats.unique_blob_count, 0);
 
         let _ = std::fs::remove_file(&out_path);
+    }
+
+    // -- P4: asymmetric signing + backward compatibility ------------------
+
+    fn write_manifest_zip(path: &std::path::Path, manifest_json: &serde_json::Value) {
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(path).expect("create"));
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("manifest.json", options)
+            .expect("start_file");
+        writer
+            .write_all(&serde_json::to_vec_pretty(manifest_json).expect("serialize"))
+            .expect("write manifest");
+        writer.finish().expect("finish");
+    }
+
+    #[test]
+    fn rsa_sign_and_verify_round_trips() {
+        let (private_pem, public_pem) = crate::test_support::test_keypair();
+        let sig = rsa_sign(private_pem, "deadbeef").expect("sign");
+        assert!(rsa_verify(public_pem, "deadbeef", &sig));
+    }
+
+    #[test]
+    fn rsa_verify_rejects_wrong_key() {
+        let (private_pem, _) = crate::test_support::test_keypair();
+        let sig = rsa_sign(private_pem, "deadbeef").expect("sign");
+        let other_pub = crate::test_support::other_test_public_key_pem();
+        assert!(!rsa_verify(&other_pub, "deadbeef", &sig));
+    }
+
+    #[test]
+    fn rsa_verify_rejects_tampered_message() {
+        let (private_pem, public_pem) = crate::test_support::test_keypair();
+        let sig = rsa_sign(private_pem, "deadbeef").expect("sign");
+        assert!(!rsa_verify(public_pem, "tampered", &sig));
+    }
+
+    #[test]
+    fn rsa_verify_rejects_malformed_hex() {
+        let (_, public_pem) = crate::test_support::test_keypair();
+        assert!(!rsa_verify(public_pem, "deadbeef", "not-hex!!"));
+    }
+
+    #[test]
+    fn export_bundle_with_no_signing_key_writes_no_signature_algorithm() {
+        // Distinct from the round-trip test above: proves the *shape* of an
+        // unsigned export, not just that import tolerates it.
+        let entries = sample_entries();
+        let manifest_sha256 = compute_manifest_hash(&entries);
+        let manifest = BundleManifest {
+            version: BUNDLE_VERSION,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            entries,
+            manifest_sha256,
+            signature: None,
+            signature_algorithm: None,
+        };
+        let json = serde_json::to_value(&manifest).expect("serialize");
+        assert!(json["signature_algorithm"].is_null());
+    }
+
+    #[tokio::test]
+    async fn import_accepts_a_legacy_v1_manifest_with_no_signature_algorithm_field_in_json() {
+        // Simulates an actual bundle exported by the pre-P4 build: the JSON
+        // object has NO `signature_algorithm` key at all (not merely a
+        // `null` value) — `#[serde(default)]` must still parse it and
+        // `import_bundle` must still verify it via the legacy HMAC key.
+        let hmac_key = "legacy-hmac-key";
+        let entries = sample_entries();
+        let manifest_sha256 = compute_manifest_hash(&entries);
+        let signature = hmac_hex(hmac_key, &manifest_sha256).expect("sign");
+        let raw_json = serde_json::json!({
+            "version": 1,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "entries": entries,
+            "manifest_sha256": manifest_sha256,
+            "signature": signature,
+            // deliberately no "signature_algorithm" key
+        });
+
+        let path = temp_path("legacy-v1.zip");
+        write_manifest_zip(&path, &raw_json);
+
+        // No artifact bytes needed for this assertion — the manifest/
+        // signature verification happens before any artifact is read, and
+        // `sample_entries()`'s bytes were never uploaded anywhere; expect a
+        // `MissingArtifact` failure AFTER signature verification succeeds,
+        // proving the legacy signature path itself was accepted.
+        let pool = test_pool().await;
+        let s3 = MockServer::start().await;
+        let err = import_bundle(
+            &pool,
+            &mock_s3_client(&s3.uri()),
+            "bkt",
+            "sha256/",
+            Uuid::new_v4(),
+            &path,
+            Some(hmac_key),
+            None,
+            "legacy-v1.zip",
+        )
+        .await
+        .expect_err("no artifact bytes are present in this synthetic bundle");
+        assert!(
+            matches!(err, BundleError::MissingArtifact(_)),
+            "expected to get past signature verification and fail on missing artifact \
+             bytes instead, got {err:?}"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn import_rejects_an_rsa_signature_that_does_not_verify() {
+        let entries = sample_entries();
+        let manifest_sha256 = compute_manifest_hash(&entries);
+        let (private_pem, _) = crate::test_support::test_keypair();
+        let signature = rsa_sign(private_pem, &manifest_sha256).expect("sign");
+        let manifest = BundleManifest {
+            version: BUNDLE_VERSION,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            entries,
+            manifest_sha256,
+            signature: Some(signature),
+            signature_algorithm: Some(RSA_ALGO.to_owned()),
+        };
+        let path = temp_path("rsa-wrong-key.zip");
+        write_manifest_zip(&path, &serde_json::to_value(&manifest).expect("serialize"));
+
+        let pool = test_pool().await;
+        let s3 = MockServer::start().await;
+        let other_pub = crate::test_support::other_test_public_key_pem();
+        let err = import_bundle(
+            &pool,
+            &mock_s3_client(&s3.uri()),
+            "bkt",
+            "sha256/",
+            Uuid::new_v4(),
+            &path,
+            None,
+            Some(&other_pub),
+            "rsa-wrong-key.zip",
+        )
+        .await
+        .expect_err("must refuse an RSA signature that doesn't verify against this key");
+        assert!(matches!(err, BundleError::SignatureMismatch));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn import_rejects_an_unsupported_signature_algorithm() {
+        let entries = sample_entries();
+        let manifest_sha256 = compute_manifest_hash(&entries);
+        let manifest = BundleManifest {
+            version: BUNDLE_VERSION,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            entries,
+            manifest_sha256,
+            signature: Some("deadbeef".to_owned()),
+            signature_algorithm: Some("ed25519".to_owned()),
+        };
+        let path = temp_path("unsupported-algo.zip");
+        write_manifest_zip(&path, &serde_json::to_value(&manifest).expect("serialize"));
+
+        let pool = test_pool().await;
+        let s3 = MockServer::start().await;
+        let err = import_bundle(
+            &pool,
+            &mock_s3_client(&s3.uri()),
+            "bkt",
+            "sha256/",
+            Uuid::new_v4(),
+            &path,
+            Some("whatever"),
+            Some("whatever"),
+            "unsupported-algo.zip",
+        )
+        .await
+        .expect_err("must refuse a signature algorithm this build doesn't understand");
+        assert!(matches!(
+            err,
+            BundleError::UnsupportedSignatureAlgorithm(ref a) if a == "ed25519"
+        ));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn import_rejects_a_bundle_version_below_the_minimum_supported() {
+        let entries = sample_entries();
+        let manifest_sha256 = compute_manifest_hash(&entries);
+        let manifest = BundleManifest {
+            version: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            entries,
+            manifest_sha256,
+            signature: None,
+            signature_algorithm: None,
+        };
+        let path = temp_path("version-too-old.zip");
+        write_manifest_zip(&path, &serde_json::to_value(&manifest).expect("serialize"));
+
+        let pool = test_pool().await;
+        let s3 = MockServer::start().await;
+        let err = import_bundle(
+            &pool,
+            &mock_s3_client(&s3.uri()),
+            "bkt",
+            "sha256/",
+            Uuid::new_v4(),
+            &path,
+            None,
+            None,
+            "version-too-old.zip",
+        )
+        .await
+        .expect_err("version 0 predates this build's minimum supported version");
+        assert!(matches!(
+            err,
+            BundleError::UnsupportedVersion { found: 0, .. }
+        ));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn import_rejects_a_bundle_version_above_what_this_build_understands() {
+        let entries = sample_entries();
+        let manifest_sha256 = compute_manifest_hash(&entries);
+        let manifest = BundleManifest {
+            version: BUNDLE_VERSION + 1,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            entries,
+            manifest_sha256,
+            signature: None,
+            signature_algorithm: None,
+        };
+        let path = temp_path("version-too-new.zip");
+        write_manifest_zip(&path, &serde_json::to_value(&manifest).expect("serialize"));
+
+        let pool = test_pool().await;
+        let s3 = MockServer::start().await;
+        let err = import_bundle(
+            &pool,
+            &mock_s3_client(&s3.uri()),
+            "bkt",
+            "sha256/",
+            Uuid::new_v4(),
+            &path,
+            None,
+            None,
+            "version-too-new.zip",
+        )
+        .await
+        .expect_err("a version newer than this build supports must be refused");
+        assert!(matches!(
+            err,
+            BundleError::UnsupportedVersion { found, .. } if found == BUNDLE_VERSION + 1
+        ));
+
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -21,6 +21,7 @@
 
 mod credentials;
 mod findings;
+mod fix_batches;
 mod license_policies;
 pub(crate) mod openapi;
 mod plans;
@@ -65,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .merge(license_policies::router())
         .merge(findings::router())
         .merge(policy_rules::router())
+        .merge(fix_batches::router())
         .merge(openapi::router())
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

@@ -53,3 +53,28 @@ pypi:
     version: "2026.7.22"
   - name: idna
     version: "3.18"
+
+# Sourced from the root Cargo.toml `[workspace.dependencies]` table
+# (exact-pinned) — real crates this repo's own Rust services depend on.
+crates:
+  - name: serde
+    version: "1.0.228"
+  - name: tokio
+    version: "1.52.3"
+  - name: uuid
+    version: "1.23.5"
+  - name: clap
+    version: "4.6.1"
+
+# NOTE: skauswatch itself has no go.mod (it is a Rust workspace) — there is
+# no lockfile to source real entries from for this ecosystem the way the
+# sections above are sourced from Cargo.toml/package.json/requirements.txt.
+# The two modules below are real, well-known public Go modules (illustrative
+# warm-start targets for the `/go/*` proxy, representative of the kind of
+# dependency PenguinTech's existing Go services — see `backend-go.md` — pull
+# via `go get`), not modules this specific repo consumes.
+go:
+  - module: github.com/google/uuid
+    version: v1.6.0
+  - module: golang.org/x/mod
+    version: v0.19.0

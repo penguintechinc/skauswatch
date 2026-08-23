@@ -18,6 +18,12 @@ anyhow = { workspace = true }
 aws-config = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 axum = { workspace = true }
+# Cosign signature payload decoding (`src/provenance.rs`) + asymmetric
+# bundle-manifest signature encoding (`src/bundle.rs`, P4) — already
+# resolved in this lockfile transitively (jsonwebtoken/aws-sdk-* all pull
+# it), pinning it here as a direct dep does not move anything already
+# locked.
+base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
@@ -29,11 +35,11 @@ clap = { workspace = true }
 # already locked.
 flate2 = { workspace = true }
 futures = { workspace = true }
-# HMAC-SHA256 bundle-manifest signing (`src/bundle.rs`, §6b) — a symmetric
-# MAC standing in for the spec's eventual cosign/sigstore asymmetric
-# signing (P4); reuses this workspace's existing hmac+sha2 dependencies
-# (see services/manager/src/routes/endpoint.rs for the same pattern)
-# rather than adding a new signing stack for P3.
+# HMAC-SHA256 bundle-manifest signing (`src/bundle.rs`, §6b) was P3's
+# symmetric stand-in for asymmetric signing; P4 adds RSA (see `rsa` below)
+# as the preferred export-side scheme, but HMAC verification is kept for
+# already-exported (`signature_algorithm` absent/`"hmac-sha256"`) bundles —
+# see `src/bundle.rs` module docs.
 hmac = { workspace = true }
 metrics = { workspace = true }
 penguin-licensing = { workspace = true, features = ["axum"] }
@@ -44,6 +50,17 @@ regex = { workspace = true }
 # the size guard while reading rather than fully buffering an unbounded body
 # first — not part of the workspace's base reqwest feature set.
 reqwest = { workspace = true, features = ["stream"] }
+# Asymmetric bundle-manifest signing (`src/bundle.rs`, P4) + cosign RSA
+# image-signature verification (`src/provenance.rs`, P4) — the exact same
+# `RsaPrivateKey`/`RsaPublicKey` + `pkcs1v15::{SigningKey, VerifyingKey}`
+# primitives `services/worker-vault-sync/src/providers/oracle.rs` already
+# uses for OCI request signing; no new crypto stack for this crate.
+# "getrandom" is needed only by this crate's own tests (`src/test_support.rs`
+# generates a fresh RSA keypair via `RsaPrivateKey::new(&mut OsRng, ...)`,
+# never in production signing/verification, which take no external RNG) —
+# `services/worker-vault-sync/Cargo.toml` enables the same feature for the
+# identical reason.
+rsa = { workspace = true, features = ["getrandom"] }
 rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

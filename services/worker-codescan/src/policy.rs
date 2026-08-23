@@ -195,7 +195,8 @@ fn default_matrix(ctx: &FindingContext) -> Decision {
     let (action, reason) = match (sev, bucket) {
         (SeverityBucket::HighOrCritical, ReachabilityBucket::ReachableExternal) => (
             "alert",
-            "critical/high + reachable+external: alert (grouped fix-PR generation is P4, deferred)",
+            "critical/high + reachable+external: alert (this cell's fix-PR half is P4 — see \
+             `should_also_fix`, called separately by `handler` alongside this decision)",
         ),
         (SeverityBucket::HighOrCritical, ReachabilityBucket::ReachableInternal) => {
             ("fix", "critical/high + reachable+internal: fix")
@@ -227,6 +228,26 @@ fn default_matrix(ctx: &FindingContext) -> Decision {
         matched_rule_id: None,
         reason: format!("default action matrix: {reason}"),
     }
+}
+
+/// True when the default action matrix's "critical/high + reachable
+/// +external" cell — spec §5's combined `alert + fix` cell, which
+/// `evaluate`'s single-`action`-column `Decision` can't express on its own
+/// — should *also* enqueue this finding into CodeScan Sentinel P4's grouped
+/// auto-fix pipeline on top of the `alert` it already resolved to.
+/// `handler::CodeScanReviewHandler::scan_and_persist_branch` calls this
+/// alongside checking `decision.action == "fix"` to build its fix-candidate
+/// list.
+///
+/// Deliberately only fires when the *default matrix* decided
+/// (`matched_rule_id.is_none()`): an admin-configured rule that explicitly
+/// resolves a finding to `"alert"` means alert only — never an implicit
+/// upgrade to also opening a fix PR the admin didn't ask for.
+pub fn should_also_fix(ctx: &FindingContext, decision: &Decision) -> bool {
+    decision.action == "alert"
+        && decision.matched_rule_id.is_none()
+        && severity_bucket(&ctx.severity) == SeverityBucket::HighOrCritical
+        && ctx.reachability.bucket() == ReachabilityBucket::ReachableExternal
 }
 
 /// Evaluates `ctx` against `rules` (need not be pre-sorted — this sorts a
@@ -386,6 +407,50 @@ mod tests {
             exposure: Some(Exposure::External),
         };
         assert_eq!(evaluate(&ctx, &[]).action, "alert");
+    }
+
+    #[test]
+    fn should_also_fix_true_for_default_matrix_critical_reachable_external() {
+        let mut ctx = base_ctx();
+        ctx.severity = "critical".to_owned();
+        ctx.reachability = Reachability {
+            used: Some(true),
+            reachable: Some(true),
+            exposure: Some(Exposure::External),
+        };
+        let decision = evaluate(&ctx, &[]);
+        assert_eq!(decision.action, "alert");
+        assert!(
+            should_also_fix(&ctx, &decision),
+            "spec §5's combined alert+fix cell"
+        );
+    }
+
+    #[test]
+    fn should_also_fix_false_when_an_admin_rule_resolved_to_alert() {
+        let mut ctx = base_ctx();
+        ctx.severity = "critical".to_owned();
+        ctx.reachability = Reachability {
+            used: Some(true),
+            reachable: Some(true),
+            exposure: Some(Exposure::External),
+        };
+        let rule = wildcard_rule(1, 0, "alert");
+        let decision = evaluate(&ctx, &[rule]);
+        assert_eq!(decision.action, "alert");
+        assert!(
+            !should_also_fix(&ctx, &decision),
+            "an explicit admin rule choosing alert must never be silently upgraded to also fix"
+        );
+    }
+
+    #[test]
+    fn should_also_fix_false_outside_the_critical_external_cell() {
+        let mut ctx = base_ctx();
+        ctx.severity = "medium".to_owned();
+        ctx.reachability = Reachability::default();
+        let decision = evaluate(&ctx, &[]);
+        assert!(!should_also_fix(&ctx, &decision));
     }
 
     #[test]

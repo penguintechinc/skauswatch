@@ -82,6 +82,14 @@ pub struct ScanFinding {
     pub latest_version: Option<String>,
     pub advisory_id: String,
     pub severity: String,
+    /// The version that resolves this finding, when known — a `cve`
+    /// finding's advisory `fixed_version` (`None` when the advisory never
+    /// published a machine-readable fixed range), or an `sca` (outdated)
+    /// finding's `latest_version` (bumping to latest *is* the fix for
+    /// plain staleness). Feeds CodeScan Sentinel P4's grouped auto-fix
+    /// (`crate::fix`) — a `fix`-actioned finding with `fixed_version: None`
+    /// is left alone (report-only): there's nothing concrete to edit to.
+    pub fixed_version: Option<String>,
 }
 
 /// Strips manifest-range decoration (`^`, `~`, `>=`, leading `v`) for a
@@ -117,6 +125,7 @@ fn dependency_findings(dep: &ManifestDependency, lookup: &DepsDevLookup) -> Vec<
             latest_version: None,
             advisory_id: String::new(),
             severity: "unknown".to_owned(),
+            fixed_version: None,
         }];
     }
 
@@ -130,6 +139,7 @@ fn dependency_findings(dep: &ManifestDependency, lookup: &DepsDevLookup) -> Vec<
             latest_version: lookup.latest_version.clone(),
             advisory_id: String::new(),
             severity: "low".to_owned(),
+            fixed_version: lookup.latest_version.clone(),
         });
     }
     for advisory in &lookup.advisories {
@@ -141,6 +151,7 @@ fn dependency_findings(dep: &ManifestDependency, lookup: &DepsDevLookup) -> Vec<
             latest_version: lookup.latest_version.clone(),
             advisory_id: advisory.id.clone(),
             severity: advisory.severity.clone(),
+            fixed_version: advisory.fixed_version.clone(),
         });
     }
     findings
@@ -275,6 +286,7 @@ mod tests {
                 id: "GHSA-xxxx-yyyy-zzzz".to_owned(),
                 severity: "high".to_owned(),
                 summary: None,
+                fixed_version: Some("1.2.1".to_owned()),
             }],
             lookup_failed: false,
         };
@@ -289,6 +301,24 @@ mod tests {
             findings
                 .iter()
                 .any(|f| f.kind == "cve" && f.advisory_id == "GHSA-xxxx-yyyy-zzzz")
+        );
+        let sca = findings
+            .iter()
+            .find(|f| f.kind == "sca")
+            .expect("sca finding");
+        assert_eq!(
+            sca.fixed_version.as_deref(),
+            Some("1.3.0"),
+            "sca fix = latest_version"
+        );
+        let cve = findings
+            .iter()
+            .find(|f| f.kind == "cve")
+            .expect("cve finding");
+        assert_eq!(
+            cve.fixed_version.as_deref(),
+            Some("1.2.1"),
+            "cve fix = the advisory's own fixed_version, not just latest_version"
         );
     }
 

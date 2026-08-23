@@ -465,6 +465,14 @@ pub(crate) struct AdvisoryRef {
     /// succeeds; `None` if that lookup failed (the advisory id itself is
     /// still recorded — see [`deps_dev_advisory_detail`]).
     pub summary: Option<String>,
+    /// The first `fixed` version found in the advisory's OSV-shaped
+    /// `affected[].ranges[].events[]` — feeds CodeScan Sentinel P4's
+    /// grouped auto-fix (`crate::fix`), which only ever attempts an edit
+    /// when a concrete remediation version is known. `None` when the
+    /// advisory detail lookup failed, or succeeded but published no
+    /// machine-readable fixed version (common for advisories that only
+    /// describe a vulnerable range without a resolved upper bound yet).
+    pub fixed_version: Option<String>,
 }
 
 /// Result of a Sentinel latest-version + OSV-advisory lookup for one
@@ -547,6 +555,7 @@ async fn deps_dev_advisory_detail(client: &reqwest::Client, base: &str, id: &str
         id: id.to_owned(),
         severity: "unknown".to_owned(),
         summary: None,
+        fixed_version: None,
     };
     let Ok(resp) = client.get(&url).send().await else {
         return fallback();
@@ -568,7 +577,35 @@ async fn deps_dev_advisory_detail(client: &reqwest::Client, base: &str, id: &str
             .get("title")
             .and_then(|v| v.as_str())
             .map(str::to_owned),
+        fixed_version: fixed_version_from_advisory_json(&json),
     }
+}
+
+/// Extracts the first `fixed` version from an OSV-shaped advisory detail
+/// response's `affected[].ranges[].events[]` — see [`AdvisoryRef::fixed_version`]'s
+/// doc comment. The lookup that produced `json` is already scoped to one
+/// specific package+version (`deps_dev_advisories_for_version`'s URL), so
+/// this deliberately does not re-filter by ecosystem/package name — any
+/// `affected` entry present already pertains to the package being looked
+/// up.
+fn fixed_version_from_advisory_json(json: &serde_json::Value) -> Option<String> {
+    let affected = json.get("affected")?.as_array()?;
+    for entry in affected {
+        let Some(ranges) = entry.get("ranges").and_then(|r| r.as_array()) else {
+            continue;
+        };
+        for range in ranges {
+            let Some(events) = range.get("events").and_then(|e| e.as_array()) else {
+                continue;
+            };
+            for event in events {
+                if let Some(fixed) = event.get("fixed").and_then(|v| v.as_str()) {
+                    return Some(fixed.to_owned());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// `GET /v3/systems/{system}/packages/{name}/versions/{version}` — the same
@@ -1102,6 +1139,49 @@ mod tests {
             result.advisories[0].summary.as_deref(),
             Some("Prototype pollution")
         );
+    }
+
+    #[tokio::test]
+    async fn lookup_latest_and_advisories_parses_fixed_version_from_osv_affected_ranges() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/NPM/packages/left-pad"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "versions": [{"versionKey": {"version": "1.3.0"}, "isDefault": true}]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/systems/NPM/packages/left-pad/versions/1.1.0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "advisoryKeys": [{"id": "GHSA-aaaa-bbbb-cccc"}]
+            })))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v3/advisories/GHSA-aaaa-bbbb-cccc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "title": "Prototype pollution",
+                "cvss3Score": 8.1,
+                "affected": [{
+                    "package": {"ecosystem": "npm", "name": "left-pad"},
+                    "ranges": [{
+                        "type": "SEMVER",
+                        "events": [
+                            {"introduced": "0"},
+                            {"fixed": "1.2.1"}
+                        ]
+                    }]
+                }]
+            })))
+            .mount(&mock)
+            .await;
+
+        let client = RegistryClient::new(None, None, None, Some(mock.uri()));
+        let result = client
+            .lookup_latest_and_advisories(Ecosystem::Npm, "left-pad", "1.1.0")
+            .await;
+        assert_eq!(result.advisories[0].fixed_version.as_deref(), Some("1.2.1"));
     }
 
     #[tokio::test]

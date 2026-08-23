@@ -43,6 +43,26 @@ pub struct SeedPypiPackage {
     pub version: String,
 }
 
+/// One crates.io crate entry in a seed manifest (P4).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeedCratesPackage {
+    /// Crate name.
+    pub name: String,
+    /// Exact version to seed.
+    pub version: String,
+}
+
+/// One Go module entry in a seed manifest (P4).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeedGoModule {
+    /// Module path, human-readable/unescaped form (e.g.
+    /// `github.com/google/uuid`) — escaped internally via
+    /// `crate::go_path::escape_module_path` before the upstream request.
+    pub module: String,
+    /// Exact version to seed (e.g. `v1.6.0`).
+    pub version: String,
+}
+
 /// A seed manifest file (see `seeds/penguintech.yaml`). Every list defaults
 /// to empty so a manifest can seed any subset of ecosystems.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -56,6 +76,12 @@ pub struct SeedManifest {
     /// PyPI packages to warm-start.
     #[serde(default)]
     pub pypi: Vec<SeedPypiPackage>,
+    /// crates.io crates to warm-start (P4).
+    #[serde(default)]
+    pub crates: Vec<SeedCratesPackage>,
+    /// Go modules to warm-start (P4).
+    #[serde(default)]
+    pub go: Vec<SeedGoModule>,
 }
 
 impl SeedManifest {
@@ -91,7 +117,11 @@ pub async fn run(state: &AppState, manifest_path: &str) -> anyhow::Result<()> {
 
     let mut seeded = 0usize;
     let mut failed = 0usize;
-    let total = manifest.images.len() + manifest.npm.len() + manifest.pypi.len();
+    let total = manifest.images.len()
+        + manifest.npm.len()
+        + manifest.pypi.len()
+        + manifest.crates.len()
+        + manifest.go.len();
 
     for image in &manifest.images {
         match pipeline
@@ -163,6 +193,56 @@ pub async fn run(state: &AppState, manifest_path: &str) -> anyhow::Result<()> {
                 tracing::error!(
                     ecosystem = "pypi",
                     name = %pkg.name,
+                    version = %pkg.version,
+                    error = %e,
+                    "seed failed"
+                );
+            }
+        }
+    }
+
+    for pkg in &manifest.crates {
+        match seed_crates_package(&pipeline, &state.cratesio, pkg, tenant_id, max_bytes).await {
+            Ok(artifact) => {
+                seeded += 1;
+                tracing::info!(
+                    ecosystem = "crates",
+                    name = %pkg.name,
+                    version = %pkg.version,
+                    sha256 = %artifact.sha256,
+                    "seeded artifact"
+                );
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::error!(
+                    ecosystem = "crates",
+                    name = %pkg.name,
+                    version = %pkg.version,
+                    error = %e,
+                    "seed failed"
+                );
+            }
+        }
+    }
+
+    for pkg in &manifest.go {
+        match seed_go_module(&pipeline, &state.go_proxy, pkg, tenant_id, max_bytes).await {
+            Ok(artifact) => {
+                seeded += 1;
+                tracing::info!(
+                    ecosystem = "go",
+                    module = %pkg.module,
+                    version = %pkg.version,
+                    sha256 = %artifact.sha256,
+                    "seeded artifact"
+                );
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::error!(
+                    ecosystem = "go",
+                    module = %pkg.module,
                     version = %pkg.version,
                     error = %e,
                     "seed failed"
@@ -262,6 +342,82 @@ async fn seed_pypi_package(
         .await
 }
 
+/// Downloads `pkg`'s `.crate` file directly (crates.io's download URL is
+/// derivable from name+version alone, unlike npm/PyPI which both require an
+/// upstream metadata fetch first) and seeds it through the shared
+/// `ScanPipeline::seed_named` path (P4).
+async fn seed_crates_package(
+    pipeline: &crate::scanpipe::ScanPipeline<'_>,
+    cratesio: &crate::crates_io::CratesIoUpstreamClient,
+    pkg: &SeedCratesPackage,
+    tenant_id: Uuid,
+    max_bytes: u64,
+) -> Result<crate::scanpipe::ResolvedArtifact, PipelineError> {
+    // Consult the sparse index first, mirroring `seed_npm_package`/
+    // `seed_pypi_package`'s "confirm the version exists before downloading"
+    // pattern — a typo'd/unpublished seed version fails with a clear
+    // `BadRequest` here instead of an opaque 404 from the download endpoint.
+    let index = cratesio.fetch_index(&pkg.name, max_bytes).await?;
+    if !crate::crates_io::version_exists(&index.bytes, &pkg.version) {
+        return Err(PipelineError::BadRequest(format!(
+            "crates.io sparse index for {} has no published version {}",
+            pkg.name, pkg.version
+        )));
+    }
+    let filename = format!("{}-{}.crate", pkg.name, pkg.version);
+    let upstream_label = cratesio.index_url().to_owned();
+    let name = pkg.name.clone();
+    let version = pkg.version.clone();
+    pipeline
+        .seed_named(
+            "crates",
+            &pkg.name,
+            &filename,
+            &upstream_label,
+            tenant_id,
+            move || async move {
+                cratesio
+                    .fetch_crate_file(&name, &version, max_bytes)
+                    .await
+                    .map(|f| (f.bytes, f.content_type))
+                    .map_err(PipelineError::from)
+            },
+        )
+        .await
+}
+
+/// Downloads `pkg`'s module source zip directly (the GOPROXY protocol's
+/// `.zip` endpoint is derivable from module+version alone) and seeds it
+/// through the shared `ScanPipeline::seed_named` path (P4).
+async fn seed_go_module(
+    pipeline: &crate::scanpipe::ScanPipeline<'_>,
+    go: &crate::go_proxy::GoProxyUpstreamClient,
+    pkg: &SeedGoModule,
+    tenant_id: Uuid,
+    max_bytes: u64,
+) -> Result<crate::scanpipe::ResolvedArtifact, PipelineError> {
+    let escaped_module = crate::go_path::escape_module_path(&pkg.module);
+    let reference = format!("{}.zip", pkg.version);
+    let upstream_label = go.base_url().to_owned();
+    let module_for_fetch = escaped_module.clone();
+    let version_for_fetch = pkg.version.clone();
+    pipeline
+        .seed_named(
+            "go",
+            &pkg.module,
+            &reference,
+            &upstream_label,
+            tenant_id,
+            move || async move {
+                go.fetch_zip(&module_for_fetch, &version_for_fetch, max_bytes)
+                    .await
+                    .map(|f| (f.bytes, f.content_type))
+                    .map_err(PipelineError::from)
+            },
+        )
+        .await
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)] // tests fail loudly by design
 mod tests {
@@ -294,12 +450,26 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_penguintech_manifest_parses_and_covers_all_three_ecosystems() {
+    fn parses_crates_and_go_entries() {
+        let raw = "crates:\n  - name: serde\n    version: \"1.0.228\"\ngo:\n  - module: github.com/google/uuid\n    version: v1.6.0\n";
+        let manifest = SeedManifest::parse(raw).expect("parse");
+        assert_eq!(manifest.crates.len(), 1);
+        assert_eq!(manifest.crates[0].name, "serde");
+        assert_eq!(manifest.crates[0].version, "1.0.228");
+        assert_eq!(manifest.go.len(), 1);
+        assert_eq!(manifest.go[0].module, "github.com/google/uuid");
+        assert_eq!(manifest.go[0].version, "v1.6.0");
+    }
+
+    #[test]
+    fn the_shipped_penguintech_manifest_parses_and_covers_all_five_ecosystems() {
         let raw = include_str!("../seeds/penguintech.yaml");
         let manifest = SeedManifest::parse(raw).expect("shipped manifest must parse");
         assert!(!manifest.images.is_empty());
         assert!(!manifest.npm.is_empty());
         assert!(!manifest.pypi.is_empty());
+        assert!(!manifest.crates.is_empty());
+        assert!(!manifest.go.is_empty());
     }
 
     #[test]
@@ -430,6 +600,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
         let npm = NpmUpstreamClient::new(
             reqwest::Client::new(),
@@ -488,6 +660,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
         let npm = NpmUpstreamClient::new(
             reqwest::Client::new(),
@@ -570,6 +744,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
         let pypi = PypiUpstreamClient::new(
             reqwest::Client::new(),
@@ -633,6 +809,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
         let pypi = PypiUpstreamClient::new(
             reqwest::Client::new(),
@@ -656,13 +834,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_seeds_all_three_ecosystems_from_a_manifest_file() {
+    async fn run_seeds_all_five_ecosystems_from_a_manifest_file() {
         let oci_body = br#"{"schemaVersion":2}"#.to_vec();
         let oci_hex = skauswatch_scan_core::compute_hashes(&oci_body).sha256;
         let npm_body = b"npm tarball".to_vec();
         let npm_hex = skauswatch_scan_core::compute_hashes(&npm_body).sha256;
         let pypi_body = b"pypi wheel".to_vec();
         let pypi_hex = skauswatch_scan_core::compute_hashes(&pypi_body).sha256;
+        let crates_body = b"crates.io tarball".to_vec();
+        let crates_hex = skauswatch_scan_core::compute_hashes(&crates_body).sha256;
+        let go_body = b"go module zip".to_vec();
+        let go_hex = skauswatch_scan_core::compute_hashes(&go_body).sha256;
 
         let oci_upstream = MockServer::start().await;
         Mock::given(method("GET"))
@@ -703,8 +885,30 @@ mod tests {
             .mount(&pypi_index)
             .await;
 
+        let cratesio = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/se/rd/serde"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("{\"name\":\"serde\",\"vers\":\"1.0.228\"}\n", "text/plain"),
+            )
+            .mount(&cratesio)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/serde/1.0.228/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(crates_body.clone()))
+            .mount(&cratesio)
+            .await;
+
+        let goproxy = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/github.com/google/uuid/@v/v1.6.0.zip"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(go_body.clone()))
+            .mount(&goproxy)
+            .await;
+
         let s3 = MockServer::start().await;
-        for hex in [&oci_hex, &npm_hex, &pypi_hex] {
+        for hex in [&oci_hex, &npm_hex, &pypi_hex, &crates_hex, &go_hex] {
             Mock::given(method("GET"))
                 .and(path(format!("/bkt/sha256/{hex}")))
                 .respond_with(
@@ -761,13 +965,30 @@ mod tests {
             );
             inner.s3 = mock_s3_client(&s3.uri());
             inner.cfg.cache_bucket = "bkt".to_owned();
+            inner.cratesio = crate::crates_io::CratesIoUpstreamClient::new(
+                reqwest::Client::new(),
+                crate::config::CratesIoUpstreamConfig {
+                    index_url: cratesio.uri(),
+                    api_url: cratesio.uri(),
+                },
+            );
+            inner.go_proxy = crate::go_proxy::GoProxyUpstreamClient::new(
+                reqwest::Client::new(),
+                crate::config::GoProxyUpstreamConfig {
+                    base_url: goproxy.uri(),
+                },
+            );
         }
 
         let manifest_path =
             std::env::temp_dir().join(format!("depgate-seed-test-{}.yaml", Uuid::new_v4()));
         tokio::fs::write(
             &manifest_path,
-            "images:\n  - name: library/seeded\n    reference: latest\nnpm:\n  - name: left-pad\n    version: \"1.3.0\"\npypi:\n  - name: requests\n    version: \"2.34.2\"\n",
+            "images:\n  - name: library/seeded\n    reference: latest\n\
+             npm:\n  - name: left-pad\n    version: \"1.3.0\"\n\
+             pypi:\n  - name: requests\n    version: \"2.34.2\"\n\
+             crates:\n  - name: serde\n    version: \"1.0.228\"\n\
+             go:\n  - module: github.com/google/uuid\n    version: v1.6.0\n",
         )
         .await
         .expect("write temp manifest");
@@ -783,6 +1004,224 @@ mod tests {
         )
         .await
         .expect("list artifacts");
-        assert_eq!(total, 3, "all three ecosystems must be indexed");
+        assert_eq!(total, 5, "all five ecosystems must be indexed");
+    }
+
+    // -- P4: crates.io / Go module seed functions ------------------------
+
+    #[tokio::test]
+    async fn seed_crates_package_downloads_and_pins_it() {
+        let body = b"fake crate bytes".to_vec();
+        let hex = skauswatch_scan_core::compute_hashes(&body).sha256;
+
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/se/rd/serde"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("{\"name\":\"serde\",\"vers\":\"1.0.228\"}\n", "text/plain"),
+            )
+            .mount(&registry)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/serde/1.0.228/download"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/x-tar")
+                    .set_body_bytes(body.clone()),
+            )
+            .mount(&registry)
+            .await;
+
+        let s3 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/bkt/sha256/{hex}")))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_raw(s3_error_xml("NoSuchKey"), "application/xml"),
+            )
+            .mount(&s3)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/bkt/sha256/{hex}")))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&s3)
+            .await;
+
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let stats = CacheStats::default();
+        let upstream = crate::upstream::UpstreamClient::new(
+            reqwest::Client::new(),
+            crate::config::UpstreamConfig::from_env(),
+        );
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024,
+            cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
+        };
+        let cratesio = crate::crates_io::CratesIoUpstreamClient::new(
+            reqwest::Client::new(),
+            crate::config::CratesIoUpstreamConfig {
+                index_url: registry.uri(),
+                api_url: registry.uri(),
+            },
+        );
+        let pkg = SeedCratesPackage {
+            name: "serde".to_owned(),
+            version: "1.0.228".to_owned(),
+        };
+        let tenant: Uuid = BOOTSTRAP_TENANT.parse().expect("valid uuid");
+
+        let artifact = seed_crates_package(&pipeline, &cratesio, &pkg, tenant, 1024)
+            .await
+            .expect("seed succeeds");
+        assert_eq!(artifact.sha256, hex);
+
+        let row = crate::db::find_by_reference(&pool, "crates", "serde", "serde-1.0.228.crate")
+            .await
+            .expect("query")
+            .expect("row indexed");
+        assert!(row.pinned, "seed_crates_package must pin the row");
+    }
+
+    #[tokio::test]
+    async fn seed_crates_package_fails_closed_when_version_is_missing_from_index() {
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/se/rd/serde"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("{\"name\":\"serde\",\"vers\":\"1.0.227\"}\n", "text/plain"),
+            )
+            .mount(&registry)
+            .await;
+
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let stats = CacheStats::default();
+        let upstream = crate::upstream::UpstreamClient::new(
+            reqwest::Client::new(),
+            crate::config::UpstreamConfig::from_env(),
+        );
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client("http://127.0.0.1:1"),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024,
+            cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
+        };
+        let cratesio = crate::crates_io::CratesIoUpstreamClient::new(
+            reqwest::Client::new(),
+            crate::config::CratesIoUpstreamConfig {
+                index_url: registry.uri(),
+                api_url: registry.uri(),
+            },
+        );
+        let pkg = SeedCratesPackage {
+            name: "serde".to_owned(),
+            version: "9.9.9".to_owned(),
+        };
+        let tenant: Uuid = BOOTSTRAP_TENANT.parse().expect("valid uuid");
+
+        let err = seed_crates_package(&pipeline, &cratesio, &pkg, tenant, 1024)
+            .await
+            .expect_err("missing version must fail");
+        assert!(matches!(err, PipelineError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn seed_go_module_downloads_and_pins_it() {
+        let body = b"fake go module zip bytes".to_vec();
+        let hex = skauswatch_scan_core::compute_hashes(&body).sha256;
+
+        let registry = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/github.com/google/uuid/@v/v1.6.0.zip"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/zip")
+                    .set_body_bytes(body.clone()),
+            )
+            .mount(&registry)
+            .await;
+
+        let s3 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/bkt/sha256/{hex}")))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_raw(s3_error_xml("NoSuchKey"), "application/xml"),
+            )
+            .mount(&s3)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/bkt/sha256/{hex}")))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&s3)
+            .await;
+
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let stats = CacheStats::default();
+        let upstream = crate::upstream::UpstreamClient::new(
+            reqwest::Client::new(),
+            crate::config::UpstreamConfig::from_env(),
+        );
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024,
+            cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
+        };
+        let go = crate::go_proxy::GoProxyUpstreamClient::new(
+            reqwest::Client::new(),
+            crate::config::GoProxyUpstreamConfig {
+                base_url: registry.uri(),
+            },
+        );
+        let pkg = SeedGoModule {
+            module: "github.com/google/uuid".to_owned(),
+            version: "v1.6.0".to_owned(),
+        };
+        let tenant: Uuid = BOOTSTRAP_TENANT.parse().expect("valid uuid");
+
+        let artifact = seed_go_module(&pipeline, &go, &pkg, tenant, 1024)
+            .await
+            .expect("seed succeeds");
+        assert_eq!(artifact.sha256, hex);
+
+        let row = crate::db::find_by_reference(&pool, "go", "github.com/google/uuid", "v1.6.0.zip")
+            .await
+            .expect("query")
+            .expect("row indexed");
+        assert!(row.pinned, "seed_go_module must pin the row");
     }
 }

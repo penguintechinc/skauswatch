@@ -141,3 +141,47 @@ spec:
         - ports:
             - port: "443"
               protocol: TCP
+    # npm registry upstream (P2 -- DEPGATE_NPM_REGISTRY_URL default).
+    - toFQDNs:
+        - matchName: "registry.npmjs.org"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # PyPI index + file host upstreams (P2 -- DEPGATE_PYPI_INDEX_URL/
+    # DEPGATE_PYPI_FILES_URL defaults).
+    - toFQDNs:
+        - matchName: "pypi.org"
+        - matchName: "files.pythonhosted.org"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # crates.io sparse index + download/CDN upstreams (P4 --
+    # DEPGATE_CRATESIO_INDEX_URL/DEPGATE_CRATESIO_API_URL defaults;
+    # static.crates.io is where crates.io's own download endpoint redirects
+    # actual `.crate` file bytes from).
+    - toFQDNs:
+        - matchName: "index.crates.io"
+        - matchName: "crates.io"
+        - matchName: "static.crates.io"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # Go module proxy upstream (P4 -- DEPGATE_GOPROXY_URL default).
+    - toFQDNs:
+        - matchName: "proxy.golang.org"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # Socket.dev optional threat-intel tie-in (P4 §5/§10 -- src/socket.rs).
+    # Inert without DEPGATE_SOCKET_API_KEY configured (zero requests sent),
+    # so allowing egress here has no effect until that secret is set.
+    - toFQDNs:
+        - matchName: "api.socket.dev"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

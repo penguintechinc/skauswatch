@@ -11,10 +11,13 @@
 mod config;
 mod db;
 mod detection;
+mod fix;
 mod git_provider;
+mod git_write;
 mod handler;
 mod lease;
 mod license_scan;
+mod manifest_edit;
 mod message;
 mod policy;
 mod reachability;

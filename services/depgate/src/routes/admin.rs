@@ -428,6 +428,8 @@ pub(crate) struct PolicyRuleItem {
     verdict: Option<String>,
     risk_check: Option<String>,
     min_severity: Option<String>,
+    /// Provenance filter (`unsigned`/`verified`/`invalid`, P4 §5/§9/§10).
+    provenance: Option<String>,
     action: String,
     description: Option<String>,
     enabled: bool,
@@ -446,6 +448,7 @@ impl From<db::PolicyRuleRow> for PolicyRuleItem {
             verdict: r.verdict,
             risk_check: r.risk_check,
             min_severity: r.min_severity,
+            provenance: r.provenance,
             action: r.action,
             description: r.description,
             enabled: r.enabled,
@@ -466,6 +469,8 @@ pub(crate) struct PolicyRuleRequest {
     verdict: Option<String>,
     risk_check: Option<String>,
     min_severity: Option<String>,
+    /// Provenance filter (`unsigned`/`verified`/`invalid`, P4 §5/§9/§10).
+    provenance: Option<String>,
     action: String,
     description: Option<String>,
     #[serde(default = "default_enabled")]
@@ -492,6 +497,13 @@ fn validate_policy_rule_request(req: &PolicyRuleRequest) -> Result<(), ApiError>
     {
         return Err(ApiError::BadRequest(format!(
             "invalid min_severity {sev:?}: must be info, low, medium, high, or critical"
+        )));
+    }
+    if let Some(p) = &req.provenance
+        && p.parse::<crate::provenance::ProvenanceStatus>().is_err()
+    {
+        return Err(ApiError::BadRequest(format!(
+            "invalid provenance {p:?}: must be unsigned, verified, or invalid"
         )));
     }
     Ok(())
@@ -552,6 +564,7 @@ pub(crate) async fn create_policy_rule(
             verdict: req.verdict.as_deref(),
             risk_check: req.risk_check.as_deref(),
             min_severity: req.min_severity.as_deref(),
+            provenance: req.provenance.as_deref(),
             action: &req.action,
             description: req.description.as_deref(),
             enabled: req.enabled,
@@ -626,6 +639,7 @@ pub(crate) async fn update_policy_rule(
             verdict: req.verdict.as_deref(),
             risk_check: req.risk_check.as_deref(),
             min_severity: req.min_severity.as_deref(),
+            provenance: req.provenance.as_deref(),
             action: &req.action,
             description: req.description.as_deref(),
             enabled: req.enabled,

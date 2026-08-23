@@ -10,22 +10,29 @@ mod auth;
 mod bundle;
 mod cache;
 mod config;
+mod crates_io;
 mod db;
 mod error;
 mod fetch;
+mod go_path;
+mod go_proxy;
 mod heuristics;
 mod mesh_admin;
 mod npm;
 mod npm_path;
 mod oci_path;
 mod policy;
+mod provenance;
 mod pypi;
 mod rescan;
 mod routes;
 mod scanpipe;
 mod seed;
+mod socket;
 mod state;
 mod tarutil;
+#[cfg(test)]
+mod test_support;
 mod upstream;
 
 use std::net::SocketAddr;
@@ -131,7 +138,7 @@ async fn run_bundle(action: BundleAction) -> anyhow::Result<()> {
                 &state.cfg.cache_bucket,
                 &state.cfg.cache_prefix,
                 std::path::Path::new(&out),
-                state.cfg.bundle_signing_key.as_deref(),
+                state.cfg.bundle_signing_private_key_pem.as_deref(),
             )
             .await?;
             println!(
@@ -157,6 +164,7 @@ async fn run_bundle(action: BundleAction) -> anyhow::Result<()> {
                 tenant_id,
                 std::path::Path::new(&path),
                 state.cfg.bundle_signing_key.as_deref(),
+                state.cfg.bundle_verify_public_key_pem.as_deref(),
                 &bundle_name,
             )
             .await?;

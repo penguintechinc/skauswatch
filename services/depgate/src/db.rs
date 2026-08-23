@@ -405,6 +405,9 @@ pub struct PolicyRuleRow {
     /// or a bare severity gate is configured. `NULL` means no severity
     /// floor.
     pub min_severity: Option<String>,
+    /// Exact-match provenance disposition (`unsigned`/`verified`/`invalid`,
+    /// P4 §5/§9/§10). `NULL` matches any.
+    pub provenance: Option<String>,
     /// `allow`/`warn`/`block`/`quarantine`.
     pub action: String,
     /// Human-readable purpose.
@@ -436,6 +439,8 @@ pub struct PolicyRuleInput<'a> {
     pub risk_check: Option<&'a str>,
     /// Minimum severity filter.
     pub min_severity: Option<&'a str>,
+    /// Provenance filter (`unsigned`/`verified`/`invalid`).
+    pub provenance: Option<&'a str>,
     /// Resulting action.
     pub action: &'a str,
     /// Human-readable purpose.
@@ -458,10 +463,10 @@ pub async fn insert_policy_rule(
     sqlx::query_as::<_, PolicyRuleRow>(
         "INSERT INTO depgate_policy_rules \
             (id, tenant_id, priority, ecosystem, name_glob, version_glob, verdict, risk_check, \
-             min_severity, action, description, enabled, created_at, updated_at, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now(), $13) \
+             min_severity, provenance, action, description, enabled, created_at, updated_at, created_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now(), $14) \
          RETURNING id, tenant_id, priority, ecosystem, name_glob, version_glob, verdict, \
-                   risk_check, min_severity, action, description, enabled, created_at, \
+                   risk_check, min_severity, provenance, action, description, enabled, created_at, \
                    updated_at, created_by",
     )
     .bind(Uuid::new_v4())
@@ -473,6 +478,7 @@ pub async fn insert_policy_rule(
     .bind(input.verdict)
     .bind(input.risk_check)
     .bind(input.min_severity)
+    .bind(input.provenance)
     .bind(input.action)
     .bind(input.description)
     .bind(input.enabled)
@@ -492,7 +498,7 @@ pub async fn list_policy_rules(
 ) -> Result<Vec<PolicyRuleRow>, sqlx::Error> {
     sqlx::query_as::<_, PolicyRuleRow>(
         "SELECT id, tenant_id, priority, ecosystem, name_glob, version_glob, verdict, \
-                risk_check, min_severity, action, description, enabled, created_at, \
+                risk_check, min_severity, provenance, action, description, enabled, created_at, \
                 updated_at, created_by \
          FROM depgate_policy_rules WHERE tenant_id = $1 ORDER BY priority DESC, created_at ASC",
     )
@@ -512,7 +518,7 @@ pub async fn get_policy_rule(
 ) -> Result<Option<PolicyRuleRow>, sqlx::Error> {
     sqlx::query_as::<_, PolicyRuleRow>(
         "SELECT id, tenant_id, priority, ecosystem, name_glob, version_glob, verdict, \
-                risk_check, min_severity, action, description, enabled, created_at, \
+                risk_check, min_severity, provenance, action, description, enabled, created_at, \
                 updated_at, created_by \
          FROM depgate_policy_rules WHERE tenant_id = $1 AND id = $2",
     )
@@ -536,11 +542,11 @@ pub async fn update_policy_rule(
     sqlx::query_as::<_, PolicyRuleRow>(
         "UPDATE depgate_policy_rules SET \
             priority = $1, ecosystem = $2, name_glob = $3, version_glob = $4, verdict = $5, \
-            risk_check = $6, min_severity = $7, action = $8, description = $9, enabled = $10, \
-            updated_at = now(), created_by = COALESCE($11, created_by) \
-         WHERE tenant_id = $12 AND id = $13 \
+            risk_check = $6, min_severity = $7, provenance = $8, action = $9, description = $10, \
+            enabled = $11, updated_at = now(), created_by = COALESCE($12, created_by) \
+         WHERE tenant_id = $13 AND id = $14 \
          RETURNING id, tenant_id, priority, ecosystem, name_glob, version_glob, verdict, \
-                   risk_check, min_severity, action, description, enabled, created_at, \
+                   risk_check, min_severity, provenance, action, description, enabled, created_at, \
                    updated_at, created_by",
     )
     .bind(input.priority)
@@ -550,6 +556,7 @@ pub async fn update_policy_rule(
     .bind(input.verdict)
     .bind(input.risk_check)
     .bind(input.min_severity)
+    .bind(input.provenance)
     .bind(input.action)
     .bind(input.description)
     .bind(input.enabled)
@@ -683,6 +690,9 @@ pub struct PolicyDecisionInsert<'a> {
     pub matched_rule_id: Option<Uuid>,
     /// Human-readable "why".
     pub reason: &'a str,
+    /// Provenance disposition this decision was made against
+    /// (`crate::provenance::ProvenanceStatus::as_str()`, P4 §5/§9).
+    pub provenance: &'a str,
     /// Attribution tenant.
     pub tenant_id: Uuid,
 }
@@ -699,8 +709,8 @@ pub async fn insert_policy_decision(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO depgate_policy_decisions \
-            (id, sha256, ecosystem, name, reference, verdict, action, matched_rule_id, reason, tenant_id, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())",
+            (id, sha256, ecosystem, name, reference, verdict, action, matched_rule_id, reason, provenance, tenant_id, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())",
     )
     .bind(Uuid::new_v4())
     .bind(d.sha256)
@@ -711,6 +721,7 @@ pub async fn insert_policy_decision(
     .bind(d.action)
     .bind(d.matched_rule_id)
     .bind(d.reason)
+    .bind(d.provenance)
     .bind(d.tenant_id)
     .execute(pool)
     .await?;
@@ -865,6 +876,7 @@ impl PolicyRuleRow {
             verdict: self.verdict,
             risk_check: self.risk_check,
             min_severity,
+            provenance: self.provenance,
             action,
             enabled: self.enabled,
         })

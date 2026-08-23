@@ -544,6 +544,11 @@ components:
         priority:
           type: integer
           format: int32
+        provenance:
+          type:
+          - string
+          - 'null'
+          description: Provenance filter (`unsigned`/`verified`/`invalid`, P4 §5/§9/§10).
         risk_check:
           type:
           - string
@@ -587,6 +592,11 @@ components:
         priority:
           type: integer
           format: int32
+        provenance:
+          type:
+          - string
+          - 'null'
+          description: Provenance filter (`unsigned`/`verified`/`invalid`, P4 §5/§9/§10).
         risk_check:
           type:
           - string
