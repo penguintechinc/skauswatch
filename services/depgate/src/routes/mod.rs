@@ -1,21 +1,25 @@
-//! Top-level router assembly: the OCI proxy (`/v2/*`) and the admin/report
-//! API (`/api/v1/depgate/*`), both behind the `skauswatch.depgate` flag gate
-//! and `skauswatch_auth::tenant_middleware`. `/healthz`/`/readyz` are wired
+//! Top-level router assembly: the OCI proxy (`/v2/*`), the npm proxy
+//! (`/npm/*`, P2), the PyPI proxy (`/pypi/*`, P2), and the admin/report API
+//! (`/api/v1/depgate/*`), all behind the `skauswatch.depgate` flag gate and
+//! `skauswatch_auth::tenant_middleware`. `/healthz`/`/readyz` are wired
 //! separately in `main.rs` (unauthenticated, per the standard telemetry
 //! surface).
 //!
 //! SPIFFE-READINESS ASYMMETRY (intentional, `security.md`/`backend.md`:
 //! every service is SPIFFE-ready): the admin/report API additionally gains
 //! an SVID-authenticated path *alongside* this JWT/tenant path — see
-//! `crate::mesh_admin`, a distinct listener on its own port. `/v2/*` does
-//! **not** gain one: its callers are `docker`/`npm` clients speaking the
-//! OCI Distribution auth flow, not mesh peers, and cannot present a
-//! workload SVID — this router (and the bearer-JWT gate below) remains the
-//! only way to reach it, unchanged.
+//! `crate::mesh_admin`, a distinct listener on its own port. The `/v2/*`,
+//! `/npm/*`, and `/pypi/*` proxy surfaces do **not** gain one: their
+//! callers are `docker`/`npm`/`pip` clients speaking each ecosystem's own
+//! registry auth convention, not mesh peers, and cannot present a workload
+//! SVID — this router (and the bearer-JWT gate below) remains the only way
+//! to reach them, unchanged.
 
 pub mod admin;
+pub mod npm;
 pub mod oci;
 pub(crate) mod openapi;
+pub mod pypi;
 
 use axum::Router;
 use penguin_licensing::axum::{FlagGate, flag_gate};
@@ -36,6 +40,8 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new().nest("/api/v1", admin::router());
     let protected = api
         .merge(oci::router())
+        .merge(npm::router())
+        .merge(pypi::router())
         .layer(axum::middleware::from_fn_with_state(
             FlagGate::new(state.license.clone(), DEPGATE_FLAG),
             flag_gate,

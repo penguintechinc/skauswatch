@@ -26,7 +26,7 @@ paths:
           - 'null'
       - name: ecosystem
         in: query
-        description: Exact-match ecosystem filter (`oci` for P1).
+        description: Exact-match ecosystem filter (`oci`, `npm`, `pypi`).
         required: false
         schema:
           type:

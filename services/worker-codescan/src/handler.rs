@@ -21,7 +21,9 @@ use crate::git_provider::{self, GitCredentials};
 use crate::license_scan::RegistryClient;
 use crate::message::{CodeScanReviewTask, SentinelScanTask, stream_task_type};
 use crate::review::ReviewOutput;
+use crate::scanner_tool::{self, ScanOutcome, ScannerTool};
 use crate::sentinel;
+use crate::tree_fetch;
 
 /// Handler for CodeScan review stream entries.
 pub struct CodeScanReviewHandler {
@@ -32,6 +34,17 @@ pub struct CodeScanReviewHandler {
     /// (see `crate::license_scan`). Built once so tests/prod share one
     /// pooled `reqwest::Client`.
     registry_client: RegistryClient,
+    /// CodeScan Sentinel P2 tool registry (SAST/secrets/IaC/SBOM) — see
+    /// `crate::scanner_tool`. A `Vec` of trait objects rather than a fixed
+    /// struct so adding a tool never touches this handler.
+    tool_registry: Vec<Box<dyn ScannerTool>>,
+    /// Subprocess execution seam for the tool registry above — real
+    /// `TokioProcessRunner` in production; tests inject a fake at the
+    /// `scanner_tool` unit level (this field always holds the real runner,
+    /// which is itself what proves the "binary genuinely absent" path in
+    /// this module's own integration tests, since the test container never
+    /// installs semgrep/gitleaks/trivy/syft).
+    process_runner: std::sync::Arc<dyn scanner_tool::ProcessRunner>,
 }
 
 impl CodeScanReviewHandler {
@@ -48,6 +61,8 @@ impl CodeScanReviewHandler {
             producer,
             config,
             registry_client,
+            tool_registry: scanner_tool::default_registry(),
+            process_runner: std::sync::Arc::new(scanner_tool::TokioProcessRunner),
         }
     }
 
@@ -634,6 +649,7 @@ impl CodeScanReviewHandler {
             task.tenant_id,
             task.repo_config_id,
             branch,
+            &["sca", "cve"],
             &seen_ids,
         )
         .await
@@ -646,7 +662,12 @@ impl CodeScanReviewHandler {
             );
         }
 
-        let findings_count = i64::try_from(findings.len()).unwrap_or(i64::MAX);
+        let tool_findings_count = self
+            .scan_and_persist_tool_findings(task, branch, git_creds, run_id)
+            .await;
+
+        let findings_count =
+            i64::try_from(findings.len() + tool_findings_count).unwrap_or(i64::MAX);
         if let Err(e) =
             db::finish_scan_run(&self.pool, run_id, "completed", findings_count, None).await
         {
@@ -657,6 +678,153 @@ impl CodeScanReviewHandler {
                 "sentinel: failed to finish scan run"
             );
         }
+    }
+
+    /// Runs the P2 tool registry (SAST/secrets/IaC/SBOM,
+    /// docs/v2-port/v2.1-codescan-sentinel.md §3) against `branch`'s fetched
+    /// working tree, upserting every tool finding and persisting any SBOM
+    /// document produced. Returns the number of tool findings upserted (for
+    /// `scan_and_persist_branch`'s `codescan_scan_runs.findings_count`).
+    ///
+    /// A tree-fetch failure (network hiccup, oversized archive, unsupported
+    /// provider) skips the entire tool pass for this run — logged, never
+    /// fatal — and deliberately does *not* call `resolve_stale_findings` for
+    /// the tool kinds in that case, so a transient fetch failure can never
+    /// masquerade as "every previously-open tool finding vanished" (see
+    /// `db::resolve_stale_findings`'s doc comment).
+    async fn scan_and_persist_tool_findings(
+        &self,
+        task: &SentinelScanTask,
+        branch: &str,
+        git_creds: &GitCredentials,
+        run_id: i64,
+    ) -> usize {
+        let tree =
+            match tree_fetch::fetch_branch_tree(&task.provider, &task.repo_url, branch, git_creds)
+                .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(
+                        repo_config_id = task.repo_config_id,
+                        branch,
+                        error = %e,
+                        "sentinel: failed to fetch branch tree, skipping tool-based scan"
+                    );
+                    return 0;
+                }
+            };
+
+        let mut seen_ids = Vec::new();
+        let mut count = 0usize;
+        for tool in &self.tool_registry {
+            if !tool.is_applicable(tree.files()) {
+                continue;
+            }
+            let outcome = match tool.scan(tree.root(), self.process_runner.as_ref()).await {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!(
+                        repo_config_id = task.repo_config_id,
+                        branch,
+                        tool = tool.name(),
+                        error = %e,
+                        "sentinel: tool scan failed"
+                    );
+                    continue;
+                }
+            };
+
+            match outcome {
+                ScanOutcome::Unavailable => {
+                    tracing::info!(
+                        repo_config_id = task.repo_config_id,
+                        branch,
+                        tool = tool.name(),
+                        "sentinel: tool binary unavailable in this image, skipped"
+                    );
+                }
+                ScanOutcome::Findings(tool_findings) => {
+                    count += tool_findings.len();
+                    for finding in &tool_findings {
+                        match db::upsert_tool_finding(
+                            &self.pool,
+                            task.tenant_id,
+                            task.repo_config_id,
+                            branch,
+                            finding,
+                        )
+                        .await
+                        {
+                            Ok(u) => seen_ids.push(u.id),
+                            Err(e) => tracing::warn!(
+                                repo_config_id = task.repo_config_id,
+                                branch,
+                                tool = tool.name(),
+                                error = %e,
+                                "sentinel: failed to upsert tool finding"
+                            ),
+                        }
+                    }
+                }
+                ScanOutcome::Sbom(doc) => {
+                    if let Err(e) = self.persist_sbom(task, branch, run_id, &doc).await {
+                        tracing::warn!(
+                            repo_config_id = task.repo_config_id,
+                            branch,
+                            tool = tool.name(),
+                            error = %e,
+                            "sentinel: failed to persist sbom artifact"
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Err(e) = db::resolve_stale_findings(
+            &self.pool,
+            task.tenant_id,
+            task.repo_config_id,
+            branch,
+            &["sast", "secret", "iac"],
+            &seen_ids,
+        )
+        .await
+        {
+            tracing::warn!(
+                repo_config_id = task.repo_config_id,
+                branch,
+                error = %e,
+                "sentinel: failed to resolve stale tool findings"
+            );
+        }
+
+        count
+    }
+
+    /// Gzip-compresses `doc` and stores it in `codescan_sbom_artifacts`,
+    /// scoped to this scan run — see `db::insert_sbom_artifact`.
+    async fn persist_sbom(
+        &self,
+        task: &SentinelScanTask,
+        branch: &str,
+        run_id: i64,
+        doc: &scanner_tool::SbomDocument,
+    ) -> anyhow::Result<()> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&doc.content)?;
+        let gzipped = encoder.finish()?;
+        db::insert_sbom_artifact(
+            &self.pool,
+            task.tenant_id,
+            task.repo_config_id,
+            branch,
+            run_id,
+            doc.format,
+            &gzipped,
+        )
+        .await
     }
 
     /// Writes one `alerts` row for a newly-alertable critical/high CVE

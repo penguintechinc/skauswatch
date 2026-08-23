@@ -55,6 +55,17 @@ paths:
           type:
           - string
           - 'null'
+      - name: tool
+        in: query
+        description: |-
+          Filters to one scanner tool (P2: `semgrep`/`gitleaks`/`trivy`/
+          `syft`) — `""` for every P1 sca/cve row, so this only ever matches
+          tool-registry findings.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
       - name: severity
         in: query
         required: false
@@ -84,6 +95,53 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
           description: CodeScan Sentinel not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/codescan/findings/sbom/{scan_run_id}:
+    get:
+      tags:
+      - codescan-sentinel
+      summary: |-
+        GET /codescan/findings/sbom/{scan_run_id} — the CycloneDX SBOM document
+        produced by the P2 `syft` tool for that scan run (spec §3/§8: "SBOM
+        output included for compliance"). Tenant-scoped by `scan_run_id`; a
+        scan run belonging to another tenant (or with no SBOM recorded, e.g. it
+        predates P2 or syft was unavailable that run) answers 404, never a
+        cross-tenant existence signal.
+      operationId: get_sbom
+      parameters:
+      - name: scan_run_id
+        in: path
+        description: codescan_scan_runs.id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: CycloneDX SBOM document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SbomResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: CodeScan Sentinel not licensed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No SBOM recorded for this scan run
           content:
             application/json:
               schema:
@@ -1477,6 +1535,11 @@ components:
         One `codescan_findings` row, as returned by `list_findings` — an
         explicit DTO (not a raw table passthrough), matching every other
         response shape in this service (`security.md` Output Validation).
+
+        `tool`/`rule_id`/`file_path`/`line`/`title` are P2 additions
+        (migrations/0005_codescan_sentinel_tool_findings.sql) — empty string /
+        `None` for every P1 sca/cve row, populated for sast/secret/iac rows from
+        the scanner-tool registry (`worker-codescan::scanner_tool::ToolFinding`).
       required:
       - id
       - repo_config_id
@@ -1489,6 +1552,9 @@ components:
       - severity
       - source
       - status
+      - tool
+      - rule_id
+      - title
       properties:
         advisory_id:
           type: string
@@ -1498,6 +1564,10 @@ components:
           type: string
         ecosystem:
           type: string
+        file_path:
+          type:
+          - string
+          - 'null'
         first_seen:
           type:
           - string
@@ -1521,16 +1591,27 @@ components:
           type:
           - string
           - 'null'
+        line:
+          type:
+          - integer
+          - 'null'
+          format: int32
         package_name:
           type: string
         repo_config_id:
           type: integer
           format: int64
+        rule_id:
+          type: string
         severity:
           type: string
         source:
           type: string
         status:
+          type: string
+        title:
+          type: string
+        tool:
           type: string
     FindingListResponse:
       type: object
@@ -2147,13 +2228,47 @@ components:
           - string
           - 'null'
           format: date-time
+    SbomResponse:
+      type: object
+      description: |-
+        GET /codescan/findings/sbom/{scan_run_id} response — the decompressed
+        CycloneDX document as a raw JSON *string* (not re-parsed into nested
+        JSON): keeps this endpoint's schema simple and type-safe rather than
+        asking `utoipa` to describe an arbitrary/untyped document shape.
+        Consumers (compliance/exec reporting, spec §8) parse `content` as
+        CycloneDX JSON client-side.
+      required:
+      - scan_run_id
+      - repo_config_id
+      - branch
+      - format
+      - content
+      properties:
+        branch:
+          type: string
+        content:
+          type: string
+        format:
+          type: string
+        repo_config_id:
+          type: integer
+          format: int64
+        scan_run_id:
+          type: integer
+          format: int64
     SeverityCount:
       type: object
-      description: One `(severity, kind, ecosystem)` bucket count for the exec/summary view.
+      description: |-
+        One `(severity, kind, ecosystem, tool)` bucket count for the exec/summary
+        view. `tool` is `""` for every P1 sca/cve row (see `Finding`'s doc
+        comment) — the P2 addition lets a summary consumer break tool-registry
+        findings down by which tool produced them (spec §8/§11 P2: "the '3 OSS
+        SAST tools' reports").
       required:
       - severity
       - kind
       - ecosystem
+      - tool
       - count
       properties:
         count:
@@ -2164,6 +2279,8 @@ components:
         kind:
           type: string
         severity:
+          type: string
+        tool:
           type: string
     StatusResponse:
       type: object

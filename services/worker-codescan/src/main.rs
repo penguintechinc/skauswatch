@@ -17,8 +17,10 @@ mod lease;
 mod license_scan;
 mod message;
 mod review;
+mod scanner_tool;
 mod scheduler;
 mod sentinel;
+mod tree_fetch;
 
 use std::net::SocketAddr;
 use std::time::Duration;

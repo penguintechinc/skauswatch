@@ -1,16 +1,21 @@
-//! SkausWatch DepGate entry point — the OCI/docker pull-through registry
+//! SkausWatch DepGate entry point — the OCI/npm/PyPI pull-through registry
 //! proxy: scan-on-ingest, content-addressed cache, verdict-as-object-tags
-//! (`docs/v2-port/v2.1-depgate.md`, P1). `serve` (default) runs the `/v2/*`
-//! proxy + `/api/v1/depgate/*` admin API + health/metrics; `healthcheck` is
-//! the container-native probe (no curl in images); `seed` warm-starts the
-//! cache from a seed manifest; `openapi` regenerates the committed spec.
+//! (`docs/v2-port/v2.1-depgate.md`, P1 OCI + P2 npm/PyPI). `serve` (default)
+//! runs the `/v2/*` + `/npm/*` + `/pypi/*` proxies + `/api/v1/depgate/*`
+//! admin API + health/metrics; `healthcheck` is the container-native probe
+//! (no curl in images); `seed` warm-starts the cache from a seed manifest;
+//! `openapi` regenerates the committed spec.
 
 mod cache;
 mod config;
 mod db;
 mod error;
+mod fetch;
 mod mesh_admin;
+mod npm;
+mod npm_path;
 mod oci_path;
+mod pypi;
 mod routes;
 mod scanpipe;
 mod seed;

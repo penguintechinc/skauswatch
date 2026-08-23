@@ -11,6 +11,9 @@ use skauswatch_scan_core::ScanEngine;
 use sqlx::PgPool;
 
 use crate::config::DepgateConfig;
+use crate::npm::NpmUpstreamClient;
+use crate::pypi::PypiUpstreamClient;
+use crate::scanpipe::ScanPipeline;
 use crate::upstream::UpstreamClient;
 
 /// In-process cache hit/miss counters backing the admin `/stats` endpoint's
@@ -57,6 +60,10 @@ pub struct AppStateInner {
     pub cfg: DepgateConfig,
     /// OCI upstream client.
     pub upstream: UpstreamClient,
+    /// npm upstream client (P2).
+    pub npm: NpmUpstreamClient,
+    /// PyPI upstream client (P2).
+    pub pypi: PypiUpstreamClient,
     /// Shared ClamAV+YARA-X scan engine.
     pub scan_engine: Arc<ScanEngine>,
     /// Shared `JWT_SECRET_KEY` — every route (OCI proxy and admin API
@@ -122,7 +129,10 @@ impl AppStateInner {
         let http = reqwest::Client::builder()
             .build()
             .map_err(|e| anyhow::anyhow!("http client: {e}"))?;
-        let upstream = UpstreamClient::new(http, upstream_cfg);
+        let upstream = UpstreamClient::new(http.clone(), upstream_cfg);
+        let npm =
+            NpmUpstreamClient::new(http.clone(), crate::config::NpmUpstreamConfig::from_env());
+        let pypi = PypiUpstreamClient::new(http, crate::config::PypiUpstreamConfig::from_env());
 
         let scan_engine = Arc::new(
             ScanEngine::new(skauswatch_scan_core::ScanEngineConfig {
@@ -153,6 +163,8 @@ impl AppStateInner {
             s3,
             cfg,
             upstream,
+            npm,
+            pypi,
             scan_engine,
             jwt_secret,
             license,
@@ -188,6 +200,7 @@ impl AppStateInner {
             .build();
         let cfg = crate::config::DepgateConfig {
             http_port: crate::config::DEFAULT_HTTP_PORT,
+            public_base_url: "http://localhost:5050".to_owned(),
             cache_bucket: "depgate-test".to_owned(),
             cache_prefix: "sha256/".to_owned(),
             quarantine_prefix: "quarantine/".to_owned(),
@@ -203,6 +216,14 @@ impl AppStateInner {
             upstream: UpstreamClient::new(
                 reqwest::Client::new(),
                 crate::config::UpstreamConfig::from_env(),
+            ),
+            npm: NpmUpstreamClient::new(
+                reqwest::Client::new(),
+                crate::config::NpmUpstreamConfig::from_env(),
+            ),
+            pypi: PypiUpstreamClient::new(
+                reqwest::Client::new(),
+                crate::config::PypiUpstreamConfig::from_env(),
             ),
             scan_engine: Arc::new(ScanEngine::clamav_only(
                 &skauswatch_scan_core::ScanEngineConfig {
@@ -227,6 +248,38 @@ impl AppStateInner {
         Arc::new(Self::build_test_state(db, license, None))
     }
 
+    /// Like [`Self::for_tests_with_db`], but overriding the npm upstream
+    /// client and `public_base_url` — used by `crate::routes::npm`'s tests,
+    /// which (unlike most P1 route tests) need the packument-rewrite
+    /// dispatch path exercised against a wiremock npm registry rather than
+    /// just tenant/auth plumbing.
+    #[cfg(test)]
+    pub fn for_tests_with_npm(
+        db: PgPool,
+        license: Arc<LicenseClient>,
+        npm: NpmUpstreamClient,
+        public_base_url: &str,
+    ) -> AppState {
+        let mut inner = Self::build_test_state(db, license, None);
+        inner.npm = npm;
+        inner.cfg.public_base_url = public_base_url.to_owned();
+        Arc::new(inner)
+    }
+
+    /// Like [`Self::for_tests_with_npm`], for `crate::routes::pypi`'s tests.
+    #[cfg(test)]
+    pub fn for_tests_with_pypi(
+        db: PgPool,
+        license: Arc<LicenseClient>,
+        pypi: PypiUpstreamClient,
+        public_base_url: &str,
+    ) -> AppState {
+        let mut inner = Self::build_test_state(db, license, None);
+        inner.pypi = pypi;
+        inner.cfg.public_base_url = public_base_url.to_owned();
+        Arc::new(inner)
+    }
+
     /// Like [`Self::for_tests_with_db`], but with a caller-supplied
     /// [`IdentityProvider`] — used by `mesh_admin`'s tests that need to
     /// exercise the SPIFFE-identity-aware code paths (degraded-provider
@@ -241,5 +294,25 @@ impl AppStateInner {
         identity: Arc<IdentityProvider>,
     ) -> AppState {
         Arc::new(Self::build_test_state(db, license, Some(identity)))
+    }
+
+    /// Builds a [`ScanPipeline`] bundling this state's DB/S3/scan-engine
+    /// handles — the one construction site every route module
+    /// (`crate::routes::oci`, `crate::routes::npm`, `crate::routes::pypi`)
+    /// and `crate::seed` share, replacing what P1 had inlined separately in
+    /// `crate::routes::oci::pipeline_for` and `crate::seed::run`.
+    #[must_use]
+    pub fn pipeline(&self) -> ScanPipeline<'_> {
+        ScanPipeline {
+            upstream: &self.upstream,
+            s3: &self.s3,
+            bucket: &self.cfg.cache_bucket,
+            cache_prefix: &self.cfg.cache_prefix,
+            quarantine_prefix: &self.cfg.quarantine_prefix,
+            scan_engine: &self.scan_engine,
+            db: &self.db,
+            max_artifact_bytes: self.cfg.max_artifact_bytes,
+            cache_stats: &self.cache_stats,
+        }
     }
 }

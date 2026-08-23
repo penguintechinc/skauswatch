@@ -1,7 +1,7 @@
 [package]
 publish = false
 name = "skauswatch-depgate"
-description = "SkausWatch DepGate — OCI/docker pull-through registry proxy: scan-on-ingest, content-addressed cache, verdict-as-object-tags (docs/v2-port/v2.1-depgate.md P1)"
+description = "SkausWatch DepGate — OCI/npm/PyPI pull-through registry proxy: scan-on-ingest, content-addressed cache, verdict-as-object-tags (docs/v2-port/v2.1-depgate.md P1 OCI + P2 npm/PyPI)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,6 +24,9 @@ clap = { workspace = true }
 futures = { workspace = true }
 metrics = { workspace = true }
 penguin-licensing = { workspace = true, features = ["axum"] }
+# PEP 503 simple-index href rewriting (src/pypi.rs) — npm's packument
+# rewrite is plain JSON manipulation and needs no regex.
+regex = { workspace = true }
 # "stream" adds Response::bytes_stream(), used by src/upstream.rs to enforce
 # the size guard while reading rather than fully buffering an unbounded body
 # first — not part of the workspace's base reqwest feature set.

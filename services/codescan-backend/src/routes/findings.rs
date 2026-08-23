@@ -1,14 +1,16 @@
 //! /api/v1/codescan/findings — CodeScan Sentinel report surface
-//! (docs/v2-port/v2.1-codescan-sentinel.md §8/§9, P1: report-only, no AI).
-//! Read-only: `worker-codescan`'s scheduler + scan handler
-//! (`services/worker-codescan/src/scheduler.rs`, `src/handler.rs`) are the
-//! only writers of `codescan_findings`, via the shared Postgres database —
-//! this service never mutates the table, only lists/summarizes it.
+//! (docs/v2-port/v2.1-codescan-sentinel.md §8/§9, P1: SCA/CVE report-only;
+//! P2: folds in the SAST/secret/IaC tool registry + SBOM artifacts, see
+//! `worker-codescan::scanner_tool`). Read-only: `worker-codescan`'s
+//! scheduler + scan handler (`services/worker-codescan/src/scheduler.rs`,
+//! `src/handler.rs`) are the only writers of `codescan_findings`/
+//! `codescan_sbom_artifacts`, via the shared Postgres database — this
+//! service never mutates either table, only lists/summarizes/serves them.
 //!
 //! Gated on `SENTINEL_FLAG` (`skauswatch.codescan.sentinel`), independent of
 //! `CODESCAN_FLAG` — see `routes::sentinel_denied`.
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -25,6 +27,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/codescan/findings", get(list_findings))
         .route("/codescan/findings/summary", get(findings_summary))
+        .route("/codescan/findings/sbom/{scan_run_id}", get(get_sbom))
 }
 
 const DEFAULT_PER_PAGE: i64 = 20;
@@ -40,6 +43,11 @@ fn pagination(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
 /// One `codescan_findings` row, as returned by `list_findings` — an
 /// explicit DTO (not a raw table passthrough), matching every other
 /// response shape in this service (`security.md` Output Validation).
+///
+/// `tool`/`rule_id`/`file_path`/`line`/`title` are P2 additions
+/// (migrations/0005_codescan_sentinel_tool_findings.sql) — empty string /
+/// `None` for every P1 sca/cve row, populated for sast/secret/iac rows from
+/// the scanner-tool registry (`worker-codescan::scanner_tool::ToolFinding`).
 #[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
 pub(crate) struct Finding {
     id: i64,
@@ -55,6 +63,11 @@ pub(crate) struct Finding {
     severity: String,
     source: String,
     status: String,
+    tool: String,
+    rule_id: String,
+    file_path: Option<String>,
+    line: Option<i32>,
+    title: String,
     #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
     first_seen: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(serialize_with = "crate::dt::serde_py_isoformat_opt")]
@@ -63,7 +76,7 @@ pub(crate) struct Finding {
 
 const FINDING_COLUMNS: &str = "id, repo_config_id, branch, kind, ecosystem, package_name, \
      current_version, latest_version, fixed_version, advisory_id, severity, source, status, \
-     first_seen, last_seen";
+     tool, rule_id, file_path, line, title, first_seen, last_seen";
 
 /// Documentation-only mirror of `list_findings`'s `serde_json::json!` body.
 #[derive(Serialize, utoipa::ToSchema)]
@@ -81,6 +94,10 @@ pub(crate) struct ListQuery {
     repo_config_id: Option<i64>,
     branch: Option<String>,
     kind: Option<String>,
+    /// Filters to one scanner tool (P2: `semgrep`/`gitleaks`/`trivy`/
+    /// `syft`) — `""` for every P1 sca/cve row, so this only ever matches
+    /// tool-registry findings.
+    tool: Option<String>,
     severity: Option<String>,
     status: Option<String>,
 }
@@ -122,6 +139,9 @@ pub(crate) async fn list_findings(
     if let Some(v) = &q.kind {
         qb.push(" AND kind = ").push_bind(v.clone());
     }
+    if let Some(v) = &q.tool {
+        qb.push(" AND tool = ").push_bind(v.clone());
+    }
     if let Some(v) = &q.severity {
         qb.push(" AND severity = ").push_bind(v.clone());
     }
@@ -147,6 +167,9 @@ pub(crate) async fn list_findings(
     if let Some(v) = &q.kind {
         count_qb.push(" AND kind = ").push_bind(v.clone());
     }
+    if let Some(v) = &q.tool {
+        count_qb.push(" AND tool = ").push_bind(v.clone());
+    }
     if let Some(v) = &q.severity {
         count_qb.push(" AND severity = ").push_bind(v.clone());
     }
@@ -167,12 +190,17 @@ pub(crate) async fn list_findings(
         .into_response())
 }
 
-/// One `(severity, kind, ecosystem)` bucket count for the exec/summary view.
+/// One `(severity, kind, ecosystem, tool)` bucket count for the exec/summary
+/// view. `tool` is `""` for every P1 sca/cve row (see `Finding`'s doc
+/// comment) — the P2 addition lets a summary consumer break tool-registry
+/// findings down by which tool produced them (spec §8/§11 P2: "the '3 OSS
+/// SAST tools' reports").
 #[derive(sqlx::FromRow, Serialize, utoipa::ToSchema)]
 pub(crate) struct SeverityCount {
     severity: String,
     kind: String,
     ecosystem: String,
+    tool: String,
     count: i64,
 }
 
@@ -205,10 +233,10 @@ pub(crate) async fn findings_summary(
     }
 
     let by_bucket = sqlx::query_as::<_, SeverityCount>(
-        "SELECT severity, kind, ecosystem, count(*) AS count FROM codescan_findings \
+        "SELECT severity, kind, ecosystem, tool, count(*) AS count FROM codescan_findings \
          WHERE tenant_id = $1 AND status = 'open' \
-         GROUP BY severity, kind, ecosystem \
-         ORDER BY severity, kind, ecosystem",
+         GROUP BY severity, kind, ecosystem, tool \
+         ORDER BY severity, kind, ecosystem, tool",
     )
     .bind(user.tenant_id)
     .fetch_all(&state.db)
@@ -224,6 +252,97 @@ pub(crate) async fn findings_summary(
         })),
     )
         .into_response())
+}
+
+/// Raw row shape for `codescan_sbom_artifacts` — not itself an API DTO
+/// ([`SbomResponse`] below is), since `doc_gzip` needs decompression before
+/// it's presentable.
+#[derive(sqlx::FromRow)]
+struct SbomRow {
+    repo_config_id: i64,
+    branch: String,
+    format: String,
+    doc_gzip: Vec<u8>,
+}
+
+/// GET /codescan/findings/sbom/{scan_run_id} response — the decompressed
+/// CycloneDX document as a raw JSON *string* (not re-parsed into nested
+/// JSON): keeps this endpoint's schema simple and type-safe rather than
+/// asking `utoipa` to describe an arbitrary/untyped document shape.
+/// Consumers (compliance/exec reporting, spec §8) parse `content` as
+/// CycloneDX JSON client-side.
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct SbomResponse {
+    scan_run_id: i64,
+    repo_config_id: i64,
+    branch: String,
+    format: String,
+    content: String,
+}
+
+/// GET /codescan/findings/sbom/{scan_run_id} — the CycloneDX SBOM document
+/// produced by the P2 `syft` tool for that scan run (spec §3/§8: "SBOM
+/// output included for compliance"). Tenant-scoped by `scan_run_id`; a
+/// scan run belonging to another tenant (or with no SBOM recorded, e.g. it
+/// predates P2 or syft was unavailable that run) answers 404, never a
+/// cross-tenant existence signal.
+#[utoipa::path(
+    get,
+    path = "/api/v1/codescan/findings/sbom/{scan_run_id}",
+    tag = "codescan-sentinel",
+    security(("bearer_jwt" = [])),
+    params(("scan_run_id" = i64, Path, description = "codescan_scan_runs.id")),
+    responses(
+        (status = 200, description = "CycloneDX SBOM document", body = SbomResponse),
+        (status = 401, description = "Missing or invalid authorization header", body = ErrorResponse),
+        (status = 403, description = "CodeScan Sentinel not licensed", body = ErrorResponse),
+        (status = 404, description = "No SBOM recorded for this scan run", body = ErrorResponse),
+    ),
+)]
+pub(crate) async fn get_sbom(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(scan_run_id): Path<i64>,
+) -> Result<Response, ApiError> {
+    if let Some(denied) = sentinel_denied(&state).await {
+        return Ok(denied);
+    }
+
+    let row = sqlx::query_as::<_, SbomRow>(
+        "SELECT repo_config_id, branch, format, doc_gzip FROM codescan_sbom_artifacts \
+         WHERE tenant_id = $1 AND scan_run_id = $2",
+    )
+    .bind(user.tenant_id)
+    .bind(scan_run_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    let Some(row) = row else {
+        return Err(ApiError::NotFound("SBOM not found".to_owned()));
+    };
+
+    let content = decompress_gzip_to_string(&row.doc_gzip)
+        .map_err(|e| ApiError::internal("sbom gzip decompress", e))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(SbomResponse {
+            scan_run_id,
+            repo_config_id: row.repo_config_id,
+            branch: row.branch,
+            format: row.format,
+            content,
+        }),
+    )
+        .into_response())
+}
+
+fn decompress_gzip_to_string(gzipped: &[u8]) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut decoder = flate2::read::GzDecoder::new(gzipped);
+    let mut out = String::new();
+    decoder.read_to_string(&mut out)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -345,6 +464,88 @@ mod tests {
         .execute(pool)
         .await
         .unwrap_or_else(|e| panic!("seed finding: {e}"));
+    }
+
+    /// Seeds a P2 tool-registry finding (sast/secret/iac) — mirrors what
+    /// `worker-codescan::db::upsert_tool_finding` writes.
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_tool_finding(
+        pool: &sqlx::PgPool,
+        tenant: Uuid,
+        repo_config_id: i64,
+        branch: &str,
+        kind: &str,
+        tool: &str,
+        rule_id: &str,
+        severity: &str,
+        file_path: &str,
+        line: i32,
+    ) {
+        sqlx::query(
+            "INSERT INTO codescan_findings \
+             (tenant_id, repo_config_id, branch, kind, ecosystem, package_name, \
+              current_version, tool, rule_id, severity, file_path, line, title, \
+              fingerprint, status) \
+             VALUES ($1,$2,$3,$4,'','','',$5,$6,$7,$8,$9,'a title',$10,'open')",
+        )
+        .bind(tenant)
+        .bind(repo_config_id)
+        .bind(branch)
+        .bind(kind)
+        .bind(tool)
+        .bind(rule_id)
+        .bind(severity)
+        .bind(file_path)
+        .bind(line)
+        .bind(format!("{tool}:{rule_id}:{file_path}:{line}"))
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed tool finding: {e}"));
+    }
+
+    async fn seed_scan_run(pool: &sqlx::PgPool, tenant: Uuid, repo_config_id: i64) -> i64 {
+        let row: (i64,) = sqlx::query_as(
+            "INSERT INTO codescan_scan_runs (tenant_id, repo_config_id, branch, status) \
+             VALUES ($1, $2, 'main', 'completed') RETURNING id",
+        )
+        .bind(tenant)
+        .bind(repo_config_id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed scan run: {e}"));
+        row.0
+    }
+
+    fn gzip(content: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder
+            .write_all(content)
+            .unwrap_or_else(|e| panic!("gzip write: {e}"));
+        encoder
+            .finish()
+            .unwrap_or_else(|e| panic!("gzip finish: {e}"))
+    }
+
+    async fn seed_sbom(
+        pool: &sqlx::PgPool,
+        tenant: Uuid,
+        repo_config_id: i64,
+        scan_run_id: i64,
+        content: &[u8],
+    ) {
+        sqlx::query(
+            "INSERT INTO codescan_sbom_artifacts \
+             (tenant_id, repo_config_id, branch, scan_run_id, format, doc_gzip) \
+             VALUES ($1, $2, 'main', $3, 'cyclonedx-json', $4)",
+        )
+        .bind(tenant)
+        .bind(repo_config_id)
+        .bind(scan_run_id)
+        .bind(gzip(content))
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed sbom: {e}"));
     }
 
     #[tokio::test]
@@ -613,5 +814,198 @@ mod tests {
         let body: serde_json::Value = resp.json();
         assert_eq!(body["total_open"], 0);
         assert_eq!(body["by_bucket"], serde_json::json!([]));
+    }
+
+    // ── P2 tool registry: findings filters + summary breakdown ────────────
+
+    #[tokio::test]
+    async fn list_findings_filters_by_tool_and_exposes_tool_registry_fields() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let tenant: Uuid = crate::routes::test_support::TEST_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("uuid: {e}"));
+        let repo = seed_repo(&state.db, tenant).await;
+
+        seed_finding(
+            &state.db, tenant, repo, "main", "sca", "low", "left-pad", "", "open",
+        )
+        .await;
+        seed_tool_finding(
+            &state.db, tenant, repo, "main", "sast", "semgrep", "rule-a", "high", "app.py", 10,
+        )
+        .await;
+
+        let server = test_server(state);
+        let resp = server
+            .get("/api/v1/codescan/findings?tool=semgrep")
+            .authorization_bearer(&admin)
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["total"], 1);
+        assert_eq!(body["data"][0]["tool"], "semgrep");
+        assert_eq!(body["data"][0]["rule_id"], "rule-a");
+        assert_eq!(body["data"][0]["file_path"], "app.py");
+        assert_eq!(body["data"][0]["line"], 10);
+        assert_eq!(body["data"][0]["title"], "a title");
+
+        // A P1 sca/cve row carries the tool-registry columns as empty
+        // string / null, never leaking a stray value across kinds.
+        let sca_resp = server
+            .get("/api/v1/codescan/findings?kind=sca")
+            .authorization_bearer(&admin)
+            .await;
+        sca_resp.assert_status_ok();
+        let sca_body: serde_json::Value = sca_resp.json();
+        assert_eq!(sca_body["data"][0]["tool"], "");
+        assert!(sca_body["data"][0]["file_path"].is_null());
+    }
+
+    #[tokio::test]
+    async fn findings_summary_breaks_down_by_tool() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let tenant: Uuid = crate::routes::test_support::TEST_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("uuid: {e}"));
+        let repo = seed_repo(&state.db, tenant).await;
+
+        seed_finding(
+            &state.db, tenant, repo, "main", "sca", "low", "left-pad", "", "open",
+        )
+        .await;
+        seed_tool_finding(
+            &state.db, tenant, repo, "main", "sast", "semgrep", "rule-a", "high", "app.py", 10,
+        )
+        .await;
+        seed_tool_finding(
+            &state.db,
+            tenant,
+            repo,
+            "main",
+            "secret",
+            "gitleaks",
+            "aws-key",
+            "critical",
+            "deploy.sh",
+            4,
+        )
+        .await;
+
+        let server = test_server(state);
+        let resp = server
+            .get("/api/v1/codescan/findings/summary")
+            .authorization_bearer(&admin)
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["total_open"], 3);
+        let buckets = body["by_bucket"].as_array().cloned().unwrap_or_default();
+        assert!(
+            buckets
+                .iter()
+                .any(|b| b["tool"] == "semgrep" && b["kind"] == "sast" && b["count"] == 1)
+        );
+        assert!(
+            buckets
+                .iter()
+                .any(|b| b["tool"] == "gitleaks" && b["kind"] == "secret" && b["count"] == 1)
+        );
+        assert!(
+            buckets
+                .iter()
+                .any(|b| b["tool"] == "" && b["kind"] == "sca" && b["count"] == 1)
+        );
+    }
+
+    // ── SBOM endpoint ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_sbom_requires_auth() {
+        let server = test_server(crate::state::AppStateInner::for_tests(dev_license()));
+        server
+            .get("/api/v1/codescan/findings/sbom/1")
+            .await
+            .assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_sbom_is_forbidden_when_sentinel_flag_disabled() {
+        let state = crate::state::AppStateInner::for_tests(gated_license());
+        let token = sign_token(&state, "1", "viewer");
+        let server = test_server(state);
+        let resp = server
+            .get("/api/v1/codescan/findings/sbom/1")
+            .authorization_bearer(token)
+            .await;
+        resp.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_sbom_returns_404_when_no_sbom_recorded() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+        let resp = server
+            .get("/api/v1/codescan/findings/sbom/999999")
+            .authorization_bearer(&admin)
+            .await;
+        resp.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_sbom_returns_the_decompressed_cyclonedx_document() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let admin = sign_token(&state, "1", "admin");
+        let tenant: Uuid = crate::routes::test_support::TEST_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("uuid: {e}"));
+        let repo = seed_repo(&state.db, tenant).await;
+        let run_id = seed_scan_run(&state.db, tenant, repo).await;
+        let doc = br#"{"bomFormat":"CycloneDX","components":[]}"#;
+        seed_sbom(&state.db, tenant, repo, run_id, doc).await;
+
+        let server = test_server(state);
+        let resp = server
+            .get(&format!("/api/v1/codescan/findings/sbom/{run_id}"))
+            .authorization_bearer(&admin)
+            .await;
+        resp.assert_status_ok();
+        let body: serde_json::Value = resp.json();
+        assert_eq!(body["scan_run_id"], run_id);
+        assert_eq!(body["repo_config_id"], repo);
+        assert_eq!(body["format"], "cyclonedx-json");
+        let content: serde_json::Value = serde_json::from_str(
+            body["content"]
+                .as_str()
+                .unwrap_or_else(|| panic!("content must be a string")),
+        )
+        .unwrap_or_else(|e| panic!("content must be valid json: {e}"));
+        assert_eq!(content["bomFormat"], "CycloneDX");
+    }
+
+    #[tokio::test]
+    async fn get_sbom_is_tenant_scoped() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let other_admin = crate::routes::test_support::sign_token_for_tenant(
+            &state,
+            "2",
+            "admin",
+            crate::routes::test_support::OTHER_TENANT_ID,
+        );
+        let tenant: Uuid = crate::routes::test_support::TEST_TENANT_ID
+            .parse()
+            .unwrap_or_else(|e| panic!("uuid: {e}"));
+        let repo = seed_repo(&state.db, tenant).await;
+        let run_id = seed_scan_run(&state.db, tenant, repo).await;
+        seed_sbom(&state.db, tenant, repo, run_id, b"{}").await;
+
+        let server = test_server(state);
+        let resp = server
+            .get(&format!("/api/v1/codescan/findings/sbom/{run_id}"))
+            .authorization_bearer(&other_admin)
+            .await;
+        resp.assert_status(StatusCode::NOT_FOUND);
     }
 }

@@ -34,7 +34,7 @@ use skauswatch_auth::TenantContext;
 
 use crate::error::{ApiError, tenant_uuid};
 use crate::oci_path::{self, OciRequest};
-use crate::scanpipe::{ResolvedArtifact, ScanPipeline};
+use crate::scanpipe::ResolvedArtifact;
 use crate::state::AppState;
 
 /// Router for the `/v2/*` OCI Distribution surface.
@@ -62,20 +62,6 @@ async fn push_not_supported() -> ApiError {
     ApiError::MethodNotAllowed(
         "DepGate is a pull-through registry cache; push is not supported".to_owned(),
     )
-}
-
-fn pipeline_for(state: &AppState) -> ScanPipeline<'_> {
-    ScanPipeline {
-        upstream: &state.upstream,
-        s3: &state.s3,
-        bucket: &state.cfg.cache_bucket,
-        cache_prefix: &state.cfg.cache_prefix,
-        quarantine_prefix: &state.cfg.quarantine_prefix,
-        scan_engine: &state.scan_engine,
-        db: &state.db,
-        max_artifact_bytes: state.cfg.max_artifact_bytes,
-        cache_stats: &state.cache_stats,
-    }
 }
 
 /// Renders a resolved artifact as the HTTP response, honoring `HEAD` (empty
@@ -109,7 +95,7 @@ async fn dispatch(
     let tenant_id = tenant_uuid(&tenant.tenant)?;
     let parsed = oci_path::parse(&rest)
         .ok_or_else(|| ApiError::NotFound("unsupported or malformed OCI path".to_owned()))?;
-    let pipeline = pipeline_for(&state);
+    let pipeline = state.pipeline();
 
     match parsed {
         OciRequest::Manifest { name, reference } => {
