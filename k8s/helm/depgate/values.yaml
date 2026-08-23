@@ -220,6 +220,22 @@ env:
         name: skauswatch-depgate-secret
         key: upstream-password
         optional: true
+  - name: DEPGATE_OFFLINE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: offline-mode
+  - name: DEPGATE_FAIL_POSTURE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: fail-posture
+  - name: DEPGATE_BUNDLE_SIGNING_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-depgate-secret
+        key: bundle-signing-key
+        optional: true
   # ClamAV reached via a sidecar/DaemonSet UNIX socket — same posture as
   # s3scan (see that chart's values.yaml note); no such sidecar ships in
   # this chart yet, scanning degrades to YARA-only until one is provisioned.
@@ -325,6 +341,14 @@ configMapData:
   upstream-service: "registry.docker.io"
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
+  # Air-gap serve mode (docs/v2-port/v2.1-depgate.md §6b) — "false" means
+  # normal pull-through proxy behavior; set "true" only in a genuinely
+  # air-gapped deployment (zero upstream egress, serve-from-vetted-cache-only).
+  offline-mode: "false"
+  # Scan-engine-failure posture (§6) — "closed" (hardened default) refuses
+  # an artifact the scan engine itself failed to evaluate; "open" is a dev-
+  # convenience posture that serves it best-effort without ever caching it.
+  fail-posture: "closed"
 
 secretData:
   db-user: "changeme-in-production"
@@ -335,3 +359,7 @@ secretData:
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
   aws-access-key-id: ""
   aws-secret-access-key: ""
+  # HMAC-SHA256 key signing/verifying air-gap bundle manifests (§6b) — empty
+  # disables signing on export and signature verification on import
+  # (checksum/per-artifact hash verification still always applies).
+  bundle-signing-key: ""

@@ -28,14 +28,25 @@ use utoipa::OpenApi;
     ),
     paths(
         crate::routes::admin::list_artifacts,
+        crate::routes::admin::list_risk_findings,
         crate::routes::admin::list_quarantine,
+        crate::routes::admin::update_quarantine,
+        crate::routes::admin::list_policy_rules,
+        crate::routes::admin::create_policy_rule,
+        crate::routes::admin::get_policy_rule,
+        crate::routes::admin::update_policy_rule,
+        crate::routes::admin::delete_policy_rule,
         crate::routes::admin::stats,
     ),
     components(schemas(
         crate::routes::admin::ArtifactItem,
         crate::routes::admin::ArtifactListResponse,
+        crate::routes::admin::RiskFindingItem,
         crate::routes::admin::QuarantineItem,
         crate::routes::admin::QuarantineListResponse,
+        crate::routes::admin::UpdateQuarantineRequest,
+        crate::routes::admin::PolicyRuleItem,
+        crate::routes::admin::PolicyRuleRequest,
         crate::routes::admin::StatsResponse,
         crate::error::ErrorResponse,
     )),
@@ -75,7 +86,11 @@ mod tests {
         let doc = ApiDoc::openapi();
         let yaml = doc.to_yaml().expect("serialize");
         assert!(yaml.contains("/api/v1/depgate/artifacts"));
+        assert!(yaml.contains("/api/v1/depgate/artifacts/{sha256}/risk-findings"));
         assert!(yaml.contains("/api/v1/depgate/quarantine"));
+        assert!(yaml.contains("/api/v1/depgate/quarantine/{id}"));
+        assert!(yaml.contains("/api/v1/depgate/policy-rules"));
+        assert!(yaml.contains("/api/v1/depgate/policy-rules/{id}"));
         assert!(yaml.contains("/api/v1/depgate/stats"));
         assert!(yaml.contains("bearer_jwt"));
     }

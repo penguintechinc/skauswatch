@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub mod anthropic;
 pub mod ollama;
 pub mod openai;
+pub mod waddleai;
 
 /// Which upstream AI provider to use, from `AI_PROVIDER` env.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

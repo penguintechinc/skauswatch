@@ -44,15 +44,28 @@ pub enum PipelineError {
     /// well-formed `sha256:<hex>` string).
     #[error("{0}")]
     BadRequest(String),
-    /// The scan verdict fails policy — fail-closed per §6: anything other
-    /// than `clean` is refused (no policy engine to make finer-grained
-    /// allow/deny decisions yet; that's P3).
+    /// The scan/policy decision refuses to serve this artifact — either the
+    /// default fail-closed baseline or an explicit `depgate_policy_rules`
+    /// match (`crate::policy`, §6).
     #[error("blocked by scan policy: verdict={verdict} threat={threat}")]
     Blocked {
         /// The offending verdict.
         verdict: String,
         /// Threat/rule names, comma-joined (empty for a bare scan error).
         threat: String,
+    },
+    /// Air-gap serve mode (§6b): the artifact is not in the vetted cache
+    /// and offline mode forbids ever contacting an upstream registry to
+    /// fetch it. Distinct from [`PipelineError::Blocked`] — this is an
+    /// availability/scope refusal, not a security verdict.
+    #[error("offline mode: {ecosystem} {name}:{reference} is not in the vetted cache")]
+    OfflineMiss {
+        /// Ecosystem discriminator.
+        ecosystem: String,
+        /// Package/repo name.
+        name: String,
+        /// Tag/version/reference requested.
+        reference: String,
     },
     /// The bytes fetched for a digest-addressed request don't hash to the
     /// digest that was requested — a data-integrity failure, never served
@@ -105,6 +118,13 @@ pub struct ScanPipeline<'a> {
     pub max_artifact_bytes: u64,
     /// In-process cache hit/miss counters.
     pub cache_stats: &'a CacheStats,
+    /// Air-gap serve mode (§6b) — when `true`, every resolve path refuses
+    /// to contact any upstream registry; a cache miss is a hard,
+    /// unconditional error, never a pull-through fetch.
+    pub offline_mode: bool,
+    /// Scan-engine-failure handling posture (§6) — see
+    /// `crate::config::FailPosture`.
+    pub fail_posture: crate::config::FailPosture,
 }
 
 impl ScanPipeline<'_> {
@@ -122,6 +142,7 @@ impl ScanPipeline<'_> {
             if let Some(obj) = self.try_serve(hex).await? {
                 return Ok(obj);
             }
+            self.offline_guard("oci", name, reference)?;
             let fetched = self
                 .upstream
                 .fetch_manifest(name, reference, self.max_artifact_bytes)
@@ -158,6 +179,7 @@ impl ScanPipeline<'_> {
             }
         }
 
+        self.offline_guard("oci", name, reference)?;
         let fetched = self
             .upstream
             .fetch_manifest(name, reference, self.max_artifact_bytes)
@@ -194,6 +216,7 @@ impl ScanPipeline<'_> {
             return Ok(obj);
         }
 
+        self.offline_guard("oci", name, digest)?;
         let fetched = self
             .upstream
             .fetch_blob(name, digest, self.max_artifact_bytes)
@@ -249,6 +272,25 @@ impl ScanPipeline<'_> {
         .execute(self.db)
         .await?;
         Ok(artifact)
+    }
+
+    /// Refuses to proceed to an upstream fetch when air-gap serve mode
+    /// (§6b) is enabled — called immediately before every upstream call in
+    /// this module, right after a cache-miss is confirmed.
+    fn offline_guard(
+        &self,
+        ecosystem: &str,
+        name: &str,
+        reference: &str,
+    ) -> Result<(), PipelineError> {
+        if self.offline_mode {
+            return Err(PipelineError::OfflineMiss {
+                ecosystem: ecosystem.to_owned(),
+                name: name.to_owned(),
+                reference: reference.to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// Attempts to serve `hex` purely from the S3 cache: reads the tag set
@@ -316,84 +358,170 @@ impl ScanPipeline<'_> {
         upstream: &str,
         tenant_id: Uuid,
     ) -> Result<ResolvedArtifact, PipelineError> {
-        let outcome = self.scan_engine.scan_bytes(&bytes).await?;
+        let outcome = match self.scan_engine.scan_bytes(&bytes).await {
+            Ok(outcome) => outcome,
+            Err(e) => return self.handle_scan_failure(bytes, content_type, e).await,
+        };
         let sha256 = outcome.hashes.sha256.clone();
         let size_bytes = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
         let scanner_version = skauswatch_scan_core::SCANNER_VERSION;
 
-        if outcome.verdict == Verdict::Clean {
-            let key = cache::object_key(self.cache_prefix, &sha256);
-            cache::put_object(self.s3, self.bucket, &key, bytes.clone(), content_type).await?;
-            cache::put_tags(self.s3, self.bucket, &key, &verdict_tags(&outcome)).await?;
-            db::upsert_artifact(
-                self.db,
-                &UpsertArtifact {
-                    ecosystem,
-                    name,
-                    reference,
-                    sha256: &sha256,
-                    upstream,
-                    content_type: Some(content_type),
-                    size_bytes,
-                    verdict: Verdict::Clean.as_str(),
-                    scanner_version,
-                    pinned: false,
-                    tenant_id,
-                },
+        // Package-risk heuristics (§5) — signals, never verdicts on their
+        // own; recorded regardless of the scan verdict so the audit trail
+        // and policy engine both see them.
+        let findings = crate::heuristics::evaluate(ecosystem, name, reference, &bytes);
+        if !findings.is_empty() {
+            db::insert_risk_findings(
+                self.db, &sha256, ecosystem, name, reference, tenant_id, &findings,
             )
             .await?;
-            return Ok(ResolvedArtifact {
-                sha256,
-                bytes,
-                content_type: content_type.to_owned(),
-            });
         }
 
-        // Fail-closed for anything that isn't a clean verdict (infected,
-        // pup, error, skipped) — §6's default policy. Stored under the
-        // quarantine prefix, never `cache_prefix`, and never served.
-        let key = cache::object_key(self.quarantine_prefix, &sha256);
-        cache::put_object(self.s3, self.bucket, &key, bytes, content_type).await?;
-        cache::put_tags(self.s3, self.bucket, &key, &verdict_tags(&outcome)).await?;
-        let threat = outcome.threat_names.join(",");
-        db::insert_quarantine(
-            self.db,
-            &QuarantineInsert {
-                sha256: &sha256,
+        // Policy engine (§6): tenant-configured rules win over the
+        // hardcoded default when they match.
+        let rules: Vec<crate::policy::PolicyRule> = db::list_policy_rules(self.db, tenant_id)
+            .await?
+            .into_iter()
+            .filter_map(db::PolicyRuleRow::into_policy_rule)
+            .collect();
+        let decision = crate::policy::evaluate(
+            &crate::policy::PolicyInput {
                 ecosystem,
                 name,
-                reference,
-                reason: if threat.is_empty() {
-                    outcome.verdict.as_str()
-                } else {
-                    &threat
-                },
-                threat: outcome.verdict.as_str(),
-                tenant_id,
-            },
-        )
-        .await?;
-        db::upsert_artifact(
-            self.db,
-            &UpsertArtifact {
-                ecosystem,
-                name,
-                reference,
-                sha256: &sha256,
-                upstream,
-                content_type: Some(content_type),
-                size_bytes,
+                version: reference,
                 verdict: outcome.verdict.as_str(),
-                scanner_version,
-                pinned: false,
+                findings: &findings,
+            },
+            &rules,
+        );
+        db::insert_policy_decision(
+            self.db,
+            &db::PolicyDecisionInsert {
+                sha256: &sha256,
+                ecosystem,
+                name,
+                reference,
+                verdict: outcome.verdict.as_str(),
+                action: decision.action.as_str(),
+                matched_rule_id: decision.matched_rule_id,
+                reason: &decision.reason,
                 tenant_id,
             },
         )
         .await?;
-        Err(PipelineError::Blocked {
-            verdict: outcome.verdict.as_str().to_owned(),
-            threat,
-        })
+
+        match decision.action {
+            crate::policy::Action::Allow | crate::policy::Action::Warn => {
+                let key = cache::object_key(self.cache_prefix, &sha256);
+                cache::put_object(self.s3, self.bucket, &key, bytes.clone(), content_type).await?;
+                cache::put_tags(self.s3, self.bucket, &key, &verdict_tags(&outcome)).await?;
+                db::upsert_artifact(
+                    self.db,
+                    &UpsertArtifact {
+                        ecosystem,
+                        name,
+                        reference,
+                        sha256: &sha256,
+                        upstream,
+                        content_type: Some(content_type),
+                        size_bytes,
+                        verdict: outcome.verdict.as_str(),
+                        scanner_version,
+                        pinned: false,
+                        tenant_id,
+                    },
+                )
+                .await?;
+                Ok(ResolvedArtifact {
+                    sha256,
+                    bytes,
+                    content_type: content_type.to_owned(),
+                })
+            }
+            crate::policy::Action::Quarantine => {
+                let key = cache::object_key(self.quarantine_prefix, &sha256);
+                cache::put_object(self.s3, self.bucket, &key, bytes, content_type).await?;
+                cache::put_tags(self.s3, self.bucket, &key, &verdict_tags(&outcome)).await?;
+                let threat = outcome.threat_names.join(",");
+                db::insert_quarantine(
+                    self.db,
+                    &QuarantineInsert {
+                        sha256: &sha256,
+                        ecosystem,
+                        name,
+                        reference,
+                        reason: if threat.is_empty() {
+                            &decision.reason
+                        } else {
+                            &threat
+                        },
+                        threat: outcome.verdict.as_str(),
+                        policy_rule_id: decision.matched_rule_id,
+                        tenant_id,
+                    },
+                )
+                .await?;
+                db::upsert_artifact(
+                    self.db,
+                    &UpsertArtifact {
+                        ecosystem,
+                        name,
+                        reference,
+                        sha256: &sha256,
+                        upstream,
+                        content_type: Some(content_type),
+                        size_bytes,
+                        verdict: outcome.verdict.as_str(),
+                        scanner_version,
+                        pinned: false,
+                        tenant_id,
+                    },
+                )
+                .await?;
+                Err(PipelineError::Blocked {
+                    verdict: outcome.verdict.as_str().to_owned(),
+                    threat,
+                })
+            }
+            // A `Block` decision is a hard policy "no" — never cached, never
+            // quarantined, no disposition-review workflow implied (that is
+            // exactly what distinguishes `Block` from `Quarantine`).
+            crate::policy::Action::Block => Err(PipelineError::Blocked {
+                verdict: outcome.verdict.as_str().to_owned(),
+                threat: decision.reason,
+            }),
+        }
+    }
+
+    /// Handles a scan-engine failure (`ScanError` — the YARA-X engine
+    /// itself erroring; see `skauswatch_scan_core::engine`'s docs) per the
+    /// configured [`crate::config::FailPosture`] (§6). `FailPosture::Closed`
+    /// (default) refuses the artifact outright, attributing the failure to
+    /// scan error; `FailPosture::Open` logs a warning and serves the bytes
+    /// best-effort without ever writing them to the vetted cache (an
+    /// unscanned artifact must never become part of the trusted set, even
+    /// under the dev-convenience posture).
+    async fn handle_scan_failure(
+        &self,
+        bytes: Bytes,
+        content_type: &str,
+        error: ScanError,
+    ) -> Result<ResolvedArtifact, PipelineError> {
+        match self.fail_posture {
+            crate::config::FailPosture::Open => {
+                tracing::warn!(
+                    error = %error,
+                    "scan engine failed; fail-open posture serves this artifact best-effort without caching it"
+                );
+                let sha256 = skauswatch_scan_core::compute_hashes(&bytes).sha256;
+                Ok(ResolvedArtifact {
+                    sha256,
+                    bytes,
+                    content_type: content_type.to_owned(),
+                })
+            }
+            crate::config::FailPosture::Closed => Err(PipelineError::Scan(error)),
+        }
     }
 
     /// Resolves a tag/name-addressed artifact for ecosystems that, like OCI
@@ -443,6 +571,7 @@ impl ScanPipeline<'_> {
                 });
             }
         }
+        self.offline_guard(ecosystem, name, reference)?;
         let (bytes, content_type) = fetch().await?;
         self.ingest(
             bytes,
@@ -658,6 +787,8 @@ mod tests {
             db: &pool,
             max_artifact_bytes: 1024,
             cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
         };
 
         let got = pipeline
@@ -718,6 +849,8 @@ mod tests {
             db: &pool,
             max_artifact_bytes: 1024,
             cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
         };
 
         let tenant = Uuid::new_v4();
@@ -779,6 +912,8 @@ mod tests {
             db: &pool,
             max_artifact_bytes: 1024,
             cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
         };
 
         let err = pipeline
@@ -834,6 +969,8 @@ mod tests {
             db: &pool,
             max_artifact_bytes: 1024,
             cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
         };
 
         let tenant = Uuid::new_v4();
@@ -892,6 +1029,8 @@ mod tests {
             db: &pool,
             max_artifact_bytes: 1024,
             cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
         };
 
         let tenant = Uuid::new_v4();
@@ -950,6 +1089,8 @@ mod tests {
             db: &pool,
             max_artifact_bytes: 1024,
             cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
         };
 
         pipeline
@@ -990,6 +1131,8 @@ mod tests {
             db: &pool,
             max_artifact_bytes: 1024,
             cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
         };
 
         let got = pipeline
@@ -997,5 +1140,349 @@ mod tests {
             .await
             .expect("list tags");
         assert_eq!(got["tags"][0], "latest");
+    }
+
+    // -- air-gap offline mode (§6b) --------------------------------------
+
+    #[tokio::test]
+    async fn offline_mode_blocks_a_cache_miss_without_touching_upstream() {
+        let s3 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/bkt/sha256/deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            ))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_raw(s3_error_xml("NoSuchKey"), "application/xml"),
+            )
+            .mount(&s3)
+            .await;
+
+        // Deliberately no mocks mounted on the upstream server — any real
+        // request would 404 from wiremock's default "no matching stub"
+        // behavior, which we additionally confirm was never even sent.
+        let upstream_server = MockServer::start().await;
+
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let upstream = upstream_client(&upstream_server.uri());
+        let stats = CacheStats::default();
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024,
+            cache_stats: &stats,
+            offline_mode: true,
+            fail_posture: crate::config::FailPosture::Closed,
+        };
+
+        let err = pipeline
+            .resolve_blob(
+                "library/nginx",
+                "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                Uuid::new_v4(),
+            )
+            .await
+            .expect_err("offline mode must refuse a cache miss");
+        assert!(matches!(err, PipelineError::OfflineMiss { .. }));
+
+        let received = upstream_server
+            .received_requests()
+            .await
+            .expect("wiremock request recording is enabled by default");
+        assert!(
+            received.is_empty(),
+            "offline mode must never contact the upstream registry, saw: {received:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_mode_still_serves_an_existing_cache_hit() {
+        let digest = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let s3 = MockServer::start().await;
+        let tagging = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+             <Tagging><TagSet><Tag><Key>threat</Key><Value>clean</Value></Tag></TagSet></Tagging>";
+        Mock::given(method("GET"))
+            .and(path(format!("/bkt/sha256/{digest}")))
+            .and(query_param("tagging", ""))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(tagging, "application/xml"))
+            .mount(&s3)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/bkt/sha256/{digest}")))
+            .and(query_param_is_missing("tagging"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"cached".to_vec()))
+            .mount(&s3)
+            .await;
+
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        // Nothing listens here — if offline mode mistakenly fell through
+        // to an upstream fetch, this connection failure would surface
+        // instead of the cache-hit result asserted below.
+        let upstream = upstream_client("http://127.0.0.1:1");
+        let stats = CacheStats::default();
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024,
+            cache_stats: &stats,
+            offline_mode: true,
+            fail_posture: crate::config::FailPosture::Closed,
+        };
+
+        let got = pipeline
+            .resolve_blob("library/nginx", &format!("sha256:{digest}"), Uuid::new_v4())
+            .await
+            .expect("a cache hit must still be served in offline mode");
+        assert_eq!(got.bytes.as_ref(), b"cached");
+    }
+
+    // -- heuristics + policy wiring (§5/§6) -------------------------------
+
+    async fn policy_decision_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM depgate_policy_decisions")
+            .fetch_one(pool)
+            .await
+            .expect("count policy decisions")
+    }
+
+    #[tokio::test]
+    async fn ingest_warns_but_still_serves_a_low_risk_npm_install_script() {
+        let pkg_json = serde_json::json!({
+            "scripts": {"postinstall": "node ./build.js"},
+        });
+        let tarball = crate::tarutil::tests::build_gzip_tar(&[(
+            "package/package.json",
+            &serde_json::to_vec(&pkg_json).expect("serialize"),
+        )]);
+        let hex = skauswatch_scan_core::compute_hashes(&tarball).sha256;
+
+        let s3 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/bkt/sha256/{hex}")))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_raw(s3_error_xml("NoSuchKey"), "application/xml"),
+            )
+            .mount(&s3)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/bkt/sha256/{hex}")))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&s3)
+            .await;
+
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let upstream = upstream_client("http://127.0.0.1:1");
+        let stats = CacheStats::default();
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024 * 1024,
+            cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
+        };
+
+        let tenant = Uuid::new_v4();
+        let tarball_clone = tarball.clone();
+        let got = pipeline
+            .resolve_named(
+                "npm",
+                "left-pad",
+                "left-pad-1.3.0.tgz",
+                "https://registry.npmjs.org",
+                tenant,
+                move || async move {
+                    Ok((
+                        Bytes::from(tarball_clone),
+                        "application/octet-stream".to_owned(),
+                    ))
+                },
+            )
+            .await
+            .expect("a warn-level finding must not block serving");
+        assert_eq!(got.sha256, hex);
+
+        let findings = db::list_risk_findings(&pool, tenant, &hex)
+            .await
+            .expect("list findings");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check_name == "npm_install_script")
+        );
+        assert_eq!(policy_decision_count(&pool).await, 1);
+
+        let row = db::find_by_reference(&pool, "npm", "left-pad", "left-pad-1.3.0.tgz")
+            .await
+            .expect("query")
+            .expect("row indexed");
+        assert_eq!(row.verdict, "clean");
+    }
+
+    #[tokio::test]
+    async fn ingest_blocks_a_clean_scan_with_a_critical_heuristic_finding() {
+        let pkg_json = serde_json::json!({
+            "scripts": {"install": "echo AKIAIOSFODNN7EXAMPLE >> /tmp/leak"},
+        });
+        let tarball = crate::tarutil::tests::build_gzip_tar(&[(
+            "package/package.json",
+            &serde_json::to_vec(&pkg_json).expect("serialize"),
+        )]);
+        let hex = skauswatch_scan_core::compute_hashes(&tarball).sha256;
+
+        let s3 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/bkt/sha256/{hex}")))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_raw(s3_error_xml("NoSuchKey"), "application/xml"),
+            )
+            .mount(&s3)
+            .await;
+        // Deliberately no PUT mock under sha256/ — a Block decision must
+        // never write to the servable cache prefix at all.
+
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let upstream = upstream_client("http://127.0.0.1:1");
+        let stats = CacheStats::default();
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024 * 1024,
+            cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
+        };
+
+        let tenant = Uuid::new_v4();
+        let tarball_clone = tarball.clone();
+        let err = pipeline
+            .resolve_named(
+                "npm",
+                "evil-pkg",
+                "evil-pkg-1.0.0.tgz",
+                "https://registry.npmjs.org",
+                tenant,
+                move || async move {
+                    Ok((
+                        Bytes::from(tarball_clone),
+                        "application/octet-stream".to_owned(),
+                    ))
+                },
+            )
+            .await
+            .expect_err("a critical heuristic finding must block despite a clean scan");
+        assert!(matches!(err, PipelineError::Blocked { .. }));
+
+        assert!(
+            db::find_by_reference(&pool, "npm", "evil-pkg", "evil-pkg-1.0.0.tgz")
+                .await
+                .expect("query")
+                .is_none(),
+            "a Block decision must never index the artifact as servable"
+        );
+        let (_, quarantine_total) = db::list_quarantine(&pool, tenant, 10, 0)
+            .await
+            .expect("list quarantine");
+        assert_eq!(
+            quarantine_total, 0,
+            "Block is distinct from Quarantine — no disposition-review row"
+        );
+    }
+
+    // -- fail posture (§6) ------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_scan_failure_closed_posture_refuses() {
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let upstream = upstream_client("http://127.0.0.1:1");
+        let stats = CacheStats::default();
+        let s3 = MockServer::start().await;
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024,
+            cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
+        };
+
+        let err = pipeline
+            .handle_scan_failure(
+                Bytes::from_static(b"whatever"),
+                "application/octet-stream",
+                ScanError::Yara("boom".to_owned()),
+            )
+            .await
+            .expect_err("closed posture must refuse");
+        assert!(matches!(err, PipelineError::Scan(_)));
+    }
+
+    #[tokio::test]
+    async fn handle_scan_failure_open_posture_serves_without_caching() {
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let upstream = upstream_client("http://127.0.0.1:1");
+        let stats = CacheStats::default();
+        // No S3 mocks mounted at all — if the open posture tried to cache
+        // anything, the unmatched PUT would surface as a Cache error.
+        let s3 = MockServer::start().await;
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024,
+            cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Open,
+        };
+
+        let bytes = Bytes::from_static(b"best-effort passthrough");
+        let expected_sha256 = skauswatch_scan_core::compute_hashes(&bytes).sha256;
+        let got = pipeline
+            .handle_scan_failure(
+                bytes.clone(),
+                "application/octet-stream",
+                ScanError::Yara("boom".to_owned()),
+            )
+            .await
+            .expect("open posture serves best-effort");
+        assert_eq!(got.bytes, bytes);
+        assert_eq!(got.sha256, expected_sha256);
     }
 }

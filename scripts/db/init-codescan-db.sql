@@ -31,7 +31,15 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
   codescan_license_detections,
   codescan_license_violations,
   codescan_scan_runs,
-  codescan_findings
+  codescan_findings,
+  -- P2 SBOM artifacts (migrations/0005) — pre-existing gap, fixed here
+  -- alongside the P3 grants below since this script was already being
+  -- touched for them.
+  codescan_sbom_artifacts,
+  -- CodeScan Sentinel P3 (migrations/0006, docs/v2-port/v2.1-codescan-sentinel.md
+  -- §6): the policy engine's rule store + audit trail.
+  codescan_policy_rules,
+  codescan_policy_decisions
 TO codescan;
 
 -- CodeScan Sentinel (docs/v2-port/v2.1-codescan-sentinel.md §9/§12) writes

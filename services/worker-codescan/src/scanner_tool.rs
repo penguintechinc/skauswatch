@@ -670,39 +670,26 @@ mod tests {
     /// Schema-accurate representative fixture (gitleaks v8 `--report-format
     /// json`) — see module docs' Fixture note.
     ///
-    /// The fake AWS key is assembled at runtime rather than written as one
-    /// literal. The value is synthetic (sequential letters, never issued), but
-    /// spelled contiguously it matches gitleaks' own `aws-access-token` rule
-    /// and so trips this repo's pre-commit secret scan on every commit that
-    /// touches this file. Splitting it keeps the scanner honest — we are not
-    /// allowlisting a path, just avoiding a self-inflicted match. Mirrors the
-    /// base64-at-rest treatment of the GCP service-account key fixture in
-    /// `worker-vault-sync`.
-    /// Returns `&'static str` (a deliberate, one-off leak of a few hundred
-    /// test bytes) because [`FakeRunner::ok`] takes `&'static [u8]`; the
-    /// string cannot be a plain `const` without spelling the key literally.
-    fn gitleaks_fixture() -> &'static str {
-        let fake_key = format!("{}{}", "AKIA", "ABCDEFGHIJKLMNOP");
-        format!(
-            r#"[
-        {{
+    /// Uses `AKIAIOSFODNN7EXAMPLE`, AWS's own published documentation example
+    /// key. It is recognised as a non-secret by gitleaks itself, so the
+    /// fixture can read naturally instead of being spliced or built at runtime
+    /// to dodge this repo's pre-commit secret scan.
+    const GITLEAKS_FIXTURE: &str = r#"[
+        {
             "Description": "AWS Access Key",
             "StartLine": 4,
             "EndLine": 4,
             "File": "infra/deploy.sh",
             "RuleID": "aws-access-key",
-            "Match": "{fake_key}",
-            "Secret": "{fake_key}",
+            "Match": "AKIAIOSFODNN7EXAMPLE",
+            "Secret": "AKIAIOSFODNN7EXAMPLE",
             "Fingerprint": "infra/deploy.sh:aws-access-key:4"
-        }}
-    ]"#
-        )
-        .leak()
-    }
+        }
+    ]"#;
 
     #[tokio::test]
     async fn gitleaks_tool_parses_a_captured_fixture() {
-        let runner = FakeRunner::ok(true, gitleaks_fixture().as_bytes());
+        let runner = FakeRunner::ok(true, GITLEAKS_FIXTURE.as_bytes());
         let outcome = GitleaksTool
             .scan(Path::new("/tmp"), &runner)
             .await

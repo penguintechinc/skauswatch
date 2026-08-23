@@ -692,6 +692,139 @@ pub async fn insert_sbom_artifact(
     Ok(())
 }
 
+// ── CodeScan Sentinel P3 (docs/v2-port/v2.1-codescan-sentinel.md §4/§6) —
+// AI reachability/exposure triage verdicts + the policy engine's rule store
+// and audit trail. Additive alongside every function above; see
+// migrations/0006_codescan_sentinel_triage_policy.sql. Enterprise-gated —
+// see `handler::CodeScanReviewHandler`'s license-tier check, which decides
+// whether any of this is ever called for a given scan.
+
+/// One WaddleAI triage verdict to persist onto an already-upserted finding.
+#[derive(Debug, Clone)]
+pub struct AiVerdict {
+    pub used: bool,
+    pub reachable: bool,
+    pub exposure: &'static str,
+    pub ai_severity: Option<String>,
+    pub ai_rationale: String,
+}
+
+/// Persists a WaddleAI triage verdict. **Ground truth preserved**: this
+/// `UPDATE` only ever touches the additive `used`/`reachable`/`exposure`/
+/// `ai_severity`/`ai_rationale`/`triaged_at`/`triage_source` columns — it
+/// has no `severity =` or `status =` clause, so a triage verdict can
+/// re-rank severity (via `ai_severity`, a separate column) but can never
+/// erase or downgrade the original scanner/CVE finding (spec §4: "tool
+/// finding = ground truth (AI re-ranks, can't erase a scanner hit)"). See
+/// `tests::upsert_ai_verdict_never_touches_the_original_severity_or_status`.
+pub async fn upsert_ai_verdict(
+    pool: &PgPool,
+    finding_id: i64,
+    verdict: &AiVerdict,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE codescan_findings SET \
+           used = $1, reachable = $2, exposure = $3, ai_severity = $4, ai_rationale = $5, \
+           triaged_at = now(), triage_source = 'waddleai' \
+         WHERE id = $6",
+    )
+    .bind(verdict.used)
+    .bind(verdict.reachable)
+    .bind(verdict.exposure)
+    .bind(&verdict.ai_severity)
+    .bind(&verdict.ai_rationale)
+    .bind(finding_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Records the static prefilter's own "not used" determination when it
+/// alone proved a package unused and the scan short-circuited before any AI
+/// spend (spec §5 point 1) — so `used`/`triage_source` reflect *some*
+/// determination even when WaddleAI was never called for this finding.
+/// Never called with `used = true` (a "used" verdict always proceeds to
+/// full AI triage, see `handler::CodeScanReviewHandler`); the parameter
+/// exists so the one call site reads naturally either way.
+pub async fn upsert_prefilter_verdict(
+    pool: &PgPool,
+    finding_id: i64,
+    used: bool,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE codescan_findings SET used = $1, triaged_at = now(), triage_source = 'prefilter' \
+         WHERE id = $2",
+    )
+    .bind(used)
+    .bind(finding_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Applies one policy-engine decision to a finding and writes its audit
+/// row in the same call — always both together, per
+/// `crate::policy::Decision`'s "always audit-logged" contract.
+pub async fn apply_policy_decision(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    finding_id: i64,
+    decision: &crate::policy::Decision,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE codescan_findings SET action = $1 WHERE id = $2")
+        .bind(&decision.action)
+        .bind(finding_id)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO codescan_policy_decisions \
+         (tenant_id, finding_id, rule_id, action, reason, decided_at) \
+         VALUES ($1, $2, $3, $4, $5, now())",
+    )
+    .bind(tenant_id)
+    .bind(finding_id)
+    .bind(decision.matched_rule_id)
+    .bind(&decision.action)
+    .bind(&decision.reason)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Loads every configured policy rule for `tenant_id`, for
+/// `crate::policy::evaluate` (which re-sorts by priority itself, so
+/// row order here is irrelevant).
+pub async fn list_policy_rules(
+    pool: &PgPool,
+    tenant_id: Uuid,
+) -> anyhow::Result<Vec<crate::policy::PolicyRule>> {
+    let rows = sqlx::query(
+        "SELECT id, priority, repo, ecosystem, package, cve, severity, reachability, exposure, \
+                tool, kind, action \
+         FROM codescan_policy_rules WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| crate::policy::PolicyRule {
+            id: r.get(0),
+            priority: r.get(1),
+            repo: r.get(2),
+            ecosystem: r.get(3),
+            package: r.get(4),
+            cve: r.get(5),
+            severity: r.get(6),
+            reachability: r.get(7),
+            exposure: r.get(8),
+            tool: r.get(9),
+            kind: r.get(10),
+            action: r.get(11),
+        })
+        .collect())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -1829,5 +1962,179 @@ mod tests {
                 .unwrap_or_else(|e| panic!("select: {e}"));
         assert_eq!(rows.len(), 1, "must upsert, not duplicate");
         assert_eq!(rows[0].0, b"second-doc");
+    }
+
+    // ── CodeScan Sentinel P3: AI triage + policy engine ────────────────────
+
+    async fn seed_cve_finding(pool: &PgPool, repo: i64, severity: &str) -> i64 {
+        upsert_finding(
+            pool,
+            test_tenant(),
+            repo,
+            "main",
+            "cve",
+            "npm",
+            "axios",
+            "1.0.0",
+            Some("1.7.0"),
+            "GHSA-critical-axios",
+            severity,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("seed finding: {e}"))
+        .id
+    }
+
+    #[tokio::test]
+    async fn upsert_ai_verdict_never_touches_the_original_severity_or_status() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let finding_id = seed_cve_finding(&pool, repo, "critical").await;
+
+        upsert_ai_verdict(
+            &pool,
+            finding_id,
+            &AiVerdict {
+                used: true,
+                reachable: false,
+                exposure: "none",
+                ai_severity: Some("low".to_owned()),
+                ai_rationale: "dead code path".to_owned(),
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert ai verdict: {e}"));
+
+        let row = sqlx::query(
+            "SELECT severity, status, used, reachable, exposure, ai_severity, ai_rationale, \
+                    triage_source \
+             FROM codescan_findings WHERE id = $1",
+        )
+        .bind(finding_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(
+            row.get::<String, _>(0),
+            "critical",
+            "the AI verdict must never overwrite the scanner's original severity"
+        );
+        assert_eq!(row.get::<String, _>(1), "open");
+        assert!(row.get::<Option<bool>, _>(2).unwrap_or_default());
+        assert!(!row.get::<Option<bool>, _>(3).unwrap_or(true));
+        assert_eq!(row.get::<Option<String>, _>(4).as_deref(), Some("none"));
+        assert_eq!(row.get::<Option<String>, _>(5).as_deref(), Some("low"));
+        assert_eq!(row.get::<String, _>(6), "dead code path");
+        assert_eq!(row.get::<String, _>(7), "waddleai");
+    }
+
+    #[tokio::test]
+    async fn upsert_prefilter_verdict_records_not_used_without_calling_ai() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let finding_id = seed_cve_finding(&pool, repo, "high").await;
+
+        upsert_prefilter_verdict(&pool, finding_id, false)
+            .await
+            .unwrap_or_else(|e| panic!("upsert prefilter verdict: {e}"));
+
+        let row = sqlx::query(
+            "SELECT used, reachable, triage_source, severity FROM codescan_findings WHERE id = $1",
+        )
+        .bind(finding_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<Option<bool>, _>(0), Some(false));
+        assert_eq!(
+            row.get::<Option<bool>, _>(1),
+            None,
+            "reachable is never set by the prefilter alone"
+        );
+        assert_eq!(row.get::<String, _>(2), "prefilter");
+        assert_eq!(row.get::<String, _>(3), "high", "severity is untouched");
+    }
+
+    #[tokio::test]
+    async fn apply_policy_decision_sets_the_action_and_writes_an_audit_row() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let finding_id = seed_cve_finding(&pool, repo, "critical").await;
+        let decision = crate::policy::Decision {
+            action: "alert".to_owned(),
+            matched_rule_id: None,
+            reason: "default action matrix: critical + reachable+external: alert".to_owned(),
+        };
+
+        apply_policy_decision(&pool, test_tenant(), finding_id, &decision)
+            .await
+            .unwrap_or_else(|e| panic!("apply decision: {e}"));
+
+        let action: String =
+            sqlx::query_scalar("SELECT action FROM codescan_findings WHERE id = $1")
+                .bind(finding_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("select action: {e}"));
+        assert_eq!(action, "alert");
+
+        let row = sqlx::query(
+            "SELECT tenant_id, finding_id, rule_id, action, reason FROM codescan_policy_decisions \
+             WHERE finding_id = $1",
+        )
+        .bind(finding_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select decision: {e}"));
+        assert_eq!(row.get::<Uuid, _>(0), test_tenant());
+        assert_eq!(row.get::<i64, _>(1), finding_id);
+        assert_eq!(row.get::<Option<i64>, _>(2), None);
+        assert_eq!(row.get::<String, _>(3), "alert");
+        assert!(row.get::<String, _>(4).contains("default action matrix"));
+    }
+
+    async fn seed_policy_rule(
+        pool: &PgPool,
+        tenant: Uuid,
+        priority: i32,
+        package: Option<&str>,
+        action: &str,
+    ) -> i64 {
+        let row = sqlx::query(
+            "INSERT INTO codescan_policy_rules (tenant_id, priority, package, action) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
+        )
+        .bind(tenant)
+        .bind(priority)
+        .bind(package)
+        .bind(action)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|e| panic!("seed policy rule: {e}"));
+        row.get::<i64, _>(0)
+    }
+
+    #[tokio::test]
+    async fn list_policy_rules_returns_only_the_requested_tenants_rules() {
+        let pool = test_pool().await;
+        seed_policy_rule(&pool, test_tenant(), 10, Some("axios"), "ignore").await;
+        seed_policy_rule(&pool, other_tenant(), 5, None, "alert").await;
+
+        let rules = list_policy_rules(&pool, test_tenant())
+            .await
+            .unwrap_or_else(|e| panic!("list rules: {e}"));
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].package.as_deref(), Some("axios"));
+        assert_eq!(rules[0].action, "ignore");
+        assert_eq!(rules[0].priority, 10);
+    }
+
+    #[tokio::test]
+    async fn list_policy_rules_is_empty_for_a_tenant_with_no_rules_configured() {
+        let pool = test_pool().await;
+        let rules = list_policy_rules(&pool, test_tenant())
+            .await
+            .unwrap_or_else(|e| panic!("list rules: {e}"));
+        assert!(rules.is_empty());
     }
 }

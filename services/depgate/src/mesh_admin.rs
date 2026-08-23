@@ -517,6 +517,7 @@ mod tests {
                 reference: "latest",
                 reason: "infected",
                 threat: "infected",
+                policy_rule_id: None,
                 tenant_id: tenant_b,
             },
         )

@@ -8,3 +8,5 @@
 - [async client ctor blocking risk](feedback_async_client_ctor_blocking_risk.md) — don't `block_on` a real async network client (aws_sdk_s3 etc.) inside a sync handler `::new()`; build it in `main.rs::serve()` and pass it in
 - [streams fred nil-decode gap](project_streams_fred_nil_decode_gap.md) — FIXED 2026-08-08: fred default-nil-types feature added; read_new no longer errors on idle XREADGROUP poll
 - [functions metric panic-closure ceiling](feedback_functions_metric_panic_closures.md) — `.unwrap_or_else(\|e\| panic!())` test idiom inflates Functions denominator with never-fired closures; workspace has a structural ~87% ceiling, don't chase 90% with more tests in the same style
+- [cargo fmt workspace scoping](feedback_cargo_fmt_workspace_scoping.md) — `cargo fmt --all` touches sibling agents' in-progress dirs; use `cargo fmt -p <pkg> -- --check`/fix instead
+- [rust raw-string & sqlx gotchas](feedback_rust_raw_string_and_sqlx_gotchas.md) — `r"...\"..."` cascades parse errors; sqlx 0.9 SqlSafeStr rejects `format!()`'d SQL; `static` can't hold a `LazyLock` inside an aggregate literal

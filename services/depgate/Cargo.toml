@@ -21,7 +21,20 @@ axum = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+# Gunzips PyPI sdist tarballs for `src/tarutil.rs`'s dependency-free tar
+# reader (`crate::heuristics::evaluate_pypi`'s setup.py-presence check) and
+# air-gap bundle manifest hashing input framing (`src/bundle.rs`) — already
+# resolved in this lockfile transitively via `zip` (see that dep's own
+# comment below), pinning it here as a direct dep does not move anything
+# already locked.
+flate2 = { workspace = true }
 futures = { workspace = true }
+# HMAC-SHA256 bundle-manifest signing (`src/bundle.rs`, §6b) — a symmetric
+# MAC standing in for the spec's eventual cosign/sigstore asymmetric
+# signing (P4); reuses this workspace's existing hmac+sha2 dependencies
+# (see services/manager/src/routes/endpoint.rs for the same pattern)
+# rather than adding a new signing stack for P3.
+hmac = { workspace = true }
 metrics = { workspace = true }
 penguin-licensing = { workspace = true, features = ["axum"] }
 # PEP 503 simple-index href rewriting (src/pypi.rs) — npm's packument
@@ -35,6 +48,10 @@ rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+# `Hashes::sha256` (bundle manifest/artifact integrity, `src/bundle.rs`)
+# already covers hashing; `sha2` here is `hmac`'s companion digest type
+# (`Hmac<Sha256>`), not a second hashing implementation.
+sha2 = { workspace = true }
 skauswatch-auth = { workspace = true }
 skauswatch-common = { workspace = true }
 skauswatch-db = { workspace = true }
@@ -55,6 +72,14 @@ tracing = { workspace = true }
 url = { workspace = true }
 utoipa = { workspace = true, features = ["yaml"] }
 uuid = { workspace = true }
+# Air-gap bundle format (`src/bundle.rs`, §6b): a single portable archive
+# holding `manifest.json` + content-addressed artifact bytes. Already
+# resolved in this lockfile transitively via `skauswatch-scan-core`'s YARA-X
+# dependency chain — pinning it here as a direct dep does not move anything
+# already locked. `default-features = false` for the same reason
+# `worker-codescan`/`codescan-backend` disable them: pulls in bzip2/ppmd
+# codecs outside deny.toml's license allow-list that this crate never uses.
+zip = { workspace = true }
 
 [dev-dependencies]
 axum-test = { workspace = true }

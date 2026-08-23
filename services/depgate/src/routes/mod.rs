@@ -59,12 +59,17 @@ pub fn router(state: AppState) -> Router {
 mod tests {
     use std::sync::Arc;
 
+    use aws_sdk_s3::Client as S3Client;
+    use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
     use axum::http::StatusCode;
     use penguin_licensing::LicenseClient;
     use sqlx::PgPool;
     use uuid::Uuid;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::router;
+    use crate::auth::{ADMIN_SCOPE, READ_SCOPE};
     use crate::db::{self, UpsertArtifact};
     use crate::state::AppStateInner;
 
@@ -103,6 +108,73 @@ mod tests {
         )
         .await
         .expect("seed artifact");
+    }
+
+    /// Seeds a `pending` quarantine event and returns its id (`insert_quarantine`
+    /// itself doesn't hand back the generated id — same round-trip
+    /// `db::list_quarantine` already does in the read-path tests above).
+    async fn seed_quarantine(pool: &PgPool, tenant_id: Uuid, sha256: &str, name: &str) -> Uuid {
+        db::insert_quarantine(
+            pool,
+            &db::QuarantineInsert {
+                sha256,
+                ecosystem: "oci",
+                name,
+                reference: "latest",
+                reason: "YARA.EICAR_Test_File",
+                threat: "infected",
+                policy_rule_id: None,
+                tenant_id,
+            },
+        )
+        .await
+        .expect("seed quarantine");
+        let (rows, _) = db::list_quarantine(pool, tenant_id, 10, 0)
+            .await
+            .expect("list quarantine");
+        rows.into_iter()
+            .find(|r| r.sha256 == sha256)
+            .expect("seeded row present")
+            .id
+    }
+
+    /// Mints a token carrying only [`ADMIN_SCOPE`] (no bundled `*:read`) —
+    /// deliberately narrow, so an admin-gated test can't accidentally pass
+    /// because it also satisfies a read check.
+    fn admin_token(jwt_secret: &str, tenant: Uuid) -> String {
+        skauswatch_testkit::jwt::mint_claims_token(
+            jwt_secret,
+            "admin-1",
+            &tenant.to_string(),
+            ADMIN_SCOPE,
+            &["admin"],
+        )
+    }
+
+    /// Mints a token carrying only [`READ_SCOPE`] — enough to list/read,
+    /// never enough to mutate.
+    fn read_only_token(jwt_secret: &str, tenant: Uuid) -> String {
+        skauswatch_testkit::jwt::mint_claims_token(
+            jwt_secret,
+            "viewer-1",
+            &tenant.to_string(),
+            READ_SCOPE,
+            &["viewer"],
+        )
+    }
+
+    /// Builds an S3 client pointed at a wiremock server, same technique as
+    /// `crate::cache`'s and `crate::scanpipe`'s own tests.
+    fn mock_s3_client(uri: &str) -> S3Client {
+        let creds = Credentials::new("AKTEST", "SKTEST", None, None, "depgate-test");
+        let cfg = aws_sdk_s3::config::Builder::new()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .endpoint_url(uri)
+            .force_path_style(true)
+            .credentials_provider(creds)
+            .build();
+        S3Client::from_conf(cfg)
     }
 
     #[tokio::test]
@@ -201,6 +273,7 @@ mod tests {
                 reference: "latest",
                 reason: "YARA.EICAR_Test_File",
                 threat: "infected",
+                policy_rule_id: None,
                 tenant_id: tenant_a,
             },
         )
@@ -215,6 +288,7 @@ mod tests {
                 reference: "latest",
                 reason: "pup",
                 threat: "pup",
+                policy_rule_id: None,
                 tenant_id: tenant_b,
             },
         )
@@ -255,6 +329,7 @@ mod tests {
                 reference: "latest",
                 reason: "infected",
                 threat: "infected",
+                policy_rule_id: None,
                 tenant_id: tenant,
             },
         )
@@ -343,5 +418,308 @@ mod tests {
         let server = test_server(state);
         let res = server.get("/v2/").authorization_bearer(&token).await;
         res.assert_status_ok();
+    }
+
+    // -- admin-scope gating (the security fix this module exists to prove:
+    // mutating endpoints, especially the quarantine-release path, must not
+    // be reachable by a merely-authenticated, tenant-matched caller) -----
+
+    #[tokio::test]
+    async fn list_artifacts_is_forbidden_without_read_scope() {
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        seed_artifact(&pool, tenant, "library/nginx", "clean").await;
+
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        // A validly signed, tenant-matched token that simply carries no
+        // depgate scope at all (e.g. a token scoped for a different
+        // service).
+        let token = skauswatch_testkit::jwt::mint_claims_token(
+            &state.jwt_secret,
+            "user-1",
+            &tenant.to_string(),
+            "other-service:read",
+            &[],
+        );
+        let server = test_server(state);
+        let res = server
+            .get("/api/v1/depgate/artifacts")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn read_scope_token_can_read_but_cannot_mutate() {
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        seed_artifact(&pool, tenant, "library/nginx", "clean").await;
+        let quarantine_id = seed_quarantine(&pool, tenant, "badbad", "library/malicious").await;
+
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        let token = read_only_token(&state.jwt_secret, tenant);
+        let server = test_server(state);
+
+        let read_res = server
+            .get("/api/v1/depgate/artifacts")
+            .authorization_bearer(&token)
+            .await;
+        read_res.assert_status_ok();
+
+        let mutate_res = server
+            .patch(&format!("/api/v1/depgate/quarantine/{quarantine_id}"))
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"disposition": "confirmed"}))
+            .await;
+        mutate_res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn quarantine_release_is_forbidden_without_admin_scope() {
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        let quarantine_id = seed_quarantine(&pool, tenant, "badbad", "library/malicious").await;
+
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        let token = read_only_token(&state.jwt_secret, tenant);
+        let server = test_server(state);
+        // The exact exploit this fix closes: a non-admin, tenant-matched
+        // caller attempting to re-admit a quarantined (malware-flagged)
+        // artifact.
+        let res = server
+            .patch(&format!("/api/v1/depgate/quarantine/{quarantine_id}"))
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"disposition": "released"}))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn quarantine_confirm_succeeds_with_admin_scope() {
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        let quarantine_id = seed_quarantine(&pool, tenant, "badbad", "library/malicious").await;
+
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        let token = admin_token(&state.jwt_secret, tenant);
+        let server = test_server(state);
+        let res = server
+            .patch(&format!("/api/v1/depgate/quarantine/{quarantine_id}"))
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"disposition": "confirmed"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["disposition"], "confirmed");
+    }
+
+    #[tokio::test]
+    async fn quarantine_release_succeeds_with_admin_scope() {
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        let quarantine_id = seed_quarantine(&pool, tenant, "badbad", "library/malicious").await;
+
+        // The `released` disposition moves the object from the quarantine
+        // prefix to the cache prefix and re-tags it clean — the one admin
+        // route code path that talks to S3 (see `crate::state::AppStateInner
+        // ::for_tests_with_s3`'s doc comment).
+        let s3_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/depgate-test/quarantine/badbad"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(b"malware-bytes".to_vec()),
+            )
+            .mount(&s3_server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/depgate-test/sha256/badbad"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&s3_server)
+            .await;
+
+        let state =
+            AppStateInner::for_tests_with_s3(pool, dev_license(), mock_s3_client(&s3_server.uri()));
+        let token = admin_token(&state.jwt_secret, tenant);
+        let server = test_server(state);
+        let res = server
+            .patch(&format!("/api/v1/depgate/quarantine/{quarantine_id}"))
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"disposition": "released"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["disposition"], "released");
+    }
+
+    #[tokio::test]
+    async fn create_policy_rule_is_forbidden_without_admin_scope() {
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        let token = read_only_token(&state.jwt_secret, tenant);
+        let server = test_server(state);
+        let res = server
+            .post("/api/v1/depgate/policy-rules")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"action": "block"}))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn create_policy_rule_succeeds_with_admin_scope() {
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        let token = admin_token(&state.jwt_secret, tenant);
+        let server = test_server(state);
+        let res = server
+            .post("/api/v1/depgate/policy-rules")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"action": "block"}))
+            .await;
+        res.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn update_policy_rule_is_forbidden_without_admin_scope() {
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        let rule = db::insert_policy_rule(
+            &pool,
+            tenant,
+            &db::PolicyRuleInput {
+                priority: 100,
+                ecosystem: None,
+                name_glob: None,
+                version_glob: None,
+                verdict: None,
+                risk_check: None,
+                min_severity: None,
+                action: "block",
+                description: None,
+                enabled: true,
+                created_by: None,
+            },
+        )
+        .await
+        .expect("seed policy rule");
+
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        let token = read_only_token(&state.jwt_secret, tenant);
+        let server = test_server(state);
+        let res = server
+            .put(&format!("/api/v1/depgate/policy-rules/{}", rule.id))
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"action": "allow"}))
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn update_policy_rule_succeeds_with_admin_scope() {
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        let rule = db::insert_policy_rule(
+            &pool,
+            tenant,
+            &db::PolicyRuleInput {
+                priority: 100,
+                ecosystem: None,
+                name_glob: None,
+                version_glob: None,
+                verdict: None,
+                risk_check: None,
+                min_severity: None,
+                action: "block",
+                description: None,
+                enabled: true,
+                created_by: None,
+            },
+        )
+        .await
+        .expect("seed policy rule");
+
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        let token = admin_token(&state.jwt_secret, tenant);
+        let server = test_server(state);
+        let res = server
+            .put(&format!("/api/v1/depgate/policy-rules/{}", rule.id))
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"action": "allow"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["action"], "allow");
+    }
+
+    #[tokio::test]
+    async fn delete_policy_rule_is_forbidden_without_admin_scope() {
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        let rule = db::insert_policy_rule(
+            &pool,
+            tenant,
+            &db::PolicyRuleInput {
+                priority: 100,
+                ecosystem: None,
+                name_glob: None,
+                version_glob: None,
+                verdict: None,
+                risk_check: None,
+                min_severity: None,
+                action: "block",
+                description: None,
+                enabled: true,
+                created_by: None,
+            },
+        )
+        .await
+        .expect("seed policy rule");
+
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        let token = read_only_token(&state.jwt_secret, tenant);
+        let server = test_server(state);
+        let res = server
+            .delete(&format!("/api/v1/depgate/policy-rules/{}", rule.id))
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_policy_rule_succeeds_with_admin_scope() {
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        let rule = db::insert_policy_rule(
+            &pool,
+            tenant,
+            &db::PolicyRuleInput {
+                priority: 100,
+                ecosystem: None,
+                name_glob: None,
+                version_glob: None,
+                verdict: None,
+                risk_check: None,
+                min_severity: None,
+                action: "block",
+                description: None,
+                enabled: true,
+                created_by: None,
+            },
+        )
+        .await
+        .expect("seed policy rule");
+
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        let token = admin_token(&state.jwt_secret, tenant);
+        let server = test_server(state);
+        let res = server
+            .delete(&format!("/api/v1/depgate/policy-rules/{}", rule.id))
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status(StatusCode::NO_CONTENT);
     }
 }

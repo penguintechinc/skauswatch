@@ -105,6 +105,13 @@ impl From<crate::scanpipe::PipelineError> for ApiError {
             PipelineError::Blocked { verdict, threat } => ApiError::Forbidden(format!(
                 "artifact blocked by scan policy (verdict={verdict}, threat={threat})"
             )),
+            PipelineError::OfflineMiss {
+                ecosystem,
+                name,
+                reference,
+            } => ApiError::NotFound(format!(
+                "offline mode: {ecosystem} {name}:{reference} is not in the vetted cache"
+            )),
             PipelineError::IntegrityMismatch { .. } => {
                 ApiError::UpstreamError("digest verification failed".to_owned())
             }

@@ -80,6 +80,16 @@ paths:
           type:
           - string
           - 'null'
+      - name: action
+        in: query
+        description: |-
+          Filters to the policy engine's resolved action (P3) —
+          `ignore`/`document`/`alert`/`fix`.
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
       responses:
         '200':
           description: Findings
@@ -321,6 +331,233 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Issue plan not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/codescan/policy-rules:
+    get:
+      tags:
+      - codescan-sentinel-policy
+      summary: |-
+        GET /codescan/policy-rules — paginated list, optionally filtered by
+        `action`, ordered by priority ascending (evaluation order).
+      operationId: list_rules
+      parameters:
+      - name: action
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: per_page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      responses:
+        '200':
+          description: Policy rules
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyRuleListResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Sentinel not licensed, or below Enterprise tier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - codescan-sentinel-policy
+      summary: |-
+        POST /codescan/policy-rules — admin only. `created_by`/`updated_by`
+        are stamped from the caller's JWT `sub`, never client-supplied (spec
+        §6: "audit fields").
+      operationId: create_rule
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePolicyRuleRequest'
+        required: true
+      responses:
+        '201':
+          description: Policy rule created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyRuleCreateResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Sentinel not licensed, below Enterprise tier, or insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/codescan/policy-rules/{rule_id}:
+    get:
+      tags:
+      - codescan-sentinel-policy
+      summary: GET /codescan/policy-rules/{id}.
+      operationId: get_rule
+      parameters:
+      - name: rule_id
+        in: path
+        description: codescan_policy_rules.id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Policy rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyRule'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Sentinel not licensed, or below Enterprise tier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Policy rule not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    delete:
+      tags:
+      - codescan-sentinel-policy
+      summary: DELETE /codescan/policy-rules/{id} — admin only.
+      operationId: delete_rule
+      parameters:
+      - name: rule_id
+        in: path
+        description: codescan_policy_rules.id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Policy rule deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyRuleDeleteResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Sentinel not licensed, below Enterprise tier, or insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Policy rule not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    patch:
+      tags:
+      - codescan-sentinel-policy
+      summary: PATCH /codescan/policy-rules/{id} — admin only.
+      operationId: update_rule
+      parameters:
+      - name: rule_id
+        in: path
+        description: codescan_policy_rules.id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePolicyRuleRequest'
+        required: true
+      responses:
+        '200':
+          description: Policy rule updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyRuleUpdateResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Sentinel not licensed, below Enterprise tier, or insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Policy rule not found
           content:
             application/json:
               schema:
@@ -1304,6 +1541,58 @@ components:
           type: string
         policy:
           type: string
+    CreatePolicyRuleRequest:
+      type: object
+      required:
+      - action
+      properties:
+        action:
+          type: string
+        cve:
+          type:
+          - string
+          - 'null'
+        description:
+          type:
+          - string
+          - 'null'
+        ecosystem:
+          type:
+          - string
+          - 'null'
+        exposure:
+          type:
+          - string
+          - 'null'
+        kind:
+          type:
+          - string
+          - 'null'
+        package:
+          type:
+          - string
+          - 'null'
+        priority:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        reachability:
+          type:
+          - string
+          - 'null'
+        repo:
+          type:
+          - string
+          - 'null'
+        severity:
+          type:
+          - string
+          - 'null'
+        tool:
+          type:
+          - string
+          - 'null'
     CreateRepoRequest:
       type: object
       description: |-
@@ -1555,15 +1844,35 @@ components:
       - tool
       - rule_id
       - title
+      - triage_source
+      - action
       properties:
+        action:
+          type: string
+          description: |-
+            The policy engine's resolved action (`ignore`/`document`/`alert`/
+            `fix`), `""` when never evaluated (spec §6). The alert bridge
+            (`worker-codescan::handler`) only ever alerts on `"alert"`.
         advisory_id:
           type: string
+        ai_rationale:
+          type:
+          - string
+          - 'null'
+        ai_severity:
+          type:
+          - string
+          - 'null'
         branch:
           type: string
         current_version:
           type: string
         ecosystem:
           type: string
+        exposure:
+          type:
+          - string
+          - 'null'
         file_path:
           type:
           - string
@@ -1598,6 +1907,10 @@ components:
           format: int32
         package_name:
           type: string
+        reachable:
+          type:
+          - boolean
+          - 'null'
         repo_config_id:
           type: integer
           format: int64
@@ -1613,6 +1926,17 @@ components:
           type: string
         tool:
           type: string
+        triage_source:
+          type: string
+        triaged_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        used:
+          type:
+          - boolean
+          - 'null'
     FindingListResponse:
       type: object
       description: Documentation-only mirror of `list_findings`'s `serde_json::json!` body.
@@ -1832,6 +2156,139 @@ components:
         total:
           type: integer
           format: int64
+    PolicyRule:
+      type: object
+      description: One `codescan_policy_rules` row.
+      required:
+      - id
+      - tenant_id
+      - priority
+      - action
+      properties:
+        action:
+          type: string
+        created_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        created_by:
+          type:
+          - string
+          - 'null'
+        cve:
+          type:
+          - string
+          - 'null'
+        description:
+          type:
+          - string
+          - 'null'
+        ecosystem:
+          type:
+          - string
+          - 'null'
+        exposure:
+          type:
+          - string
+          - 'null'
+        id:
+          type: integer
+          format: int64
+        kind:
+          type:
+          - string
+          - 'null'
+        package:
+          type:
+          - string
+          - 'null'
+        priority:
+          type: integer
+          format: int32
+        reachability:
+          type:
+          - string
+          - 'null'
+        repo:
+          type:
+          - string
+          - 'null'
+        severity:
+          type:
+          - string
+          - 'null'
+        tenant_id:
+          type: string
+          format: uuid
+        tool:
+          type:
+          - string
+          - 'null'
+        updated_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        updated_by:
+          type:
+          - string
+          - 'null'
+    PolicyRuleCreateResponse:
+      type: object
+      description: Documentation-only mirror of `create_rule`'s `serde_json::json!` body.
+      required:
+      - message
+      - rule
+      properties:
+        message:
+          type: string
+        rule:
+          $ref: '#/components/schemas/PolicyRule'
+    PolicyRuleDeleteResponse:
+      type: object
+      description: Documentation-only mirror of `delete_rule`'s `serde_json::json!` body.
+      required:
+      - message
+      - deleted
+      properties:
+        deleted:
+          type: boolean
+        message:
+          type: string
+    PolicyRuleListResponse:
+      type: object
+      description: Documentation-only mirror of `list_rules`'s `serde_json::json!` body.
+      required:
+      - data
+      - total
+      - page
+      - per_page
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyRule'
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
+    PolicyRuleUpdateResponse:
+      type: object
+      description: Documentation-only mirror of `update_rule`'s `serde_json::json!` body.
+      required:
+      - message
+      - rule
+      properties:
+        message:
+          type: string
+        rule:
+          $ref: '#/components/schemas/PolicyRule'
     PolicyUpdateResponse:
       type: object
       description: Documentation-only mirror of `update_policy`'s `serde_json::json!` body.
@@ -2352,6 +2809,58 @@ components:
           type:
           - string
           - 'null'
+    UpdatePolicyRuleRequest:
+      type: object
+      properties:
+        action:
+          type:
+          - string
+          - 'null'
+        cve:
+          type:
+          - string
+          - 'null'
+        description:
+          type:
+          - string
+          - 'null'
+        ecosystem:
+          type:
+          - string
+          - 'null'
+        exposure:
+          type:
+          - string
+          - 'null'
+        kind:
+          type:
+          - string
+          - 'null'
+        package:
+          type:
+          - string
+          - 'null'
+        priority:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        reachability:
+          type:
+          - string
+          - 'null'
+        repo:
+          type:
+          - string
+          - 'null'
+        severity:
+          type:
+          - string
+          - 'null'
+        tool:
+          type:
+          - string
+          - 'null'
     UpdateRepoRequest:
       type: object
       description: PUT /codescan/repos/{repo_id} body — all fields optional (partial update).
@@ -2423,3 +2932,5 @@ tags:
   description: OSS license-compliance policy configuration
 - name: codescan-sentinel
   description: Scheduled SCA/CVE dependency scanning and reports (report-only, no AI)
+- name: codescan-sentinel-policy
+  description: P3 AI reachability triage + policy engine rule CRUD (Enterprise-gated)

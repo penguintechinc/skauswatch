@@ -68,7 +68,233 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Missing or invalid tenant claim
+          description: Missing or invalid tenant claim, or missing depgate:read scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/depgate/artifacts/{sha256}/risk-findings:
+    get:
+      tags:
+      - depgate
+      operationId: list_risk_findings
+      parameters:
+      - name: sha256
+        in: path
+        description: Content digest hex
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Package-risk heuristic findings recorded for this artifact (§5)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RiskFindingItem'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing or invalid tenant claim, or missing depgate:read scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/depgate/policy-rules:
+    get:
+      tags:
+      - depgate
+      operationId: list_policy_rules
+      responses:
+        '200':
+          description: Tenant's policy rules, highest priority first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PolicyRuleItem'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing or invalid tenant claim, or missing depgate:read scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - depgate
+      operationId: create_policy_rule
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyRuleRequest'
+        required: true
+      responses:
+        '200':
+          description: Created policy rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyRuleItem'
+        '400':
+          description: Invalid action/min_severity value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing or invalid tenant claim, or missing depgate:admin scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/depgate/policy-rules/{id}:
+    get:
+      tags:
+      - depgate
+      operationId: get_policy_rule
+      parameters:
+      - name: id
+        in: path
+        description: Policy rule id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: The policy rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyRuleItem'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing or invalid tenant claim, or missing depgate:read scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No such policy rule for this tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    put:
+      tags:
+      - depgate
+      operationId: update_policy_rule
+      parameters:
+      - name: id
+        in: path
+        description: Policy rule id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolicyRuleRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated policy rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyRuleItem'
+        '400':
+          description: Invalid action/min_severity value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing or invalid tenant claim, or missing depgate:admin scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No such policy rule for this tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    delete:
+      tags:
+      - depgate
+      operationId: delete_policy_rule
+      parameters:
+      - name: id
+        in: path
+        description: Policy rule id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '204':
+          description: Policy rule deleted
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing or invalid tenant claim, or missing depgate:admin scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No such policy rule for this tenant
           content:
             application/json:
               schema:
@@ -109,7 +335,59 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Missing or invalid tenant claim
+          description: Missing or invalid tenant claim, or missing depgate:read scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/depgate/quarantine/{id}:
+    patch:
+      tags:
+      - depgate
+      operationId: update_quarantine
+      parameters:
+      - name: id
+        in: path
+        description: Quarantine event id
+        required: true
+        schema:
+          type: string
+          format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateQuarantineRequest'
+        required: true
+      responses:
+        '200':
+          description: Updated quarantine event; `released` re-admits the artifact to the vetted cache
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuarantineItem'
+        '400':
+          description: Invalid disposition value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing or invalid tenant claim, or missing depgate:admin scope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No such quarantine event for this tenant
           content:
             application/json:
               schema:
@@ -135,7 +413,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Missing or invalid tenant claim
+          description: Missing or invalid tenant claim, or missing depgate:read scope
           content:
             application/json:
               schema:
@@ -227,6 +505,100 @@ components:
         error:
           type: string
           description: Human-readable error message.
+    PolicyRuleItem:
+      type: object
+      description: One policy-rule row, wire shape.
+      required:
+      - id
+      - priority
+      - action
+      - enabled
+      - created_at
+      - updated_at
+      properties:
+        action:
+          type: string
+        created_at:
+          type: string
+        description:
+          type:
+          - string
+          - 'null'
+        ecosystem:
+          type:
+          - string
+          - 'null'
+        enabled:
+          type: boolean
+        id:
+          type: string
+          format: uuid
+        min_severity:
+          type:
+          - string
+          - 'null'
+        name_glob:
+          type:
+          - string
+          - 'null'
+        priority:
+          type: integer
+          format: int32
+        risk_check:
+          type:
+          - string
+          - 'null'
+        updated_at:
+          type: string
+        verdict:
+          type:
+          - string
+          - 'null'
+        version_glob:
+          type:
+          - string
+          - 'null'
+    PolicyRuleRequest:
+      type: object
+      description: Create/replace request body for a policy rule.
+      required:
+      - action
+      properties:
+        action:
+          type: string
+        description:
+          type:
+          - string
+          - 'null'
+        ecosystem:
+          type:
+          - string
+          - 'null'
+        enabled:
+          type: boolean
+        min_severity:
+          type:
+          - string
+          - 'null'
+        name_glob:
+          type:
+          - string
+          - 'null'
+        priority:
+          type: integer
+          format: int32
+        risk_check:
+          type:
+          - string
+          - 'null'
+        verdict:
+          type:
+          - string
+          - 'null'
+        version_glob:
+          type:
+          - string
+          - 'null'
     QuarantineItem:
       type: object
       description: One quarantine row, wire shape.
@@ -252,10 +624,27 @@ components:
           format: uuid
         name:
           type: string
+        policy_rule_id:
+          type:
+          - string
+          - 'null'
+          format: uuid
         reason:
           type: string
         reference:
           type: string
+        resolution_note:
+          type:
+          - string
+          - 'null'
+        resolved_at:
+          type:
+          - string
+          - 'null'
+        resolved_by:
+          type:
+          - string
+          - 'null'
         sha256:
           type: string
         threat:
@@ -282,6 +671,39 @@ components:
         total:
           type: integer
           format: int64
+    RiskFindingItem:
+      type: object
+      description: One risk-finding row, wire shape.
+      required:
+      - id
+      - sha256
+      - ecosystem
+      - name
+      - reference
+      - check_name
+      - severity
+      - detail
+      - created_at
+      properties:
+        check_name:
+          type: string
+        created_at:
+          type: string
+        detail:
+          type: string
+        ecosystem:
+          type: string
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        reference:
+          type: string
+        severity:
+          type: string
+        sha256:
+          type: string
     StatsResponse:
       type: object
       description: Response for `GET /api/v1/depgate/stats`.
@@ -318,6 +740,22 @@ components:
         quarantine_count:
           type: integer
           format: int64
+    UpdateQuarantineRequest:
+      type: object
+      description: Request body for `PATCH /api/v1/depgate/quarantine/{id}`.
+      required:
+      - disposition
+      properties:
+        disposition:
+          type: string
+          description: |-
+            New disposition (`confirmed`/`false_positive`/`released`) — `pending`
+            is the initial state only, never a valid transition target.
+        resolution_note:
+          type:
+          - string
+          - 'null'
+          description: Free-text resolution note.
   securitySchemes:
     bearer_jwt:
       type: http

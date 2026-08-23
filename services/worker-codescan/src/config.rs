@@ -73,6 +73,20 @@ pub struct WorkerConfig {
     /// registry of its own with a per-module license field, so this scans
     /// via deps.dev instead (see `crate::license_scan`).
     pub go_registry_url: Option<String>,
+    /// WaddleAI inference endpoint for CodeScan Sentinel P3 reachability
+    /// triage (`WADDLEAI_BASE_URL`, see `skauswatch_ai::waddleai`). `None`
+    /// means AI triage is disabled/unconfigured — the deterministic
+    /// prefilter and policy engine (default matrix) still run for an
+    /// Enterprise-licensed tenant; only the AI call itself is skipped (see
+    /// `handler::CodeScanReviewHandler`'s graceful-degradation path).
+    pub waddleai_base_url: Option<String>,
+    /// WaddleAI API key (`WADDLEAI_API_KEY`). `None` behaves identically to
+    /// `waddleai_base_url` being `None` — both are required together.
+    pub waddleai_api_key: Option<String>,
+    /// WaddleAI model tier to request (`WADDLEAI_TIER`, default `"reason"`)
+    /// — `"bulk"`/`"reason"`/`"hard"` per spec §4; WaddleAI itself resolves
+    /// the concrete model.
+    pub waddleai_tier: String,
 }
 
 impl WorkerConfig {
@@ -106,6 +120,9 @@ impl WorkerConfig {
             env::var("PYPI_REGISTRY_URL").ok().as_deref(),
             env::var("CRATES_REGISTRY_URL").ok().as_deref(),
             env::var("GO_REGISTRY_URL").ok().as_deref(),
+            env::var("WADDLEAI_BASE_URL").ok().as_deref(),
+            env::var("WADDLEAI_API_KEY").ok().as_deref(),
+            env::var("WADDLEAI_TIER").ok().as_deref(),
         ))
     }
 
@@ -134,6 +151,9 @@ impl WorkerConfig {
         pypi_registry_url: Option<&str>,
         crates_registry_url: Option<&str>,
         go_registry_url: Option<&str>,
+        waddleai_base_url: Option<&str>,
+        waddleai_api_key: Option<&str>,
+        waddleai_tier: Option<&str>,
     ) -> Self {
         Self {
             redis_url: redis_url.unwrap_or("redis://localhost:6379").to_owned(),
@@ -163,6 +183,9 @@ impl WorkerConfig {
             pypi_registry_url: pypi_registry_url.map(str::to_owned),
             crates_registry_url: crates_registry_url.map(str::to_owned),
             go_registry_url: go_registry_url.map(str::to_owned),
+            waddleai_base_url: waddleai_base_url.map(str::to_owned),
+            waddleai_api_key: waddleai_api_key.map(str::to_owned),
+            waddleai_tier: waddleai_tier.unwrap_or("reason").to_owned(),
         }
     }
 }
@@ -180,6 +203,9 @@ mod tests {
             None,
             None,
             "consumer-1",
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -218,6 +244,9 @@ mod tests {
         assert_eq!(cfg.pypi_registry_url, None);
         assert_eq!(cfg.crates_registry_url, None);
         assert_eq!(cfg.go_registry_url, None);
+        assert_eq!(cfg.waddleai_base_url, None);
+        assert_eq!(cfg.waddleai_api_key, None);
+        assert_eq!(cfg.waddleai_tier, "reason");
     }
 
     #[test]
@@ -244,6 +273,9 @@ mod tests {
             Some("http://pypi.example.com"),
             Some("http://crates.example.com"),
             Some("http://depsdev.example.com"),
+            Some("https://waddleai.internal"),
+            Some("waddleai-key"),
+            Some("hard"),
         );
         assert_eq!(cfg.redis_url, "redis://cache:6379");
         assert_eq!(cfg.redis_password.as_deref(), Some("s3cr3t"));
@@ -285,6 +317,12 @@ mod tests {
             cfg.go_registry_url.as_deref(),
             Some("http://depsdev.example.com")
         );
+        assert_eq!(
+            cfg.waddleai_base_url.as_deref(),
+            Some("https://waddleai.internal")
+        );
+        assert_eq!(cfg.waddleai_api_key.as_deref(), Some("waddleai-key"));
+        assert_eq!(cfg.waddleai_tier, "hard");
     }
 
     #[test]
@@ -305,6 +343,9 @@ mod tests {
             None,
             None,
             Some("nope"),
+            None,
+            None,
+            None,
             None,
             None,
             None,

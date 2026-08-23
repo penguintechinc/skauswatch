@@ -208,6 +208,9 @@ impl AppStateInner {
             clamd_socket: None,
             clamd_timeout_secs: 30,
             yara_rules_path: None,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
+            bundle_signing_key: None,
         };
         Self {
             db,
@@ -266,6 +269,17 @@ impl AppStateInner {
         Arc::new(inner)
     }
 
+    /// Like [`Self::for_tests_with_npm`], but overriding the S3 client —
+    /// used by `crate::routes::admin`'s quarantine-release test, the one
+    /// admin-API code path (`update_quarantine`'s `released` branch) that
+    /// actually talks to S3 rather than only DB-driven code paths.
+    #[cfg(test)]
+    pub fn for_tests_with_s3(db: PgPool, license: Arc<LicenseClient>, s3: S3Client) -> AppState {
+        let mut inner = Self::build_test_state(db, license, None);
+        inner.s3 = s3;
+        Arc::new(inner)
+    }
+
     /// Like [`Self::for_tests_with_npm`], for `crate::routes::pypi`'s tests.
     #[cfg(test)]
     pub fn for_tests_with_pypi(
@@ -313,6 +327,8 @@ impl AppStateInner {
             db: &self.db,
             max_artifact_bytes: self.cfg.max_artifact_bytes,
             cache_stats: &self.cache_stats,
+            offline_mode: self.cfg.offline_mode,
+            fail_posture: self.cfg.fail_posture,
         }
     }
 }

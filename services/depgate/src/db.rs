@@ -161,8 +161,19 @@ pub struct QuarantineRow {
     pub reason: String,
     /// `malware` or `pup`.
     pub threat: String,
-    /// Disposition (`"blocked"` for P1 — no policy engine yet).
+    /// Lifecycle disposition: `pending`/`confirmed`/`false_positive`/`released`
+    /// (`docs/v2-port/v2.1-depgate.md` §6).
     pub disposition: String,
+    /// The policy rule that produced this quarantine event, if any (`None`
+    /// for a default-policy quarantine with no matching rule).
+    pub policy_rule_id: Option<Uuid>,
+    /// When a human resolved this event (set the disposition away from
+    /// `pending`).
+    pub resolved_at: Option<NaiveDateTime>,
+    /// Who resolved it (subject claim of the resolving JWT).
+    pub resolved_by: Option<String>,
+    /// Free-text resolution note (e.g. why this was a false positive).
+    pub resolution_note: Option<String>,
     /// Attribution tenant.
     pub tenant_id: Uuid,
     /// When this was recorded.
@@ -184,20 +195,23 @@ pub struct QuarantineInsert<'a> {
     pub reason: &'a str,
     /// `malware` or `pup`.
     pub threat: &'a str,
+    /// The policy rule that produced this event, if any.
+    pub policy_rule_id: Option<Uuid>,
     /// Attribution tenant.
     pub tenant_id: Uuid,
 }
 
-/// Records a quarantine event. Always inserts a new row — repeated pulls of
-/// the same infected reference are each individually audit-logged.
+/// Records a quarantine event with disposition `pending`. Always inserts a
+/// new row — repeated pulls of the same infected reference are each
+/// individually audit-logged.
 ///
 /// # Errors
 /// Propagates any `sqlx::Error`.
 pub async fn insert_quarantine(pool: &PgPool, q: &QuarantineInsert<'_>) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO depgate_quarantine \
-            (id, sha256, ecosystem, name, reference, reason, threat, disposition, tenant_id, created_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'blocked', $8, now())",
+            (id, sha256, ecosystem, name, reference, reason, threat, disposition, policy_rule_id, tenant_id, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, now())",
     )
     .bind(Uuid::new_v4())
     .bind(q.sha256)
@@ -206,6 +220,7 @@ pub async fn insert_quarantine(pool: &PgPool, q: &QuarantineInsert<'_>) -> Resul
     .bind(q.reference)
     .bind(q.reason)
     .bind(q.threat)
+    .bind(q.policy_rule_id)
     .bind(q.tenant_id)
     .execute(pool)
     .await?;
@@ -292,6 +307,7 @@ pub async fn list_quarantine(
 
     let rows = sqlx::query_as::<_, QuarantineRow>(
         "SELECT id, sha256, ecosystem, name, reference, reason, threat, disposition, \
+                policy_rule_id, resolved_at, resolved_by, resolution_note, \
                 tenant_id, created_at \
          FROM depgate_quarantine WHERE tenant_id = $1 \
          ORDER BY created_at DESC LIMIT $2 OFFSET $3",
@@ -359,4 +375,498 @@ pub async fn quarantine_count_all_tenants(pool: &PgPool) -> Result<i64, sqlx::Er
     sqlx::query_scalar("SELECT COUNT(*) FROM depgate_quarantine")
         .fetch_one(pool)
         .await
+}
+
+// -- Policy rules engine (§6, §8) --------------------------------------
+
+/// One `depgate_policy_rules` row.
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct PolicyRuleRow {
+    /// Primary key.
+    pub id: Uuid,
+    /// Owning tenant — policy is per-tenant configuration, unlike the
+    /// shared content-addressed cache (see this file's module docs).
+    pub tenant_id: Uuid,
+    /// Match priority — highest wins among all matching, enabled rules.
+    pub priority: i32,
+    /// `NULL` matches any ecosystem.
+    pub ecosystem: Option<String>,
+    /// Glob (`*`/`?`) against the package/repo name. `NULL` matches any.
+    pub name_glob: Option<String>,
+    /// Glob against the tag/version/reference string. `NULL` matches any.
+    pub version_glob: Option<String>,
+    /// Exact-match scan verdict (`Verdict::as_str()`). `NULL` matches any.
+    pub verdict: Option<String>,
+    /// Exact-match heuristic check name (`RiskFinding.check`). `NULL`
+    /// matches any (or, combined with `min_severity`, "any finding at or
+    /// above this severity").
+    pub risk_check: Option<String>,
+    /// Minimum heuristic severity required for a match, when `risk_check`
+    /// or a bare severity gate is configured. `NULL` means no severity
+    /// floor.
+    pub min_severity: Option<String>,
+    /// `allow`/`warn`/`block`/`quarantine`.
+    pub action: String,
+    /// Human-readable purpose.
+    pub description: Option<String>,
+    /// Disabled rules are never matched.
+    pub enabled: bool,
+    /// Row creation time.
+    pub created_at: NaiveDateTime,
+    /// Last update time.
+    pub updated_at: NaiveDateTime,
+    /// Subject claim of whoever created/last modified this rule.
+    pub created_by: Option<String>,
+}
+
+/// Fields accepted from a policy-rule create/update request.
+#[derive(Debug, Clone)]
+pub struct PolicyRuleInput<'a> {
+    /// Match priority.
+    pub priority: i32,
+    /// Ecosystem filter.
+    pub ecosystem: Option<&'a str>,
+    /// Name glob filter.
+    pub name_glob: Option<&'a str>,
+    /// Version glob filter.
+    pub version_glob: Option<&'a str>,
+    /// Verdict filter.
+    pub verdict: Option<&'a str>,
+    /// Risk-check filter.
+    pub risk_check: Option<&'a str>,
+    /// Minimum severity filter.
+    pub min_severity: Option<&'a str>,
+    /// Resulting action.
+    pub action: &'a str,
+    /// Human-readable purpose.
+    pub description: Option<&'a str>,
+    /// Whether this rule is active.
+    pub enabled: bool,
+    /// Subject claim of the caller.
+    pub created_by: Option<&'a str>,
+}
+
+/// Creates a policy rule for `tenant_id`.
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn insert_policy_rule(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    input: &PolicyRuleInput<'_>,
+) -> Result<PolicyRuleRow, sqlx::Error> {
+    sqlx::query_as::<_, PolicyRuleRow>(
+        "INSERT INTO depgate_policy_rules \
+            (id, tenant_id, priority, ecosystem, name_glob, version_glob, verdict, risk_check, \
+             min_severity, action, description, enabled, created_at, updated_at, created_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now(), $13) \
+         RETURNING id, tenant_id, priority, ecosystem, name_glob, version_glob, verdict, \
+                   risk_check, min_severity, action, description, enabled, created_at, \
+                   updated_at, created_by",
+    )
+    .bind(Uuid::new_v4())
+    .bind(tenant_id)
+    .bind(input.priority)
+    .bind(input.ecosystem)
+    .bind(input.name_glob)
+    .bind(input.version_glob)
+    .bind(input.verdict)
+    .bind(input.risk_check)
+    .bind(input.min_severity)
+    .bind(input.action)
+    .bind(input.description)
+    .bind(input.enabled)
+    .bind(input.created_by)
+    .fetch_one(pool)
+    .await
+}
+
+/// Lists every policy rule for `tenant_id`, highest priority first — the
+/// same order [`crate::policy::evaluate`] uses to pick a winner.
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn list_policy_rules(
+    pool: &PgPool,
+    tenant_id: Uuid,
+) -> Result<Vec<PolicyRuleRow>, sqlx::Error> {
+    sqlx::query_as::<_, PolicyRuleRow>(
+        "SELECT id, tenant_id, priority, ecosystem, name_glob, version_glob, verdict, \
+                risk_check, min_severity, action, description, enabled, created_at, \
+                updated_at, created_by \
+         FROM depgate_policy_rules WHERE tenant_id = $1 ORDER BY priority DESC, created_at ASC",
+    )
+    .bind(tenant_id)
+    .fetch_all(pool)
+    .await
+}
+
+/// Fetches one policy rule, tenant-scoped.
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn get_policy_rule(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<PolicyRuleRow>, sqlx::Error> {
+    sqlx::query_as::<_, PolicyRuleRow>(
+        "SELECT id, tenant_id, priority, ecosystem, name_glob, version_glob, verdict, \
+                risk_check, min_severity, action, description, enabled, created_at, \
+                updated_at, created_by \
+         FROM depgate_policy_rules WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(tenant_id)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Replaces every mutable field of a policy rule, tenant-scoped.
+/// `Ok(None)` when no such rule exists for this tenant.
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn update_policy_rule(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+    input: &PolicyRuleInput<'_>,
+) -> Result<Option<PolicyRuleRow>, sqlx::Error> {
+    sqlx::query_as::<_, PolicyRuleRow>(
+        "UPDATE depgate_policy_rules SET \
+            priority = $1, ecosystem = $2, name_glob = $3, version_glob = $4, verdict = $5, \
+            risk_check = $6, min_severity = $7, action = $8, description = $9, enabled = $10, \
+            updated_at = now(), created_by = COALESCE($11, created_by) \
+         WHERE tenant_id = $12 AND id = $13 \
+         RETURNING id, tenant_id, priority, ecosystem, name_glob, version_glob, verdict, \
+                   risk_check, min_severity, action, description, enabled, created_at, \
+                   updated_at, created_by",
+    )
+    .bind(input.priority)
+    .bind(input.ecosystem)
+    .bind(input.name_glob)
+    .bind(input.version_glob)
+    .bind(input.verdict)
+    .bind(input.risk_check)
+    .bind(input.min_severity)
+    .bind(input.action)
+    .bind(input.description)
+    .bind(input.enabled)
+    .bind(input.created_by)
+    .bind(tenant_id)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Deletes a policy rule, tenant-scoped. Returns whether a row was deleted.
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn delete_policy_rule(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query("DELETE FROM depgate_policy_rules WHERE tenant_id = $1 AND id = $2")
+        .bind(tenant_id)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+// -- Risk findings (§5) -------------------------------------------------
+
+/// One `depgate_risk_findings` row.
+#[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
+pub struct RiskFindingRow {
+    /// Primary key.
+    pub id: Uuid,
+    /// Content digest hex of the artifact this finding is about.
+    pub sha256: String,
+    /// Ecosystem discriminator.
+    pub ecosystem: String,
+    /// Package/repo name.
+    pub name: String,
+    /// Tag/version/reference string.
+    pub reference: String,
+    /// Stable check identifier.
+    pub check_name: String,
+    /// Severity of this hit.
+    pub severity: String,
+    /// Human-readable explanation.
+    pub detail: String,
+    /// Attribution tenant.
+    pub tenant_id: Uuid,
+    /// When this was recorded.
+    pub created_at: NaiveDateTime,
+}
+
+/// Bulk-inserts `findings` for one ingested artifact. A no-op (no query
+/// sent) when `findings` is empty.
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn insert_risk_findings(
+    pool: &PgPool,
+    sha256: &str,
+    ecosystem: &str,
+    name: &str,
+    reference: &str,
+    tenant_id: Uuid,
+    findings: &[crate::heuristics::RiskFinding],
+) -> Result<(), sqlx::Error> {
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(
+        "INSERT INTO depgate_risk_findings \
+            (id, sha256, ecosystem, name, reference, check_name, severity, detail, tenant_id, created_at) ",
+    );
+    qb.push_values(findings, |mut b, f| {
+        b.push_bind(Uuid::new_v4())
+            .push_bind(sha256)
+            .push_bind(ecosystem)
+            .push_bind(name)
+            .push_bind(reference)
+            .push_bind(f.check.clone())
+            .push_bind(f.severity.as_str())
+            .push_bind(f.detail.clone())
+            .push_bind(tenant_id)
+            .push("now()");
+    });
+    qb.build().execute(pool).await?;
+    Ok(())
+}
+
+/// Lists every recorded risk finding for `sha256`, tenant-scoped.
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn list_risk_findings(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    sha256: &str,
+) -> Result<Vec<RiskFindingRow>, sqlx::Error> {
+    sqlx::query_as::<_, RiskFindingRow>(
+        "SELECT id, sha256, ecosystem, name, reference, check_name, severity, detail, \
+                tenant_id, created_at \
+         FROM depgate_risk_findings WHERE tenant_id = $1 AND sha256 = $2 \
+         ORDER BY created_at ASC",
+    )
+    .bind(tenant_id)
+    .bind(sha256)
+    .fetch_all(pool)
+    .await
+}
+
+// -- Policy decisions audit trail (§6) -----------------------------------
+
+/// Fields needed to record one policy evaluation.
+#[derive(Debug, Clone)]
+pub struct PolicyDecisionInsert<'a> {
+    /// Content digest hex.
+    pub sha256: &'a str,
+    /// Ecosystem discriminator.
+    pub ecosystem: &'a str,
+    /// Package/repo name.
+    pub name: &'a str,
+    /// Tag/version/reference string.
+    pub reference: &'a str,
+    /// The scan verdict this decision was made against.
+    pub verdict: &'a str,
+    /// The resulting action.
+    pub action: &'a str,
+    /// The rule that matched, if any.
+    pub matched_rule_id: Option<Uuid>,
+    /// Human-readable "why".
+    pub reason: &'a str,
+    /// Attribution tenant.
+    pub tenant_id: Uuid,
+}
+
+/// Records one policy decision — every ingest-time evaluation, regardless
+/// of the resulting action (§6: "answerable: why was this package
+/// blocked?").
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn insert_policy_decision(
+    pool: &PgPool,
+    d: &PolicyDecisionInsert<'_>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO depgate_policy_decisions \
+            (id, sha256, ecosystem, name, reference, verdict, action, matched_rule_id, reason, tenant_id, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(d.sha256)
+    .bind(d.ecosystem)
+    .bind(d.name)
+    .bind(d.reference)
+    .bind(d.verdict)
+    .bind(d.action)
+    .bind(d.matched_rule_id)
+    .bind(d.reason)
+    .bind(d.tenant_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// -- Quarantine disposition lifecycle (§6) -------------------------------
+
+/// Fetches one quarantine event by id, tenant-scoped.
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn get_quarantine(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+) -> Result<Option<QuarantineRow>, sqlx::Error> {
+    sqlx::query_as::<_, QuarantineRow>(
+        "SELECT id, sha256, ecosystem, name, reference, reason, threat, disposition, \
+                policy_rule_id, resolved_at, resolved_by, resolution_note, tenant_id, created_at \
+         FROM depgate_quarantine WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(tenant_id)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Updates a quarantine event's disposition, tenant-scoped. `Ok(None)` when
+/// no such event exists for this tenant.
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn update_quarantine_disposition(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    id: Uuid,
+    disposition: &str,
+    resolved_by: &str,
+    resolution_note: Option<&str>,
+) -> Result<Option<QuarantineRow>, sqlx::Error> {
+    sqlx::query_as::<_, QuarantineRow>(
+        "UPDATE depgate_quarantine SET \
+            disposition = $1, resolved_at = now(), resolved_by = $2, resolution_note = $3 \
+         WHERE tenant_id = $4 AND id = $5 \
+         RETURNING id, sha256, ecosystem, name, reference, reason, threat, disposition, \
+                   policy_rule_id, resolved_at, resolved_by, resolution_note, tenant_id, created_at",
+    )
+    .bind(disposition)
+    .bind(resolved_by)
+    .bind(resolution_note)
+    .bind(tenant_id)
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+// -- Air-gap bundle import provenance (§6b) ------------------------------
+
+/// Records one bundle import event.
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn insert_bundle_import(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    bundle_name: &str,
+    manifest_sha256: &str,
+    signature_verified: bool,
+    artifact_count: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO depgate_bundle_imports \
+            (id, bundle_name, manifest_sha256, signature_verified, artifact_count, tenant_id, imported_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, now())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(bundle_name)
+    .bind(manifest_sha256)
+    .bind(signature_verified)
+    .bind(artifact_count)
+    .bind(tenant_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// -- Re-scan sweep support (§6) -------------------------------------------
+
+/// Lists every artifact whose recorded `scanner_version` differs from
+/// `current_version` — the re-scan sweep's candidate set
+/// (`crate::rescan::sweep`). Deliberately unscoped by tenant: a re-scan is
+/// a maintenance operation over the whole shared cache, not a per-tenant
+/// report.
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn artifacts_with_stale_scanner_version(
+    pool: &PgPool,
+    current_version: &str,
+) -> Result<Vec<ArtifactRow>, sqlx::Error> {
+    sqlx::query_as::<_, ArtifactRow>(
+        "SELECT id, ecosystem, name, reference, sha256, upstream, content_type, size_bytes, \
+                verdict, verdict_at, scanner_version, pinned, tenant_id, first_seen, last_seen \
+         FROM depgate_artifacts WHERE scanner_version <> $1",
+    )
+    .bind(current_version)
+    .fetch_all(pool)
+    .await
+}
+
+/// Fleet-wide (every tenant) list of `verdict = clean` artifacts — the
+/// candidate set for `crate::bundle::export_bundle`. Export is a
+/// connected-side maintenance operation over the whole shared cache, not a
+/// per-tenant report, same reachability posture as
+/// [`verdict_counts_all_tenants`].
+///
+/// # Errors
+/// Propagates any `sqlx::Error`.
+pub async fn list_clean_artifacts_all_tenants(
+    pool: &PgPool,
+) -> Result<Vec<ArtifactRow>, sqlx::Error> {
+    sqlx::query_as::<_, ArtifactRow>(
+        "SELECT id, ecosystem, name, reference, sha256, upstream, content_type, size_bytes, \
+                verdict, verdict_at, scanner_version, pinned, tenant_id, first_seen, last_seen \
+         FROM depgate_artifacts WHERE verdict = 'clean' ORDER BY ecosystem, name, reference",
+    )
+    .fetch_all(pool)
+    .await
+}
+
+impl PolicyRuleRow {
+    /// Converts this row into the pure `crate::policy::PolicyRule` shape
+    /// `crate::policy::evaluate` operates on. `None` only if the DB somehow
+    /// holds an `action`/`min_severity` value outside the `CHECK`-
+    /// constrained set — defensive, should never happen; such a row is
+    /// simply skipped (never matched) rather than panicking the ingest
+    /// path over one malformed rule.
+    #[must_use]
+    pub fn into_policy_rule(self) -> Option<crate::policy::PolicyRule> {
+        let action = self.action.parse().ok()?;
+        let min_severity = match self.min_severity {
+            Some(s) => Some(s.parse().ok()?),
+            None => None,
+        };
+        Some(crate::policy::PolicyRule {
+            id: self.id,
+            priority: self.priority,
+            ecosystem: self.ecosystem,
+            name_glob: self.name_glob,
+            version_glob: self.version_glob,
+            verdict: self.verdict,
+            risk_check: self.risk_check,
+            min_severity,
+            action,
+            enabled: self.enabled,
+        })
+    }
 }
