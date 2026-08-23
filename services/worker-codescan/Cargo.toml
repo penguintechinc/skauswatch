@@ -36,6 +36,15 @@ tracing = { workspace = true }
 reqwest = { workspace = true }
 urlencoding = "=2.1.3"
 uuid = { workspace = true }
+# CodeScan Sentinel P2 tool registry (crate::scanner_tool, crate::tree_fetch):
+# fingerprinting tool findings (sha2), branch-tree zip archive fetch (zip,
+# tempfile), and applicability/file-list walking (walkdir) — see
+# crate::tree_fetch's module docs for why zip over tar.gz.
+sha2 = { workspace = true }
+zip = { workspace = true }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+flate2 = { workspace = true }
 
 [dev-dependencies]
 wiremock = { workspace = true }

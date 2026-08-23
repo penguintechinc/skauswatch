@@ -69,6 +69,7 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         license_policies::delete_policy,
         findings::list_findings,
         findings::findings_summary,
+        findings::get_sbom,
     ),
     components(schemas(
         ErrorResponse,
@@ -112,6 +113,7 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         findings::FindingListResponse,
         findings::SeverityCount,
         findings::FindingsSummaryResponse,
+        findings::SbomResponse,
     )),
     tags(
         (name = "codescan", description = "Repo configs, AI code reviews, and issue plans"),

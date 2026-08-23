@@ -32,7 +32,7 @@ fn default_limit() -> i64 {
 pub(crate) struct ListArtifactsQuery {
     /// Exact-match verdict filter (`clean`/`infected`/`pup`/`error`/`skipped`/`quarantined`).
     verdict: Option<String>,
-    /// Exact-match ecosystem filter (`oci` for P1).
+    /// Exact-match ecosystem filter (`oci`, `npm`, `pypi`).
     ecosystem: Option<String>,
     /// Substring match against `name`.
     name: Option<String>,

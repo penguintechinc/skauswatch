@@ -76,6 +76,11 @@ pub enum PipelineError {
     /// The YARA-X engine itself failed mid-scan.
     #[error(transparent)]
     Scan(#[from] ScanError),
+    /// npm/PyPI upstream fetch failure (`crate::fetch`) — the P2 ecosystem
+    /// clients' error type, distinct from [`PipelineError::Upstream`]'s OCI
+    /// `UpstreamError` since neither shares the Bearer-challenge machinery.
+    #[error(transparent)]
+    Fetch(#[from] crate::fetch::FetchError),
 }
 
 /// Bundles every dependency `resolve_manifest`/`resolve_blob` need. Built
@@ -126,8 +131,10 @@ impl ScanPipeline<'_> {
                 .ingest(
                     fetched.bytes,
                     &fetched.content_type,
+                    "oci",
                     name,
                     reference,
+                    self.upstream.base_url(),
                     tenant_id,
                 )
                 .await;
@@ -158,8 +165,10 @@ impl ScanPipeline<'_> {
         self.ingest(
             fetched.bytes,
             &fetched.content_type,
+            "oci",
             name,
             reference,
+            self.upstream.base_url(),
             tenant_id,
         )
         .await
@@ -199,8 +208,10 @@ impl ScanPipeline<'_> {
         self.ingest(
             fetched.bytes,
             &fetched.content_type,
+            "oci",
             name,
             digest,
+            self.upstream.base_url(),
             tenant_id,
         )
         .await
@@ -278,15 +289,31 @@ impl ScanPipeline<'_> {
     }
 
     /// Scans `bytes`, then either caches+tags+indexes them as clean or
-    /// quarantines+indexes them as blocked. `reference` is the tag/digest
-    /// the caller originally asked for (recorded on the index row so
-    /// `find_by_reference` can resolve it next time).
+    /// quarantines+indexes them as blocked. `reference` is the tag/digest/
+    /// filename the caller originally asked for (recorded on the index row
+    /// so `find_by_reference` can resolve it next time). `ecosystem`
+    /// discriminates the index row (`"oci"`/`"npm"`/`"pypi"`) — every
+    /// front end funnels through this one scan/cache/quarantine/index path
+    /// regardless of which upstream client fetched the bytes.
+    ///
+    /// `upstream` is recorded on the index row for audit — each caller
+    /// passes its own upstream client's base/index URL (`ScanPipeline` has
+    /// no ecosystem-specific client of its own to read one from beyond
+    /// `self.upstream` for OCI, since npm/PyPI clients live on `AppState`
+    /// instead — see [`Self::resolve_named`]'s docs).
+    // One argument per distinct piece of data this shared scan/cache/
+    // quarantine/index path needs — mirrors `src/config.rs::resolve_depgate`'s
+    // identical allow: a params struct would just move the same fields
+    // without adding clarity for a private fn.
+    #[allow(clippy::too_many_arguments)]
     async fn ingest(
         &self,
         bytes: Bytes,
         content_type: &str,
+        ecosystem: &str,
         name: &str,
         reference: &str,
+        upstream: &str,
         tenant_id: Uuid,
     ) -> Result<ResolvedArtifact, PipelineError> {
         let outcome = self.scan_engine.scan_bytes(&bytes).await?;
@@ -301,11 +328,11 @@ impl ScanPipeline<'_> {
             db::upsert_artifact(
                 self.db,
                 &UpsertArtifact {
-                    ecosystem: "oci",
+                    ecosystem,
                     name,
                     reference,
                     sha256: &sha256,
-                    upstream: self.upstream.base_url(),
+                    upstream,
                     content_type: Some(content_type),
                     size_bytes,
                     verdict: Verdict::Clean.as_str(),
@@ -333,7 +360,7 @@ impl ScanPipeline<'_> {
             self.db,
             &QuarantineInsert {
                 sha256: &sha256,
-                ecosystem: "oci",
+                ecosystem,
                 name,
                 reference,
                 reason: if threat.is_empty() {
@@ -349,11 +376,11 @@ impl ScanPipeline<'_> {
         db::upsert_artifact(
             self.db,
             &UpsertArtifact {
-                ecosystem: "oci",
+                ecosystem,
                 name,
                 reference,
                 sha256: &sha256,
-                upstream: self.upstream.base_url(),
+                upstream,
                 content_type: Some(content_type),
                 size_bytes,
                 verdict: outcome.verdict.as_str(),
@@ -367,6 +394,100 @@ impl ScanPipeline<'_> {
             verdict: outcome.verdict.as_str().to_owned(),
             threat,
         })
+    }
+
+    /// Resolves a tag/name-addressed artifact for ecosystems that, like OCI
+    /// tags, don't know the content digest ahead of the fetch: consults the
+    /// `(ecosystem, name, reference)` index first — serving from cache on a
+    /// prior-clean hit, refusing outright on a prior-blocked hit — and only
+    /// calls `fetch` (the caller's ecosystem-specific upstream client) on a
+    /// genuine miss, then runs the result through the same
+    /// [`Self::ingest`] scan/cache/quarantine/index path every ecosystem
+    /// shares. This is the npm/PyPI equivalent of `resolve_manifest`'s
+    /// tag-addressed branch; OCI keeps its own inline copy since it also
+    /// has a digest-addressed branch this generic form doesn't need to
+    /// cover.
+    ///
+    /// `upstream` is the caller's upstream client's base/index URL, recorded
+    /// on the index row for audit — `ScanPipeline` holds no npm/PyPI client
+    /// of its own (those live on `AppState`, since only OCI needs one on
+    /// every construction site), so the caller supplies the label instead
+    /// of this method deriving it from `ecosystem`.
+    ///
+    /// # Errors
+    /// See [`PipelineError`].
+    pub async fn resolve_named<F, Fut>(
+        &self,
+        ecosystem: &str,
+        name: &str,
+        reference: &str,
+        upstream: &str,
+        tenant_id: Uuid,
+        fetch: F,
+    ) -> Result<ResolvedArtifact, PipelineError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(Bytes, String), PipelineError>>,
+    {
+        if let Some(row) = db::find_by_reference(self.db, ecosystem, name, reference).await? {
+            if row.verdict == Verdict::Clean.as_str() {
+                if let Some(obj) = self.try_serve(&row.sha256).await? {
+                    return Ok(obj);
+                }
+                // Cache entry evicted since the row was written — fall
+                // through to a fresh fetch+ingest below.
+            } else {
+                return Err(PipelineError::Blocked {
+                    verdict: row.verdict,
+                    threat: String::new(),
+                });
+            }
+        }
+        let (bytes, content_type) = fetch().await?;
+        self.ingest(
+            bytes,
+            &content_type,
+            ecosystem,
+            name,
+            reference,
+            upstream,
+            tenant_id,
+        )
+        .await
+    }
+
+    /// Warm-start entry point for npm/PyPI seed entries — see
+    /// [`Self::seed_manifest`]'s OCI equivalent. Resolves via
+    /// [`Self::resolve_named`], then pins the resulting row.
+    ///
+    /// # Errors
+    /// See [`PipelineError`].
+    pub async fn seed_named<F, Fut>(
+        &self,
+        ecosystem: &str,
+        name: &str,
+        reference: &str,
+        upstream: &str,
+        tenant_id: Uuid,
+        fetch: F,
+    ) -> Result<ResolvedArtifact, PipelineError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<(Bytes, String), PipelineError>>,
+    {
+        let artifact = self
+            .resolve_named(ecosystem, name, reference, upstream, tenant_id, fetch)
+            .await?;
+        sqlx::query(
+            "UPDATE depgate_artifacts SET pinned = true \
+             WHERE ecosystem = $1 AND name = $2 AND reference = $3",
+        )
+        .bind(ecosystem)
+        .bind(name)
+        .bind(reference)
+        .execute(self.db)
+        .await?;
+        Ok(artifact)
     }
 }
 

@@ -92,11 +92,93 @@ impl UpstreamConfig {
     }
 }
 
+/// npm registry upstream settings (`docs/v2-port/v2.1-depgate.md` §4 P2).
+/// Single default upstream, same posture as [`UpstreamConfig`] for OCI —
+/// per-scope/per-upstream routing is a later-phase concern.
+#[derive(Debug, Clone)]
+pub struct NpmUpstreamConfig {
+    /// Registry API base (`DEPGATE_NPM_REGISTRY_URL`).
+    pub registry_url: String,
+    /// Optional Bearer token for the upstream registry
+    /// (`DEPGATE_NPM_TOKEN`) — raises rate limits / grants access to a
+    /// private registry; never required for public packages.
+    pub token: Option<String>,
+}
+
+fn resolve_npm_upstream(registry_url: Option<&str>, token: Option<&str>) -> NpmUpstreamConfig {
+    NpmUpstreamConfig {
+        registry_url: resolve_or(registry_url, "https://registry.npmjs.org"),
+        token: resolve_opt(token),
+    }
+}
+
+impl NpmUpstreamConfig {
+    /// Loads npm upstream settings from the environment.
+    pub fn from_env() -> Self {
+        resolve_npm_upstream(
+            std::env::var("DEPGATE_NPM_REGISTRY_URL").ok().as_deref(),
+            std::env::var("DEPGATE_NPM_TOKEN").ok().as_deref(),
+        )
+    }
+}
+
+/// PyPI upstream settings (`docs/v2-port/v2.1-depgate.md` §4 P2). The index
+/// (`pypi.org`, simple/JSON API) and the file host (`files.pythonhosted.org`,
+/// actual wheel/sdist bytes) are configured separately because that is how
+/// the real PyPI deployment is split, and a self-hosted index (devpi, etc.)
+/// may split them differently too.
+#[derive(Debug, Clone)]
+pub struct PypiUpstreamConfig {
+    /// Simple/JSON index API base (`DEPGATE_PYPI_INDEX_URL`).
+    pub index_url: String,
+    /// Package file host base (`DEPGATE_PYPI_FILES_URL`).
+    pub files_url: String,
+    /// Optional Basic-auth username for a private index
+    /// (`DEPGATE_PYPI_USERNAME`).
+    pub username: Option<String>,
+    /// Optional Basic-auth password (`DEPGATE_PYPI_PASSWORD`).
+    pub password: Option<String>,
+}
+
+fn resolve_pypi_upstream(
+    index_url: Option<&str>,
+    files_url: Option<&str>,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> PypiUpstreamConfig {
+    PypiUpstreamConfig {
+        index_url: resolve_or(index_url, "https://pypi.org"),
+        files_url: resolve_or(files_url, "https://files.pythonhosted.org"),
+        username: resolve_opt(username),
+        password: resolve_opt(password),
+    }
+}
+
+impl PypiUpstreamConfig {
+    /// Loads PyPI upstream settings from the environment.
+    pub fn from_env() -> Self {
+        resolve_pypi_upstream(
+            std::env::var("DEPGATE_PYPI_INDEX_URL").ok().as_deref(),
+            std::env::var("DEPGATE_PYPI_FILES_URL").ok().as_deref(),
+            std::env::var("DEPGATE_PYPI_USERNAME").ok().as_deref(),
+            std::env::var("DEPGATE_PYPI_PASSWORD").ok().as_deref(),
+        )
+    }
+}
+
 /// Cache-bucket + scan-engine + serving settings.
 #[derive(Debug, Clone)]
 pub struct DepgateConfig {
     /// REST bind port (`API_PORT`).
     pub http_port: u16,
+    /// This deployment's own externally-reachable base URL
+    /// (`DEPGATE_PUBLIC_BASE_URL`, default `http://localhost:{http_port}`) —
+    /// used only to rewrite npm packument `dist.tarball` links and PyPI
+    /// simple-index/JSON-API file links back at DepGate itself (§4 P2).
+    /// The OCI proxy needs no equivalent: docker/containerd clients are
+    /// pointed at DepGate directly via their own mirror config, never
+    /// discover its address from a DepGate-served document.
+    pub public_base_url: String,
     /// Dedicated cache bucket name (`DEPGATE_CACHE_BUCKET`).
     pub cache_bucket: String,
     /// Key prefix for servable, verdict-clean content-addressed objects
@@ -123,6 +205,7 @@ pub struct DepgateConfig {
 #[allow(clippy::too_many_arguments)]
 fn resolve_depgate(
     http_port: Option<&str>,
+    public_base_url: Option<&str>,
     cache_bucket: Option<&str>,
     cache_prefix: Option<&str>,
     quarantine_prefix: Option<&str>,
@@ -131,8 +214,10 @@ fn resolve_depgate(
     clamd_timeout_secs: Option<&str>,
     yara_rules_path: Option<&str>,
 ) -> DepgateConfig {
+    let http_port = resolve_num(http_port, DEFAULT_HTTP_PORT);
     DepgateConfig {
-        http_port: resolve_num(http_port, DEFAULT_HTTP_PORT),
+        http_port,
+        public_base_url: resolve_or(public_base_url, &format!("http://localhost:{http_port}")),
         cache_bucket: resolve_or(cache_bucket, "depgate-cache"),
         cache_prefix: resolve_or(cache_prefix, "sha256/"),
         quarantine_prefix: resolve_or(quarantine_prefix, "quarantine/"),
@@ -148,6 +233,7 @@ impl DepgateConfig {
     pub fn from_env() -> Self {
         resolve_depgate(
             std::env::var("API_PORT").ok().as_deref(),
+            std::env::var("DEPGATE_PUBLIC_BASE_URL").ok().as_deref(),
             std::env::var("DEPGATE_CACHE_BUCKET").ok().as_deref(),
             std::env::var("DEPGATE_CACHE_PREFIX").ok().as_deref(),
             std::env::var("DEPGATE_QUARANTINE_PREFIX").ok().as_deref(),
@@ -196,8 +282,12 @@ mod tests {
 
     #[test]
     fn depgate_defaults() {
-        let cfg = resolve_depgate(None, None, None, None, None, None, None, None);
+        let cfg = resolve_depgate(None, None, None, None, None, None, None, None, None);
         assert_eq!(cfg.http_port, DEFAULT_HTTP_PORT);
+        assert_eq!(
+            cfg.public_base_url,
+            format!("http://localhost:{DEFAULT_HTTP_PORT}")
+        );
         assert_eq!(cfg.cache_bucket, "depgate-cache");
         assert_eq!(cfg.cache_prefix, "sha256/");
         assert_eq!(cfg.quarantine_prefix, "quarantine/");
@@ -211,6 +301,7 @@ mod tests {
     fn depgate_honors_overrides() {
         let cfg = resolve_depgate(
             Some("9090"),
+            Some("https://depgate.internal"),
             Some("my-bucket"),
             Some("blobs/"),
             Some("bad/"),
@@ -220,6 +311,7 @@ mod tests {
             Some("/etc/yara"),
         );
         assert_eq!(cfg.http_port, 9090);
+        assert_eq!(cfg.public_base_url, "https://depgate.internal");
         assert_eq!(cfg.cache_bucket, "my-bucket");
         assert_eq!(cfg.cache_prefix, "blobs/");
         assert_eq!(cfg.quarantine_prefix, "bad/");
@@ -231,8 +323,62 @@ mod tests {
 
     #[test]
     fn depgate_invalid_numeric_values_fall_back_to_defaults() {
-        let cfg = resolve_depgate(Some("not-a-port"), None, None, None, None, None, None, None);
+        let cfg = resolve_depgate(
+            Some("not-a-port"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(cfg.http_port, DEFAULT_HTTP_PORT);
+    }
+
+    #[test]
+    fn npm_upstream_defaults_to_npmjs() {
+        let cfg = resolve_npm_upstream(None, None);
+        assert_eq!(cfg.registry_url, "https://registry.npmjs.org");
+        assert_eq!(cfg.token, None);
+    }
+
+    #[test]
+    fn npm_upstream_honors_overrides() {
+        let cfg = resolve_npm_upstream(Some("https://npm.internal"), Some("tok-123"));
+        assert_eq!(cfg.registry_url, "https://npm.internal");
+        assert_eq!(cfg.token.as_deref(), Some("tok-123"));
+    }
+
+    #[test]
+    fn npm_upstream_blank_values_fall_back_to_defaults() {
+        let cfg = resolve_npm_upstream(Some(""), Some(""));
+        assert_eq!(cfg.registry_url, "https://registry.npmjs.org");
+        assert_eq!(cfg.token, None);
+    }
+
+    #[test]
+    fn pypi_upstream_defaults_to_pypi_org() {
+        let cfg = resolve_pypi_upstream(None, None, None, None);
+        assert_eq!(cfg.index_url, "https://pypi.org");
+        assert_eq!(cfg.files_url, "https://files.pythonhosted.org");
+        assert_eq!(cfg.username, None);
+        assert_eq!(cfg.password, None);
+    }
+
+    #[test]
+    fn pypi_upstream_honors_overrides() {
+        let cfg = resolve_pypi_upstream(
+            Some("https://pypi.internal"),
+            Some("https://files.internal"),
+            Some("user"),
+            Some("pass"),
+        );
+        assert_eq!(cfg.index_url, "https://pypi.internal");
+        assert_eq!(cfg.files_url, "https://files.internal");
+        assert_eq!(cfg.username.as_deref(), Some("user"));
+        assert_eq!(cfg.password.as_deref(), Some("pass"));
     }
 
     #[test]

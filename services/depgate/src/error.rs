@@ -87,6 +87,16 @@ impl From<crate::cache::CacheError> for ApiError {
     }
 }
 
+impl From<crate::fetch::FetchError> for ApiError {
+    fn from(e: crate::fetch::FetchError) -> Self {
+        use crate::fetch::FetchError;
+        match e {
+            FetchError::NotFound => ApiError::NotFound("artifact not found upstream".to_owned()),
+            other => ApiError::UpstreamError(other.to_string()),
+        }
+    }
+}
+
 impl From<crate::scanpipe::PipelineError> for ApiError {
     fn from(e: crate::scanpipe::PipelineError) -> Self {
         use crate::scanpipe::PipelineError;
@@ -105,6 +115,7 @@ impl From<crate::scanpipe::PipelineError> for ApiError {
             PipelineError::Cache(e) => ApiError::internal("cache", e),
             PipelineError::Db(e) => ApiError::internal("database", e),
             PipelineError::Scan(e) => ApiError::internal("scan", e),
+            PipelineError::Fetch(e) => ApiError::from(e),
         }
     }
 }

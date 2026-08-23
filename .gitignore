@@ -229,3 +229,6 @@ services/*/dist/
 # stale Python packaging `lib/` pattern above — un-ignore it explicitly.
 !scripts/lib/
 !scripts/lib/**
+
+# Stray per-agent CARGO_TARGET_DIRs occasionally created at repo root
+target-*/

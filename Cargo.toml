@@ -171,6 +171,22 @@ tempfile = "=3.27.0"
 infer = "=0.22.0"
 sha1 = "=0.10.7"
 
+# CodeScan Sentinel P2 tool registry (worker-codescan): fetches a branch's
+# tree as a zip archive (GitHub zipball / GitLab archive.zip) rather than a
+# tar.gz — `zip` is already resolved in this lockfile transitively via
+# yara-x (skauswatch-scan-core's malware-scan engine); pinning it here at the
+# exact same version does not move anything already locked. `flate2` is the
+# same story (already resolved as `zip`'s own compression backend) and is
+# reused directly by codescan-backend to gzip/gunzip stored SBOM documents.
+# default-features off: `zip`'s default feature set pulls bzip2 (libbz2-rs-sys,
+# license `bzip2-1.0.6`) and ppmd-rust (`CC0-1.0 OR MIT-0`) — codecs we never
+# use and licenses outside deny.toml's allow list. GitHub zipballs and GitLab
+# `archive.zip` are deflate, so that is the only codec enabled here. Shrinking
+# the dependency surface beats widening license policy for codecs we do not
+# decompress.
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
+flate2 = "=1.1.9"
+
 # AuthN/Z
 bcrypt = "=0.19.2"
 email_address = "=0.2.9"

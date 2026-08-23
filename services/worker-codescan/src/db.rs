@@ -413,8 +413,16 @@ pub struct UpsertedFinding {
 
 /// Inserts or refreshes one `codescan_findings` row for the
 /// `(tenant_id, repo_config_id, branch, package_name, advisory_id)` dedupe
-/// key. A previously `resolved` finding that reappears is reopened and its
-/// `alerted_at` cleared — see migrations/0004's column doc comment.
+/// key — only ever called with `kind` `"sca"` or `"cve"` (see callers in
+/// `sentinel.rs`); tool-registry findings go through
+/// [`upsert_tool_finding`]'s separate fingerprint-based key instead. A
+/// previously `resolved` finding that reappears is reopened and its
+/// `alerted_at` cleared — see migrations/0004's column doc comment. The
+/// `WHERE kind IN ('sca', 'cve')` on the `ON CONFLICT` target matches
+/// migrations/0005's partial index of the same predicate (which replaced
+/// 0004's original table-wide constraint so it no longer collides with
+/// tool-registry rows that share the same `package_name = ''`/
+/// `advisory_id = ''` convention — see that migration's comment).
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_finding(
     pool: &PgPool,
@@ -436,6 +444,7 @@ pub async fn upsert_finding(
           first_seen, last_seen, created_at, updated_at) \
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'open',now(),now(),now(),now()) \
          ON CONFLICT (tenant_id, repo_config_id, branch, package_name, advisory_id) \
+         WHERE kind IN ('sca', 'cve') \
          DO UPDATE SET \
            kind = EXCLUDED.kind, \
            latest_version = EXCLUDED.latest_version, \
@@ -480,25 +489,37 @@ pub async fn mark_finding_alerted(pool: &PgPool, finding_id: i64) -> anyhow::Res
 }
 
 /// Marks every currently-`open` finding for `(tenant_id, repo_config_id,
-/// branch)` NOT in `seen_ids` as `resolved` — the dependency was either
-/// removed from the manifest or is no longer flagged. Called once per scan
-/// after every dependency in the branch has been upserted, mirroring how
-/// Dependabot auto-closes alerts for fixed dependencies.
+/// branch)` whose `kind` is in `kinds` and whose id is NOT in `seen_ids` as
+/// `resolved` — the dependency/rule hit was either removed or is no longer
+/// flagged. Called once per *kind group* that was actually scanned this run
+/// (P1's manifest-based `["sca", "cve"]` scan and P2's tool-based
+/// `["sast", "secret", "iac"]` scan are independent passes — see
+/// `handler::CodeScanReviewHandler::scan_and_persist_branch`), mirroring
+/// how Dependabot auto-closes alerts for fixed dependencies.
+///
+/// The `kinds` filter matters: if the tool-based tree fetch fails for a
+/// branch this run (`tree_fetch::fetch_branch_tree` error — network hiccup,
+/// oversized archive), the caller simply skips calling this for
+/// `["sast", "secret", "iac"]` that run rather than passing an empty
+/// `seen_ids`, which would otherwise resolve every real, still-open
+/// tool finding purely because this run never got far enough to re-see them.
 pub async fn resolve_stale_findings(
     pool: &PgPool,
     tenant_id: Uuid,
     repo_config_id: i64,
     branch: &str,
+    kinds: &[&str],
     seen_ids: &[i64],
 ) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE codescan_findings SET status = 'resolved', updated_at = now() \
          WHERE tenant_id = $1 AND repo_config_id = $2 AND branch = $3 \
-           AND status = 'open' AND NOT (id = ANY($4))",
+           AND kind = ANY($4) AND status = 'open' AND NOT (id = ANY($5))",
     )
     .bind(tenant_id)
     .bind(repo_config_id)
     .bind(branch)
+    .bind(kinds)
     .bind(seen_ids)
     .execute(pool)
     .await?;
@@ -571,6 +592,101 @@ pub async fn insert_sentinel_alert(
     .bind(severity)
     .bind(indicators)
     .bind(tenant_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+// ── CodeScan Sentinel P2 tool registry (docs/v2-port/v2.1-codescan-sentinel.md
+// §3/§9) — SAST/secret/IaC findings + SBOM artifacts, additive alongside the
+// P1 SCA/CVE functions above; see migrations/0005_codescan_sentinel_tool_findings.sql.
+
+/// Inserts or refreshes one `codescan_findings` row for a tool-produced
+/// (`sast`/`secret`/`iac`) finding, deduped/upserted on
+/// `finding.fingerprint()` via the partial unique index migrations/0005
+/// added (`(tenant_id, repo_config_id, branch, kind, fingerprint) WHERE
+/// fingerprint <> ''`) — entirely independent of 0004's original
+/// `package_name`/`advisory_id` dedupe key, which continues to govern P1's
+/// sca/cve rows unchanged. Same reopen/re-alert semantics as
+/// [`upsert_finding`]: a previously `resolved` finding that reappears is
+/// reopened and its `alerted_at` cleared.
+pub async fn upsert_tool_finding(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    repo_config_id: i64,
+    branch: &str,
+    finding: &crate::scanner_tool::ToolFinding,
+) -> anyhow::Result<UpsertedFinding> {
+    let fingerprint = finding.fingerprint();
+    let row = sqlx::query(
+        "INSERT INTO codescan_findings \
+         (tenant_id, repo_config_id, branch, kind, ecosystem, package_name, \
+          current_version, tool, rule_id, severity, file_path, line, title, \
+          fingerprint, status, first_seen, last_seen, created_at, updated_at) \
+         VALUES ($1,$2,$3,$4,'','','',$5,$6,$7,$8,$9,$10,$11,'open',now(),now(),now(),now()) \
+         ON CONFLICT (tenant_id, repo_config_id, branch, kind, fingerprint) \
+         WHERE fingerprint <> '' \
+         DO UPDATE SET \
+           tool = EXCLUDED.tool, \
+           severity = EXCLUDED.severity, \
+           file_path = EXCLUDED.file_path, \
+           line = EXCLUDED.line, \
+           title = EXCLUDED.title, \
+           last_seen = now(), \
+           updated_at = now(), \
+           status = 'open', \
+           alerted_at = CASE WHEN codescan_findings.status = 'resolved' \
+                              THEN NULL ELSE codescan_findings.alerted_at END \
+         RETURNING id, alerted_at",
+    )
+    .bind(tenant_id)
+    .bind(repo_config_id)
+    .bind(branch)
+    .bind(finding.kind)
+    .bind(finding.tool)
+    .bind(&finding.rule_id)
+    .bind(&finding.severity)
+    .bind(&finding.file_path)
+    .bind(finding.line)
+    .bind(&finding.title)
+    .bind(&fingerprint)
+    .fetch_one(pool)
+    .await?;
+
+    let id: i64 = row.get(0);
+    let alerted_at: Option<chrono::DateTime<chrono::Utc>> = row.get(1);
+    Ok(UpsertedFinding {
+        id,
+        needs_alert: alerted_at.is_none(),
+    })
+}
+
+/// Stores one gzip-compressed CycloneDX SBOM document for a scan run — one
+/// row per `codescan_scan_runs.id` (see migrations/0005's `UNIQUE
+/// (scan_run_id)`), read back by codescan-backend's
+/// `GET /codescan/findings/sbom/{scan_run_id}`.
+pub async fn insert_sbom_artifact(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    repo_config_id: i64,
+    branch: &str,
+    scan_run_id: i64,
+    format: &str,
+    doc_gzip: &[u8],
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO codescan_sbom_artifacts \
+         (tenant_id, repo_config_id, branch, scan_run_id, format, doc_gzip, created_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, now()) \
+         ON CONFLICT (scan_run_id) DO UPDATE SET \
+           format = EXCLUDED.format, doc_gzip = EXCLUDED.doc_gzip",
+    )
+    .bind(tenant_id)
+    .bind(repo_config_id)
+    .bind(branch)
+    .bind(scan_run_id)
+    .bind(format)
+    .bind(doc_gzip)
     .execute(pool)
     .await?;
     Ok(())
@@ -1230,7 +1346,7 @@ mod tests {
         mark_finding_alerted(&pool, first.id)
             .await
             .unwrap_or_else(|e| panic!("mark alerted: {e}"));
-        resolve_stale_findings(&pool, test_tenant(), repo, "main", &[])
+        resolve_stale_findings(&pool, test_tenant(), repo, "main", &["sca", "cve"], &[])
             .await
             .unwrap_or_else(|e| panic!("resolve stale: {e}"));
 
@@ -1299,9 +1415,16 @@ mod tests {
         .await
         .unwrap_or_else(|e| panic!("upsert kept: {e}"));
 
-        resolve_stale_findings(&pool, test_tenant(), repo, "main", &[kept.id])
-            .await
-            .unwrap_or_else(|e| panic!("resolve stale: {e}"));
+        resolve_stale_findings(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            &["sca", "cve"],
+            &[kept.id],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("resolve stale: {e}"));
 
         let stale_status: String =
             sqlx::query_scalar("SELECT status FROM codescan_findings WHERE id = $1")
@@ -1355,7 +1478,7 @@ mod tests {
         .await
         .unwrap_or_else(|e| panic!("upsert other branch: {e}"));
 
-        resolve_stale_findings(&pool, test_tenant(), repo, "main", &[])
+        resolve_stale_findings(&pool, test_tenant(), repo, "main", &["sca", "cve"], &[])
             .await
             .unwrap_or_else(|e| panic!("resolve stale: {e}"));
 
@@ -1486,5 +1609,225 @@ mod tests {
         assert_eq!(row.get::<String, _>(2), "pending");
         assert_eq!(row.get::<String, _>(3), "codescan_sentinel");
         assert_eq!(row.get::<Uuid, _>(4), test_tenant());
+    }
+
+    // ── CodeScan Sentinel P2 tool registry ─────────────────────────────────
+
+    fn test_tool_finding(
+        rule_id: &str,
+        file_path: &str,
+        line: i32,
+    ) -> crate::scanner_tool::ToolFinding {
+        crate::scanner_tool::ToolFinding {
+            kind: "sast",
+            tool: "semgrep",
+            rule_id: rule_id.to_owned(),
+            severity: "high".to_owned(),
+            file_path: Some(file_path.to_owned()),
+            line: Some(line),
+            title: "Hardcoded secret".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_tool_finding_inserts_a_new_open_row_needing_alert() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let finding = test_tool_finding("rule-a", "app.py", 10);
+
+        let result = upsert_tool_finding(&pool, test_tenant(), repo, "main", &finding)
+            .await
+            .unwrap_or_else(|e| panic!("upsert: {e}"));
+        assert!(result.needs_alert);
+
+        let row = sqlx::query(
+            "SELECT kind, tool, rule_id, severity, file_path, line, title, status, fingerprint \
+             FROM codescan_findings WHERE id = $1",
+        )
+        .bind(result.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(row.get::<String, _>(0), "sast");
+        assert_eq!(row.get::<String, _>(1), "semgrep");
+        assert_eq!(row.get::<String, _>(2), "rule-a");
+        assert_eq!(row.get::<String, _>(3), "high");
+        assert_eq!(row.get::<Option<String>, _>(4).as_deref(), Some("app.py"));
+        assert_eq!(row.get::<Option<i32>, _>(5), Some(10));
+        assert_eq!(row.get::<String, _>(6), "Hardcoded secret");
+        assert_eq!(row.get::<String, _>(7), "open");
+        assert_eq!(row.get::<String, _>(8), finding.fingerprint());
+    }
+
+    #[tokio::test]
+    async fn upsert_tool_finding_is_idempotent_on_the_fingerprint_and_does_not_re_alert() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let finding = test_tool_finding("rule-a", "app.py", 10);
+
+        let first = upsert_tool_finding(&pool, test_tenant(), repo, "main", &finding)
+            .await
+            .unwrap_or_else(|e| panic!("first upsert: {e}"));
+        mark_finding_alerted(&pool, first.id)
+            .await
+            .unwrap_or_else(|e| panic!("mark alerted: {e}"));
+
+        let second = upsert_tool_finding(&pool, test_tenant(), repo, "main", &finding)
+            .await
+            .unwrap_or_else(|e| panic!("second upsert: {e}"));
+        assert_eq!(
+            second.id, first.id,
+            "same fingerprint must update, not duplicate"
+        );
+        assert!(
+            !second.needs_alert,
+            "an already-alerted, still-open finding must not need re-alerting"
+        );
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM codescan_findings WHERE repo_config_id = $1 AND kind = 'sast'",
+        )
+        .bind(repo)
+        .fetch_one(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("count: {e}"));
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn upsert_tool_finding_never_collides_with_a_p1_sca_cve_row_in_the_same_branch() {
+        // Both dedupe keys are scoped by kind and are otherwise disjoint
+        // (package_name/advisory_id for sca/cve, fingerprint for
+        // sast/secret/iac) — this proves inserting both kinds in the same
+        // (tenant, repo, branch) never trips the other kind's unique index.
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+
+        upsert_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            "sca",
+            "npm",
+            "left-pad",
+            "1.0.0",
+            Some("1.3.0"),
+            "",
+            "low",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert sca: {e}"));
+
+        let tool_result = upsert_tool_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            &test_tool_finding("rule-a", "app.py", 10),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert tool finding: {e}"));
+        assert!(tool_result.id > 0);
+    }
+
+    #[tokio::test]
+    async fn resolve_stale_findings_only_resolves_the_requested_kinds() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+
+        let sca = upsert_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            "sca",
+            "npm",
+            "left-pad",
+            "1.0.0",
+            Some("1.0.0"),
+            "",
+            "low",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert sca: {e}"));
+        let sast = upsert_tool_finding(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            &test_tool_finding("rule-a", "app.py", 10),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert sast: {e}"));
+
+        // Resolving only the "sast" kind group with an empty seen_ids must
+        // leave the still-open "sca" finding untouched.
+        resolve_stale_findings(&pool, test_tenant(), repo, "main", &["sast"], &[])
+            .await
+            .unwrap_or_else(|e| panic!("resolve: {e}"));
+
+        let sca_status: String =
+            sqlx::query_scalar("SELECT status FROM codescan_findings WHERE id = $1")
+                .bind(sca.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("select sca: {e}"));
+        let sast_status: String =
+            sqlx::query_scalar("SELECT status FROM codescan_findings WHERE id = $1")
+                .bind(sast.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("select sast: {e}"));
+        assert_eq!(
+            sca_status, "open",
+            "sca must be untouched by a sast-only resolve pass"
+        );
+        assert_eq!(sast_status, "resolved");
+    }
+
+    #[tokio::test]
+    async fn insert_sbom_artifact_stores_and_upserts_by_scan_run() {
+        let pool = test_pool().await;
+        let repo = seed_repo_config(&pool).await;
+        let run_id = start_scan_run(&pool, test_tenant(), repo, "main")
+            .await
+            .unwrap_or_else(|e| panic!("start run: {e}"));
+
+        insert_sbom_artifact(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            run_id,
+            "cyclonedx-json",
+            b"first-doc",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("insert sbom: {e}"));
+
+        // A second call for the same scan_run_id must update in place, not
+        // duplicate — mirrors the "one SBOM per scan run" invariant
+        // migrations/0005's UNIQUE(scan_run_id) enforces.
+        insert_sbom_artifact(
+            &pool,
+            test_tenant(),
+            repo,
+            "main",
+            run_id,
+            "cyclonedx-json",
+            b"second-doc",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("upsert sbom: {e}"));
+
+        let rows: Vec<(Vec<u8>,)> =
+            sqlx::query_as("SELECT doc_gzip FROM codescan_sbom_artifacts WHERE scan_run_id = $1")
+                .bind(run_id)
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("select: {e}"));
+        assert_eq!(rows.len(), 1, "must upsert, not duplicate");
+        assert_eq!(rows[0].0, b"second-doc");
     }
 }
