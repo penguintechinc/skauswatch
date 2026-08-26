@@ -187,6 +187,110 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
       security:
       - bearer_jwt: []
+  /api/v1/codescan/fix-batches:
+    get:
+      tags:
+      - codescan-sentinel-policy
+      summary: |-
+        GET /codescan/fix-batches — paginated, filterable list of grouped
+        auto-fix batches, most-recently-updated first.
+      operationId: list_batches
+      parameters:
+      - name: repo_config_id
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: status
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: per_page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      responses:
+        '200':
+          description: Fix batches
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FixBatchListResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Sentinel not licensed, or below Enterprise tier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/codescan/fix-batches/{batch_id}:
+    get:
+      tags:
+      - codescan-sentinel-policy
+      summary: |-
+        GET /codescan/fix-batches/{batch_id} — one batch plus every finding it
+        itemizes.
+      operationId: get_batch
+      parameters:
+      - name: batch_id
+        in: path
+        description: Fix batch id
+        required: true
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: Fix batch detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FixBatchDetailResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Sentinel not licensed, or below Enterprise tier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Fix batch not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
   /api/v1/codescan/plans:
     get:
       tags:
@@ -1971,6 +2075,120 @@ components:
           items:
             $ref: '#/components/schemas/SeverityCount'
         total_open:
+          type: integer
+          format: int64
+    FixBatch:
+      type: object
+      description: One `codescan_fix_batches` row.
+      required:
+      - id
+      - repo_config_id
+      - target_branch
+      - branch_name
+      - status
+      properties:
+        branch_name:
+          type: string
+        created_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        id:
+          type: integer
+          format: int64
+        pr_number:
+          type:
+          - integer
+          - 'null'
+          format: int64
+        pr_url:
+          type:
+          - string
+          - 'null'
+        repo_config_id:
+          type: integer
+          format: int64
+        status:
+          type: string
+        target_branch:
+          type: string
+        updated_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    FixBatchDetailResponse:
+      type: object
+      description: Documentation-only mirror of `get_batch`'s `serde_json::json!` body.
+      required:
+      - batch
+      - findings
+      properties:
+        batch:
+          $ref: '#/components/schemas/FixBatch'
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/FixBatchFinding'
+    FixBatchFinding:
+      type: object
+      description: |-
+        One `codescan_fix_batch_findings` row — the itemized content of a
+        batch's PR/MR body (spec §7: "pkg old→new · CVE(s) fixed · severity ·
+        reachability verdict").
+      required:
+      - finding_id
+      - package_name
+      - ecosystem
+      - old_version
+      - new_version
+      - advisory_id
+      - severity
+      - reachability_verdict
+      properties:
+        advisory_id:
+          type: string
+        created_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        ecosystem:
+          type: string
+        finding_id:
+          type: integer
+          format: int64
+        new_version:
+          type: string
+        old_version:
+          type: string
+        package_name:
+          type: string
+        reachability_verdict:
+          type: string
+        severity:
+          type: string
+    FixBatchListResponse:
+      type: object
+      description: Documentation-only mirror of `list_batches`'s `serde_json::json!` body.
+      required:
+      - data
+      - total
+      - page
+      - per_page
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/FixBatch'
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        total:
           type: integer
           format: int64
     LicensePolicy:

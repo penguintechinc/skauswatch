@@ -236,6 +236,60 @@ env:
         name: skauswatch-depgate-secret
         key: bundle-signing-key
         optional: true
+  # P4 (docs/v2-port/v2.1-depgate.md §9/§11): asymmetric bundle signing.
+  # The exporting/connected side holds the private key; the air-gapped
+  # importer needs only the public key — never both on the same deployment
+  # in a genuine air-gap topology, but both wired here (each optional) so
+  # one chart install can play either role.
+  - name: DEPGATE_BUNDLE_SIGNING_PRIVATE_KEY_PEM
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-depgate-secret
+        key: bundle-signing-private-key-pem
+        optional: true
+  - name: DEPGATE_BUNDLE_VERIFY_PUBLIC_KEY_PEM
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: bundle-verify-public-key-pem
+        optional: true
+  # cosign RSA image-signature verification (P4 §5/§9/§10, src/provenance.rs)
+  # — a public key, not sensitive, but scoped to its own key for clarity.
+  - name: DEPGATE_COSIGN_PUBLIC_KEY_PEM
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: cosign-public-key-pem
+        optional: true
+  # Socket.dev optional threat-intel tie-in (P4 §5/§10) — unset (default)
+  # means the integration never sends a request; see src/socket.rs.
+  - name: DEPGATE_SOCKET_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-depgate-secret
+        key: socket-api-key
+        optional: true
+  - name: DEPGATE_SOCKET_BASE_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: socket-base-url
+  # crates.io + Go module proxy upstreams (P4 §4/§9).
+  - name: DEPGATE_CRATESIO_INDEX_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: cratesio-index-url
+  - name: DEPGATE_CRATESIO_API_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: cratesio-api-url
+  - name: DEPGATE_GOPROXY_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: goproxy-url
   # ClamAV reached via a sidecar/DaemonSet UNIX socket — same posture as
   # s3scan (see that chart's values.yaml note); no such sidecar ships in
   # this chart yet, scanning degrades to YARA-only until one is provisioned.
@@ -349,6 +403,21 @@ configMapData:
   # an artifact the scan engine itself failed to evaluate; "open" is a dev-
   # convenience posture that serves it best-effort without ever caching it.
   fail-posture: "closed"
+  # P4 asymmetric bundle-signature verification (import side) — empty
+  # disables RSA-signed-bundle verification (HMAC-signed bundles are
+  # unaffected, see secretData.bundle-signing-key).
+  bundle-verify-public-key-pem: ""
+  # P4 cosign RSA image-signature verification — empty disables it (every
+  # OCI artifact then reports `unsigned`, never `invalid`; see
+  # src/provenance.rs).
+  cosign-public-key-pem: ""
+  # P4 Socket.dev tie-in — empty disables it entirely (see
+  # secretData.socket-api-key; the base URL alone with no key is inert).
+  socket-base-url: "https://api.socket.dev"
+  # P4 crates.io + Go module proxy upstreams.
+  cratesio-index-url: "https://index.crates.io"
+  cratesio-api-url: "https://crates.io/api/v1/crates"
+  goproxy-url: "https://proxy.golang.org"
 
 secretData:
   db-user: "changeme-in-production"
@@ -359,7 +428,16 @@ secretData:
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
   aws-access-key-id: ""
   aws-secret-access-key: ""
-  # HMAC-SHA256 key signing/verifying air-gap bundle manifests (§6b) — empty
-  # disables signing on export and signature verification on import
-  # (checksum/per-artifact hash verification still always applies).
+  # HMAC-SHA256 key verifying LEGACY (pre-P4) air-gap bundle manifests
+  # (§6b) — empty disables verification of an HMAC-signed bundle (checksum/
+  # per-artifact hash verification still always applies). P4 exports sign
+  # asymmetrically instead — see bundle-signing-private-key-pem.
   bundle-signing-key: ""
+  # P4 asymmetric bundle signing (export side, §9/§11) — PEM-encoded RSA
+  # private key (PKCS#8 or PKCS#1); empty disables signing on export
+  # entirely (an unsigned bundle is still checksum-verified on import).
+  bundle-signing-private-key-pem: ""
+  # P4 Socket.dev tie-in (§5/§10) — customer's API key belongs in IceBox,
+  # never committed; empty means the integration is fully disabled (zero
+  # requests ever sent, see src/socket.rs).
+  socket-api-key: ""

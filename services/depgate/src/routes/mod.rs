@@ -1,21 +1,24 @@
 //! Top-level router assembly: the OCI proxy (`/v2/*`), the npm proxy
-//! (`/npm/*`, P2), the PyPI proxy (`/pypi/*`, P2), and the admin/report API
-//! (`/api/v1/depgate/*`), all behind the `skauswatch.depgate` flag gate and
-//! `skauswatch_auth::tenant_middleware`. `/healthz`/`/readyz` are wired
-//! separately in `main.rs` (unauthenticated, per the standard telemetry
-//! surface).
+//! (`/npm/*`, P2), the PyPI proxy (`/pypi/*`, P2), the crates.io proxy
+//! (`/crates/*`, P4), the Go module proxy (`/go/*`, P4), and the admin/
+//! report API (`/api/v1/depgate/*`), all behind the `skauswatch.depgate`
+//! flag gate and `skauswatch_auth::tenant_middleware`. `/healthz`/`/readyz`
+//! are wired separately in `main.rs` (unauthenticated, per the standard
+//! telemetry surface).
 //!
 //! SPIFFE-READINESS ASYMMETRY (intentional, `security.md`/`backend.md`:
 //! every service is SPIFFE-ready): the admin/report API additionally gains
 //! an SVID-authenticated path *alongside* this JWT/tenant path — see
 //! `crate::mesh_admin`, a distinct listener on its own port. The `/v2/*`,
-//! `/npm/*`, and `/pypi/*` proxy surfaces do **not** gain one: their
-//! callers are `docker`/`npm`/`pip` clients speaking each ecosystem's own
-//! registry auth convention, not mesh peers, and cannot present a workload
-//! SVID — this router (and the bearer-JWT gate below) remains the only way
-//! to reach them, unchanged.
+//! `/npm/*`, `/pypi/*`, `/crates/*`, and `/go/*` proxy surfaces do **not**
+//! gain one: their callers are `docker`/`npm`/`pip`/`cargo`/`go` clients
+//! speaking each ecosystem's own registry auth convention, not mesh peers,
+//! and cannot present a workload SVID — this router (and the bearer-JWT
+//! gate below) remains the only way to reach them, unchanged.
 
 pub mod admin;
+pub mod crates_io;
+pub mod go;
 pub mod npm;
 pub mod oci;
 pub(crate) mod openapi;
@@ -42,6 +45,8 @@ pub fn router(state: AppState) -> Router {
         .merge(oci::router())
         .merge(npm::router())
         .merge(pypi::router())
+        .merge(crates_io::router())
+        .merge(go::router())
         .layer(axum::middleware::from_fn_with_state(
             FlagGate::new(state.license.clone(), DEPGATE_FLAG),
             flag_gate,
@@ -598,6 +603,7 @@ mod tests {
                 verdict: None,
                 risk_check: None,
                 min_severity: None,
+                provenance: None,
                 action: "block",
                 description: None,
                 enabled: true,
@@ -633,6 +639,7 @@ mod tests {
                 verdict: None,
                 risk_check: None,
                 min_severity: None,
+                provenance: None,
                 action: "block",
                 description: None,
                 enabled: true,
@@ -670,6 +677,7 @@ mod tests {
                 verdict: None,
                 risk_check: None,
                 min_severity: None,
+                provenance: None,
                 action: "block",
                 description: None,
                 enabled: true,
@@ -704,6 +712,7 @@ mod tests {
                 verdict: None,
                 risk_check: None,
                 min_severity: None,
+                provenance: None,
                 action: "block",
                 description: None,
                 enabled: true,

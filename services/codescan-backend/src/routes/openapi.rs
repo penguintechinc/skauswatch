@@ -18,7 +18,10 @@ use axum::routing::get;
 use axum::{Json, Router};
 use utoipa::OpenApi;
 
-use super::{credentials, findings, license_policies, plans, policy_rules, repos, reviews, status};
+use super::{
+    credentials, findings, fix_batches, license_policies, plans, policy_rules, repos, reviews,
+    status,
+};
 use crate::auth::CurrentUser;
 use crate::error::{ApiError, ErrorResponse, ValidationErrorResponse};
 use crate::state::AppState;
@@ -75,6 +78,8 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         policy_rules::get_rule,
         policy_rules::update_rule,
         policy_rules::delete_rule,
+        fix_batches::list_batches,
+        fix_batches::get_batch,
     ),
     components(schemas(
         ErrorResponse,
@@ -126,6 +131,10 @@ pub(crate) const OPENAPI_FLAG: &str = "skauswatch.openapi-docs";
         policy_rules::UpdatePolicyRuleRequest,
         policy_rules::PolicyRuleUpdateResponse,
         policy_rules::PolicyRuleDeleteResponse,
+        fix_batches::FixBatch,
+        fix_batches::FixBatchListResponse,
+        fix_batches::FixBatchFinding,
+        fix_batches::FixBatchDetailResponse,
     )),
     tags(
         (name = "codescan", description = "Repo configs, AI code reviews, and issue plans"),

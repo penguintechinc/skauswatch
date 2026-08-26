@@ -139,7 +139,7 @@ pub async fn get_repo_config(
     tenant_id: Uuid,
 ) -> anyhow::Result<RepoConfigRecord> {
     let row = sqlx::query(
-        "SELECT id, tenant_id, provider, repo_url, repo_name, credential_id \
+        "SELECT id, tenant_id, provider, repo_url, repo_name, credential_id, sentinel_auto_fix \
          FROM codescan_repo_configs WHERE id = $1 AND tenant_id = $2",
     )
     .bind(repo_config_id)
@@ -155,6 +155,7 @@ pub async fn get_repo_config(
         _repo_url: row.get(3),
         _repo_name: row.get(4),
         credential_id: row.get(5),
+        sentinel_auto_fix: row.get(6),
     })
 }
 
@@ -393,6 +394,11 @@ pub struct RepoConfigRecord {
     /// per-repo credential configured — see
     /// `handler::CodeScanReviewHandler::resolve_git_credentials`.
     pub credential_id: Option<i64>,
+    /// CodeScan Sentinel P4's per-repo opt-in for the git-write half of
+    /// grouped auto-fix (spec §7) — `false` (report-only) by default;
+    /// `crate::fix::run_fix_batch` never makes a git write call when this
+    /// is `false` (see migrations/0007's column doc comment).
+    pub sentinel_auto_fix: bool,
 }
 
 // ── CodeScan Sentinel (docs/v2-port/v2.1-codescan-sentinel.md §9/§10) ─────
@@ -475,6 +481,29 @@ pub async fn upsert_finding(
         id,
         needs_alert: alerted_at.is_none(),
     })
+}
+
+/// Stamps `codescan_findings.fixed_version` for one finding — a small
+/// follow-up write kept separate from [`upsert_finding`] rather than added
+/// as another positional argument to it (which has 11 existing call sites
+/// across this module's own tests); called once per scan from
+/// `handler::CodeScanReviewHandler::scan_and_persist_branch` right after
+/// the upsert, and only when `sentinel::ScanFinding::fixed_version` is
+/// `Some` (CodeScan Sentinel P4, spec §7 — grouped auto-fix needs a
+/// concrete remediation version per finding).
+pub async fn update_finding_fixed_version(
+    pool: &PgPool,
+    finding_id: i64,
+    fixed_version: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE codescan_findings SET fixed_version = $1, updated_at = now() WHERE id = $2",
+    )
+    .bind(fixed_version)
+    .bind(finding_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Marks a finding as alerted — called immediately after the `alerts` row
@@ -823,6 +852,237 @@ pub async fn list_policy_rules(
             action: r.get(11),
         })
         .collect())
+}
+
+// ── CodeScan Sentinel P4 grouped auto-fix (spec §7/§9) ────────────────────
+// `codescan_fix_batches` / `codescan_fix_batch_findings` persistence for
+// `crate::fix::run_fix_batch`, the sole caller of every function below.
+
+/// An open `codescan_fix_batches` row — the batch `crate::fix` keeps
+/// updating until its PR merges/closes. `pr_number`/`pr_url` are nullable
+/// columns in the schema (future-proofing) but always populated by
+/// [`create_fix_batch`], the only writer — a `NULL` here means the row was
+/// corrupted some other way, surfaced as an error rather than silently
+/// treated as "no PR".
+#[derive(Debug, Clone)]
+pub struct FixBatchRecord {
+    pub id: i64,
+    pub branch_name: String,
+    pub pr_number: i64,
+    pub pr_url: String,
+}
+
+/// Fetches the currently-open batch for `(tenant_id, repo_config_id,
+/// target_branch)`, if any — the DB-level enforcement of "exactly one open
+/// PR per (repo, target branch)" (migrations/0007's partial unique index)
+/// means this can never return more than one row.
+pub async fn get_open_fix_batch(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    repo_config_id: i64,
+    target_branch: &str,
+) -> anyhow::Result<Option<FixBatchRecord>> {
+    let row = sqlx::query(
+        "SELECT id, branch_name, pr_number, pr_url FROM codescan_fix_batches \
+         WHERE tenant_id = $1 AND repo_config_id = $2 AND target_branch = $3 AND status = 'open'",
+    )
+    .bind(tenant_id)
+    .bind(repo_config_id)
+    .bind(target_branch)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let pr_number: Option<i64> = row.get(2);
+    let pr_url: Option<String> = row.get(3);
+    Ok(Some(FixBatchRecord {
+        id: row.get(0),
+        branch_name: row.get(1),
+        pr_number: pr_number.ok_or_else(|| {
+            anyhow::anyhow!("open fix batch {} has no pr_number", row.get::<i64, _>(0))
+        })?,
+        pr_url: pr_url.unwrap_or_default(),
+    }))
+}
+
+/// Creates a fresh, open fix batch — called exactly once, on the run that
+/// first opens the batch's PR/MR.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_fix_batch(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    repo_config_id: i64,
+    target_branch: &str,
+    branch_name: &str,
+    pr_number: i64,
+    pr_url: &str,
+) -> anyhow::Result<i64> {
+    let row = sqlx::query(
+        "INSERT INTO codescan_fix_batches \
+         (tenant_id, repo_config_id, target_branch, branch_name, pr_number, pr_url, status, \
+          created_at, updated_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,'open',now(),now()) RETURNING id",
+    )
+    .bind(tenant_id)
+    .bind(repo_config_id)
+    .bind(target_branch)
+    .bind(branch_name)
+    .bind(pr_number)
+    .bind(pr_url)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.get(0))
+}
+
+/// Transitions a batch to `merged` or `closed` — called once `crate::fix`
+/// observes (via `git_write::get_pull_request_state`) that the tracked
+/// PR/MR is no longer open, freeing the `(repo, target_branch)` slot for a
+/// fresh batch on the next fixable finding.
+pub async fn mark_fix_batch_status(
+    pool: &PgPool,
+    batch_id: i64,
+    status: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE codescan_fix_batches SET status = $1, updated_at = now() WHERE id = $2")
+        .bind(status)
+        .bind(batch_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Every finding id already included in `batch_id` — `crate::fix`'s
+/// idempotency check: a finding already present here is never re-committed
+/// or re-recorded, so a scan re-run over an unchanged finding set produces
+/// zero additional git writes.
+pub async fn list_fix_batch_finding_ids(
+    pool: &PgPool,
+    batch_id: i64,
+) -> anyhow::Result<std::collections::HashSet<i64>> {
+    let rows =
+        sqlx::query("SELECT finding_id FROM codescan_fix_batch_findings WHERE batch_id = $1")
+            .bind(batch_id)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().map(|r| r.get::<i64, _>(0)).collect())
+}
+
+/// Records one finding as successfully included in a batch's committed
+/// edits — `ON CONFLICT ... DO NOTHING` on `(batch_id, finding_id)` makes
+/// this itself idempotent, belt-and-suspenders alongside the caller's own
+/// `list_fix_batch_finding_ids` pre-check.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_fix_batch_finding(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    batch_id: i64,
+    finding_id: i64,
+    package_name: &str,
+    ecosystem: &str,
+    old_version: &str,
+    new_version: &str,
+    advisory_id: &str,
+    severity: &str,
+    reachability_verdict: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO codescan_fix_batch_findings \
+         (tenant_id, batch_id, finding_id, package_name, ecosystem, old_version, new_version, \
+          advisory_id, severity, reachability_verdict, created_at) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now()) \
+         ON CONFLICT (batch_id, finding_id) DO NOTHING",
+    )
+    .bind(tenant_id)
+    .bind(batch_id)
+    .bind(finding_id)
+    .bind(package_name)
+    .bind(ecosystem)
+    .bind(old_version)
+    .bind(new_version)
+    .bind(advisory_id)
+    .bind(severity)
+    .bind(reachability_verdict)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// One `codescan_fix_batch_findings` row, for regenerating a batch's PR/MR
+/// body (`crate::fix`) and for the `codescan-backend` batch-detail
+/// endpoint's read path.
+#[derive(Debug, Clone)]
+pub struct FixBatchFindingRecord {
+    pub package_name: String,
+    pub ecosystem: String,
+    pub old_version: String,
+    pub new_version: String,
+    pub advisory_id: String,
+    pub severity: String,
+    pub reachability_verdict: String,
+}
+
+/// Every finding itemized in `batch_id`, oldest-included first — the exact
+/// set `crate::fix` regenerates a PR/MR body from.
+pub async fn list_fix_batch_findings(
+    pool: &PgPool,
+    batch_id: i64,
+) -> anyhow::Result<Vec<FixBatchFindingRecord>> {
+    let rows = sqlx::query(
+        "SELECT package_name, ecosystem, old_version, new_version, advisory_id, severity, \
+                reachability_verdict \
+         FROM codescan_fix_batch_findings WHERE batch_id = $1 ORDER BY created_at ASC",
+    )
+    .bind(batch_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| FixBatchFindingRecord {
+            package_name: r.get(0),
+            ecosystem: r.get(1),
+            old_version: r.get(2),
+            new_version: r.get(3),
+            advisory_id: r.get(4),
+            severity: r.get(5),
+            reachability_verdict: r.get(6),
+        })
+        .collect())
+}
+
+/// Downgrades a `fix`-actioned finding back to a non-fix action when the
+/// grouped auto-fix pipeline couldn't apply it — missing git write scope,
+/// or a version spec that isn't mechanically editable (spec §7: "never
+/// silently dropped"). Reuses `codescan_policy_decisions` as the audit
+/// trail rather than a parallel failure-tracking table; `rule_id` is always
+/// `NULL` here since this isn't a policy-rule re-evaluation, it's a
+/// fix-pipeline outcome. A tenant/finding whose policy still resolves to
+/// `"fix"` on the *next* scan will simply be re-attempted then — bounded to
+/// the scan schedule, never a tight retry loop.
+pub async fn record_fix_failure(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    finding_id: i64,
+    fallback_action: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE codescan_findings SET action = $1 WHERE id = $2")
+        .bind(fallback_action)
+        .bind(finding_id)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO codescan_policy_decisions \
+         (tenant_id, finding_id, rule_id, action, reason, decided_at) \
+         VALUES ($1, $2, NULL, $3, $4, now())",
+    )
+    .bind(tenant_id)
+    .bind(finding_id)
+    .bind(fallback_action)
+    .bind(reason)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]

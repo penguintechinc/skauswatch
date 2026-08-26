@@ -166,6 +166,62 @@ impl PypiUpstreamConfig {
     }
 }
 
+/// crates.io upstream settings (`docs/v2-port/v2.1-depgate.md` §4/§9 P4).
+/// `index_url` is the sparse-index base (per-crate metadata, plain
+/// pass-through — see `src/crates_io.rs`); `api_url` is the `.crate`
+/// download-file host, split the same way [`PypiUpstreamConfig`] splits its
+/// index/files hosts since a self-hosted mirror may split them differently
+/// too.
+#[derive(Debug, Clone)]
+pub struct CratesIoUpstreamConfig {
+    /// Sparse index base (`DEPGATE_CRATESIO_INDEX_URL`).
+    pub index_url: String,
+    /// `.crate` download API base (`DEPGATE_CRATESIO_API_URL`).
+    pub api_url: String,
+}
+
+fn resolve_cratesio_upstream(
+    index_url: Option<&str>,
+    api_url: Option<&str>,
+) -> CratesIoUpstreamConfig {
+    CratesIoUpstreamConfig {
+        index_url: resolve_or(index_url, "https://index.crates.io"),
+        api_url: resolve_or(api_url, "https://crates.io/api/v1/crates"),
+    }
+}
+
+impl CratesIoUpstreamConfig {
+    /// Loads crates.io upstream settings from the environment.
+    pub fn from_env() -> Self {
+        resolve_cratesio_upstream(
+            std::env::var("DEPGATE_CRATESIO_INDEX_URL").ok().as_deref(),
+            std::env::var("DEPGATE_CRATESIO_API_URL").ok().as_deref(),
+        )
+    }
+}
+
+/// Go module proxy upstream settings (`docs/v2-port/v2.1-depgate.md` §4/§9
+/// P4) — a single configured `GOPROXY`-protocol upstream, same single-
+/// upstream posture as every other ecosystem client in this file.
+#[derive(Debug, Clone)]
+pub struct GoProxyUpstreamConfig {
+    /// GOPROXY-protocol base URL (`DEPGATE_GOPROXY_URL`).
+    pub base_url: String,
+}
+
+fn resolve_goproxy_upstream(base_url: Option<&str>) -> GoProxyUpstreamConfig {
+    GoProxyUpstreamConfig {
+        base_url: resolve_or(base_url, "https://proxy.golang.org"),
+    }
+}
+
+impl GoProxyUpstreamConfig {
+    /// Loads Go module proxy settings from the environment.
+    pub fn from_env() -> Self {
+        resolve_goproxy_upstream(std::env::var("DEPGATE_GOPROXY_URL").ok().as_deref())
+    }
+}
+
 /// How `crate::scanpipe::ScanPipeline::ingest` treats a scan-engine failure
 /// (`ScanError` — the YARA-X engine itself erroring, not a plain
 /// ClamAV-unreachable degrade-to-clean; see `skauswatch_scan_core::engine`'s
@@ -235,15 +291,31 @@ pub struct DepgateConfig {
     /// Scan-error handling posture (`DEPGATE_FAIL_POSTURE`, default
     /// `closed`) — see [`FailPosture`].
     pub fail_posture: FailPosture,
-    /// HMAC-SHA256 key used to sign/verify air-gap bundle manifests
-    /// (`DEPGATE_BUNDLE_SIGNING_KEY`, §6b). `None` disables signing on
-    /// export and signature verification on import (checksum/per-artifact
-    /// hash verification still always applies). A symmetric MAC stands in
-    /// for the spec's eventual cosign/sigstore asymmetric signing (P4,
-    /// `docs/v2-port/v2.1-depgate.md` §9/§11) — reuses this workspace's
-    /// existing `hmac`+`sha2` dependencies rather than adding a new
-    /// signing stack for P3.
+    /// HMAC-SHA256 key used to verify air-gap bundle manifests signed under
+    /// the legacy P3 symmetric scheme (`DEPGATE_BUNDLE_SIGNING_KEY`, §6b).
+    /// P4 moves EXPORT to asymmetric signing (see
+    /// [`Self::bundle_signing_private_key_pem`]) — this key remains only for
+    /// verifying bundles exported before that change; `None` refuses to
+    /// verify an HMAC-signed bundle (checksum/per-artifact hash verification
+    /// still always applies regardless).
     pub bundle_signing_key: Option<String>,
+    /// PEM-encoded RSA private key (PKCS#1 or PKCS#8) used to sign air-gap
+    /// bundle manifests on export (`DEPGATE_BUNDLE_SIGNING_PRIVATE_KEY_PEM`,
+    /// P4 §9/§11) — the exporting/connected side's key; the air-gapped
+    /// importer needs only [`Self::bundle_verify_public_key_pem`]. `None`
+    /// disables signing on export (the exported bundle carries no
+    /// signature at all).
+    pub bundle_signing_private_key_pem: Option<String>,
+    /// PEM-encoded RSA public key used to verify an asymmetrically-signed
+    /// air-gap bundle manifest on import
+    /// (`DEPGATE_BUNDLE_VERIFY_PUBLIC_KEY_PEM`, P4). `None` disables
+    /// verification of an RSA-signed bundle (an HMAC-signed bundle is still
+    /// checked against [`Self::bundle_signing_key`] independently).
+    pub bundle_verify_public_key_pem: Option<String>,
+    /// PEM-encoded RSA public key trusted to verify cosign OCI image
+    /// signatures (`DEPGATE_COSIGN_PUBLIC_KEY_PEM`, P4 §5/§9/§10) — see
+    /// `crate::provenance`. `None` disables verification.
+    pub cosign_public_key_pem: Option<String>,
 }
 
 // One argument per DEPGATE_* env var, mirroring `resolve_upstream` above and
@@ -263,6 +335,9 @@ fn resolve_depgate(
     offline_mode: Option<&str>,
     fail_posture: Option<&str>,
     bundle_signing_key: Option<&str>,
+    bundle_signing_private_key_pem: Option<&str>,
+    bundle_verify_public_key_pem: Option<&str>,
+    cosign_public_key_pem: Option<&str>,
 ) -> DepgateConfig {
     let http_port = resolve_num(http_port, DEFAULT_HTTP_PORT);
     DepgateConfig {
@@ -281,6 +356,9 @@ fn resolve_depgate(
         ),
         fail_posture: FailPosture::from_env_str(fail_posture),
         bundle_signing_key: resolve_opt(bundle_signing_key),
+        bundle_signing_private_key_pem: resolve_opt(bundle_signing_private_key_pem),
+        bundle_verify_public_key_pem: resolve_opt(bundle_verify_public_key_pem),
+        cosign_public_key_pem: resolve_opt(cosign_public_key_pem),
     }
 }
 
@@ -300,6 +378,15 @@ impl DepgateConfig {
             std::env::var("DEPGATE_OFFLINE_MODE").ok().as_deref(),
             std::env::var("DEPGATE_FAIL_POSTURE").ok().as_deref(),
             std::env::var("DEPGATE_BUNDLE_SIGNING_KEY").ok().as_deref(),
+            std::env::var("DEPGATE_BUNDLE_SIGNING_PRIVATE_KEY_PEM")
+                .ok()
+                .as_deref(),
+            std::env::var("DEPGATE_BUNDLE_VERIFY_PUBLIC_KEY_PEM")
+                .ok()
+                .as_deref(),
+            std::env::var("DEPGATE_COSIGN_PUBLIC_KEY_PEM")
+                .ok()
+                .as_deref(),
         )
     }
 }
@@ -342,7 +429,8 @@ mod tests {
     #[test]
     fn depgate_defaults() {
         let cfg = resolve_depgate(
-            None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None,
         );
         assert_eq!(cfg.http_port, DEFAULT_HTTP_PORT);
         assert_eq!(
@@ -359,6 +447,9 @@ mod tests {
         assert!(!cfg.offline_mode);
         assert_eq!(cfg.fail_posture, FailPosture::Closed);
         assert_eq!(cfg.bundle_signing_key, None);
+        assert_eq!(cfg.bundle_signing_private_key_pem, None);
+        assert_eq!(cfg.bundle_verify_public_key_pem, None);
+        assert_eq!(cfg.cosign_public_key_pem, None);
     }
 
     #[test]
@@ -376,6 +467,9 @@ mod tests {
             Some("true"),
             Some("open"),
             Some("sekret"),
+            Some("priv-pem"),
+            Some("pub-pem"),
+            Some("cosign-pub-pem"),
         );
         assert_eq!(cfg.http_port, 9090);
         assert_eq!(cfg.public_base_url, "https://depgate.internal");
@@ -389,12 +483,21 @@ mod tests {
         assert!(cfg.offline_mode);
         assert_eq!(cfg.fail_posture, FailPosture::Open);
         assert_eq!(cfg.bundle_signing_key.as_deref(), Some("sekret"));
+        assert_eq!(
+            cfg.bundle_signing_private_key_pem.as_deref(),
+            Some("priv-pem")
+        );
+        assert_eq!(cfg.bundle_verify_public_key_pem.as_deref(), Some("pub-pem"));
+        assert_eq!(cfg.cosign_public_key_pem.as_deref(), Some("cosign-pub-pem"));
     }
 
     #[test]
     fn depgate_invalid_numeric_values_fall_back_to_defaults() {
         let cfg = resolve_depgate(
             Some("not-a-port"),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -441,6 +544,9 @@ mod tests {
                 Some(v),
                 None,
                 None,
+                None,
+                None,
+                None,
             );
             assert!(cfg.offline_mode, "expected {v:?} to enable offline mode");
         }
@@ -455,6 +561,9 @@ mod tests {
             None,
             None,
             Some("false"),
+            None,
+            None,
+            None,
             None,
             None,
         );
@@ -509,5 +618,46 @@ mod tests {
     fn spiffe_env_defaults_to_beta_when_unset() {
         assert!(std::env::var("SPIFFE_ENV").is_err());
         assert_eq!(spiffe_env(), "beta");
+    }
+
+    #[test]
+    fn cratesio_upstream_defaults_to_the_public_registry() {
+        let cfg = resolve_cratesio_upstream(None, None);
+        assert_eq!(cfg.index_url, "https://index.crates.io");
+        assert_eq!(cfg.api_url, "https://crates.io/api/v1/crates");
+    }
+
+    #[test]
+    fn cratesio_upstream_honors_overrides() {
+        let cfg = resolve_cratesio_upstream(
+            Some("https://index.internal"),
+            Some("https://crates.internal/api"),
+        );
+        assert_eq!(cfg.index_url, "https://index.internal");
+        assert_eq!(cfg.api_url, "https://crates.internal/api");
+    }
+
+    #[test]
+    fn cratesio_upstream_blank_values_fall_back_to_defaults() {
+        let cfg = resolve_cratesio_upstream(Some(""), Some(""));
+        assert_eq!(cfg.index_url, "https://index.crates.io");
+    }
+
+    #[test]
+    fn goproxy_upstream_defaults_to_the_public_proxy() {
+        let cfg = resolve_goproxy_upstream(None);
+        assert_eq!(cfg.base_url, "https://proxy.golang.org");
+    }
+
+    #[test]
+    fn goproxy_upstream_honors_overrides() {
+        let cfg = resolve_goproxy_upstream(Some("https://goproxy.internal"));
+        assert_eq!(cfg.base_url, "https://goproxy.internal");
+    }
+
+    #[test]
+    fn goproxy_upstream_blank_value_falls_back_to_default() {
+        let cfg = resolve_goproxy_upstream(Some(""));
+        assert_eq!(cfg.base_url, "https://proxy.golang.org");
     }
 }

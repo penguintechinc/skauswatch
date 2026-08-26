@@ -125,6 +125,16 @@ pub struct ScanPipeline<'a> {
     /// Scan-engine-failure handling posture (§6) — see
     /// `crate::config::FailPosture`.
     pub fail_posture: crate::config::FailPosture,
+    /// Optional Socket.dev enrichment client (§5, P4) — a client with no
+    /// API key configured (`crate::socket::SocketClient::disabled_ref`) is
+    /// a complete no-op, the value every construction site not specifically
+    /// exercising Socket enrichment uses.
+    pub socket: &'a crate::socket::SocketClient,
+    /// PEM-encoded RSA public key trusted to verify cosign image signatures
+    /// (`DEPGATE_COSIGN_PUBLIC_KEY_PEM`, §5/§9/§10, P4) — `None` disables
+    /// verification: every OCI artifact then reports
+    /// `crate::provenance::ProvenanceStatus::Unsigned`, never `Invalid`.
+    pub cosign_public_key: Option<&'a str>,
 }
 
 impl ScanPipeline<'_> {
@@ -368,14 +378,34 @@ impl ScanPipeline<'_> {
 
         // Package-risk heuristics (§5) — signals, never verdicts on their
         // own; recorded regardless of the scan verdict so the audit trail
-        // and policy engine both see them.
-        let findings = crate::heuristics::evaluate(ecosystem, name, reference, &bytes);
+        // and policy engine both see them. Socket.dev findings (also §5,
+        // P4) are folded into the SAME vector — there is no separate
+        // Socket decision path, only additional signals the one policy
+        // engine below consumes exactly like a local heuristic hit.
+        let mut findings = crate::heuristics::evaluate(ecosystem, name, reference, &bytes);
+        findings.extend(self.socket.evaluate(ecosystem, name, reference).await);
         if !findings.is_empty() {
             db::insert_risk_findings(
                 self.db, &sha256, ecosystem, name, reference, tenant_id, &findings,
             )
             .await?;
         }
+
+        // Provenance (§5/§9, P4): cosign signature discovery is meaningful
+        // only for OCI artifacts — every other ecosystem is unconditionally
+        // `Unsigned`.
+        let provenance = if ecosystem == "oci" {
+            crate::provenance::verify(
+                self.upstream,
+                name,
+                &sha256,
+                self.cosign_public_key,
+                self.max_artifact_bytes,
+            )
+            .await
+        } else {
+            crate::provenance::ProvenanceStatus::Unsigned
+        };
 
         // Policy engine (§6): tenant-configured rules win over the
         // hardcoded default when they match.
@@ -391,6 +421,7 @@ impl ScanPipeline<'_> {
                 version: reference,
                 verdict: outcome.verdict.as_str(),
                 findings: &findings,
+                provenance: provenance.as_str(),
             },
             &rules,
         );
@@ -405,6 +436,7 @@ impl ScanPipeline<'_> {
                 action: decision.action.as_str(),
                 matched_rule_id: decision.matched_rule_id,
                 reason: &decision.reason,
+                provenance: provenance.as_str(),
                 tenant_id,
             },
         )
@@ -789,6 +821,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let got = pipeline
@@ -851,6 +885,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let tenant = Uuid::new_v4();
@@ -914,6 +950,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let err = pipeline
@@ -971,6 +1009,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let tenant = Uuid::new_v4();
@@ -1031,6 +1071,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let tenant = Uuid::new_v4();
@@ -1091,6 +1133,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         pipeline
@@ -1133,6 +1177,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let got = pipeline
@@ -1179,6 +1225,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: true,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let err = pipeline
@@ -1239,6 +1287,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: true,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let got = pipeline
@@ -1299,6 +1349,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let tenant = Uuid::new_v4();
@@ -1377,6 +1429,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let tenant = Uuid::new_v4();
@@ -1436,6 +1490,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let err = pipeline
@@ -1470,6 +1526,8 @@ mod tests {
             cache_stats: &stats,
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Open,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
         };
 
         let bytes = Bytes::from_static(b"best-effort passthrough");
@@ -1484,5 +1542,268 @@ mod tests {
             .expect("open posture serves best-effort");
         assert_eq!(got.bytes, bytes);
         assert_eq!(got.sha256, expected_sha256);
+    }
+
+    // -- P4: Socket.dev findings feed the same policy engine ------------
+
+    #[tokio::test]
+    async fn ingest_folds_a_critical_socket_finding_into_the_policy_decision() {
+        // No package.json at all -> `crate::heuristics::evaluate` (the
+        // local, non-Socket signal source) contributes zero findings on its
+        // own, so any block here is attributable ONLY to the Socket-sourced
+        // finding flowing through the exact same `findings` vector/policy
+        // evaluation heuristics use — proving there is no separate Socket
+        // decision path (module docs: `crate::socket`).
+        let tarball = crate::tarutil::tests::build_gzip_tar(&[("package/README.md", b"hello")]);
+        let hex = skauswatch_scan_core::compute_hashes(&tarball).sha256;
+
+        let s3 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/bkt/sha256/{hex}")))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_raw(s3_error_xml("NoSuchKey"), "application/xml"),
+            )
+            .mount(&s3)
+            .await;
+        // Deliberately no PUT mock under sha256/ — a Block decision must
+        // never write to the servable cache prefix.
+
+        let socket_server = MockServer::start().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path("/v0/purl"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                serde_json::json!({
+                    "alerts": [
+                        {"type": "malwareIndicator", "severity": "critical", "description": "known malware signature"},
+                    ]
+                })
+                .to_string(),
+                "application/json",
+            ))
+            .mount(&socket_server)
+            .await;
+        let socket = crate::socket::SocketClient::new(
+            reqwest::Client::new(),
+            crate::socket::SocketConfig {
+                api_key: Some("sk-test".to_owned()),
+                base_url: socket_server.uri(),
+            },
+            Some(skauswatch_testkit::license::dev_license("skauswatch")),
+        );
+
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let upstream = upstream_client("http://127.0.0.1:1");
+        let stats = CacheStats::default();
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024 * 1024,
+            cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
+            socket: &socket,
+            cosign_public_key: None,
+        };
+
+        let tenant = Uuid::new_v4();
+        let tarball_clone = tarball.clone();
+        let err = pipeline
+            .resolve_named(
+                "npm",
+                "evil-pkg",
+                "evil-pkg-1.0.0.tgz",
+                "https://registry.npmjs.org",
+                tenant,
+                move || async move {
+                    Ok((
+                        Bytes::from(tarball_clone),
+                        "application/octet-stream".to_owned(),
+                    ))
+                },
+            )
+            .await
+            .expect_err(
+                "a critical Socket-sourced finding must block despite no local heuristic hit",
+            );
+        assert!(matches!(err, PipelineError::Blocked { .. }));
+
+        let findings = db::list_risk_findings(&pool, tenant, &hex)
+            .await
+            .expect("list findings");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check_name == "socket_malwareIndicator"),
+            "expected a socket_-prefixed finding, got {findings:?}"
+        );
+        assert!(
+            db::find_by_reference(&pool, "npm", "evil-pkg", "evil-pkg-1.0.0.tgz")
+                .await
+                .expect("query")
+                .is_none(),
+            "a Block decision must never index the artifact as servable"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_ignores_socket_entirely_when_unconfigured() {
+        // The default `SocketClient::disabled_ref()` every other test in
+        // this module uses — confirms the common case (no Socket.dev key
+        // configured) behaves identically to before Socket existed at all.
+        let body = b"hello depgate, no socket configured".to_vec();
+        let hex = skauswatch_scan_core::compute_hashes(&body).sha256;
+        let digest = format!("sha256:{hex}");
+
+        let s3 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/bkt/sha256/{hex}")))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_raw(s3_error_xml("NoSuchKey"), "application/xml"),
+            )
+            .mount(&s3)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path(format!("/bkt/sha256/{hex}")))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&s3)
+            .await;
+
+        let upstream_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/nginx/blobs/{digest}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(body.clone()),
+            )
+            .mount(&upstream_server)
+            .await;
+
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let upstream = upstream_client(&upstream_server.uri());
+        let stats = CacheStats::default();
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024,
+            cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
+        };
+
+        let got = pipeline
+            .resolve_blob("library/nginx", &digest, Uuid::new_v4())
+            .await
+            .expect("unconfigured Socket must never block an otherwise-clean artifact");
+        assert_eq!(got.sha256, hex);
+    }
+
+    // -- P4: provenance dimension reaches the policy engine ---------------
+
+    #[tokio::test]
+    async fn ingest_blocks_on_an_explicit_unsigned_provenance_rule() {
+        // No `.sig` tag mock is mounted -> `crate::provenance::verify`
+        // resolves to `Unsigned` (the default for every unmocked/absent
+        // signature) -- an admin-configured rule targeting exactly that
+        // disposition must reach and block it, proving `ingest()` actually
+        // computes provenance and threads it into `PolicyInput`, not just
+        // that `crate::policy::evaluate` can match on the field in
+        // isolation (already covered in `policy.rs`'s own tests).
+        let body = b"unsigned oci blob content".to_vec();
+        let hex = skauswatch_scan_core::compute_hashes(&body).sha256;
+        let digest = format!("sha256:{hex}");
+
+        let s3 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/bkt/sha256/{hex}")))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_raw(s3_error_xml("NoSuchKey"), "application/xml"),
+            )
+            .mount(&s3)
+            .await;
+        // Deliberately no PUT mock — a Block decision must never cache.
+
+        let upstream_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/library/nginx/blobs/{digest}")))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&upstream_server)
+            .await;
+        // No mock for `/v2/library/nginx/manifests/sha256-{hex}.sig` -- the
+        // cosign discovery request -- so wiremock answers its default 404,
+        // which `crate::provenance::verify` maps to `Unsigned`.
+
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let tenant = Uuid::new_v4();
+        db::insert_policy_rule(
+            &pool,
+            tenant,
+            &crate::db::PolicyRuleInput {
+                priority: 100,
+                ecosystem: Some("oci"),
+                name_glob: None,
+                version_glob: None,
+                verdict: None,
+                risk_check: None,
+                min_severity: None,
+                provenance: Some("unsigned"),
+                action: "block",
+                description: Some("require signed images"),
+                enabled: true,
+                created_by: None,
+            },
+        )
+        .await
+        .expect("seed policy rule");
+
+        let upstream = upstream_client(&upstream_server.uri());
+        let stats = CacheStats::default();
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024,
+            cache_stats: &stats,
+            offline_mode: false,
+            fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
+        };
+
+        let err = pipeline
+            .resolve_blob("library/nginx", &digest, tenant)
+            .await
+            .expect_err("the tenant's unsigned-provenance rule must block");
+        assert!(matches!(err, PipelineError::Blocked { .. }));
+
+        assert!(
+            db::find_by_reference(&pool, "oci", "library/nginx", &digest)
+                .await
+                .expect("query")
+                .is_none(),
+            "a Block decision must never index the artifact as servable"
+        );
     }
 }

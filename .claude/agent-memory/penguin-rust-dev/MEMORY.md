@@ -10,3 +10,5 @@
 - [functions metric panic-closure ceiling](feedback_functions_metric_panic_closures.md) — `.unwrap_or_else(\|e\| panic!())` test idiom inflates Functions denominator with never-fired closures; workspace has a structural ~87% ceiling, don't chase 90% with more tests in the same style
 - [cargo fmt workspace scoping](feedback_cargo_fmt_workspace_scoping.md) — `cargo fmt --all` touches sibling agents' in-progress dirs; use `cargo fmt -p <pkg> -- --check`/fix instead
 - [rust raw-string & sqlx gotchas](feedback_rust_raw_string_and_sqlx_gotchas.md) — `r"...\"..."` cascades parse errors; sqlx 0.9 SqlSafeStr rejects `format!()`'d SQL; `static` can't hold a `LazyLock` inside an aggregate literal
+- [DepGate P4 (Socket/provenance/bundle/crates+go)](project_depgate_p4.md) — key decisions, RSA-reuse-not-new-crate pattern, real go_path parse bug found
+- [verify by failing-test name, not count](feedback_verify_by_name_not_count.md) — a "known failures" delta that matches by count can still hide a new real bug; diff names

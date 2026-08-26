@@ -17,6 +17,7 @@ use skauswatch_vault::CredentialCipher;
 use crate::config::WorkerConfig;
 use crate::db::{self, RepoConfigRecord};
 use crate::detection;
+use crate::fix;
 use crate::git_provider::{self, GitCredentials};
 use crate::license_scan::RegistryClient;
 use crate::message::{CodeScanReviewTask, SentinelScanTask, stream_task_type};
@@ -27,6 +28,30 @@ use crate::scanner_tool::{self, ScanOutcome, ScannerTool};
 use crate::sentinel;
 use crate::tree_fetch;
 use crate::triage;
+
+/// [`CodeScanReviewHandler::triage_and_resolve_action`]'s outcome — see that
+/// method's doc comment.
+struct ResolvedAction {
+    should_alert: bool,
+    should_fix: bool,
+    reachability_summary: String,
+}
+
+/// Renders a policy [`policy::Reachability`] verdict as a short
+/// human-readable string for CodeScan Sentinel P4's fix-PR body
+/// (`crate::fix::FixCandidate::reachability_verdict`) — `""` (never
+/// triaged) renders as `"unknown"` in the PR body itself
+/// (`fix::render_pr_body`), so this only needs to distinguish the triaged
+/// states.
+fn reachability_summary(r: &policy::Reachability) -> String {
+    match (r.used, r.reachable, r.exposure) {
+        (Some(false), _, _) => "not used".to_owned(),
+        (_, Some(true), Some(exposure)) => format!("reachable/{}", exposure.as_str()),
+        (_, Some(true), None) => "reachable".to_owned(),
+        (_, Some(false), _) => "not reachable".to_owned(),
+        _ => String::new(),
+    }
+}
 
 /// Handler for CodeScan review stream entries.
 pub struct CodeScanReviewHandler {
@@ -625,7 +650,7 @@ impl CodeScanReviewHandler {
             };
 
         for branch in branches {
-            self.scan_and_persist_branch(&task, &branch, &git_creds)
+            self.scan_and_persist_branch(&task, &branch, &git_creds, &repo_config)
                 .await;
         }
 
@@ -634,15 +659,18 @@ impl CodeScanReviewHandler {
 
     /// Scans one (repo, branch), upserts every computed finding, resolves
     /// findings that vanished this run, records the `codescan_scan_runs`
-    /// row, and bridges any newly-alertable critical/high CVE finding into
-    /// `alerts`. Every failure here is logged and swallowed rather than
-    /// propagated — one branch's persistence trouble must never abort the
-    /// other branch's scan.
+    /// row, bridges any newly-alertable critical/high CVE finding into
+    /// `alerts`, and (CodeScan Sentinel P4) hands every `fix`-resolved
+    /// finding with a known remediation version to `crate::fix::run_fix_batch`.
+    /// Every failure here is logged and swallowed rather than propagated —
+    /// one branch's persistence trouble must never abort the other branch's
+    /// scan.
     async fn scan_and_persist_branch(
         &self,
         task: &SentinelScanTask,
         branch: &str,
         git_creds: &GitCredentials,
+        repo_config: &RepoConfigRecord,
     ) {
         let run_id =
             match db::start_scan_run(&self.pool, task.tenant_id, task.repo_config_id, branch).await
@@ -719,6 +747,7 @@ impl CodeScanReviewHandler {
             };
 
         let mut seen_ids = Vec::with_capacity(findings.len());
+        let mut fix_candidates: Vec<fix::FixCandidate> = Vec::new();
         for finding in &findings {
             let upserted = match db::upsert_finding(
                 &self.pool,
@@ -749,7 +778,18 @@ impl CodeScanReviewHandler {
             };
             seen_ids.push(upserted.id);
 
-            let should_alert = self
+            if let Some(fixed_version) = &finding.fixed_version
+                && let Err(e) =
+                    db::update_finding_fixed_version(&self.pool, upserted.id, fixed_version).await
+            {
+                tracing::warn!(
+                    finding_id = upserted.id,
+                    error = %e,
+                    "sentinel: failed to persist fixed_version"
+                );
+            }
+
+            let resolved = self
                 .triage_and_resolve_action(
                     task,
                     finding,
@@ -760,9 +800,46 @@ impl CodeScanReviewHandler {
                     waddleai_provider.as_deref(),
                 )
                 .await;
-            if upserted.needs_alert && should_alert {
+            if upserted.needs_alert && resolved.should_alert {
                 self.bridge_alert(task, branch, finding, upserted.id).await;
             }
+            if resolved.should_fix
+                && let Some(fixed_version) = &finding.fixed_version
+            {
+                fix_candidates.push(fix::FixCandidate {
+                    finding_id: upserted.id,
+                    ecosystem: finding.ecosystem.to_owned(),
+                    package_name: finding.package_name.clone(),
+                    current_version: finding.current_version.clone(),
+                    fixed_version: fixed_version.clone(),
+                    advisory_id: finding.advisory_id.clone(),
+                    severity: finding.severity.clone(),
+                    reachability_verdict: resolved.reachability_summary,
+                });
+            }
+        }
+
+        let fix_outcome = fix::run_fix_batch(
+            &self.pool,
+            task.tenant_id,
+            task.repo_config_id,
+            &task.provider,
+            &task.repo_url,
+            branch,
+            git_creds,
+            &fix_candidates,
+            repo_config.sentinel_auto_fix,
+        )
+        .await;
+        if fix_outcome.committed > 0 || fix_outcome.skipped > 0 {
+            tracing::info!(
+                repo_config_id = task.repo_config_id,
+                branch,
+                batch_id = ?fix_outcome.batch_id,
+                committed = fix_outcome.committed,
+                skipped = fix_outcome.skipped,
+                "sentinel: grouped auto-fix batch processed"
+            );
         }
 
         if let Err(e) = db::resolve_stale_findings(
@@ -962,6 +1039,10 @@ impl CodeScanReviewHandler {
     /// this module now exists (spec §13: deterministic scanning stands
     /// alone without WaddleAI/Enterprise).
     #[allow(clippy::too_many_arguments)]
+    /// [`Self::triage_and_resolve_action`]'s outcome — `should_alert` drives
+    /// the existing `alerts` bridge unchanged; `should_fix` plus
+    /// `reachability_summary` feed CodeScan Sentinel P4's grouped auto-fix
+    /// candidate list (`crate::fix::FixCandidate`).
     async fn triage_and_resolve_action(
         &self,
         task: &SentinelScanTask,
@@ -971,11 +1052,18 @@ impl CodeScanReviewHandler {
         tree: Option<&tree_fetch::WorkingTree>,
         policy_rules: &[policy::PolicyRule],
         waddleai_provider: Option<&dyn CompletionProvider>,
-    ) -> bool {
+    ) -> ResolvedAction {
         let legacy_should_alert =
             finding.kind == "cve" && matches!(finding.severity.as_str(), "critical" | "high");
         if !ai_policy_enabled {
-            return legacy_should_alert;
+            // CodeScan Sentinel P4's grouped auto-fix is itself Enterprise-
+            // gated (spec §13: it rides the policy engine) — a finding can
+            // only ever resolve to `should_fix` when the policy engine ran.
+            return ResolvedAction {
+                should_alert: legacy_should_alert,
+                should_fix: false,
+                reachability_summary: String::new(),
+            };
         }
 
         // Static prefilter (spec §5 point 1) — the cheap, deterministic
@@ -1083,6 +1171,8 @@ impl CodeScanReviewHandler {
             reachability: reachability_verdict,
         };
         let decision = policy::evaluate(&ctx, policy_rules);
+        let should_fix = decision.action == "fix" || policy::should_also_fix(&ctx, &decision);
+        let reachability_summary = reachability_summary(&ctx.reachability);
         if let Err(e) =
             db::apply_policy_decision(&self.pool, task.tenant_id, finding_id, &decision).await
         {
@@ -1092,7 +1182,11 @@ impl CodeScanReviewHandler {
                 "sentinel: failed to persist policy decision"
             );
         }
-        decision.action == "alert"
+        ResolvedAction {
+            should_alert: decision.action == "alert",
+            should_fix,
+            reachability_summary,
+        }
     }
 
     /// Writes one `alerts` row for a newly-alertable critical/high CVE

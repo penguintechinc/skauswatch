@@ -11,9 +11,12 @@ use skauswatch_scan_core::ScanEngine;
 use sqlx::PgPool;
 
 use crate::config::DepgateConfig;
+use crate::crates_io::CratesIoUpstreamClient;
+use crate::go_proxy::GoProxyUpstreamClient;
 use crate::npm::NpmUpstreamClient;
 use crate::pypi::PypiUpstreamClient;
 use crate::scanpipe::ScanPipeline;
+use crate::socket::SocketClient;
 use crate::upstream::UpstreamClient;
 
 /// In-process cache hit/miss counters backing the admin `/stats` endpoint's
@@ -64,6 +67,13 @@ pub struct AppStateInner {
     pub npm: NpmUpstreamClient,
     /// PyPI upstream client (P2).
     pub pypi: PypiUpstreamClient,
+    /// crates.io upstream client (P4).
+    pub cratesio: CratesIoUpstreamClient,
+    /// Go module proxy upstream client (P4).
+    pub go_proxy: GoProxyUpstreamClient,
+    /// Optional Socket.dev enrichment client (§5, P4) — see
+    /// `crate::socket` module docs for the full gating contract.
+    pub socket: SocketClient,
     /// Shared ClamAV+YARA-X scan engine.
     pub scan_engine: Arc<ScanEngine>,
     /// Shared `JWT_SECRET_KEY` — every route (OCI proxy and admin API
@@ -132,7 +142,21 @@ impl AppStateInner {
         let upstream = UpstreamClient::new(http.clone(), upstream_cfg);
         let npm =
             NpmUpstreamClient::new(http.clone(), crate::config::NpmUpstreamConfig::from_env());
-        let pypi = PypiUpstreamClient::new(http, crate::config::PypiUpstreamConfig::from_env());
+        let pypi =
+            PypiUpstreamClient::new(http.clone(), crate::config::PypiUpstreamConfig::from_env());
+        let cratesio = CratesIoUpstreamClient::new(
+            http.clone(),
+            crate::config::CratesIoUpstreamConfig::from_env(),
+        );
+        let go_proxy = GoProxyUpstreamClient::new(
+            http.clone(),
+            crate::config::GoProxyUpstreamConfig::from_env(),
+        );
+        let socket = SocketClient::new(
+            http,
+            crate::socket::SocketConfig::from_env(),
+            Some(license.clone()),
+        );
 
         let scan_engine = Arc::new(
             ScanEngine::new(skauswatch_scan_core::ScanEngineConfig {
@@ -165,6 +189,9 @@ impl AppStateInner {
             upstream,
             npm,
             pypi,
+            cratesio,
+            go_proxy,
+            socket,
             scan_engine,
             jwt_secret,
             license,
@@ -211,6 +238,9 @@ impl AppStateInner {
             offline_mode: false,
             fail_posture: crate::config::FailPosture::Closed,
             bundle_signing_key: None,
+            bundle_signing_private_key_pem: None,
+            bundle_verify_public_key_pem: None,
+            cosign_public_key_pem: None,
         };
         Self {
             db,
@@ -228,6 +258,15 @@ impl AppStateInner {
                 reqwest::Client::new(),
                 crate::config::PypiUpstreamConfig::from_env(),
             ),
+            cratesio: CratesIoUpstreamClient::new(
+                reqwest::Client::new(),
+                crate::config::CratesIoUpstreamConfig::from_env(),
+            ),
+            go_proxy: GoProxyUpstreamClient::new(
+                reqwest::Client::new(),
+                crate::config::GoProxyUpstreamConfig::from_env(),
+            ),
+            socket: SocketClient::disabled(),
             scan_engine: Arc::new(ScanEngine::clamav_only(
                 &skauswatch_scan_core::ScanEngineConfig {
                     clamd_socket: None,
@@ -294,6 +333,32 @@ impl AppStateInner {
         Arc::new(inner)
     }
 
+    /// Like [`Self::for_tests_with_npm`], for `crate::routes::crates_io`'s
+    /// tests (P4).
+    #[cfg(test)]
+    pub fn for_tests_with_cratesio(
+        db: PgPool,
+        license: Arc<LicenseClient>,
+        cratesio: CratesIoUpstreamClient,
+    ) -> AppState {
+        let mut inner = Self::build_test_state(db, license, None);
+        inner.cratesio = cratesio;
+        Arc::new(inner)
+    }
+
+    /// Like [`Self::for_tests_with_npm`], for `crate::routes::go`'s tests
+    /// (P4).
+    #[cfg(test)]
+    pub fn for_tests_with_go_proxy(
+        db: PgPool,
+        license: Arc<LicenseClient>,
+        go_proxy: GoProxyUpstreamClient,
+    ) -> AppState {
+        let mut inner = Self::build_test_state(db, license, None);
+        inner.go_proxy = go_proxy;
+        Arc::new(inner)
+    }
+
     /// Like [`Self::for_tests_with_db`], but with a caller-supplied
     /// [`IdentityProvider`] — used by `mesh_admin`'s tests that need to
     /// exercise the SPIFFE-identity-aware code paths (degraded-provider
@@ -329,6 +394,8 @@ impl AppStateInner {
             cache_stats: &self.cache_stats,
             offline_mode: self.cfg.offline_mode,
             fail_posture: self.cfg.fail_posture,
+            socket: &self.socket,
+            cosign_public_key: self.cfg.cosign_public_key_pem.as_deref(),
         }
     }
 }

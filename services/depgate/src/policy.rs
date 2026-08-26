@@ -82,6 +82,12 @@ pub struct PolicyRule {
     pub risk_check: Option<String>,
     /// Minimum heuristic severity required for a match.
     pub min_severity: Option<Severity>,
+    /// Exact-match provenance disposition (`crate::provenance::ProvenanceStatus`,
+    /// §5/§9/§10). `None` matches any — provenance never affects the
+    /// *default* decision (only an explicit rule using this field can act on
+    /// it), so an admin can require signed images for chosen repos without
+    /// breaking any existing unsigned pull elsewhere.
+    pub provenance: Option<String>,
     /// Resulting action when this rule matches.
     pub action: Action,
     /// Disabled rules are never matched.
@@ -102,6 +108,10 @@ pub struct PolicyInput<'a> {
     pub verdict: &'a str,
     /// Heuristic findings recorded for this artifact.
     pub findings: &'a [RiskFinding],
+    /// Provenance disposition (`crate::provenance::ProvenanceStatus::as_str()`)
+    /// — `"unsigned"` for every non-OCI ecosystem and any OCI artifact
+    /// without a verified cosign signature (§5/§9).
+    pub provenance: &'a str,
 }
 
 /// The result of one policy evaluation.
@@ -166,6 +176,11 @@ fn rule_matches(rule: &PolicyRule, input: &PolicyInput<'_>) -> bool {
     }
     if let Some(v) = &rule.verdict
         && v != input.verdict
+    {
+        return false;
+    }
+    if let Some(p) = &rule.provenance
+        && p != input.provenance
     {
         return false;
     }
@@ -284,6 +299,7 @@ mod tests {
             verdict: None,
             risk_check: None,
             min_severity: None,
+            provenance: None,
             action,
             enabled: true,
         }
@@ -356,6 +372,7 @@ mod tests {
             version: "1.3.0",
             verdict: "clean",
             findings: &[],
+            provenance: "unsigned",
         };
         let d = evaluate(&input, &[]);
         assert_eq!(d.action, Action::Allow);
@@ -370,6 +387,7 @@ mod tests {
             version: "1.3.0",
             verdict: "clean",
             findings: &[],
+            provenance: "unsigned",
         };
         let low = rule(Action::Block, 10);
         let high = rule(Action::Allow, 100);
@@ -386,6 +404,7 @@ mod tests {
             version: "1.3.0",
             verdict: "clean",
             findings: &[],
+            provenance: "unsigned",
         };
         let mut disabled = rule(Action::Block, 1000);
         disabled.enabled = false;
@@ -401,6 +420,7 @@ mod tests {
             version: "1.0.0",
             verdict: "clean",
             findings: &[],
+            provenance: "unsigned",
         };
         let mut r = rule(Action::Block, 50);
         r.ecosystem = Some("npm".to_owned());
@@ -418,6 +438,7 @@ mod tests {
             version: "1.0.0",
             verdict: "clean",
             findings: &[],
+            provenance: "unsigned",
         };
         let mut r = rule(Action::Block, 50);
         r.ecosystem = Some("npm".to_owned());
@@ -433,6 +454,7 @@ mod tests {
             version: "1.0.0",
             verdict: "clean",
             findings: &[finding("typosquat_distance", Severity::High)],
+            provenance: "unsigned",
         };
         let mut r = rule(Action::Quarantine, 50);
         r.risk_check = Some("typosquat_distance".to_owned());
@@ -464,6 +486,7 @@ mod tests {
                 "suspicious_embedded_credential",
                 Severity::Critical,
             )],
+            provenance: "unsigned",
         };
         let mut r = rule(Action::Quarantine, 50);
         r.min_severity = Some(Severity::High);
@@ -481,6 +504,7 @@ mod tests {
             version: "0.1.0",
             verdict: "clean",
             findings: &[],
+            provenance: "unsigned",
         };
         let not_matching = PolicyInput {
             version: "1.0.0",
@@ -488,5 +512,48 @@ mod tests {
         };
         assert_eq!(evaluate(&matching, &[r.clone()]).action, Action::Block);
         assert_eq!(evaluate(&not_matching, &[r]).action, Action::Allow);
+    }
+
+    #[test]
+    fn provenance_never_affects_the_default_decision() {
+        // §9/§10 "default must not break existing pulls" — with no
+        // configured rule, `unsigned` and `invalid` provenance both still
+        // resolve via the ordinary verdict-only default.
+        for provenance in ["unsigned", "invalid", "verified"] {
+            let input = PolicyInput {
+                ecosystem: "oci",
+                name: "library/nginx",
+                version: "latest",
+                verdict: "clean",
+                findings: &[],
+                provenance,
+            };
+            assert_eq!(evaluate(&input, &[]).action, Action::Allow);
+        }
+    }
+
+    #[test]
+    fn evaluate_matches_on_provenance_dimension() {
+        let mut r = rule(Action::Block, 50);
+        r.provenance = Some("unsigned".to_owned());
+        let input = PolicyInput {
+            ecosystem: "oci",
+            name: "library/nginx",
+            version: "latest",
+            verdict: "clean",
+            findings: &[],
+            provenance: "unsigned",
+        };
+        assert_eq!(evaluate(&input, &[r.clone()]).action, Action::Block);
+
+        let signed = PolicyInput {
+            provenance: "verified",
+            ..input
+        };
+        assert_eq!(
+            evaluate(&signed, &[r]).action,
+            Action::Allow,
+            "a rule requiring `unsigned` must not match a verified artifact"
+        );
     }
 }
