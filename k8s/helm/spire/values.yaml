@@ -136,12 +136,12 @@ spire:
       sqlite:
         path: "/run/spire/data/datastore.sqlite"
       postgresql:
-        # NOTE: `marchproxy` is a RETIRED product (repo archived). This default
-        # is inherited from the original chart and is almost certainly wrong —
-        # every environment that sets `type: postgresql` overrides it
-        # (beta/gamma use the in-cluster `postgres` service; production must be
-        # set explicitly — see production.yml).
-        host: "marchproxy.nest.svc"
+        # Default host follows this repo's in-cluster convention: the
+        # `postgres` Service in the product namespace (same as beta.yml,
+        # gamma.yml, and every other chart). Each environment that sets
+        # `type: postgresql` still confirms or overrides this — production may
+        # point at a managed/external database (see production.yml).
+        host: "postgres"
         port: 5432
         dbName: spire
         # TLS to the database with server-certificate verification.

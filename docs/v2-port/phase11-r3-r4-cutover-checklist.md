@@ -343,10 +343,13 @@ onto PostgreSQL, matching production.
       then confirm an existing workload's SVID still validates and that
       `spire-server entry show` still lists the auto-enrolled entries. A wiped
       CA shows up as every workload failing mTLS at once.
-- [ ] **PROD BLOCKER — set the production PostgreSQL host.**
-      `production.yml` currently points at `marchproxy.nest.svc`, which names a
-      RETIRED product. If that Service is gone, the SPIRE server cannot reach
-      its datastore and will not start. Confirm the real prod PG host with the
-      owner and set it before cutover. Production keeps `sslMode: verify-full`
-      (do NOT downgrade); if the server cert is from a private CA, mount the CA
-      bundle and set `sslRootCert`.
+- [ ] **Provision & confirm the production PostgreSQL datastore.**
+      `production.yml` now points SPIRE's datastore at the in-cluster
+      `postgres` Service (this repo's convention, matching beta/gamma), so it
+      no longer references the retired `marchproxy` product. Before cutover:
+      (a) confirm that database exists in the prod cluster — or, if prod uses a
+      managed/external DB (e.g. DigitalOcean Managed PostgreSQL), set `host` to
+      that endpoint (the single value to change); (b) create the `spire`
+      database and the `spire-db-credentials` secret. Production keeps
+      `sslMode: verify-full` (do NOT downgrade); if the server cert is from a
+      private CA, mount the CA bundle and set `sslRootCert`.
