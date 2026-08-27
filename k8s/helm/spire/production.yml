@@ -21,19 +21,25 @@ spire:
       tag: "1.9.4"  # Reference only
       pullPolicy: IfNotPresent
     dataStore:
-      # Preferred: NEST-hosted PostgreSQL. Fallback: any PG host.
       type: postgresql
       postgresql:
-        # !! MUST BE SET BEFORE PROD CUTOVER !!
-        # `marchproxy.nest.svc` names a RETIRED product (marchproxy: repo
-        # archived, capability folded into Envoy / owning repos). If that
-        # Service no longer exists, the SPIRE server cannot reach its
-        # datastore and will not start — taking the whole mesh with it.
-        # Replace with the real prod PostgreSQL host before cutover; tracked
-        # as a blocking item in docs/v2-port/phase11-r3-r4-cutover-checklist.md.
-        host: "marchproxy.nest.svc"
+        # In-cluster PostgreSQL, the same convention as beta.yml / gamma.yml
+        # and every other chart in this repo (the `postgres` Service in the
+        # skauswatch namespace). This replaces the original chart's
+        # `marchproxy.nest.svc` default, which named a now-retired product and
+        # would not resolve. If prod instead uses a managed/external database
+        # (e.g. a DigitalOcean Managed PostgreSQL), override `host` here with
+        # that endpoint — it is the single value to change. The `spire`
+        # database and `spire-db-credentials` secret must exist before cutover.
+        host: "postgres"
         port: 5432
         dbName: spire
+        # Production keeps verify-full (do NOT downgrade). verify-full requires
+        # the server cert to chain to a trusted CA and match `host`; for an
+        # in-cluster or private-CA database, mount the CA bundle and set
+        # sslRootCert to its path (e.g. /run/spire/tls/ca.crt).
+        sslMode: "verify-full"
+        sslRootCert: ""
         secretName: spire-db-credentials
     nodeAttestation:
       k8sPsat:

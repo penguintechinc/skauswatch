@@ -35,7 +35,10 @@ spire:
     dataStore:
       type: postgresql
       postgresql:
-        host: "marchproxy.nest.svc"
+        # Example root-server datastore. Point at the root's own PostgreSQL
+        # (in-cluster `postgres` by convention, or a managed/external host);
+        # the original `marchproxy.nest.svc` named a retired product.
+        host: "postgres"
         port: 5432
         dbName: spire_root
         secretName: spire-root-db-credentials
