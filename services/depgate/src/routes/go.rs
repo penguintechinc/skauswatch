@@ -50,10 +50,20 @@ async fn dispatch(
 
     match parsed {
         GoRequest::List { module } => {
+            // Regression guard (finding: air-gap offline-mode egress
+            // bypass, metadata routes) — this metadata call has no cache
+            // to consult first, so gate it unconditionally.
+            crate::scanpipe::offline_guard(state.cfg.offline_mode, "go", module, "@v/list")?;
             let body = go.fetch_list(module, max_bytes).await?;
             Ok(([(axum::http::header::CONTENT_TYPE, "text/plain")], body).into_response())
         }
         GoRequest::Info { module, version } => {
+            crate::scanpipe::offline_guard(
+                state.cfg.offline_mode,
+                "go",
+                module,
+                &format!("{version}.info"),
+            )?;
             let body = go.fetch_info(module, version, max_bytes).await?;
             Ok(
                 Json(serde_json::from_slice::<serde_json::Value>(&body).unwrap_or_default())
@@ -287,5 +297,80 @@ mod tests {
             .authorization_bearer(&tok)
             .await;
         res.assert_status(StatusCode::NOT_FOUND);
+    }
+
+    /// Builds an offline-mode-enabled state pointed at `upstream` — shared
+    /// by both Go proxy metadata regression tests below.
+    fn offline_go_state(pool: PgPool, upstream_uri: &str) -> crate::state::AppState {
+        let mut state = AppStateInner::for_tests_with_go_proxy(
+            pool,
+            dev_license(),
+            GoProxyUpstreamClient::new(
+                reqwest::Client::new(),
+                GoProxyUpstreamConfig {
+                    base_url: upstream_uri.to_owned(),
+                },
+            ),
+        );
+        std::sync::Arc::get_mut(&mut state)
+            .expect("sole owner in test")
+            .cfg
+            .offline_mode = true;
+        state
+    }
+
+    // Regression: air-gap offline-mode egress bypass (metadata routes).
+    // Neither `@v/list` nor `@v/{version}.info` has a cache to consult,
+    // unlike the `.mod`/`.zip` paths — before the fix both reached
+    // upstream unconditionally regardless of `offline_mode`.
+    #[tokio::test]
+    async fn list_endpoint_refuses_upstream_egress_in_offline_mode() {
+        // Deliberately no mock mounted — any real request would 404 from
+        // wiremock's default "no matching stub" behavior, which we
+        // additionally confirm was never even sent.
+        let upstream = MockServer::start().await;
+        let pool = test_pool().await;
+        let state = offline_go_state(pool, &upstream.uri());
+        let tenant = Uuid::new_v4();
+        let tok = token(&state, tenant);
+        let server = test_server(state);
+        let res = server
+            .get("/go/github.com/pkg/errors/@v/list")
+            .authorization_bearer(&tok)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+
+        let received = upstream
+            .received_requests()
+            .await
+            .expect("wiremock request recording is enabled by default");
+        assert!(
+            received.is_empty(),
+            "offline mode must never contact the upstream module proxy, saw: {received:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn info_endpoint_refuses_upstream_egress_in_offline_mode() {
+        let upstream = MockServer::start().await;
+        let pool = test_pool().await;
+        let state = offline_go_state(pool, &upstream.uri());
+        let tenant = Uuid::new_v4();
+        let tok = token(&state, tenant);
+        let server = test_server(state);
+        let res = server
+            .get("/go/github.com/pkg/errors/@v/v0.9.1.info")
+            .authorization_bearer(&tok)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+
+        let received = upstream
+            .received_requests()
+            .await
+            .expect("wiremock request recording is enabled by default");
+        assert!(
+            received.is_empty(),
+            "offline mode must never contact the upstream module proxy, saw: {received:?}"
+        );
     }
 }

@@ -41,6 +41,10 @@ async fn simple_index(
     _tenant: TenantContext,
     Path(project): Path<String>,
 ) -> Result<Response, ApiError> {
+    // Regression guard (finding: air-gap offline-mode egress bypass,
+    // metadata routes) — this metadata call has no cache to consult first,
+    // so gate it unconditionally.
+    crate::scanpipe::offline_guard(state.cfg.offline_mode, "pypi", &project, "simple-index")?;
     let html = state
         .pypi
         .fetch_simple_index(&project, state.cfg.max_artifact_bytes)
@@ -62,6 +66,10 @@ async fn json_api(
     _tenant: TenantContext,
     Path(project): Path<String>,
 ) -> Result<Response, ApiError> {
+    // Regression guard (finding: air-gap offline-mode egress bypass,
+    // metadata routes) — this metadata call has no cache to consult first,
+    // so gate it unconditionally.
+    crate::scanpipe::offline_guard(state.cfg.offline_mode, "pypi", &project, "json-api")?;
     let doc = state
         .pypi
         .fetch_json_api(&project, state.cfg.max_artifact_bytes)
@@ -342,5 +350,98 @@ mod tests {
             .await;
         res.assert_status_ok();
         assert_eq!(res.as_bytes().as_ref(), body.as_slice());
+    }
+
+    /// Builds an offline-mode-enabled state pointed at `upstream` — shared
+    /// by both PyPI metadata regression tests below.
+    fn offline_pypi_state(pool: PgPool, upstream_uri: &str) -> crate::state::AppState {
+        let mut state = AppStateInner::for_tests_with_pypi(
+            pool,
+            dev_license(),
+            PypiUpstreamClient::new(
+                reqwest::Client::new(),
+                PypiUpstreamConfig {
+                    index_url: upstream_uri.to_owned(),
+                    files_url: upstream_uri.to_owned(),
+                    username: None,
+                    password: None,
+                },
+            ),
+            "https://depgate.internal",
+        );
+        std::sync::Arc::get_mut(&mut state)
+            .expect("sole owner in test")
+            .cfg
+            .offline_mode = true;
+        state
+    }
+
+    // Regression: air-gap offline-mode egress bypass (metadata routes).
+    // Neither PyPI metadata endpoint has a cache to consult, unlike the
+    // package-file path — before the fix both reached upstream
+    // unconditionally regardless of `offline_mode`.
+    #[tokio::test]
+    async fn simple_index_endpoint_refuses_upstream_egress_in_offline_mode() {
+        // Deliberately no mock mounted — any real request would 404 from
+        // wiremock's default "no matching stub" behavior, which we
+        // additionally confirm was never even sent.
+        let upstream = MockServer::start().await;
+        let pool = test_pool().await;
+        let state = offline_pypi_state(pool, &upstream.uri());
+
+        let tenant = Uuid::new_v4();
+        let token = skauswatch_testkit::jwt::mint_claims_token(
+            &state.jwt_secret,
+            "user-1",
+            &tenant.to_string(),
+            "*:read",
+            &["admin"],
+        );
+        let server = test_server(state);
+        let res = server
+            .get("/pypi/simple/requests/")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+
+        let received = upstream
+            .received_requests()
+            .await
+            .expect("wiremock request recording is enabled by default");
+        assert!(
+            received.is_empty(),
+            "offline mode must never contact the upstream index, saw: {received:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn json_api_endpoint_refuses_upstream_egress_in_offline_mode() {
+        let upstream = MockServer::start().await;
+        let pool = test_pool().await;
+        let state = offline_pypi_state(pool, &upstream.uri());
+
+        let tenant = Uuid::new_v4();
+        let token = skauswatch_testkit::jwt::mint_claims_token(
+            &state.jwt_secret,
+            "user-1",
+            &tenant.to_string(),
+            "*:read",
+            &["admin"],
+        );
+        let server = test_server(state);
+        let res = server
+            .get("/pypi/pypi/requests/json")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+
+        let received = upstream
+            .received_requests()
+            .await
+            .expect("wiremock request recording is enabled by default");
+        assert!(
+            received.is_empty(),
+            "offline mode must never contact the upstream index, saw: {received:?}"
+        );
     }
 }

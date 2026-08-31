@@ -66,3 +66,39 @@ spec:
         - ports:
             - port: "443"
               protocol: TCP
+    # ASM scan traffic (masscan port discovery, banner grab, TLS cert
+    # fetch, headless-Chromium screenshot capture -- services/scanner/src/
+    # asm.rs) needs to reach arbitrary tenant-supplied targets on
+    # arbitrary ports; that's the point of attack-surface scanning, so
+    # this can't be a narrow toPorts allowlist the way the dependencies
+    # above are. Network-layer defense-in-depth for the SSRF finding this
+    # chart's app-layer fix addresses (services/scanner/src/
+    # target_safety.rs + services/manager/src/routes/asm.rs): `except`
+    # carves the same link-local/IMDS, RFC1918, CGNAT, loopback, and
+    # multicast ranges out of this allow, so an app-layer validation bug
+    # or bypass still can't reach cloud metadata or in-cluster services
+    # over the network. This is defense-in-depth, NOT the primary
+    # control -- a CIDR-only network policy can never catch a *domain*
+    # target that resolves safely now and to a blocked address later
+    # (DNS rebinding); the app-layer post-resolution re-check is what
+    # actually closes that gap. ASM's "internal" scan mode
+    # (`asm_scans.mode`) is stored but not yet wired to any differentiated
+    # network path in this worker, so there is no legitimate in-cluster/
+    # RFC1918 scan traffic to preserve here today.
+    - toCIDRSet:
+        - cidr: "0.0.0.0/0"
+          except:
+            - "0.0.0.0/8"
+            - "10.0.0.0/8"
+            - "100.64.0.0/10"
+            - "127.0.0.0/8"
+            - "169.254.0.0/16"
+            - "172.16.0.0/12"
+            - "192.168.0.0/16"
+            - "224.0.0.0/4"
+        - cidr: "::/0"
+          except:
+            - "::1/128"
+            - "fc00::/7"
+            - "fe80::/10"
+            - "ff00::/8"

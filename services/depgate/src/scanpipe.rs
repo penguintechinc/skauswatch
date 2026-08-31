@@ -137,6 +137,38 @@ pub struct ScanPipeline<'a> {
     pub cosign_public_key: Option<&'a str>,
 }
 
+/// Refuses an upstream call when air-gap serve mode (§6b) is enabled —
+/// `Err(PipelineError::OfflineMiss)` fail-closed, same shape
+/// [`ScanPipeline`]'s binary-artifact paths (`resolve_manifest`,
+/// `resolve_blob`, `resolve_named`, `list_tags`) already use via the
+/// private method of the same name below.
+///
+/// A free function (not a `ScanPipeline` method) because the metadata
+/// routes — npm packument, PyPI simple-index/JSON API, crates.io sparse
+/// index, Go `@v/list`/`.info` — reach their upstream client directly off
+/// `AppState` and never construct a `ScanPipeline`. Regression guard,
+/// finding: air-gap offline-mode egress bypass (metadata routes) — every
+/// metadata handler MUST call this before its upstream fetch, mirroring
+/// what the binary paths already did.
+///
+/// # Errors
+/// [`PipelineError::OfflineMiss`] when `offline_mode` is `true`.
+pub fn offline_guard(
+    offline_mode: bool,
+    ecosystem: &str,
+    name: &str,
+    reference: &str,
+) -> Result<(), PipelineError> {
+    if offline_mode {
+        return Err(PipelineError::OfflineMiss {
+            ecosystem: ecosystem.to_owned(),
+            name: name.to_owned(),
+            reference: reference.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 impl ScanPipeline<'_> {
     /// Resolves `GET|HEAD /v2/{name}/manifests/{reference}`.
     ///
@@ -254,8 +286,12 @@ impl ScanPipeline<'_> {
     /// never touches the cache, scanner, or DB.
     ///
     /// # Errors
-    /// See [`PipelineError`].
+    /// See [`PipelineError`]. Regression guard (finding: air-gap
+    /// offline-mode egress bypass, metadata routes): this is a metadata
+    /// call with no cache to check first, so the offline gate applies
+    /// unconditionally rather than only after a cache miss.
     pub async fn list_tags(&self, name: &str) -> Result<serde_json::Value, PipelineError> {
+        self.offline_guard("oci", name, "tags/list")?;
         Ok(self.upstream.list_tags(name).await?)
     }
 
@@ -286,21 +322,17 @@ impl ScanPipeline<'_> {
 
     /// Refuses to proceed to an upstream fetch when air-gap serve mode
     /// (§6b) is enabled — called immediately before every upstream call in
-    /// this module, right after a cache-miss is confirmed.
+    /// this module, right after a cache-miss is confirmed. Delegates to the
+    /// free [`offline_guard`] function so the exact same gate/error shape
+    /// is available to metadata route handlers that never construct a
+    /// `ScanPipeline` at all (see that function's docs).
     fn offline_guard(
         &self,
         ecosystem: &str,
         name: &str,
         reference: &str,
     ) -> Result<(), PipelineError> {
-        if self.offline_mode {
-            return Err(PipelineError::OfflineMiss {
-                ecosystem: ecosystem.to_owned(),
-                name: name.to_owned(),
-                reference: reference.to_owned(),
-            });
-        }
-        Ok(())
+        offline_guard(self.offline_mode, ecosystem, name, reference)
     }
 
     /// Attempts to serve `hex` purely from the S3 cache: reads the tag set
@@ -1237,6 +1269,53 @@ mod tests {
             )
             .await
             .expect_err("offline mode must refuse a cache miss");
+        assert!(matches!(err, PipelineError::OfflineMiss { .. }));
+
+        let received = upstream_server
+            .received_requests()
+            .await
+            .expect("wiremock request recording is enabled by default");
+        assert!(
+            received.is_empty(),
+            "offline mode must never contact the upstream registry, saw: {received:?}"
+        );
+    }
+
+    // Regression: air-gap offline-mode egress bypass (metadata routes).
+    // `list_tags` has no cache to consult at all — before the fix it
+    // reached upstream unconditionally regardless of `offline_mode`.
+    #[tokio::test]
+    async fn offline_mode_blocks_list_tags_without_touching_upstream() {
+        // Deliberately no mocks mounted on the upstream server — any real
+        // request would 404 from wiremock's default "no matching stub"
+        // behavior, which we additionally confirm was never even sent.
+        let upstream_server = MockServer::start().await;
+
+        let engine = clean_engine().await;
+        let pool = test_pool().await;
+        let upstream = upstream_client(&upstream_server.uri());
+        let stats = CacheStats::default();
+        let s3 = MockServer::start().await;
+        let pipeline = ScanPipeline {
+            upstream: &upstream,
+            s3: &mock_s3_client(&s3.uri()),
+            bucket: "bkt",
+            cache_prefix: "sha256/",
+            quarantine_prefix: "quarantine/",
+            scan_engine: &engine,
+            db: &pool,
+            max_artifact_bytes: 1024,
+            cache_stats: &stats,
+            offline_mode: true,
+            fail_posture: crate::config::FailPosture::Closed,
+            socket: crate::socket::SocketClient::disabled_ref(),
+            cosign_public_key: None,
+        };
+
+        let err = pipeline
+            .list_tags("library/nginx")
+            .await
+            .expect_err("offline mode must refuse a tags/list call");
         assert!(matches!(err, PipelineError::OfflineMiss { .. }));
 
         let received = upstream_server
