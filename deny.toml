@@ -34,6 +34,19 @@ ignore = [
     # >=36.0.13<37, >=46.0.2<47, >=47.0.3. Drop this + `cargo update -p wasmtime`
     # the moment yara-x bumps its wasmtime pin into a patched range.
     "RUSTSEC-2026-0222",
+    # wasmtime WASI-filesystem sandbox escape via trailing-slash path handling
+    # (RUSTSEC-2026-0269, published 2026-08). Transitive via yara-x (=1.19.0,
+    # requires wasmtime ~43; patched ranges are >=24.0.13<25, >=36.0.14<37,
+    # >=46.0.3<47, >=47.0.4 — none reachable without a yara-x bump). NOT
+    # REACHABLE HERE AT ALL: the vulnerable code lives in the WASI filesystem
+    # layer (wasmtime-wasi / wasi-common / cap-std), and none of those crates
+    # are in our dependency graph (`grep -c wasmtime-wasi Cargo.lock` == 0).
+    # yara-x embeds wasmtime purely to evaluate compiled YARA rules over
+    # in-memory scan bytes — it grants the guest no WASI context and no
+    # preopened directories — so the vulnerable path is not merely unexercised,
+    # it is not compiled in. Drop this + `cargo update -p wasmtime` the moment
+    # yara-x bumps its wasmtime pin into a patched range.
+    "RUSTSEC-2026-0269",
 ]
 
 [licenses]
