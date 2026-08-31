@@ -50,6 +50,11 @@ async fn index_proxy(
     // proxied straight through to the equivalent upstream path rather than
     // re-deriving it from a crate name, so this route works unmodified even
     // if crates.io's prefixing convention ever changes.
+    //
+    // Regression guard (finding: air-gap offline-mode egress bypass,
+    // metadata routes) — this metadata call has no cache to consult first,
+    // so gate it unconditionally.
+    crate::scanpipe::offline_guard(state.cfg.offline_mode, "crates", &rest, "sparse-index")?;
     let fetched = state
         .cratesio
         .fetch_index_path(&rest, state.cfg.max_artifact_bytes)
@@ -271,5 +276,52 @@ mod tests {
             .await;
         res.assert_status_ok();
         assert_eq!(res.as_bytes().as_ref(), body.as_slice());
+    }
+
+    // Regression: air-gap offline-mode egress bypass (metadata routes).
+    // The sparse-index proxy has no cache to consult, unlike the download
+    // path — before the fix it reached upstream unconditionally regardless
+    // of `offline_mode`.
+    #[tokio::test]
+    async fn index_proxy_refuses_upstream_egress_in_offline_mode() {
+        // Deliberately no mock mounted — any real request would 404 from
+        // wiremock's default "no matching stub" behavior, which we
+        // additionally confirm was never even sent.
+        let upstream = MockServer::start().await;
+
+        let pool = test_pool().await;
+        let mut state = AppStateInner::for_tests_with_cratesio(
+            pool,
+            dev_license(),
+            CratesIoUpstreamClient::new(
+                reqwest::Client::new(),
+                CratesIoUpstreamConfig {
+                    index_url: upstream.uri(),
+                    api_url: String::new(),
+                },
+            ),
+        );
+        std::sync::Arc::get_mut(&mut state)
+            .expect("sole owner in test")
+            .cfg
+            .offline_mode = true;
+
+        let tenant = Uuid::new_v4();
+        let tok = token(&state, tenant);
+        let server = test_server(state);
+        let res = server
+            .get("/crates/index/se/rd/serde")
+            .authorization_bearer(&tok)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+
+        let received = upstream
+            .received_requests()
+            .await
+            .expect("wiremock request recording is enabled by default");
+        assert!(
+            received.is_empty(),
+            "offline mode must never contact the upstream index, saw: {received:?}"
+        );
     }
 }

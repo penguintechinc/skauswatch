@@ -41,6 +41,10 @@ async fn dispatch(
 
     match parsed {
         NpmRequest::Packument { name } => {
+            // Regression guard (finding: air-gap offline-mode egress
+            // bypass, metadata routes) — this metadata call has no cache
+            // to consult first, so gate it unconditionally.
+            crate::scanpipe::offline_guard(state.cfg.offline_mode, "npm", name, "packument")?;
             let doc = state
                 .npm
                 .fetch_packument(name, state.cfg.max_artifact_bytes)
@@ -253,5 +257,60 @@ mod tests {
             .await;
         res.assert_status_ok();
         assert_eq!(res.as_bytes().as_ref(), body.as_slice());
+    }
+
+    // Regression: air-gap offline-mode egress bypass (metadata routes).
+    // The packument endpoint has no cache to consult, unlike the tarball
+    // path — before the fix it reached upstream unconditionally regardless
+    // of `offline_mode`.
+    #[tokio::test]
+    async fn packument_endpoint_refuses_upstream_egress_in_offline_mode() {
+        // Deliberately no mock mounted for this path — any real request
+        // would 404 from wiremock's default "no matching stub" behavior,
+        // which we additionally confirm was never even sent.
+        let upstream = MockServer::start().await;
+
+        let pool = test_pool().await;
+        let npm_client = NpmUpstreamClient::new(
+            reqwest::Client::new(),
+            NpmUpstreamConfig {
+                registry_url: upstream.uri(),
+                token: None,
+            },
+        );
+        let mut state = AppStateInner::for_tests_with_npm(
+            pool,
+            dev_license(),
+            npm_client,
+            "https://depgate.internal",
+        );
+        std::sync::Arc::get_mut(&mut state)
+            .expect("sole owner in test")
+            .cfg
+            .offline_mode = true;
+
+        let tenant = Uuid::new_v4();
+        let token = skauswatch_testkit::jwt::mint_claims_token(
+            &state.jwt_secret,
+            "user-1",
+            &tenant.to_string(),
+            "*:read",
+            &["admin"],
+        );
+        let server = test_server(state);
+        let res = server
+            .get("/npm/left-pad")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status(StatusCode::NOT_FOUND);
+
+        let received = upstream
+            .received_requests()
+            .await
+            .expect("wiremock request recording is enabled by default");
+        assert!(
+            received.is_empty(),
+            "offline mode must never contact the upstream registry, saw: {received:?}"
+        );
     }
 }

@@ -31,6 +31,8 @@
 //! empty list / a report with an empty `screenshots` array until that stage
 //! lands.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
@@ -85,6 +87,175 @@ fn check_len(s: &str, field: &str, min: usize, max: usize) -> Result<(), ApiErro
             field,
             &format!("String should have at most {max} characters"),
         ));
+    }
+    Ok(())
+}
+
+// ============================================
+// SSRF hardening (creation-time layer)
+// ============================================
+//
+// **Regression coverage for a CONFIRMED HIGH security-review finding**:
+// `target` previously reached the scanner (masscan → banner-grab →
+// TLS-cert fetch → headless-Chromium screenshot) with only this file's
+// empty/length check — no block on link-local (including
+// `169.254.169.254`, the AWS IMDS well-known address), loopback, or
+// RFC1918/CGNAT ranges. An ordinary tenant (`admin`/`maintainer` role)
+// could scan the platform's own cloud metadata or internal services and
+// have the results (including a Chromium-rendered screenshot) handed
+// back. This is the lighter, creation-time half of the fix — the
+// critical half lives in `services/scanner/src/target_safety.rs`
+// (`resolve_target_for_masscan` + the per-masscan-discovered-IP re-check
+// in `asm.rs::run_asm_scan`), since a domain accepted here can still
+// resolve to a blocked address by the time the scanner dispatches (DNS
+// rebinding) — this creation-time check alone would not catch that.
+//
+// Deliberately duplicated here rather than shared via a workspace crate:
+// this fix is scoped to `services/scanner/**` +
+// `services/manager/src/routes/asm.rs` only, so the blocklist logic is a
+// small, self-contained, pure-`std` copy (no new dependency) rather than
+// a shared crate this file isn't allowed to introduce.
+//
+// Asset-ownership verification (v1's `scan_targets` FK model) is
+// intentionally **not** restored here — out of scope for this hotfix,
+// which closes the SSRF path via IP-range validation only; see this
+// module's doc comment's "Scope note" and
+// `docs/v2-port/phase12-scope-scan-monitor.md` for the tracked follow-up
+// to add a per-tenant target-allowlist/verification gate.
+
+/// IPv4 ranges disallowed as scan destinations: "this network"/
+/// unspecified, RFC1918 private space, CGNAT (RFC6598), loopback,
+/// link-local (which includes the cloud IMDS well-known address
+/// `169.254.169.254`), and multicast.
+const BLOCKED_V4: &[(Ipv4Addr, u8)] = &[
+    (Ipv4Addr::new(0, 0, 0, 0), 8),
+    (Ipv4Addr::new(10, 0, 0, 0), 8),
+    (Ipv4Addr::new(100, 64, 0, 0), 10),
+    (Ipv4Addr::new(127, 0, 0, 0), 8),
+    (Ipv4Addr::new(169, 254, 0, 0), 16),
+    (Ipv4Addr::new(172, 16, 0, 0), 12),
+    (Ipv4Addr::new(192, 168, 0, 0), 16),
+    (Ipv4Addr::new(224, 0, 0, 0), 4),
+];
+
+/// IPv6 ranges disallowed as scan destinations: loopback, unique-local
+/// (ULA — the IPv6 analogue of RFC1918), link-local, and multicast.
+const BLOCKED_V6: &[(Ipv6Addr, u8)] = &[
+    (Ipv6Addr::LOCALHOST, 128),
+    (Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7),
+    (Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
+    (Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
+];
+
+/// Inclusive `[network, broadcast]` bounds of `addr/prefix`.
+fn v4_bounds(addr: Ipv4Addr, prefix: u8) -> (u32, u32) {
+    let addr = u32::from(addr);
+    if prefix == 0 {
+        (0, u32::MAX)
+    } else if prefix >= 32 {
+        (addr, addr)
+    } else {
+        let mask = !0u32 << (32 - prefix);
+        let network = addr & mask;
+        (network, network | !mask)
+    }
+}
+
+/// Inclusive `[network, broadcast]` bounds of `addr/prefix` (IPv6
+/// analogue of [`v4_bounds`]).
+fn v6_bounds(addr: Ipv6Addr, prefix: u8) -> (u128, u128) {
+    let addr = u128::from(addr);
+    if prefix == 0 {
+        (0, u128::MAX)
+    } else if prefix >= 128 {
+        (addr, addr)
+    } else {
+        let mask = !0u128 << (128 - prefix);
+        let network = addr & mask;
+        (network, network | !mask)
+    }
+}
+
+fn point_in<T: PartialOrd>(point: T, bounds: (T, T)) -> bool {
+    bounds.0 <= point && point <= bounds.1
+}
+
+fn ranges_overlap<T: PartialOrd>(a: (T, T), b: (T, T)) -> bool {
+    a.0 <= b.1 && b.0 <= a.1
+}
+
+/// True if `ip` falls within any disallowed range. IPv4-mapped IPv6
+/// addresses (`::ffff:a.b.c.d`) are normalized to plain IPv4 first via
+/// [`IpAddr::to_canonical`] — a well-known blocklist-bypass technique
+/// otherwise.
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => {
+            let point = u32::from(v4);
+            BLOCKED_V4
+                .iter()
+                .any(|&(net, prefix)| point_in(point, v4_bounds(net, prefix)))
+        }
+        IpAddr::V6(v6) => {
+            let point = u128::from(v6);
+            BLOCKED_V6
+                .iter()
+                .any(|&(net, prefix)| point_in(point, v6_bounds(net, prefix)))
+        }
+    }
+}
+
+/// True if `addr/prefix` overlaps any disallowed range in either
+/// direction — the requested CIDR might itself sit inside a blocked range
+/// (e.g. `169.254.1.0/24`), or be broad enough to swallow one (e.g.
+/// `0.0.0.0/0`, `10.0.0.0/7`).
+fn is_blocked_cidr(addr: IpAddr, prefix: u8) -> bool {
+    match addr.to_canonical() {
+        IpAddr::V4(v4) => {
+            let req = v4_bounds(v4, prefix);
+            BLOCKED_V4
+                .iter()
+                .any(|&(net, net_prefix)| ranges_overlap(req, v4_bounds(net, net_prefix)))
+        }
+        IpAddr::V6(v6) => {
+            let req = v6_bounds(v6, prefix);
+            BLOCKED_V6
+                .iter()
+                .any(|&(net, net_prefix)| ranges_overlap(req, v6_bounds(net, net_prefix)))
+        }
+    }
+}
+
+const TARGET_BLOCKED_MSG: &str = "Target resolves to a disallowed address range (link-local/metadata, loopback, private, \
+     CGNAT, or multicast)";
+
+/// Creation-time SSRF check for a scan `target`: a literal IP or CIDR is
+/// validated directly against the same blocklist the scanner worker uses
+/// (see this section's module doc). A domain name is *not* resolved
+/// here — synchronous DNS resolution in a request handler is its own
+/// SSRF-adjacent hazard, and would be vulnerable to rebinding between
+/// this check and actual scan time regardless — so domain-form targets
+/// are accepted here and re-checked after resolution by the scanner
+/// worker immediately before dispatch (`services/scanner/src/
+/// target_safety.rs::resolve_target_for_masscan`), which is the layer
+/// that actually closes the SSRF path for domain targets.
+fn validate_target_safety(target: &str) -> Result<(), ApiError> {
+    if let Some((addr_part, prefix_part)) = target.split_once('/')
+        && let (Ok(addr), Ok(prefix)) = (addr_part.parse::<IpAddr>(), prefix_part.parse::<u8>())
+    {
+        let max_prefix = if addr.is_ipv4() { 32 } else { 128 };
+        if prefix > max_prefix {
+            return Err(validation("target", "Invalid CIDR prefix length"));
+        }
+        if is_blocked_cidr(addr, prefix) {
+            return Err(validation("target", TARGET_BLOCKED_MSG));
+        }
+        return Ok(());
+    }
+    if let Ok(ip) = target.parse::<IpAddr>()
+        && is_blocked_ip(ip)
+    {
+        return Err(validation("target", TARGET_BLOCKED_MSG));
     }
     Ok(())
 }
@@ -251,6 +422,7 @@ pub(crate) async fn create_asm_scan(
         _ => return Err(validation("target", "Field required")),
     };
     check_len(target, "target", 1, 2048)?;
+    validate_target_safety(target)?;
     let mode = body.mode.unwrap_or_else(|| "external".to_owned());
     if !MODES.contains(&mode.as_str()) {
         return Err(validation("mode", MODE_MSG));
@@ -878,6 +1050,80 @@ mod tests {
         (axum_test::TestServer::new(app), state)
     }
 
+    // ---------- pure validator unit tests (no DB/HTTP) — every required
+    // blocked range, v4 + v6, plus representative allowed public targets ----------
+
+    #[test]
+    fn blocks_aws_imds_link_local() {
+        assert!(is_blocked_ip("169.254.169.254".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocks_v4_loopback() {
+        assert!(is_blocked_ip("127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocks_rfc1918_ranges() {
+        assert!(is_blocked_ip("10.1.2.3".parse().unwrap()));
+        assert!(is_blocked_ip("172.16.0.1".parse().unwrap()));
+        assert!(is_blocked_ip("172.31.255.254".parse().unwrap()));
+        assert!(is_blocked_ip("192.168.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocks_unspecified_cgnat_and_multicast() {
+        assert!(is_blocked_ip("0.0.0.0".parse().unwrap()));
+        assert!(is_blocked_ip("100.64.0.1".parse().unwrap()));
+        assert!(is_blocked_ip("100.127.255.254".parse().unwrap()));
+        assert!(is_blocked_ip("224.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocks_v6_loopback_ula_link_local_multicast() {
+        assert!(is_blocked_ip("::1".parse().unwrap()));
+        assert!(is_blocked_ip("fc00::1".parse().unwrap()));
+        assert!(is_blocked_ip("fd12:3456:789a::1".parse().unwrap()));
+        assert!(is_blocked_ip("fe80::1".parse().unwrap()));
+        assert!(is_blocked_ip("ff02::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocks_ipv4_mapped_ipv6_bypass_attempt() {
+        assert!(is_blocked_ip("::ffff:169.254.169.254".parse().unwrap()));
+    }
+
+    #[test]
+    fn allows_representative_public_targets() {
+        assert!(!is_blocked_ip("8.8.8.8".parse().unwrap()));
+        assert!(!is_blocked_ip("1.1.1.1".parse().unwrap()));
+        assert!(!is_blocked_ip("203.0.113.5".parse().unwrap()));
+        assert!(!is_blocked_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocks_cidr_inside_and_broader_than_blocked_ranges() {
+        assert!(is_blocked_cidr("169.254.1.0".parse().unwrap(), 24));
+        assert!(is_blocked_cidr("0.0.0.0".parse().unwrap(), 0));
+        assert!(is_blocked_cidr("10.0.0.0".parse().unwrap(), 7));
+    }
+
+    #[test]
+    fn allows_public_cidr() {
+        assert!(!is_blocked_cidr("203.0.113.0".parse().unwrap(), 24));
+        assert!(!is_blocked_cidr("2606:4700::".parse().unwrap(), 32));
+    }
+
+    #[test]
+    fn validate_target_safety_rejects_blocked_and_accepts_public_and_domain() {
+        assert!(validate_target_safety("169.254.169.254").is_err());
+        assert!(validate_target_safety("10.0.0.0/8").is_err());
+        assert!(validate_target_safety("203.0.113.5").is_ok());
+        assert!(validate_target_safety("203.0.113.0/24").is_ok());
+        // Domain forms are deferred, not resolved here — see the fn doc.
+        assert!(validate_target_safety("scan-target.example").is_ok());
+    }
+
     #[tokio::test]
     async fn all_routes_require_auth() {
         let (server, _state) = server_and_state().await;
@@ -954,6 +1200,75 @@ mod tests {
         res.assert_status(StatusCode::BAD_REQUEST);
     }
 
+    // ---------- SSRF hardening regression coverage (security review
+    // finding: `target` reached masscan + headless Chromium with no block
+    // on link-local/IMDS/loopback/RFC1918; see `validate_target_safety`'s
+    // module doc) ----------
+
+    #[tokio::test]
+    async fn create_scan_rejects_link_local_metadata_target() {
+        let (server, state) = server_and_state().await;
+        let (_, token) =
+            test_support::authed_user(&state, "admin-ssrf1@example.com", "admin").await;
+        let res = server
+            .post("/api/v1/asm/scans")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"target": "169.254.169.254"}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["details"][0]["loc"], serde_json::json!(["target"]));
+    }
+
+    #[tokio::test]
+    async fn create_scan_rejects_private_cidr_target() {
+        let (server, state) = server_and_state().await;
+        let (_, token) =
+            test_support::authed_user(&state, "admin-ssrf2@example.com", "admin").await;
+        for target in ["10.0.0.0/8", "192.168.0.0/16", "0.0.0.0/0"] {
+            let res = server
+                .post("/api/v1/asm/scans")
+                .authorization_bearer(&token)
+                .json(&serde_json::json!({"target": target}))
+                .await;
+            res.assert_status(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn create_scan_rejects_loopback_and_v6_targets() {
+        let (server, state) = server_and_state().await;
+        let (_, token) =
+            test_support::authed_user(&state, "admin-ssrf3@example.com", "admin").await;
+        for target in ["127.0.0.1", "::1", "fe80::1"] {
+            let res = server
+                .post("/api/v1/asm/scans")
+                .authorization_bearer(&token)
+                .json(&serde_json::json!({"target": target}))
+                .await;
+            res.assert_status(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    /// A domain-form target is accepted here — creation-time validation
+    /// can't safely resolve DNS, so this is deferred to the scanner
+    /// worker's post-resolution check (`target_safety::
+    /// resolve_target_for_masscan`), which is the layer that actually
+    /// closes the SSRF path for domains (see this module's SSRF section
+    /// doc comment).
+    #[tokio::test]
+    async fn create_scan_accepts_domain_target_deferred_to_scanner() {
+        let (server, state) = server_and_state().await;
+        let (_, token) =
+            test_support::authed_user(&state, "admin-ssrf4@example.com", "admin").await;
+        let res = server
+            .post("/api/v1/asm/scans")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({"target": "scan-target.example"}))
+            .await;
+        res.assert_status(StatusCode::CREATED);
+    }
+
     #[tokio::test]
     async fn create_scan_persists_row_defaults_and_is_readable() {
         let (server, state) = server_and_state().await;
@@ -962,11 +1277,11 @@ mod tests {
         let res = server
             .post("/api/v1/asm/scans")
             .authorization_bearer(&token)
-            .json(&serde_json::json!({"target": "192.168.1.0/24"}))
+            .json(&serde_json::json!({"target": "203.0.113.0/24"}))
             .await;
         res.assert_status(StatusCode::CREATED);
         let body: serde_json::Value = res.json();
-        assert_eq!(body["target"], "192.168.1.0/24");
+        assert_eq!(body["target"], "203.0.113.0/24");
         assert_eq!(body["mode"], "external");
         assert_eq!(body["status"], "pending");
         assert_eq!(body["ports_config"]["rate"], 1000);
@@ -978,7 +1293,7 @@ mod tests {
             .await;
         get_res.assert_status_ok();
         let get_body: serde_json::Value = get_res.json();
-        assert_eq!(get_body["target"], "192.168.1.0/24");
+        assert_eq!(get_body["target"], "203.0.113.0/24");
     }
 
     #[tokio::test]

@@ -91,6 +91,7 @@ use uuid::Uuid;
 use x509_parser::prelude::FromDer as _;
 
 use crate::message::ScannerResult;
+use crate::target_safety;
 
 /// Well-known ports probed by default when the trigger request supplies no
 /// extras — mirrors v1's ASM default surface
@@ -805,27 +806,72 @@ pub async fn run_asm_scan(
         Ok(_) => {}
     }
 
-    let open_ports =
-        match run_masscan(&cfg.masscan_bin, target, &ports, rate, cfg.masscan_timeout).await {
-            Ok(ports) => ports,
-            Err(e) => {
-                let msg = e.to_string();
-                let _ = sqlx::query(
-                "UPDATE asm_scans SET status = 'failed', completed_at = now(), error_message = $3 \
-                 WHERE id = $1 AND tenant_id = $2",
-            )
-            .bind(scan_id)
-            .bind(tenant_id)
-            .bind(&msg)
-            .execute(pool)
-            .await;
-                return error_result(target, &msg, start);
-            }
-        };
+    // SSRF hardening, layer 1: resolve `target` to the exact address(es)
+    // masscan will scan and reject up front if any of them (or, for a
+    // literal IP/CIDR target, the target itself) falls in a disallowed
+    // range — see `crate::target_safety` module doc. Fails the scan closed
+    // with a recorded reason rather than ever invoking masscan. `target`
+    // (the original string) is preserved everywhere else — DB rows, diff
+    // lookups, the result summary — only the masscan invocation gets the
+    // resolved/validated form.
+    let masscan_target = match target_safety::resolve_target_for_masscan(target).await {
+        Ok(t) => t,
+        Err(e) => {
+            let msg = e.to_string();
+            mark_scan_failed(pool, scan_id, tenant_id, &msg).await;
+            tracing::warn!(scan_id, target, reason = %msg, "asm scan target rejected by SSRF blocklist before masscan dispatch");
+            return error_result(target, &msg, start);
+        }
+    };
+
+    let open_ports = match run_masscan(
+        &cfg.masscan_bin,
+        &masscan_target,
+        &ports,
+        rate,
+        cfg.masscan_timeout,
+    )
+    .await
+    {
+        Ok(ports) => ports,
+        Err(e) => {
+            let msg = e.to_string();
+            mark_scan_failed(pool, scan_id, tenant_id, &msg).await;
+            return error_result(target, &msg, start);
+        }
+    };
 
     // Group by IP, preserving masscan's discovery order for determinism.
+    //
+    // SSRF hardening, layer 2 (anti-rebinding — the layer that actually
+    // matters): every masscan-discovered IP is re-validated against the
+    // same blocklist right here, before any banner-grab/cert-fetch/
+    // screenshot stage acts on it. `target` may have resolved safely at
+    // layer 1 (`resolve_target_for_masscan`, above) and rebound to a
+    // private/metadata address by the time masscan actually connected —
+    // masscan's own report carries the address it actually reached, and
+    // that's what gets checked now. A blocked IP is dropped entirely (no
+    // `asm_hosts` row, no findings) with the reason logged.
     let mut ips: Vec<String> = Vec::new();
     for op in &open_ports {
+        match op.ip.parse::<std::net::IpAddr>() {
+            Ok(addr) if target_safety::is_blocked_ip(addr) => {
+                tracing::warn!(
+                    scan_id, ip = %op.ip, port = op.port,
+                    "asm masscan-discovered IP is in a disallowed range, dropping finding \
+                     (possible DNS rebinding)"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    scan_id, ip = %op.ip, error = %e,
+                    "asm masscan reported an unparseable IP, dropping finding"
+                );
+                continue;
+            }
+            Ok(_) => {}
+        }
         if !ips.contains(&op.ip) {
             ips.push(op.ip.clone());
         }
@@ -884,15 +930,7 @@ pub async fn run_asm_scan(
 
     if let Err(e) = persist_findings(pool, tenant_id, scan_id, &ips, &findings, cfg).await {
         let msg = format!("failed to persist asm findings: {e}");
-        let _ = sqlx::query(
-            "UPDATE asm_scans SET status = 'failed', completed_at = now(), error_message = $3 \
-             WHERE id = $1 AND tenant_id = $2",
-        )
-        .bind(scan_id)
-        .bind(tenant_id)
-        .bind(&msg)
-        .execute(pool)
-        .await;
+        mark_scan_failed(pool, scan_id, tenant_id, &msg).await;
         return error_result(target, &msg, start);
     }
 
@@ -925,6 +963,27 @@ pub async fn run_asm_scan(
         status: "success".to_owned(),
         error_message: None,
         timestamp: Utc::now().to_rfc3339(),
+    }
+}
+
+/// Marks `asm_scans` row `scan_id` `'failed'` with `message` as
+/// `error_message` — the shared tail of every early-return failure path in
+/// [`run_asm_scan`] (SSRF-blocked target, masscan spawn/exit/timeout,
+/// findings-persist error). Best-effort: a failure to even record the
+/// failure is logged, not propagated — the caller already has its own
+/// error to return.
+async fn mark_scan_failed(pool: &PgPool, scan_id: i64, tenant_id: Uuid, message: &str) {
+    let result = sqlx::query(
+        "UPDATE asm_scans SET status = 'failed', completed_at = now(), error_message = $3 \
+         WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(scan_id)
+    .bind(tenant_id)
+    .bind(message)
+    .execute(pool)
+    .await;
+    if let Err(e) = result {
+        tracing::error!(scan_id, error = %e, "failed to record asm scan failure");
     }
 }
 
@@ -1815,12 +1874,17 @@ mod tests {
     async fn run_asm_scan_masscan_failure_marks_scan_failed_with_net_raw_message() {
         let pool = db_pool().await;
         let tenant = tenant_uuid(TENANT_A);
-        let scan_id = seed_pending_scan(&pool, tenant, "target-fail.example").await;
+        // A literal (public-range) IP, not a domain: this test exercises
+        // the masscan-spawn-failure path specifically, and a domain-form
+        // target would now be DNS-resolved by the SSRF layer-1 check
+        // before ever reaching masscan (see `target_safety`), which would
+        // change which error this test observes.
+        let scan_id = seed_pending_scan(&pool, tenant, "203.0.113.9").await;
 
         let result = run_asm_scan(
             &pool,
             tenant,
-            "target-fail.example",
+            "203.0.113.9",
             &serde_json::json!({"scan_id": scan_id}),
             &test_cfg("/nonexistent/definitely-not-masscan"),
         )
@@ -1836,6 +1900,135 @@ mod tests {
                 .expect("scan row");
         assert_eq!(row.0, "failed");
         assert!(row.1.expect("error message stored").contains("NET_RAW"));
+    }
+
+    // ---------- SSRF hardening regression coverage (security review
+    // finding: ASM `target` reached masscan/headless-Chromium with no
+    // block on link-local/IMDS/loopback/RFC1918; see
+    // `crate::target_safety` module doc) ----------
+
+    /// Layer 1: a literal target in a disallowed range must be rejected
+    /// *before* masscan is ever invoked. `masscan_bin` points at a path
+    /// that does not exist — if the SSRF check failed to short-circuit,
+    /// the failure would instead surface as the "masscan binary
+    /// unavailable ... NET_RAW" spawn error (see the test above), not this
+    /// blocklist message, so asserting the message content also proves
+    /// masscan was never dispatched.
+    #[tokio::test]
+    async fn run_asm_scan_blocked_literal_target_never_reaches_masscan() {
+        let pool = db_pool().await;
+        let tenant = tenant_uuid(TENANT_A);
+        let scan_id = seed_pending_scan(&pool, tenant, "169.254.169.254").await;
+
+        let result = run_asm_scan(
+            &pool,
+            tenant,
+            "169.254.169.254",
+            &serde_json::json!({"scan_id": scan_id}),
+            &test_cfg("/nonexistent/definitely-not-masscan"),
+        )
+        .await;
+        assert_eq!(result.status, "error");
+        let msg = result.error_message.expect("error message present");
+        assert!(msg.contains("disallowed"), "unexpected message: {msg}");
+        assert!(!msg.contains("NET_RAW"), "masscan must never be invoked");
+
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_message FROM asm_scans WHERE id = $1")
+                .bind(scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("scan row");
+        assert_eq!(row.0, "failed");
+        assert!(row.1.expect("error message stored").contains("disallowed"));
+    }
+
+    /// Layer 1: a blocked literal CIDR is rejected the same way.
+    #[tokio::test]
+    async fn run_asm_scan_blocked_literal_cidr_never_reaches_masscan() {
+        let pool = db_pool().await;
+        let tenant = tenant_uuid(TENANT_A);
+        let scan_id = seed_pending_scan(&pool, tenant, "10.0.0.0/8").await;
+
+        let result = run_asm_scan(
+            &pool,
+            tenant,
+            "10.0.0.0/8",
+            &serde_json::json!({"scan_id": scan_id}),
+            &test_cfg("/nonexistent/definitely-not-masscan"),
+        )
+        .await;
+        assert_eq!(result.status, "error");
+        let msg = result.error_message.expect("error message present");
+        assert!(msg.contains("disallowed"), "unexpected message: {msg}");
+    }
+
+    /// Layer 2 (anti-rebinding): a target that passes the layer-1 check
+    /// (a public-range literal target here, standing in for a domain that
+    /// resolved safely at layer 1 — see `target_safety::tests::
+    /// resolve_drops_domain_resolving_to_loopback` for the DNS-resolution
+    /// side of this) must still have every individual masscan-discovered
+    /// IP re-validated: a blocked IP among the results is dropped (no
+    /// `asm_hosts`/`asm_services` row, no banner/cert/screenshot attempt)
+    /// while the scan otherwise completes normally with the safe finding
+    /// intact — this is what actually stops DNS rebinding, since masscan's
+    /// report reflects the address it truly connected to.
+    #[tokio::test]
+    async fn run_asm_scan_drops_masscan_discovered_blocked_ip_but_keeps_safe_findings() {
+        let pool = db_pool().await;
+        let tenant = tenant_uuid(TENANT_A);
+        let scan_id = seed_pending_scan(&pool, tenant, "198.51.100.50").await;
+
+        let script = fake_binary(
+            r#"[
+{ "ip": "198.51.100.50", "ports": [ {"port": 22, "proto": "tcp", "status": "open"} ] },
+{ "ip": "127.0.0.1", "ports": [ {"port": 6379, "proto": "tcp", "status": "open"} ] }
+]"#,
+            0,
+        );
+        let bin = script.to_str().expect("utf8 path").to_owned();
+
+        let result = run_asm_scan(
+            &pool,
+            tenant,
+            "198.51.100.50",
+            &serde_json::json!({"scan_id": scan_id}),
+            &test_cfg(&bin),
+        )
+        .await;
+        assert_eq!(result.status, "success");
+        assert_eq!(
+            result.findings_count, 1,
+            "the blocked-IP finding must be dropped, only the safe one kept"
+        );
+
+        let safe_host_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM asm_hosts WHERE scan_id = $1 AND ip_address = '198.51.100.50'",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(safe_host_count, 1);
+
+        let blocked_host_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM asm_hosts WHERE scan_id = $1 AND ip_address = '127.0.0.1'",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(
+            blocked_host_count, 0,
+            "masscan-discovered loopback address must never be persisted"
+        );
+
+        let status: String = sqlx::query_scalar("SELECT status FROM asm_scans WHERE id = $1")
+            .bind(scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("scan row");
+        assert_eq!(status, "completed");
     }
 
     #[tokio::test]
@@ -1904,14 +2097,17 @@ mod tests {
     async fn run_asm_scan_first_scan_for_target_writes_no_diff_row() {
         let pool = db_pool().await;
         let tenant = tenant_uuid(TENANT_A);
-        let scan_id = seed_pending_scan(&pool, tenant, "first-ever.example").await;
+        // Literal IP, not a domain — see the comment on the masscan-failure
+        // test above for why (avoids depending on live DNS resolution in
+        // this test).
+        let scan_id = seed_pending_scan(&pool, tenant, "198.51.100.40").await;
         let script = fake_binary("[]", 0);
         let bin = script.to_str().expect("utf8 path").to_owned();
 
         let result = run_asm_scan(
             &pool,
             tenant,
-            "first-ever.example",
+            "198.51.100.40",
             &serde_json::json!({"scan_id": scan_id}),
             &test_cfg(&bin),
         )

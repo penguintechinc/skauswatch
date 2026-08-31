@@ -12,6 +12,7 @@ mod db;
 mod handler;
 mod message;
 mod scan;
+mod target_safety;
 mod yara;
 
 use std::net::SocketAddr;

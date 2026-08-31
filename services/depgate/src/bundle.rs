@@ -108,6 +108,21 @@ pub enum BundleError {
     /// mismatch.
     #[error("invalid RSA key for bundle signing: {0}")]
     InvalidSigningKey(String),
+    /// The manifest declares a `signature_algorithm` (or defaults to one)
+    /// for which this importer has no verify key configured at all — e.g.
+    /// an RSA-only-configured importer receiving a manifest that selects
+    /// (or defaults to, by omitting the field) HMAC. Refused rather than
+    /// silently treated as unverified, which would let a forged manifest
+    /// pick whichever algorithm has no key and skip verification entirely.
+    #[error("no verify key configured for bundle signature algorithm {0:?}")]
+    NoVerifyKeyForAlgorithm(String),
+    /// Defense-in-depth admission gate: a verify key is configured but the
+    /// signature did not come back verified. Should be unreachable given
+    /// the match above (every non-`true` path already returns `Err`), kept
+    /// as a hard backstop so a future refactor of that match can never
+    /// silently reintroduce the write-before-gate bug this guards against.
+    #[error("bundle signature verification is required but did not succeed")]
+    SignatureVerificationFailed,
     /// A manifest entry references an artifact the bundle doesn't contain.
     #[error("bundle is missing artifact bytes for sha256 {0}")]
     MissingArtifact(String),
@@ -441,7 +456,15 @@ pub async fn import_bundle(
                         }
                         true
                     }
-                    None => false,
+                    // No HMAC key configured for this importer — regression
+                    // guard (finding: air-gap bundle signature-verification
+                    // bypass): a forged manifest that selects (or, by
+                    // omitting the field, defaults to) HMAC on an
+                    // RSA-only-configured importer must be refused, not
+                    // silently treated as "unverified but still admitted".
+                    None => {
+                        return Err(BundleError::NoVerifyKeyForAlgorithm(algo.to_owned()));
+                    }
                 },
                 RSA_ALGO => match rsa_verify_public_key_pem {
                     Some(pem) => {
@@ -450,7 +473,10 @@ pub async fn import_bundle(
                         }
                         true
                     }
-                    None => false,
+                    // Same regression guard, RSA side.
+                    None => {
+                        return Err(BundleError::NoVerifyKeyForAlgorithm(algo.to_owned()));
+                    }
                 },
                 other => {
                     return Err(BundleError::UnsupportedSignatureAlgorithm(other.to_owned()));
@@ -464,6 +490,20 @@ pub async fn import_bundle(
             false
         }
     };
+
+    // Hard admission gate (finding: air-gap bundle signature-verification
+    // bypass) — the moment *any* verify key is configured, a bundle must
+    // have actually verified before a single byte is hashed or written.
+    // Every path above that leaves a key configured without `true` already
+    // returns `Err`, so this should be unreachable; it stays as a
+    // belt-and-suspenders backstop rather than trusting that invariant to
+    // hold forever across future edits to the match above. The only way to
+    // reach `import_bundle` with `signature_verified == false` and pass
+    // this gate is the legitimate, pre-existing "unsigned bundle, importer
+    // has no verify key configured at all" path.
+    if !signature_verified && (hmac_verify_key.is_some() || rsa_verify_public_key_pem.is_some()) {
+        return Err(BundleError::SignatureVerificationFailed);
+    }
 
     // Pre-flight: verify EVERY unique artifact's content hash before
     // writing anything — all-or-nothing, no partial trust.
@@ -690,6 +730,12 @@ mod tests {
         writer.finish().expect("finish zip");
     }
 
+    // Regression (finding: air-gap bundle signature-verification bypass):
+    // this is also the "a bundle whose signature genuinely verifies is
+    // still admitted" positive case for the fix below — an RSA-only
+    // importer config (`hmac_verify_key: None`) with a manifest that
+    // actually verifies against the configured RSA key must still be
+    // admitted, not just refused.
     #[tokio::test]
     async fn export_then_import_round_trips_a_clean_artifact() {
         let pool = test_pool().await;
@@ -849,6 +895,73 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&out_path);
+    }
+
+    #[tokio::test]
+    async fn import_rejects_a_forged_bundle_selecting_an_algorithm_with_no_configured_key() {
+        // Regression (finding: air-gap bundle signature-verification
+        // bypass): a forged manifest carries a present-but-unverifiable
+        // `signature` and simply omits `signature_algorithm`, which
+        // defaults to HMAC. Against an importer configured RSA-only
+        // (`hmac_verify_key: None`, the documented air-gap import config),
+        // the pre-fix `None => false` match arm let this through as
+        // `signature_verified = false` with nothing gating on that value —
+        // the forged bundle was admitted to the cache/DB as
+        // `verdict=clean, pinned=true`. Must now be refused before a
+        // single byte is hashed or written.
+        let entries = sample_entries();
+        let manifest_sha256 = compute_manifest_hash(&entries);
+        let manifest = BundleManifest {
+            version: BUNDLE_VERSION,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            entries,
+            manifest_sha256,
+            signature: Some("garbage-not-a-real-signature".to_owned()),
+            signature_algorithm: None, // forged bundle omits it -> defaults to HMAC_ALGO
+        };
+        let path = temp_path("forged-algo-bypass.zip");
+        write_manifest_zip(&path, &serde_json::to_value(&manifest).expect("serialize"));
+
+        let dest_pool = test_pool().await;
+        let dest_s3 = MockServer::start().await;
+        // Deliberately no mocks mounted on S3 at all — if the importer
+        // ever attempts to read/write an artifact this proves it didn't.
+
+        let err = import_bundle(
+            &dest_pool,
+            &mock_s3_client(&dest_s3.uri()),
+            "bkt2",
+            "sha256/",
+            Uuid::new_v4(),
+            &path,
+            None, // RSA-only importer config: no HMAC key configured
+            Some(&crate::test_support::test_keypair().1),
+            "forged-algo-bypass.zip",
+        )
+        .await
+        .expect_err("must refuse a forged bundle whose selected algorithm has no configured key");
+        assert!(
+            matches!(err, BundleError::NoVerifyKeyForAlgorithm(ref a) if a == HMAC_ALGO),
+            "expected NoVerifyKeyForAlgorithm(\"{HMAC_ALGO}\"), got {err:?}"
+        );
+
+        let requests = dest_s3
+            .received_requests()
+            .await
+            .expect("wiremock request recording is enabled by default");
+        assert!(
+            requests.is_empty(),
+            "a forged, unverifiable bundle must never reach any S3 call, got {requests:?}"
+        );
+        assert!(
+            db::find_by_reference(&dest_pool, "npm", "left-pad", "1.3.0")
+                .await
+                .expect("query")
+                .is_none(),
+            "nothing should be admitted on a rejected import"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]
