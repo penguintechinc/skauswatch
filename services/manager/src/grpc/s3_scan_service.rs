@@ -231,7 +231,7 @@ impl S3ScanService for S3ScanGrpc {
         &self,
         request: Request<ScanTask>,
     ) -> Result<Response<TaskAck>, Status> {
-        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        require_jwt(request.metadata(), &self.state.auth.jwt_verify_key)?;
         let tenant = require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
@@ -280,7 +280,7 @@ impl S3ScanService for S3ScanGrpc {
         &self,
         request: Request<ScanResult>,
     ) -> Result<Response<ResultAck>, Status> {
-        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        require_jwt(request.metadata(), &self.state.auth.jwt_verify_key)?;
         let res = request.into_inner();
         check_api_version(&res.api_version)?;
         let accepted = handle_scan_result(&self.state, &res).await;
@@ -294,7 +294,7 @@ impl S3ScanService for S3ScanGrpc {
         &self,
         request: Request<AdhocScanRequest>,
     ) -> Result<Response<AdhocScanResponse>, Status> {
-        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        require_jwt(request.metadata(), &self.state.auth.jwt_verify_key)?;
         let tenant = require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
@@ -371,7 +371,7 @@ impl S3ScanService for S3ScanGrpc {
         &self,
         request: Request<Streaming<ScanResult>>,
     ) -> Result<Response<StreamAck>, Status> {
-        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        require_jwt(request.metadata(), &self.state.auth.jwt_verify_key)?;
         let mut stream = request.into_inner();
         let mut results_received: i32 = 0;
         while let Some(res) = stream.message().await? {
@@ -400,7 +400,7 @@ impl S3ScanService for S3ScanGrpc {
         &self,
         request: Request<ScanStatusRequest>,
     ) -> Result<Response<ScanStatusResponse>, Status> {
-        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        require_jwt(request.metadata(), &self.state.auth.jwt_verify_key)?;
         let tenant = require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
@@ -446,14 +446,19 @@ mod tests {
         S3ScanGrpc::new(test_state())
     }
 
-    /// Wraps `msg` in a `Request` carrying a valid `test-secret`-signed
-    /// bearer token, matching `test_state()`'s `AuthSettings::jwt_secret`.
+    /// Wraps `msg` in a `Request` carrying a valid bearer token signed with
+    /// the shared fixture keypair, matching `test_state()`'s
+    /// `AuthSettings::jwt_verify_key` (`skauswatch_testkit::jwt`).
     fn authed<T>(msg: T) -> Request<T> {
-        let token =
-            match skauswatch_auth::issue_service_token("worker", "worker", "test-secret", 300) {
-                Ok(t) => t,
-                Err(e) => panic!("issue test token: {e}"),
-            };
+        let token = match skauswatch_auth::issue_service_token(
+            "worker",
+            "worker",
+            skauswatch_testkit::jwt::signing_key(),
+            300,
+        ) {
+            Ok(t) => t,
+            Err(e) => panic!("issue test token: {e}"),
+        };
         let mut req = Request::new(msg);
         let value = match format!("Bearer {token}").parse() {
             Ok(v) => v,

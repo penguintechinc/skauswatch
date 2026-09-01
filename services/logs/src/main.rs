@@ -76,10 +76,13 @@ async fn serve() -> anyhow::Result<()> {
         .build()
         .map_err(|e| anyhow::anyhow!("http client: {e}"))?;
 
-    // Fail-fast (before serving a single request) if `JWT_SECRET_KEY` is
-    // missing in production — see `skauswatch_auth::load_jwt_secret`.
-    // `/ingest` requires a valid bearer token verified against this secret.
-    let jwt_secret = skauswatch_auth::load_jwt_secret().map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Fail-fast (before serving a single request) if `JWT_VERIFY_KEY` is
+    // missing in production — see `skauswatch_auth::load_jwt_verify_key`.
+    // `/ingest` requires a valid bearer token verified against this key
+    // (ES256 per audit finding H1b — was a shared symmetric
+    // `JWT_SECRET_KEY`).
+    let jwt_verify_key =
+        skauswatch_auth::load_jwt_verify_key().map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let license_cfg = penguin_licensing::LicenseConfig::from_env("skauswatch")
         .map_err(|e| anyhow::anyhow!("license config: {e}"))?
@@ -99,7 +102,7 @@ async fn serve() -> anyhow::Result<()> {
         http: http.clone(),
         opensearch_url: cfg.opensearch_url.clone().into(),
         clock: Clock::System,
-        jwt_secret: jwt_secret.into(),
+        jwt_verify_key,
         license,
     };
     // `rate_limit::apply` wraps only the production build of

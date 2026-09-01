@@ -13,7 +13,7 @@
 //!
 //! # Fail-safe policy
 //!
-//! Mirrors `skauswatch_auth::load_jwt_secret`'s house fail-fast pattern: a
+//! Mirrors `skauswatch_auth::load_jwt_verify_key`'s house fail-fast pattern: a
 //! service that requires an identity and can't get one must not silently
 //! run without one. Whether the Workload API is unreachable at startup or
 //! a later [`IdentityProvider::refresh`] fails, the same rule applies —

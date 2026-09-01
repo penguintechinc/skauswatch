@@ -94,7 +94,8 @@ impl CurrentUser {
     }
 }
 
-/// Decodes and validates a bearer token per v1 `_decode_jwt`: HS256,
+/// Decodes and validates a bearer token per v1 `_decode_jwt`: ES256 (audit
+/// finding H1b — was HS256 against the shared symmetric `JWT_SECRET_KEY`),
 /// `sub`/`exp`/`scope` required, expiry checked. Signature/expiry/missing
 /// required-claim failures map to the single v1 message
 /// `"Invalid or expired token"` (401). A token that decodes and verifies
@@ -102,15 +103,11 @@ impl CurrentUser {
 /// trimming) is a *distinct* failure — 403, not 401 — per the house tenant
 /// boundary: a well-formed credential that simply doesn't identify a tenant
 /// is a tenant-isolation violation, not an authentication failure.
-pub fn decode_bearer(token: &str, secret: &str) -> Result<CurrentUser, ApiError> {
-    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+pub fn decode_bearer(token: &str, verify_key: &DecodingKey) -> Result<CurrentUser, ApiError> {
+    let mut validation = Validation::new(jsonwebtoken::Algorithm::ES256);
     validation.validate_exp = true;
-    let data = jsonwebtoken::decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .map_err(|_| ApiError::Unauthorized("Invalid or expired token".to_owned()))?;
+    let data = jsonwebtoken::decode::<Claims>(token, verify_key, &validation)
+        .map_err(|_| ApiError::Unauthorized("Invalid or expired token".to_owned()))?;
     let claims = data.claims;
     let tenant_id = claims.tenant.trim().to_owned();
     if tenant_id.is_empty() {
@@ -138,7 +135,7 @@ impl FromRequestParts<AppState> for CurrentUser {
             .strip_prefix("Bearer ")
             .ok_or_else(|| ApiError::Unauthorized(HEADER_MSG.to_owned()))?
             .trim();
-        decode_bearer(token, &state.auth.jwt_secret)
+        decode_bearer(token, &state.auth.jwt_verify_key)
     }
 }
 
@@ -147,16 +144,14 @@ impl FromRequestParts<AppState> for CurrentUser {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use jsonwebtoken::{EncodingKey, Header};
+    use jsonwebtoken::{Algorithm, Header};
     use serde_json::json;
-
-    const SECRET: &str = "test-secret";
 
     fn sign(claims: serde_json::Value) -> String {
         jsonwebtoken::encode(
-            &Header::default(),
+            &Header::new(Algorithm::ES256),
             &claims,
-            &EncodingKey::from_secret(SECRET.as_bytes()),
+            skauswatch_testkit::jwt::signing_key(),
         )
         .expect("encode")
     }
@@ -170,7 +165,7 @@ mod tests {
             "scope": "secrets:read secrets:write",
             "tenant": "acme",
         }));
-        let user = decode_bearer(&token, SECRET).expect("decode");
+        let user = decode_bearer(&token, skauswatch_testkit::jwt::verify_key()).expect("decode");
         assert_eq!(user.user_id, "user-1");
         assert_eq!(user.tenant_id, "acme");
         assert!(user.scopes.contains("secrets:read"));
@@ -181,7 +176,7 @@ mod tests {
     fn missing_tenant_claim_is_rejected() {
         let now = Utc::now().timestamp();
         let token = sign(json!({"sub": "u", "exp": now + 3600, "scope": "secrets:read"}));
-        match decode_bearer(&token, SECRET) {
+        match decode_bearer(&token, skauswatch_testkit::jwt::verify_key()) {
             Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Missing or invalid tenant"),
             other => panic!("expected 403, got {other:?}"),
         }
@@ -193,7 +188,7 @@ mod tests {
         let token = sign(json!({
             "sub": "u", "exp": now + 3600, "scope": "secrets:read", "tenant": "   ",
         }));
-        match decode_bearer(&token, SECRET) {
+        match decode_bearer(&token, skauswatch_testkit::jwt::verify_key()) {
             Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Missing or invalid tenant"),
             other => panic!("expected 403, got {other:?}"),
         }
@@ -205,7 +200,7 @@ mod tests {
         // jsonwebtoken's default 60s leeway means `exp` must be well past
         // "now minus leeway" to register as expired in this assertion.
         let token = sign(json!({"sub": "u", "exp": now - 300, "scope": "secrets:read"}));
-        match decode_bearer(&token, SECRET) {
+        match decode_bearer(&token, skauswatch_testkit::jwt::verify_key()) {
             Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "Invalid or expired token"),
             other => panic!("expected 401, got {other:?}"),
         }
@@ -215,14 +210,14 @@ mod tests {
     fn missing_scope_claim_is_rejected() {
         let now = Utc::now().timestamp();
         let token = sign(json!({"sub": "u", "exp": now + 3600}));
-        assert!(decode_bearer(&token, SECRET).is_err());
+        assert!(decode_bearer(&token, skauswatch_testkit::jwt::verify_key()).is_err());
     }
 
     #[test]
     fn wrong_secret_is_rejected() {
         let now = Utc::now().timestamp();
         let token = sign(json!({"sub": "u", "exp": now + 3600, "scope": "secrets:read"}));
-        assert!(decode_bearer(&token, "other-secret").is_err());
+        assert!(decode_bearer(&token, skauswatch_testkit::jwt::other_verify_key()).is_err());
     }
 
     #[test]

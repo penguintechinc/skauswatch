@@ -76,10 +76,11 @@ pub struct AppStateInner {
     pub socket: SocketClient,
     /// Shared ClamAV+YARA-X scan engine.
     pub scan_engine: Arc<ScanEngine>,
-    /// Shared `JWT_SECRET_KEY` — every route (OCI proxy and admin API
-    /// alike) requires a valid bearer token carrying a `tenant` claim; see
-    /// `src/routes/mod.rs`.
-    pub jwt_secret: String,
+    /// Shared ES256 verify key (`JWT_VERIFY_KEY`, PEM SPKI public key —
+    /// audit finding H1b, was a shared symmetric `JWT_SECRET_KEY`) — every
+    /// route (OCI proxy and admin API alike) requires a valid bearer token
+    /// carrying a `tenant` claim; see `src/routes/mod.rs`.
+    pub jwt_verify_key: jsonwebtoken::DecodingKey,
     /// License entitlement + PostHog flag client.
     pub license: Arc<LicenseClient>,
     /// In-process cache hit/miss counters.
@@ -104,8 +105,8 @@ pub struct AppStateInner {
 pub type AppState = Arc<AppStateInner>;
 
 impl skauswatch_auth::JwtSecretSource for AppStateInner {
-    fn jwt_secret(&self) -> &str {
-        &self.jwt_secret
+    fn jwt_verify_key(&self) -> &jsonwebtoken::DecodingKey {
+        &self.jwt_verify_key
     }
 }
 
@@ -115,7 +116,8 @@ impl AppStateInner {
     /// scan engine (fails fast on a bad `YARA_RULES_PATH`, same posture as
     /// `services/s3scan`), and resolves the license client.
     pub async fn from_env() -> anyhow::Result<AppState> {
-        let jwt_secret = skauswatch_auth::load_jwt_secret().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let jwt_verify_key =
+            skauswatch_auth::load_jwt_verify_key().map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let license_cfg = penguin_licensing::LicenseConfig::from_env("skauswatch")
             .map_err(|e| anyhow::anyhow!("license config: {e}"))?
@@ -193,7 +195,7 @@ impl AppStateInner {
             go_proxy,
             socket,
             scan_engine,
-            jwt_secret,
+            jwt_verify_key,
             license,
             cache_stats: Arc::new(CacheStats::default()),
             identity: Some(identity),
@@ -275,7 +277,7 @@ impl AppStateInner {
                     yara_rules_path: None,
                 },
             )),
-            jwt_secret: "test-secret".to_owned(),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license,
             cache_stats: Arc::new(CacheStats::default()),
             identity,

@@ -185,7 +185,7 @@ mod tests {
 
         let tenant = Uuid::new_v4();
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "*:read",
@@ -247,7 +247,7 @@ mod tests {
         );
         let tenant = Uuid::new_v4();
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "*:read",
@@ -337,7 +337,7 @@ mod tests {
 
         let tenant = Uuid::new_v4();
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "*:read",
@@ -391,7 +391,7 @@ mod tests {
 
         let tenant = Uuid::new_v4();
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "*:read",
@@ -422,7 +422,7 @@ mod tests {
 
         let tenant = Uuid::new_v4();
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "*:read",

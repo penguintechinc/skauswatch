@@ -73,10 +73,12 @@ async fn serve() -> anyhow::Result<()> {
     skauswatch_telemetry::install_metrics_exporter()
         .map_err(|e| anyhow::anyhow!("metrics exporter: {e}"))?;
 
-    // Fails fast (before any CA key material is touched) if JWT_SECRET_KEY
-    // is missing in production — see skauswatch_auth::load_jwt_secret and
-    // finding #2 (this service previously had no authentication at all).
-    let jwt_secret: Arc<str> = skauswatch_auth::load_jwt_secret()?.into();
+    // Fails fast (before any CA key material is touched) if JWT_VERIFY_KEY
+    // is missing in production — see skauswatch_auth::load_jwt_verify_key
+    // and finding #2 (this service previously had no authentication at
+    // all). ES256 per audit finding H1b: this service never mints tokens,
+    // so it loads only the public verify key, never JWT_SIGNING_KEY.
+    let jwt_verify_key = skauswatch_auth::load_jwt_verify_key()?;
 
     // License entitlement + PostHog flag client (fail-safe) — gates the
     // live /api/v1/ssh/openapi.json route only; certificate issuance
@@ -114,7 +116,7 @@ async fn serve() -> anyhow::Result<()> {
     let state = AppState {
         ca,
         store,
-        jwt_secret,
+        jwt_verify_key,
         license,
     };
 

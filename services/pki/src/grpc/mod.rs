@@ -2,9 +2,10 @@
 //! `GRPC_PORT` (default 50052, `GRPC_ENABLED` default true) — the same 16
 //! RPCs the v1 servicer implemented (`grpc/server.py`).
 //!
-//! AUTH (hardened, finding #1): every RPC — including `HealthCheck` — now
-//! requires `authorization: Bearer <jwt>` metadata, verified against the
-//! shared `JWT_SECRET_KEY` (`skauswatch_auth::verify_grpc_bearer`). Before
+//! AUTH (hardened, finding #1; ES256 per audit finding H1b): every RPC —
+//! including `HealthCheck` — now requires `authorization: Bearer <jwt>`
+//! metadata, verified against the shared `JWT_VERIFY_KEY`
+//! (`skauswatch_auth::verify_grpc_bearer`). Before
 //! this pass the port was completely open: anyone on the network could mint
 //! CA certificates and download private keys via gRPC with zero auth. A
 //! future caller must present a machine JWT minted with
@@ -18,10 +19,10 @@
 //! the wire and accepts only a peer presenting
 //! `spiffe://penguintech.io/<env>/manager` (see [`manager_matcher`]). This
 //! is *additive* to, not a replacement for, [`auth_interceptor`]: for one
-//! release cycle both a valid client certificate *and* a valid HS256
+//! release cycle both a valid client certificate *and* a valid ES256
 //! bearer token are required (dual-accept — see the doc's §2 "Transition
-//! plan"; §3 there deletes the HS256 layer entirely once mTLS is confirmed
-//! healthy in beta). When no identity is held — `AppState::identity` is
+//! plan"; §3 there deletes the bearer-token layer entirely once mTLS is
+//! confirmed healthy in beta). When no identity is held — `AppState::identity` is
 //! `None`, or the SPIFFE Workload API attested but degraded (dev/test, no
 //! SPIRE agent socket present) — the listener falls back to plaintext with
 //! `auth_interceptor` as the sole gate, exactly as before this change.
@@ -65,10 +66,10 @@ pub fn port() -> u16 {
 /// Tonic interceptor requiring `authorization: Bearer <jwt>` on every RPC of
 /// the service it's attached to (finding #1 — see module docs).
 fn auth_interceptor(
-    secret: String,
+    verify_key: jsonwebtoken::DecodingKey,
 ) -> impl FnMut(tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> + Clone {
     move |req: tonic::Request<()>| {
-        skauswatch_auth::verify_grpc_bearer(req.metadata(), &secret)?;
+        skauswatch_auth::verify_grpc_bearer(req.metadata(), &verify_key)?;
         Ok(req)
     }
 }
@@ -133,7 +134,7 @@ async fn serve_with_ready(
 ) -> anyhow::Result<()> {
     use skauswatch_proto::pki::pki_service_server::PkiServiceServer;
 
-    let interceptor = auth_interceptor(state.jwt_secret.clone());
+    let interceptor = auth_interceptor(state.jwt_verify_key.clone());
     let identity = state.identity.clone();
     let router = tonic::transport::Server::builder().add_service(
         PkiServiceServer::with_interceptor(pki_service::PkiGrpc::new(state), interceptor),
@@ -156,7 +157,7 @@ async fn serve_with_ready(
         Some(cfg) => {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             let bound = listener.local_addr()?;
-            tracing::info!(addr = %bound, "pki gRPC listening (mTLS, manager-only + HS256 bearer)");
+            tracing::info!(addr = %bound, "pki gRPC listening (mTLS, manager-only + ES256 bearer)");
             if let Some(tx) = ready {
                 let _ = tx.send(bound);
             }
@@ -168,7 +169,7 @@ async fn serve_with_ready(
             tracing::warn!(
                 %addr,
                 "no SPIFFE workload identity held — pki gRPC serving plaintext \
-                 (dev/test only; HS256 bearer auth is still required on every RPC; \
+                 (dev/test only; ES256 bearer auth is still required on every RPC; \
                  production hard-fails at startup instead of reaching this fallback)"
             );
             if let Some(tx) = ready {
@@ -407,10 +408,15 @@ mod tests {
 
     #[test]
     fn auth_interceptor_rejects_missing_and_wrong_secret() {
-        let mut auth = auth_interceptor("real-secret".to_owned());
+        let mut auth = auth_interceptor(skauswatch_testkit::jwt::verify_key().clone());
         assert!(auth(tonic::Request::new(())).is_err());
 
-        let token = match skauswatch_auth::issue_service_token("x", "admin", "wrong-secret", 300) {
+        let token = match skauswatch_auth::issue_service_token(
+            "x",
+            "admin",
+            skauswatch_testkit::jwt::other_signing_key(),
+            300,
+        ) {
             Ok(t) => t,
             Err(e) => panic!("issue token: {e}"),
         };
@@ -425,8 +431,13 @@ mod tests {
 
     #[test]
     fn auth_interceptor_accepts_valid_token() {
-        let mut auth = auth_interceptor("real-secret".to_owned());
-        let token = match skauswatch_auth::issue_service_token("x", "admin", "real-secret", 300) {
+        let mut auth = auth_interceptor(skauswatch_testkit::jwt::verify_key().clone());
+        let token = match skauswatch_auth::issue_service_token(
+            "x",
+            "admin",
+            skauswatch_testkit::jwt::signing_key(),
+            300,
+        ) {
             Ok(t) => t,
             Err(e) => panic!("issue token: {e}"),
         };

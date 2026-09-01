@@ -57,6 +57,7 @@
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use jsonwebtoken::DecodingKey;
 use skauswatch_auth::Claims;
 
 use crate::error::ApiError;
@@ -75,13 +76,14 @@ pub const ADMIN_SCOPE: &str = "codescan:admin";
 /// intentional, not a preserved-behavior gap).
 pub const WRITE_SCOPE: &str = "codescan:write";
 
-/// Decodes and tenant-validates an access token: HS256 signature, expiry,
-/// and a non-empty `tenant` claim — the same boundary
+/// Decodes and tenant-validates an access token: ES256 signature (audit
+/// finding H1b — was HS256 against the shared symmetric `JWT_SECRET_KEY`),
+/// expiry, and a non-empty `tenant` claim — the same boundary
 /// `skauswatch_auth::tenant_middleware` enforces at the router layer.
 /// "Token expired"/"Invalid token" wording matches the v1 `auth_required`
 /// messages this service's error bodies still follow.
-pub fn decode_access(token: &str, secret: &str) -> Result<Claims, ApiError> {
-    let claims = skauswatch_auth::decode_claims(token, secret).map_err(|e| match e {
+pub fn decode_access(token: &str, verify_key: &DecodingKey) -> Result<Claims, ApiError> {
+    let claims = skauswatch_auth::decode_claims(token, verify_key).map_err(|e| match e {
         skauswatch_auth::TenantAuthError::Expired => {
             ApiError::Unauthorized("Token expired".to_owned())
         }
@@ -178,7 +180,7 @@ impl FromRequestParts<AppState> for CurrentUser {
         let token = header
             .strip_prefix("Bearer ")
             .ok_or_else(|| ApiError::Unauthorized(HEADER_MSG.to_owned()))?;
-        let claims = decode_access(token, &state.auth.jwt_secret)?;
+        let claims = decode_access(token, &state.auth.jwt_verify_key)?;
         let user_id: i64 = claims
             .sub
             .parse()
@@ -202,9 +204,8 @@ impl FromRequestParts<AppState> for CurrentUser {
 #[allow(clippy::panic)]
 mod tests {
     use super::*;
-    use jsonwebtoken::{EncodingKey, Header};
+    use jsonwebtoken::{Algorithm, Header};
 
-    const SECRET: &str = "test-secret";
     const TENANT: &str = "00000000-0000-0000-0000-0000000000aa";
 
     fn claims(sub: &str, tenant: &str, roles: &[&str], exp_offset: i64) -> Claims {
@@ -224,9 +225,9 @@ mod tests {
 
     fn sign(claims: &Claims) -> String {
         match jsonwebtoken::encode(
-            &Header::default(),
+            &Header::new(Algorithm::ES256),
             claims,
-            &EncodingKey::from_secret(SECRET.as_bytes()),
+            skauswatch_testkit::jwt::signing_key(),
         ) {
             Ok(t) => t,
             Err(e) => panic!("encode: {e}"),
@@ -236,7 +237,7 @@ mod tests {
     #[test]
     fn decodes_manager_issued_access_token() {
         let token = sign(&claims("42", TENANT, &["admin"], 60));
-        let decoded = match decode_access(&token, SECRET) {
+        let decoded = match decode_access(&token, skauswatch_testkit::jwt::verify_key()) {
             Ok(c) => c,
             Err(e) => panic!("decode: {e:?}"),
         };
@@ -257,7 +258,7 @@ mod tests {
         let mut c = claims("7", TENANT, &["maintainer"], 60);
         c.teams = vec!["team-a".to_owned()];
         let token = sign(&c);
-        let decoded = match decode_access(&token, SECRET) {
+        let decoded = match decode_access(&token, skauswatch_testkit::jwt::verify_key()) {
             Ok(c) => c,
             Err(e) => panic!("decode: {e:?}"),
         };
@@ -268,7 +269,7 @@ mod tests {
     #[test]
     fn missing_tenant_claim_is_rejected_as_forbidden() {
         let token = sign(&claims("1", "", &["viewer"], 60));
-        match decode_access(&token, SECRET) {
+        match decode_access(&token, skauswatch_testkit::jwt::verify_key()) {
             Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "missing or empty tenant claim"),
             other => panic!("expected 403 missing tenant, got {other:?}"),
         }
@@ -277,7 +278,7 @@ mod tests {
     #[test]
     fn expired_token_maps_to_token_expired() {
         let token = sign(&claims("1", TENANT, &["viewer"], -120));
-        match decode_access(&token, SECRET) {
+        match decode_access(&token, skauswatch_testkit::jwt::verify_key()) {
             Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "Token expired"),
             other => panic!("expected 401 Token expired, got {other:?}"),
         }
@@ -286,7 +287,7 @@ mod tests {
     #[test]
     fn wrong_secret_is_rejected_as_invalid_token() {
         let token = sign(&claims("1", TENANT, &["viewer"], 60));
-        match decode_access(&token, "wrong-secret") {
+        match decode_access(&token, skauswatch_testkit::jwt::other_verify_key()) {
             Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "Invalid token"),
             other => panic!("expected 401 Invalid token, got {other:?}"),
         }
@@ -348,7 +349,7 @@ mod tests {
         };
         let state = AppStateInner::for_tests(license);
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.auth.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "5",
             TENANT,
             "",

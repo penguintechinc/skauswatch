@@ -145,7 +145,7 @@ mod tests {
         let (server, state) = full_server().await;
         let (id, _) = test_support::authed_user(&state, "no-tenant-mw@example.com", "admin").await;
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.auth.jwt_secret,
+            &state.auth.jwt_signing_key,
             &id.to_string(),
             "", // no tenant claim
             crate::auth::role_scope_bundle("admin"),

@@ -11,7 +11,10 @@ authors.workspace = true
 
 [dependencies]
 jsonwebtoken = { workspace = true }
+p256 = { workspace = true }
 penguin-licensing = { workspace = true }
+pkcs8 = { workspace = true }
+rand_core = { workspace = true }
 skauswatch-auth = { workspace = true }
 sqlx = { workspace = true }
 tracing = { workspace = true }

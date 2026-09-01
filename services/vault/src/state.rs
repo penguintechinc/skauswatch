@@ -17,25 +17,27 @@ use tokio::sync::RwLock;
 /// penguin-licensing flag check.
 pub const VAULT_FLAG: &str = "skauswatch.vault";
 
-/// Auth settings: HS256 JWT secret shared with the manager and webui.
+/// Auth settings: ES256 JWT verify key shared with the manager and webui
+/// (audit finding H1b — vault never mints tokens, so it holds only the
+/// public verify half, never `JWT_SIGNING_KEY`).
 #[derive(Debug, Clone)]
 pub struct AuthSettings {
-    /// HS256 signing secret (env `JWT_SECRET_KEY`), matching v1
-    /// `AuthConfig.jwt_secret` (env `JWT_SECRET`).
-    pub jwt_secret: String,
+    /// ES256 verify key (env `JWT_VERIFY_KEY`, PEM SPKI public key).
+    pub jwt_verify_key: jsonwebtoken::DecodingKey,
 }
 
 impl AuthSettings {
-    /// Loads the HS256 signing secret via the house fail-fast policy
-    /// (`skauswatch_auth::load_jwt_secret`): a missing/empty
-    /// `JWT_SECRET_KEY` aborts startup in production (`RELEASE_MODE !=
+    /// Loads the ES256 verify key via the house fail-fast policy
+    /// (`skauswatch_auth::load_jwt_verify_key`): a missing/empty
+    /// `JWT_VERIFY_KEY` aborts startup in production (`RELEASE_MODE !=
     /// "false"`) rather than falling back to a guessable value — vault's
     /// own former fallback (`dev-{pid}`) was both weak (a small, guessable
     /// process id) and never checked production posture at all. Non-prod
-    /// only gets a random ephemeral secret, per the shared policy.
-    fn from_env() -> Result<Self, skauswatch_auth::MissingProductionSecret> {
+    /// only gets a random ephemeral keypair's verify half, per the shared
+    /// policy.
+    fn from_env() -> Result<Self, skauswatch_auth::JwtKeyError> {
         Ok(Self {
-            jwt_secret: skauswatch_auth::load_jwt_secret()?,
+            jwt_verify_key: skauswatch_auth::load_jwt_verify_key()?,
         })
     }
 }
@@ -138,10 +140,35 @@ impl AppStateInner {
             license,
             db,
             auth: AuthSettings {
-                jwt_secret: "test-secret".to_owned(),
+                jwt_verify_key: test_jwt_verify_key(),
             },
             envelope: RwLock::new(envelope),
             streams: None,
         })
     }
+}
+
+/// Fixed, throwaway ES256 (P-256) test verify key — identical to
+/// `crates/skauswatch-testkit::jwt`'s `VERIFY_PEM` fixture (duplicated, not
+/// shared: [`AppStateInner::for_tests`]/[`AppStateInner::for_tests_with_db`]
+/// are NOT `#[cfg(test)]`-gated, so this module can't pull in
+/// `skauswatch-testkit`, a `[dev-dependencies]`-only crate). Every
+/// `#[cfg(test)]` module in this service that mints a token via
+/// `skauswatch_testkit::jwt::signing_key()` verifies against a state built
+/// from this same PEM — keep the two fixtures byte-identical if either is
+/// ever regenerated.
+#[cfg_attr(not(test), allow(dead_code))]
+const TEST_VERIFY_PEM: &str = "-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEP0rRGDpY7mvK+4dCItv+ilnNZcl7
+6Y6TyB7Co5+J5qL9l1XVMoIf09g3asOdnSp55o5QtwR7qsf8qg3yVPbHRw==
+-----END PUBLIC KEY-----
+";
+
+/// Parses [`TEST_VERIFY_PEM`]. Panics on parse failure — a broken fixture
+/// literal is a test-infra fault, never a case under test.
+#[cfg_attr(not(test), allow(dead_code))]
+#[allow(clippy::panic)]
+fn test_jwt_verify_key() -> jsonwebtoken::DecodingKey {
+    jsonwebtoken::DecodingKey::from_ec_pem(TEST_VERIFY_PEM.as_bytes())
+        .unwrap_or_else(|e| panic!("test fixture verify key: {e}"))
 }

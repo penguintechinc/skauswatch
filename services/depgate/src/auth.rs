@@ -76,7 +76,7 @@ impl FromRequestParts<AppState> for AuthedUser {
         let token = header
             .strip_prefix("Bearer ")
             .ok_or_else(|| ApiError::Forbidden(HEADER_MSG.to_owned()))?;
-        let claims = skauswatch_auth::decode_claims(token, &state.jwt_secret)
+        let claims = skauswatch_auth::decode_claims(token, &state.jwt_verify_key)
             .map_err(|_| ApiError::Forbidden("Invalid or expired token".to_owned()))?;
         claims
             .require_tenant()

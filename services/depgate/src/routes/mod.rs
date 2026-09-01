@@ -174,9 +174,9 @@ mod tests {
     /// Mints a token carrying only [`ADMIN_SCOPE`] (no bundled `*:read`) —
     /// deliberately narrow, so an admin-gated test can't accidentally pass
     /// because it also satisfies a read check.
-    fn admin_token(jwt_secret: &str, tenant: Uuid) -> String {
+    fn admin_token(signing_key: &jsonwebtoken::EncodingKey, tenant: Uuid) -> String {
         skauswatch_testkit::jwt::mint_claims_token(
-            jwt_secret,
+            signing_key,
             "admin-1",
             &tenant.to_string(),
             ADMIN_SCOPE,
@@ -186,9 +186,9 @@ mod tests {
 
     /// Mints a token carrying only [`READ_SCOPE`] — enough to list/read,
     /// never enough to mutate.
-    fn read_only_token(jwt_secret: &str, tenant: Uuid) -> String {
+    fn read_only_token(signing_key: &jsonwebtoken::EncodingKey, tenant: Uuid) -> String {
         skauswatch_testkit::jwt::mint_claims_token(
-            jwt_secret,
+            signing_key,
             "viewer-1",
             &tenant.to_string(),
             READ_SCOPE,
@@ -225,7 +225,7 @@ mod tests {
         let state = AppStateInner::for_tests_with_db(pool, gated_license());
         let tenant = Uuid::new_v4();
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "*:read",
@@ -249,7 +249,7 @@ mod tests {
 
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant_a.to_string(),
             "*:read",
@@ -275,7 +275,7 @@ mod tests {
 
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "*:read",
@@ -330,7 +330,7 @@ mod tests {
 
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant_a.to_string(),
             "*:read",
@@ -371,7 +371,7 @@ mod tests {
 
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "*:read",
@@ -393,7 +393,7 @@ mod tests {
         let pool = test_pool().await;
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             "not-a-uuid",
             "*:read",
@@ -413,7 +413,7 @@ mod tests {
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
         let tenant = Uuid::new_v4();
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "*:read",
@@ -442,7 +442,7 @@ mod tests {
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
         let tenant = Uuid::new_v4();
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "*:read",
@@ -468,7 +468,7 @@ mod tests {
         // depgate scope at all (e.g. a token scoped for a different
         // service).
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "other-service:read",
@@ -490,7 +490,7 @@ mod tests {
         let quarantine_id = seed_quarantine(&pool, tenant, "badbad", "library/malicious").await;
 
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
-        let token = read_only_token(&state.jwt_secret, tenant);
+        let token = read_only_token(skauswatch_testkit::jwt::signing_key(), tenant);
         let server = test_server(state);
 
         let read_res = server
@@ -514,7 +514,7 @@ mod tests {
         let quarantine_id = seed_quarantine(&pool, tenant, "badbad", "library/malicious").await;
 
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
-        let token = read_only_token(&state.jwt_secret, tenant);
+        let token = read_only_token(skauswatch_testkit::jwt::signing_key(), tenant);
         let server = test_server(state);
         // The exact exploit this fix closes: a non-admin, tenant-matched
         // caller attempting to re-admit a quarantined (malware-flagged)
@@ -534,7 +534,7 @@ mod tests {
         let quarantine_id = seed_quarantine(&pool, tenant, "badbad", "library/malicious").await;
 
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
-        let token = admin_token(&state.jwt_secret, tenant);
+        let token = admin_token(skauswatch_testkit::jwt::signing_key(), tenant);
         let server = test_server(state);
         let res = server
             .patch(&format!("/api/v1/depgate/quarantine/{quarantine_id}"))
@@ -574,7 +574,7 @@ mod tests {
 
         let state =
             AppStateInner::for_tests_with_s3(pool, dev_license(), mock_s3_client(&s3_server.uri()));
-        let token = admin_token(&state.jwt_secret, tenant);
+        let token = admin_token(skauswatch_testkit::jwt::signing_key(), tenant);
         let server = test_server(state);
         let res = server
             .patch(&format!("/api/v1/depgate/quarantine/{quarantine_id}"))
@@ -591,7 +591,7 @@ mod tests {
         let pool = test_pool().await;
         let tenant = Uuid::new_v4();
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
-        let token = read_only_token(&state.jwt_secret, tenant);
+        let token = read_only_token(skauswatch_testkit::jwt::signing_key(), tenant);
         let server = test_server(state);
         let res = server
             .post("/api/v1/depgate/policy-rules")
@@ -606,7 +606,7 @@ mod tests {
         let pool = test_pool().await;
         let tenant = Uuid::new_v4();
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
-        let token = admin_token(&state.jwt_secret, tenant);
+        let token = admin_token(skauswatch_testkit::jwt::signing_key(), tenant);
         let server = test_server(state);
         let res = server
             .post("/api/v1/depgate/policy-rules")
@@ -642,7 +642,7 @@ mod tests {
         .expect("seed policy rule");
 
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
-        let token = read_only_token(&state.jwt_secret, tenant);
+        let token = read_only_token(skauswatch_testkit::jwt::signing_key(), tenant);
         let server = test_server(state);
         let res = server
             .put(&format!("/api/v1/depgate/policy-rules/{}", rule.id))
@@ -678,7 +678,7 @@ mod tests {
         .expect("seed policy rule");
 
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
-        let token = admin_token(&state.jwt_secret, tenant);
+        let token = admin_token(skauswatch_testkit::jwt::signing_key(), tenant);
         let server = test_server(state);
         let res = server
             .put(&format!("/api/v1/depgate/policy-rules/{}", rule.id))
@@ -716,7 +716,7 @@ mod tests {
         .expect("seed policy rule");
 
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
-        let token = read_only_token(&state.jwt_secret, tenant);
+        let token = read_only_token(skauswatch_testkit::jwt::signing_key(), tenant);
         let server = test_server(state);
         let res = server
             .delete(&format!("/api/v1/depgate/policy-rules/{}", rule.id))
@@ -751,7 +751,7 @@ mod tests {
         .expect("seed policy rule");
 
         let state = AppStateInner::for_tests_with_db(pool, dev_license());
-        let token = admin_token(&state.jwt_secret, tenant);
+        let token = admin_token(skauswatch_testkit::jwt::signing_key(), tenant);
         let server = test_server(state);
         let res = server
             .delete(&format!("/api/v1/depgate/policy-rules/{}", rule.id))

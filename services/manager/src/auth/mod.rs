@@ -1,7 +1,10 @@
-//! Authentication: bcrypt password hashes, HS256 access tokens in the house
+//! Authentication: bcrypt password hashes, ES256 access tokens in the house
 //! `skauswatch_auth::Claims` shape (`sub/iss/aud/iat/exp/scope/tenant/teams/
 //! roles` — see `security.md` Authentication & Authorization), and the
-//! `CurrentUser` extractor that mirrors v1's `@auth_required`.
+//! `CurrentUser` extractor that mirrors v1's `@auth_required`. This service
+//! is the workspace's sole issuer: it holds `JWT_SIGNING_KEY` (private) as
+//! well as `JWT_VERIFY_KEY` (public, `AuthSettings::jwt_verify_key`); every
+//! other service holds only the verify key (audit finding H1b).
 //!
 //! Tenancy retrofit (docs/v2-port/tenancy-model.md): the access token used to
 //! be the exact v1 shape (`{sub, role, type, exp, iat}`) — that is now
@@ -22,7 +25,7 @@
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use chrono::Utc;
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use skauswatch_auth::Claims;
@@ -134,7 +137,7 @@ pub fn create_access_token(
     user_id: i32,
     role: &str,
     tenant: &str,
-    secret: &str,
+    signing_key: &EncodingKey,
     expires_minutes: i64,
 ) -> Result<String, ApiError> {
     let now = Utc::now().timestamp();
@@ -149,18 +152,20 @@ pub fn create_access_token(
         teams: vec![],
         roles: vec![role.to_owned()],
     };
-    jsonwebtoken::encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .map_err(|e| ApiError::internal("jwt encode", e))
+    jsonwebtoken::encode(&Header::new(Algorithm::ES256), &claims, signing_key)
+        .map_err(|e| ApiError::internal("jwt encode", e))
 }
 
-/// Issues a v1-shape refresh token.
+/// Issues a v1-shape refresh token. Intra-service only (mint AND verify
+/// both happen inside this service — never presented to another service),
+/// but still ES256-signed with the same `JWT_SIGNING_KEY`/`JWT_VERIFY_KEY`
+/// keypair rather than a separate symmetric secret: the workspace-wide
+/// `JWT_SECRET_KEY` env var is retired entirely (audit finding H1b, hard
+/// cutover), and introducing a second dedicated secret just for refresh
+/// tokens would be new scope this migration doesn't need.
 pub fn create_refresh_token(
     user_id: i32,
-    secret: &str,
+    signing_key: &EncodingKey,
     expires_days: i64,
 ) -> Result<String, ApiError> {
     let now = Utc::now().timestamp();
@@ -171,12 +176,8 @@ pub fn create_refresh_token(
         iat: now,
         jti: uuid::Uuid::new_v4().to_string(),
     };
-    jsonwebtoken::encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
-    .map_err(|e| ApiError::internal("jwt encode", e))
+    jsonwebtoken::encode(&Header::new(Algorithm::ES256), &claims, signing_key)
+        .map_err(|e| ApiError::internal("jwt encode", e))
 }
 
 /// Decodes signature/exp into raw claims. Error strings are caller-supplied
@@ -187,36 +188,32 @@ pub fn create_refresh_token(
 /// since the access token has moved to the shared `Claims` shape.
 fn decode_generic_claims(
     token: &str,
-    secret: &str,
+    verify_key: &DecodingKey,
     expired_msg: &str,
     invalid_msg: &str,
 ) -> Result<serde_json::Value, ApiError> {
-    let mut validation = Validation::default(); // HS256
+    let mut validation = Validation::new(Algorithm::ES256);
     validation.validate_exp = true;
     validation.required_spec_claims.clear();
-    jsonwebtoken::decode::<serde_json::Value>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .map(|data| data.claims)
-    .map_err(|e| match e.kind() {
-        jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
-            ApiError::Unauthorized(expired_msg.to_owned())
-        }
-        _ => ApiError::Unauthorized(invalid_msg.to_owned()),
-    })
+    jsonwebtoken::decode::<serde_json::Value>(token, verify_key, &validation)
+        .map(|data| data.claims)
+        .map_err(|e| match e.kind() {
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
+                ApiError::Unauthorized(expired_msg.to_owned())
+            }
+            _ => ApiError::Unauthorized(invalid_msg.to_owned()),
+        })
 }
 
-/// Decodes and tenant-validates an access token: HS256 signature, expiry,
+/// Decodes and tenant-validates an access token: ES256 signature, expiry,
 /// and a non-empty `tenant` claim — the same tenant-isolation boundary
 /// `skauswatch_auth::tenant_middleware` enforces at the router layer,
 /// enforced again here so `CurrentUser` fails closed even for a handler
 /// reached through a router that (for whatever reason, e.g. a per-module
 /// test router) never mounted the outer middleware. "Token expired"/
 /// "Invalid token" wording matches v1's `auth_required` messages.
-pub fn decode_access(token: &str, secret: &str) -> Result<Claims, ApiError> {
-    let claims = skauswatch_auth::decode_claims(token, secret).map_err(|e| match e {
+pub fn decode_access(token: &str, verify_key: &DecodingKey) -> Result<Claims, ApiError> {
+    let claims = skauswatch_auth::decode_claims(token, verify_key).map_err(|e| match e {
         skauswatch_auth::TenantAuthError::Expired => {
             ApiError::Unauthorized("Token expired".to_owned())
         }
@@ -229,10 +226,10 @@ pub fn decode_access(token: &str, secret: &str) -> Result<Claims, ApiError> {
 }
 
 /// Decodes and type-checks a refresh token (v1 `/auth/refresh` strings).
-pub fn decode_refresh(token: &str, secret: &str) -> Result<RefreshClaims, ApiError> {
+pub fn decode_refresh(token: &str, verify_key: &DecodingKey) -> Result<RefreshClaims, ApiError> {
     let claims = decode_generic_claims(
         token,
-        secret,
+        verify_key,
         "Refresh token expired",
         "Invalid refresh token",
     )?;
@@ -362,7 +359,7 @@ impl FromRequestParts<AppState> for CurrentUser {
         let token = header
             .strip_prefix("Bearer ")
             .ok_or_else(|| ApiError::Unauthorized(HEADER_MSG.to_owned()))?;
-        let claims = decode_access(token, &state.auth.jwt_secret)?;
+        let claims = decode_access(token, &state.auth.jwt_verify_key)?;
         let user_id: i32 = claims
             .sub
             .parse()
@@ -428,15 +425,22 @@ impl From<UserRow> for CurrentUser {
 mod tests {
     use super::*;
 
-    const SECRET: &str = "test-secret";
+    /// Throwaway ES256 fixture keypair shared with every other service's
+    /// tests — see `crates/skauswatch-testkit::jwt` docs.
+    fn signing() -> &'static jsonwebtoken::EncodingKey {
+        skauswatch_testkit::jwt::signing_key()
+    }
+    fn verify() -> &'static jsonwebtoken::DecodingKey {
+        skauswatch_testkit::jwt::verify_key()
+    }
 
     #[test]
     fn access_token_roundtrips_with_tenant_and_scope() {
-        let token = match create_access_token(42, "admin", "tenant-a", SECRET, 30) {
+        let token = match create_access_token(42, "admin", "tenant-a", signing(), 30) {
             Ok(t) => t,
             Err(e) => panic!("encode: {e:?}"),
         };
-        let claims = match decode_access(&token, SECRET) {
+        let claims = match decode_access(&token, verify()) {
             Ok(c) => c,
             Err(e) => panic!("decode: {e:?}"),
         };
@@ -554,11 +558,11 @@ mod tests {
         // the tenant-isolation boundary is enforced on decode, matching
         // `skauswatch_auth::tenant_middleware`'s "reject if absent/empty"
         // contract (never a silent bypass at mint time).
-        let token = match create_access_token(1, "viewer", "", SECRET, 30) {
+        let token = match create_access_token(1, "viewer", "", signing(), 30) {
             Ok(t) => t,
             Err(e) => panic!("encode: {e:?}"),
         };
-        match decode_access(&token, SECRET) {
+        match decode_access(&token, verify()) {
             Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "missing or empty tenant claim"),
             other => panic!("expected 403, got {other:?}"),
         }
@@ -566,11 +570,11 @@ mod tests {
 
     #[test]
     fn refresh_token_is_rejected_as_access() {
-        let token = match create_refresh_token(42, SECRET, 7) {
+        let token = match create_refresh_token(42, signing(), 7) {
             Ok(t) => t,
             Err(e) => panic!("encode: {e:?}"),
         };
-        assert!(decode_access(&token, SECRET).is_err());
+        assert!(decode_access(&token, verify()).is_err());
     }
 
     #[test]
@@ -587,15 +591,11 @@ mod tests {
             teams: vec![],
             roles: vec!["viewer".into()],
         };
-        let token = match jsonwebtoken::encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(SECRET.as_bytes()),
-        ) {
+        let token = match jsonwebtoken::encode(&Header::new(Algorithm::ES256), &claims, signing()) {
             Ok(t) => t,
             Err(e) => panic!("encode: {e}"),
         };
-        match decode_access(&token, SECRET) {
+        match decode_access(&token, verify()) {
             Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "Token expired"),
             other => panic!("expected 401 Token expired, got {other:?}"),
         }
@@ -677,7 +677,7 @@ mod tests {
             999_999,
             "admin",
             DEFAULT_TENANT_ID,
-            &state.auth.jwt_secret,
+            &state.auth.jwt_signing_key,
             30,
         )
         .unwrap_or_else(|e| panic!("encode: {e:?}"));
@@ -704,9 +704,14 @@ mod tests {
             Ok(r) => r,
             Err(e) => panic!("seed: {e}"),
         };
-        let token =
-            create_access_token(id, "viewer", DEFAULT_TENANT_ID, &state.auth.jwt_secret, 30)
-                .unwrap_or_else(|e| panic!("encode: {e:?}"));
+        let token = create_access_token(
+            id,
+            "viewer",
+            DEFAULT_TENANT_ID,
+            &state.auth.jwt_signing_key,
+            30,
+        )
+        .unwrap_or_else(|e| panic!("encode: {e:?}"));
         let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
         match CurrentUser::from_request_parts(&mut parts, &state).await {
             Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "User not found or inactive"),
@@ -741,7 +746,7 @@ mod tests {
         let (id, _) =
             crate::routes::test_support::authed_user(&state, "no-tenant@example.com", "admin")
                 .await;
-        let token = create_access_token(id, "admin", "", &state.auth.jwt_secret, 30)
+        let token = create_access_token(id, "admin", "", &state.auth.jwt_signing_key, 30)
             .unwrap_or_else(|e| panic!("encode: {e:?}"));
         let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
         match CurrentUser::from_request_parts(&mut parts, &state).await {

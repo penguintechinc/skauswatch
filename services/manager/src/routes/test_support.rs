@@ -84,7 +84,7 @@ pub(crate) async fn seed_user_in_tenant(
 /// already-seeded `(user_id, tenant_id, role)` triple.
 fn mint_token(state: &AppState, user_id: i32, tenant_id: uuid::Uuid, role: &str) -> String {
     skauswatch_testkit::jwt::mint_claims_token(
-        &state.auth.jwt_secret,
+        &state.auth.jwt_signing_key,
         &user_id.to_string(),
         &tenant_id.to_string(),
         crate::auth::role_scope_bundle(role),

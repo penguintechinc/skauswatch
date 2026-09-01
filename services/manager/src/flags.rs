@@ -4,7 +4,11 @@
 //! docs/feature-flags.md.
 
 /// Module gates — licensed sub-products.
-pub const MODULE_FLAGS: &[&str] = &["skauswatch.vault", "skauswatch.codescan"];
+pub const MODULE_FLAGS: &[&str] = &[
+    "skauswatch.vault",
+    "skauswatch.codescan",
+    "skauswatch.depgate",
+];
 
 /// Core feature-area flags, one per /api/v1 router / worker job family.
 pub const CORE_FLAGS: &[&str] = &[

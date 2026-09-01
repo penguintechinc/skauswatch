@@ -269,7 +269,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<AlertRequest>,
     ) -> Result<Response<AlertResponse>, Status> {
-        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        require_jwt(request.metadata(), &self.state.auth.jwt_verify_key)?;
         let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
@@ -314,7 +314,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<AlertQuery>,
     ) -> Result<Response<AlertResponse>, Status> {
-        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        require_jwt(request.metadata(), &self.state.auth.jwt_verify_key)?;
         let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
@@ -328,7 +328,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<AlertStatusUpdate>,
     ) -> Result<Response<AlertResponse>, Status> {
-        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        require_jwt(request.metadata(), &self.state.auth.jwt_verify_key)?;
         let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
@@ -392,7 +392,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<IocRequest>,
     ) -> Result<Response<IocResponse>, Status> {
-        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        require_jwt(request.metadata(), &self.state.auth.jwt_verify_key)?;
         let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
@@ -443,7 +443,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<IndicatorLookup>,
     ) -> Result<Response<IndicatorMatch>, Status> {
-        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        require_jwt(request.metadata(), &self.state.auth.jwt_verify_key)?;
         let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
@@ -519,7 +519,7 @@ impl ManagerService for ManagerGrpc {
         &self,
         request: Request<AuditEvent>,
     ) -> Result<Response<AuditResponse>, Status> {
-        require_jwt(request.metadata(), &self.state.auth.jwt_secret)?;
+        require_jwt(request.metadata(), &self.state.auth.jwt_verify_key)?;
         let tenant = super::require_tenant_metadata(request.metadata())?;
         let req = request.into_inner();
         check_api_version(&req.api_version)?;
@@ -597,9 +597,10 @@ mod tests {
     /// FK-satisfying) tenant explicitly instead of using this constant.
     const TEST_TENANT: &str = crate::auth::DEFAULT_TENANT_ID;
 
-    /// Wraps `msg` in a `Request` carrying a valid `test-secret`-signed
-    /// bearer token (matching `test_state()`'s `AuthSettings::jwt_secret`)
-    /// plus a valid `x-tenant-id` metadata entry (`require_tenant_metadata`,
+    /// Wraps `msg` in a `Request` carrying a valid bearer token signed with
+    /// the shared fixture keypair (matching `test_state()`'s
+    /// `AuthSettings::jwt_verify_key` — `skauswatch_testkit::jwt`) plus a
+    /// valid `x-tenant-id` metadata entry (`require_tenant_metadata`,
     /// docs/v2-port/tenancy-model.md §3) — every implemented RPC now
     /// requires both.
     fn authed<T>(msg: T) -> Request<T> {
@@ -612,7 +613,7 @@ mod tests {
         let token = match skauswatch_auth::issue_service_token(
             "test-caller",
             "admin",
-            "test-secret",
+            skauswatch_testkit::jwt::signing_key(),
             300,
         ) {
             Ok(t) => t,
@@ -649,11 +650,15 @@ mod tests {
 
     #[tokio::test]
     async fn get_alert_with_wrong_secret_is_unauthenticated() {
-        let bad_token =
-            match skauswatch_auth::issue_service_token("x", "admin", "wrong-secret", 300) {
-                Ok(t) => t,
-                Err(e) => panic!("issue token: {e}"),
-            };
+        let bad_token = match skauswatch_auth::issue_service_token(
+            "x",
+            "admin",
+            skauswatch_testkit::jwt::other_signing_key(),
+            300,
+        ) {
+            Ok(t) => t,
+            Err(e) => panic!("issue token: {e}"),
+        };
         let mut req = Request::new(AlertQuery {
             alert_id: 1,
             api_version: "v1".to_owned(),
@@ -1129,7 +1134,7 @@ mod tests {
         let token = match skauswatch_auth::issue_service_token(
             "test-caller",
             "admin",
-            "test-secret",
+            skauswatch_testkit::jwt::signing_key(),
             300,
         ) {
             Ok(t) => t,

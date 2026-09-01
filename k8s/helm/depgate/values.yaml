@@ -300,11 +300,11 @@ env:
   # this chart yet, scanning degrades to YARA-only until one is provisioned.
   - name: CLAMD_SOCKET
     value: "/var/run/clamav/clamd.sock"
-  - name: JWT_SECRET_KEY
+  - name: JWT_VERIFY_KEY
     valueFrom:
       secretKeyRef:
         name: '{{ include "skauswatch-depgate.secretName" . }}'
-        key: jwt-secret-key
+        key: jwt-verify-key
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
@@ -429,7 +429,10 @@ configMapData:
 secretData:
   db-user: ""
   db-pass: ""
-  jwt-secret-key: ""
+  # PEM EC P-256 public key (SPKI) verifying ES256 tokens minted by
+  # manager (the sole issuer) -- see k8s/helm/manager/values.yaml
+  # secretData for keypair generation commands.
+  jwt-verify-key: ""
   upstream-username: ""
   upstream-password: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

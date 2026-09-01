@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use jsonwebtoken::{EncodingKey, Header};
+use jsonwebtoken::{Algorithm, Header};
 use penguin_licensing::LicenseClient;
 use serde::Serialize;
 use skauswatch_vault::{EnvelopeEncryption, MekVersion};
@@ -27,20 +27,25 @@ struct TestClaims<'a> {
     tenant: &'a str,
 }
 
-/// Signs a Vault-shaped bearer token (`sub`/`exp`/`scope`/`tenant`) using
-/// the given state's configured JWT secret — for exercising `CurrentUser`.
-/// Always stamped with [`TEST_TENANT`]; use [`sign_token_for_tenant`] for
-/// tests that need a specific (or second) tenant.
+/// Signs a Vault-shaped bearer token (`sub`/`exp`/`scope`/`tenant`) with the
+/// shared ES256 fixture signing key (`skauswatch_testkit::jwt::signing_key`)
+/// — for exercising `CurrentUser`. `state` is unused for the key itself
+/// (every test-constructed [`AppState`] verifies against the matching
+/// fixture verify key — see `AppStateInner::for_tests_with_db`'s
+/// `test_jwt_verify_key`) but kept as a parameter so call sites don't need
+/// to change if a future test constructor ever varies the keypair.  Always
+/// stamped with [`TEST_TENANT`]; use [`sign_token_for_tenant`] for tests
+/// that need a specific (or second) tenant.
 #[allow(clippy::panic)]
-pub(crate) fn sign_token(state: &AppState, sub: &str, scope: &str) -> String {
-    sign_token_for_tenant(state, sub, scope, TEST_TENANT)
+pub(crate) fn sign_token(_state: &AppState, sub: &str, scope: &str) -> String {
+    sign_token_for_tenant(_state, sub, scope, TEST_TENANT)
 }
 
 /// Like [`sign_token`], but with a caller-chosen `tenant` claim — for
 /// cross-tenant-isolation tests.
 #[allow(clippy::panic)]
 pub(crate) fn sign_token_for_tenant(
-    state: &AppState,
+    _state: &AppState,
     sub: &str,
     scope: &str,
     tenant: &str,
@@ -53,9 +58,9 @@ pub(crate) fn sign_token_for_tenant(
         tenant,
     };
     match jsonwebtoken::encode(
-        &Header::default(),
+        &Header::new(Algorithm::ES256),
         &claims,
-        &EncodingKey::from_secret(state.auth.jwt_secret.as_bytes()),
+        skauswatch_testkit::jwt::signing_key(),
     ) {
         Ok(t) => t,
         Err(e) => panic!("sign test token: {e}"),
@@ -132,7 +137,7 @@ pub(crate) async fn db_state_with_streams(
         license,
         db: pool,
         auth: crate::state::AuthSettings {
-            jwt_secret: "test-secret".to_owned(),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
         },
         envelope: tokio::sync::RwLock::new(test_envelope()),
         streams: Some(streams),

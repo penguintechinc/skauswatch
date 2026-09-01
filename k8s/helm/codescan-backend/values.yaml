@@ -161,11 +161,11 @@ env:
         name: '{{ include "skauswatch-codescan-backend.secretName" . }}'
         key: redis-password
         optional: true
-  - name: JWT_SECRET_KEY
+  - name: JWT_VERIFY_KEY
     valueFrom:
       secretKeyRef:
         name: '{{ include "skauswatch-codescan-backend.secretName" . }}'
-        key: jwt-secret-key
+        key: jwt-verify-key
   - name: CREDENTIAL_ENCRYPTION_KEY
     valueFrom:
       secretKeyRef:
@@ -240,7 +240,10 @@ secretData:
   db-user: ""
   db-pass: ""
   redis-password: ""
-  jwt-secret-key: ""
+  # PEM EC P-256 public key (SPKI) verifying ES256 tokens minted by
+  # manager (the sole issuer) -- see k8s/helm/manager/values.yaml
+  # secretData for keypair generation commands.
+  jwt-verify-key: ""
   credential-encryption-key: ""
   anthropic-api-key: ""
   openai-api-key: ""

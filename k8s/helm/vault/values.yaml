@@ -97,7 +97,7 @@ tolerations: []
 
 affinity: {}
 
-# services/vault/src/state.rs: PORT, JWT_SECRET_KEY, DB_* (skauswatch_db),
+# services/vault/src/state.rs: PORT, JWT_VERIFY_KEY, DB_* (skauswatch_db),
 # REDIS_*, plus the envelope-encryption master key (VAULT_MEK*, see
 # crates/skauswatch-vault/src/crypto.rs) — VAULT_MEK_CURRENT_VERSION selects
 # how many VAULT_MEK_V{n} secrets are loaded (falls back to bare VAULT_MEK).
@@ -160,11 +160,11 @@ env:
         name: '{{ include "skauswatch-vault.secretName" . }}'
         key: redis-password
         optional: true
-  - name: JWT_SECRET_KEY
+  - name: JWT_VERIFY_KEY
     valueFrom:
       secretKeyRef:
         name: '{{ include "skauswatch-vault.secretName" . }}'
-        key: jwt-secret-key
+        key: jwt-verify-key
   - name: VAULT_MEK_CURRENT_VERSION
     value: "1"
   - name: VAULT_MEK_V1
@@ -228,7 +228,10 @@ secretData:
   db-user: ""
   db-pass: ""
   redis-password: ""
-  jwt-secret-key: ""
+  # PEM EC P-256 public key (SPKI) verifying ES256 tokens minted by
+  # manager (the sole issuer) -- see k8s/helm/manager/values.yaml
+  # secretData for keypair generation commands.
+  jwt-verify-key: ""
   # REQUIRED: 32-byte key, base64-encoded (`openssl rand -base64 32`) —
   # placeholder here means data cannot be decrypted after redeploy. Rotate
   # by bumping VAULT_MEK_CURRENT_VERSION and adding VAULT_MEK_V{n}.

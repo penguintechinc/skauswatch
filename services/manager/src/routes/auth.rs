@@ -252,12 +252,12 @@ async fn issue_token_pair(
         user_id,
         role,
         &tenant.to_string(),
-        &state.auth.jwt_secret,
+        &state.auth.jwt_signing_key,
         state.auth.access_expires_minutes,
     )?;
     let refresh = create_refresh_token(
         user_id,
-        &state.auth.jwt_secret,
+        &state.auth.jwt_signing_key,
         state.auth.refresh_expires_days,
     )?;
     let expires_at = (Utc::now() + Duration::days(state.auth.refresh_expires_days)).naive_utc();
@@ -316,7 +316,7 @@ pub(crate) async fn refresh(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<RefreshRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let claims = decode_refresh(&body.refresh_token, &state.auth.jwt_secret)?;
+    let claims = decode_refresh(&body.refresh_token, &state.auth.jwt_verify_key)?;
     let hash = token_hash(&body.refresh_token);
 
     let row = sqlx::query_as::<_, RefreshRow>(
@@ -718,9 +718,10 @@ mod tests {
         // shape with a real, non-empty tenant claim (docs/v2-port/
         // tenancy-model.md §2) — decode it the same way any consumer would.
         // `db_state`/`AppStateInner::for_tests_with_db` always fixes
-        // `jwt_secret` to this literal (src/state.rs).
+        // `jwt_verify_key` to this fixture (src/state.rs — byte-identical
+        // to `skauswatch_testkit::jwt::verify_key`).
         let access = body["access_token"].as_str().unwrap_or_default();
-        let claims = match auth::decode_access(access, "test-secret") {
+        let claims = match auth::decode_access(access, skauswatch_testkit::jwt::verify_key()) {
             Ok(c) => c,
             Err(e) => panic!("decode minted access token: {e:?}"),
         };
@@ -741,7 +742,7 @@ mod tests {
 
         // Well-formed but never issued (never stored) → revoked message.
         let state2 = db_state(dev_license()).await;
-        let fabricated = create_refresh_token(1, &state2.auth.jwt_secret, 7)
+        let fabricated = create_refresh_token(1, &state2.auth.jwt_signing_key, 7)
             .unwrap_or_else(|e| panic!("encode: {e:?}"));
         let server2 = test_server_with_state(state2).await;
         let res = server2
@@ -787,10 +788,11 @@ mod tests {
         // `refresh_tokens` row, not re-derived — docs/v2-port/
         // tenancy-model.md §2), not silently drop it on the re-minted token.
         let rotated_access = first_body["access_token"].as_str().unwrap_or_default();
-        let claims = match auth::decode_access(rotated_access, "test-secret") {
-            Ok(c) => c,
-            Err(e) => panic!("decode rotated access token: {e:?}"),
-        };
+        let claims =
+            match auth::decode_access(rotated_access, skauswatch_testkit::jwt::verify_key()) {
+                Ok(c) => c,
+                Err(e) => panic!("decode rotated access token: {e:?}"),
+            };
         assert_eq!(claims.tenant, crate::auth::DEFAULT_TENANT_ID);
 
         // The original refresh token was revoked by rotation — reusing it
@@ -809,7 +811,7 @@ mod tests {
         let state = db_state(dev_license()).await;
         let id =
             seed_login_user(&state, "deact@example.com", "correct-horse", "viewer", true).await;
-        let refresh = create_refresh_token(id, &state.auth.jwt_secret, 7)
+        let refresh = create_refresh_token(id, &state.auth.jwt_signing_key, 7)
             .unwrap_or_else(|e| panic!("encode: {e:?}"));
         sqlx::query(
             "INSERT INTO refresh_tokens (user_id, token_hash, expires_at, revoked, tenant_id) \

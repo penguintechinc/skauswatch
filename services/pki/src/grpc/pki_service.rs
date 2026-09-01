@@ -45,7 +45,7 @@ impl PkiGrpc {
         metadata: &tonic::metadata::MetadataMap,
         required: &'static str,
     ) -> Result<(), Status> {
-        let claims = skauswatch_auth::verify_grpc_bearer(metadata, &self.state.jwt_secret)?;
+        let claims = skauswatch_auth::verify_grpc_bearer(metadata, &self.state.jwt_verify_key)?;
         if crate::authz::has_capability(&claims, required) {
             Ok(())
         } else {
@@ -894,7 +894,12 @@ mod tests {
     #[allow(clippy::panic)] // test-only helper fails loudly by design
     fn req_with_role<T>(msg: T, role: &str) -> Request<T> {
         let mut request = Request::new(msg);
-        let token = match skauswatch_auth::issue_service_token("tester", role, "test-secret", 300) {
+        let token = match skauswatch_auth::issue_service_token(
+            "tester",
+            role,
+            skauswatch_testkit::jwt::signing_key(),
+            300,
+        ) {
             Ok(t) => t,
             Err(e) => panic!("issue test token: {e}"),
         };
@@ -1789,7 +1794,7 @@ mod tests {
         let issuer_token = match skauswatch_auth::issue_service_token(
             "tester",
             "pki-issuer",
-            "test-secret",
+            skauswatch_testkit::jwt::signing_key(),
             300,
         ) {
             Ok(tok) => tok,

@@ -74,19 +74,20 @@ pub struct AppState {
     pub opensearch_url: std::sync::Arc<str>,
     /// Time source.
     pub clock: Clock,
-    /// Shared HS256 signing secret (`JWT_SECRET_KEY`) — every `/ingest`
-    /// request must carry a bearer token verified against this (via
-    /// `skauswatch_auth::tenant_middleware`). Before this pass `/ingest` had
-    /// no authentication at all.
-    pub jwt_secret: Arc<str>,
+    /// Shared ES256 verify key (`JWT_VERIFY_KEY`, PEM SPKI public key —
+    /// audit finding H1b, was a shared symmetric `JWT_SECRET_KEY`) — every
+    /// `/ingest` request must carry a bearer token verified against this
+    /// (via `skauswatch_auth::tenant_middleware`). Before this pass
+    /// `/ingest` had no authentication at all.
+    pub jwt_verify_key: jsonwebtoken::DecodingKey,
     /// License entitlement + PostHog flag client (fail-safe) — gates
     /// `/ingest` on [`LOG_INGEST_FLAG`].
     pub license: Arc<LicenseClient>,
 }
 
 impl skauswatch_auth::JwtSecretSource for AppState {
-    fn jwt_secret(&self) -> &str {
-        &self.jwt_secret
+    fn jwt_verify_key(&self) -> &jsonwebtoken::DecodingKey {
+        &self.jwt_verify_key
     }
 }
 
@@ -295,8 +296,6 @@ mod tests {
     /// The exact batch bytes fed to v1 to produce `BULK_REFERENCE`.
     const BATCH_JSON: &[u8] = include_bytes!("../tests/fixtures/batch.json");
 
-    /// Fixed `JWT_SECRET_KEY` every test's tokens are signed/verified against.
-    const TEST_JWT_SECRET: &str = "test-secret";
     /// The tenant used by tests that aren't specifically exercising
     /// cross-tenant behavior.
     const TEST_TENANT: &str = "tenant-a";
@@ -311,10 +310,10 @@ mod tests {
     }
 
     /// Mints a valid house `Claims` bearer token for `tenant`, signed with
-    /// [`TEST_JWT_SECRET`].
+    /// the shared fixture keypair (`skauswatch_testkit::jwt::signing_key`).
     fn bearer_for(tenant: &str) -> String {
         skauswatch_testkit::jwt::mint_claims_token(
-            TEST_JWT_SECRET,
+            skauswatch_testkit::jwt::signing_key(),
             "tester",
             tenant,
             "*:read *:write",
@@ -348,7 +347,7 @@ mod tests {
             http: reqwest::Client::new(),
             opensearch_url: opensearch_url.into(),
             clock,
-            jwt_secret: TEST_JWT_SECRET.into(),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license,
         }
     }
@@ -497,7 +496,7 @@ mod tests {
     async fn ingest_with_no_tenant_claim_is_403() {
         let server = test_server("http://unused");
         let token = skauswatch_testkit::jwt::mint_claims_token(
-            TEST_JWT_SECRET,
+            skauswatch_testkit::jwt::signing_key(),
             "tester",
             "", // no tenant claim
             "*:read *:write",

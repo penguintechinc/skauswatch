@@ -19,11 +19,14 @@ pub struct AppStateInner {
     pub x509_config: X509CaConfig,
     /// REST/gRPC bind ports.
     pub server: ServerConfig,
-    /// Shared HS256 signing secret (`JWT_SECRET_KEY`) — every REST and gRPC
-    /// endpoint requires a valid bearer token verified against this (finding
-    /// #1): this service mints CA certificates and private keys, and had no
-    /// authentication at all before this hardening pass.
-    pub jwt_secret: String,
+    /// Shared ES256 verify key (`JWT_VERIFY_KEY`, PEM SPKI public key) —
+    /// every REST and gRPC endpoint requires a valid bearer token verified
+    /// against this (finding #1; audit finding H1b: ES256, not the shared
+    /// symmetric `JWT_SECRET_KEY`): this service mints CA certificates and
+    /// private keys, and had no authentication at all before this
+    /// hardening pass. This service never mints tokens itself, so it holds
+    /// only the public verify half — never `JWT_SIGNING_KEY`.
+    pub jwt_verify_key: jsonwebtoken::DecodingKey,
     /// License entitlement + PostHog flag client (fail-safe) — currently
     /// only used to gate the live `/api/v1/openapi.json` route.
     pub license: Arc<LicenseClient>,
@@ -44,18 +47,19 @@ pub struct AppStateInner {
 pub type AppState = Arc<AppStateInner>;
 
 impl skauswatch_auth::JwtSecretSource for AppStateInner {
-    fn jwt_secret(&self) -> &str {
-        &self.jwt_secret
+    fn jwt_verify_key(&self) -> &jsonwebtoken::DecodingKey {
+        &self.jwt_verify_key
     }
 }
 
 impl AppStateInner {
     /// Builds state from the environment: loads/generates both CAs and
     /// connects the Postgres pool (with retry) via the shared `skauswatch-db`.
-    /// Fails fast (before any CA key material is touched) if `JWT_SECRET_KEY`
-    /// is missing in production — see `skauswatch_auth::load_jwt_secret`.
+    /// Fails fast (before any CA key material is touched) if `JWT_VERIFY_KEY`
+    /// is missing in production — see `skauswatch_auth::load_jwt_verify_key`.
     pub async fn from_env() -> anyhow::Result<AppState> {
-        let jwt_secret = skauswatch_auth::load_jwt_secret().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let jwt_verify_key =
+            skauswatch_auth::load_jwt_verify_key().map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let license_cfg = penguin_licensing::LicenseConfig::from_env("skauswatch")
             .map_err(|e| anyhow::anyhow!("license config: {e}"))?
@@ -107,7 +111,7 @@ impl AppStateInner {
             manager,
             x509_config,
             server,
-            jwt_secret,
+            jwt_verify_key,
             license,
             identity: Some(identity),
         }))
@@ -130,7 +134,7 @@ impl AppStateInner {
     /// ephemeral X.509 CA, an in-memory `SshCa::for_tests()` (no
     /// `ssh-keygen` subprocess — that binary isn't installed in the plain
     /// `rust:*-bookworm` image this workspace builds/tests in), a lazy
-    /// (unconnected) Postgres pool, and a fixed, known `jwt_secret` so
+    /// (unconnected) Postgres pool, and a fixed, known `jwt_verify_key` so
     /// route/gRPC auth-gate tests can mint valid bearer tokens without
     /// touching the real environment or a live DB.
     #[cfg(test)]
@@ -175,7 +179,7 @@ impl AppStateInner {
                 api_port: 8001,
                 grpc_port: 50_052,
             },
-            jwt_secret: "test-secret".to_owned(),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license,
             identity: None,
         })
@@ -221,7 +225,7 @@ impl AppStateInner {
                 api_port: 8001,
                 grpc_port: 50_052,
             },
-            jwt_secret: "test-secret".to_owned(),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license: Self::dev_license(),
             identity: Some(identity),
         })
@@ -291,7 +295,7 @@ impl AppStateInner {
                 api_port: 8001,
                 grpc_port: 50_052,
             },
-            jwt_secret: "test-secret".to_owned(),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license: Self::dev_license(),
             identity: None,
         })
@@ -312,7 +316,7 @@ impl AppStateInner {
                 api_port: 8001,
                 grpc_port: 50_052,
             },
-            jwt_secret: "test-secret".to_owned(),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license: Self::dev_license(),
             identity: None,
         })

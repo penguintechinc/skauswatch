@@ -4,9 +4,10 @@
 //! docs/v2-port/manager-contract.md §gRPC; Python source of truth:
 //! services/manager/grpc/{server,s3_scan_server}.py.
 //!
-//! AUTH (hardened, finding #3): every implemented business RPC now requires
-//! `authorization: Bearer <jwt>` metadata — an HS256 access token signed
-//! with the shared `JWT_SECRET_KEY` (`skauswatch_auth::verify_grpc_bearer`).
+//! AUTH (hardened, finding #3; ES256 per audit finding H1b): every
+//! implemented business RPC now requires `authorization: Bearer <jwt>`
+//! metadata — an ES256 access token verifiable with the shared
+//! `JWT_VERIFY_KEY` (`skauswatch_auth::verify_grpc_bearer`).
 //! `HealthCheck` stays open (liveness/readiness probes, no sensitive data,
 //! not in the audit's gated-method list). Dead/UNIMPLEMENTED stub RPCs are
 //! unauthenticated too — they do no work regardless of the caller. No
@@ -24,10 +25,10 @@
 //! deliberately keeps this broad rather than narrowed to specific callers,
 //! since every RPC here has zero real callers today). This is *additive*
 //! to, not a replacement for, the per-RPC `require_jwt` gate above: for one
-//! release cycle both a valid client certificate *and* a valid HS256
+//! release cycle both a valid client certificate *and* a valid ES256
 //! bearer token are required (dual-accept — see
 //! `docs/v2-port/service-auth-model.md`'s §2 "Transition plan"; a later
-//! pass deletes the HS256 layer entirely once mTLS is confirmed healthy in
+//! pass deletes the bearer-token layer entirely once mTLS is confirmed healthy in
 //! beta). When no identity is held — `AppState::identity` is `None`, or the
 //! SPIFFE Workload API attested but degraded (dev/test, no SPIRE agent
 //! socket present) — the listener falls back to plaintext with
@@ -168,7 +169,7 @@ async fn serve_with_ready(
             let bound = listener.local_addr()?;
             tracing::info!(
                 addr = %bound,
-                "manager gRPC listening (mTLS, same-trust-domain + HS256 bearer)"
+                "manager gRPC listening (mTLS, same-trust-domain + ES256 bearer)"
             );
             if let Some(tx) = ready {
                 let _ = tx.send(bound);
@@ -181,7 +182,7 @@ async fn serve_with_ready(
             tracing::warn!(
                 %addr,
                 "no SPIFFE workload identity held — manager gRPC serving plaintext \
-                 (dev/test only; per-RPC HS256 bearer auth is still required; \
+                 (dev/test only; per-RPC ES256 bearer auth is still required; \
                  production hard-fails at startup instead of reaching this fallback)"
             );
             if let Some(tx) = ready {
@@ -197,8 +198,11 @@ async fn serve_with_ready(
 /// signed with the shared `JWT_SECRET_KEY` (finding #3). Maps verification
 /// failure onto `UNAUTHENTICATED` via `skauswatch_auth::ServiceTokenError`'s
 /// `From<_> for tonic::Status` impl.
-fn require_jwt(metadata: &tonic::metadata::MetadataMap, secret: &str) -> Result<(), Status> {
-    skauswatch_auth::verify_grpc_bearer(metadata, secret)?;
+fn require_jwt(
+    metadata: &tonic::metadata::MetadataMap,
+    verify_key: &jsonwebtoken::DecodingKey,
+) -> Result<(), Status> {
+    skauswatch_auth::verify_grpc_bearer(metadata, verify_key)?;
     Ok(())
 }
 
@@ -422,9 +426,14 @@ mod tests {
     #[test]
     fn require_jwt_accepts_valid_and_rejects_missing() {
         let empty = tonic::metadata::MetadataMap::new();
-        assert!(require_jwt(&empty, "s3cret").is_err());
+        assert!(require_jwt(&empty, skauswatch_testkit::jwt::verify_key()).is_err());
 
-        let token = match skauswatch_auth::issue_service_token("1", "admin", "s3cret", 300) {
+        let token = match skauswatch_auth::issue_service_token(
+            "1",
+            "admin",
+            skauswatch_testkit::jwt::signing_key(),
+            300,
+        ) {
             Ok(t) => t,
             Err(e) => panic!("issue token: {e}"),
         };
@@ -434,7 +443,7 @@ mod tests {
             Err(e) => panic!("metadata value: {e}"),
         };
         md.insert("authorization", value);
-        assert!(require_jwt(&md, "s3cret").is_ok());
+        assert!(require_jwt(&md, skauswatch_testkit::jwt::verify_key()).is_ok());
     }
 
     #[test]

@@ -2,9 +2,10 @@
 //! blueprints exactly (`/certificates`, `/ssh`, and the bare common routes),
 //! with no trailing-slash variance.
 //!
-//! AUTH (hardened, finding #1): every route in this router requires a valid
-//! `Authorization: Bearer <jwt>` — an HS256 access token signed with the
-//! shared `JWT_SECRET_KEY` — enforced as a single router-wide layer via
+//! AUTH (hardened, finding #1; ES256 per audit finding H1b): every route in
+//! this router requires a valid `Authorization: Bearer <jwt>` — an ES256
+//! access token verifiable with the shared `JWT_VERIFY_KEY` — enforced as a
+//! single router-wide layer via
 //! `skauswatch_auth::AuthenticatedCaller` (no local user DB here, so this is
 //! signature/expiry/type only, unlike the manager's `CurrentUser`). Before
 //! this pass every one of these endpoints — including certificate issuance
@@ -38,10 +39,15 @@ pub(crate) mod test_support {
     }
 
     /// Mints a bearer token for the fixed `for_tests`/`for_tests_with_db`
-    /// JWT secret (`"test-secret"`).
+    /// verify key (`skauswatch_testkit::jwt::verify_key`).
     #[allow(clippy::panic)] // test-only helper fails loudly by design
     pub(crate) fn bearer() -> String {
-        match skauswatch_auth::issue_service_token("tester", "admin", "test-secret", 300) {
+        match skauswatch_auth::issue_service_token(
+            "tester",
+            "admin",
+            skauswatch_testkit::jwt::signing_key(),
+            300,
+        ) {
             Ok(t) => format!("Bearer {t}"),
             Err(e) => panic!("issue test token: {e}"),
         }
@@ -201,7 +207,7 @@ pub fn router(state: AppState) -> Router {
         // — they moved to the dedicated mTLS-required maintenance listener
         // (`crate::maintenance`) so their cross-tenant access is
         // cryptographically enforced (SPIFFE `endpoint-agent-maintenance`
-        // identity) instead of relying on this HS256-bearer-gated listener's
+        // identity) instead of relying on this ES256-bearer-gated listener's
         // network reachability. See `crate::maintenance` module docs and
         // `docs/v2-port/service-auth-model.md` §3.
         .route("/statistics", get(common::statistics))
@@ -290,15 +296,15 @@ mod tests {
         axum_test::TestServer::new(super::router(AppStateInner::for_tests()))
     }
 
-    fn bearer(server_secret: &str) -> String {
-        bearer_with_role("admin", server_secret)
+    fn bearer(signing_key: &jsonwebtoken::EncodingKey) -> String {
+        bearer_with_role("admin", signing_key)
     }
 
     /// Same as [`bearer`] but with a caller-chosen `ServiceClaims.role`, for
     /// exercising `crate::authz`'s scope gates with a role that carries
     /// less than every capability.
-    fn bearer_with_role(role: &str, server_secret: &str) -> String {
-        match skauswatch_auth::issue_service_token("tester", role, server_secret, 300) {
+    fn bearer_with_role(role: &str, signing_key: &jsonwebtoken::EncodingKey) -> String {
+        match skauswatch_auth::issue_service_token("tester", role, signing_key, 300) {
             Ok(t) => format!("Bearer {t}"),
             Err(e) => panic!("issue test token: {e}"),
         }
@@ -349,7 +355,7 @@ mod tests {
 
     /// Regression for R3-1 (`docs/v2-port/service-auth-model.md` §3):
     /// `/expiring` and `/cleanup` must no longer be reachable on the
-    /// primary, HS256-bearer-gated listener at all — not even behind the
+    /// primary, ES256-bearer-gated listener at all — not even behind the
     /// auth layer — since they now live exclusively on the dedicated
     /// mTLS-required maintenance listener (`crate::maintenance`). A bare
     /// 404 here (not 401) proves the route was actually removed, not just
@@ -363,7 +369,10 @@ mod tests {
                 _ => server.post(path),
             };
             let res = request
-                .add_header(axum::http::header::AUTHORIZATION, bearer("test-secret"))
+                .add_header(
+                    axum::http::header::AUTHORIZATION,
+                    bearer(skauswatch_testkit::jwt::signing_key()),
+                )
                 .await;
             res.assert_status(StatusCode::NOT_FOUND);
         }
@@ -377,7 +386,10 @@ mod tests {
         // always rejects.
         let res = server
             .get("/api/v1/statistics")
-            .add_header(axum::http::header::AUTHORIZATION, bearer("test-secret"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer(skauswatch_testkit::jwt::signing_key()),
+            )
             .await;
         assert_ne!(res.status_code(), StatusCode::UNAUTHORIZED);
     }
@@ -387,7 +399,10 @@ mod tests {
         let server = test_server();
         let res = server
             .get("/api/v1/statistics")
-            .add_header(axum::http::header::AUTHORIZATION, bearer("wrong-secret"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer(skauswatch_testkit::jwt::other_signing_key()),
+            )
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);
     }
@@ -418,7 +433,10 @@ mod tests {
 
         let x509_res = server
             .post("/api/v1/certificates")
-            .add_header(axum::http::header::AUTHORIZATION, bearer("test-secret"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer(skauswatch_testkit::jwt::signing_key()),
+            )
             .add_header(crate::tenant::TENANT_HEADER, tenant.clone())
             .json(&serde_json::json!({ "subject": "CN=flag-off.example.com" }))
             .await;
@@ -429,7 +447,10 @@ mod tests {
 
         let ssh_res = server
             .post("/api/v1/ssh/certificates")
-            .add_header(axum::http::header::AUTHORIZATION, bearer("test-secret"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer(skauswatch_testkit::jwt::signing_key()),
+            )
             .add_header(crate::tenant::TENANT_HEADER, tenant)
             .json(&serde_json::json!({
                 "certificate_type": "user",
@@ -446,7 +467,10 @@ mod tests {
         // proves the split targets POST only, not the whole path.
         let list_res = server
             .get("/api/v1/certificates")
-            .add_header(axum::http::header::AUTHORIZATION, bearer("test-secret"))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer(skauswatch_testkit::jwt::signing_key()),
+            )
             .add_header(
                 crate::tenant::TENANT_HEADER,
                 uuid::Uuid::new_v4().to_string(),
@@ -469,7 +493,7 @@ mod tests {
             .post("/api/v1/certificates")
             .add_header(
                 axum::http::header::AUTHORIZATION,
-                bearer_with_role("viewer", "test-secret"),
+                bearer_with_role("viewer", skauswatch_testkit::jwt::signing_key()),
             )
             .add_header(crate::tenant::TENANT_HEADER, tenant.clone())
             .json(&serde_json::json!({ "subject": "CN=no-issue-scope.example.com" }))
@@ -487,7 +511,7 @@ mod tests {
             .post("/api/v1/certificates")
             .add_header(
                 axum::http::header::AUTHORIZATION,
-                bearer_with_role("admin", "test-secret"),
+                bearer_with_role("admin", skauswatch_testkit::jwt::signing_key()),
             )
             .add_header(crate::tenant::TENANT_HEADER, tenant)
             .json(&serde_json::json!({ "subject": "CN=has-issue-scope.example.com" }))
@@ -510,7 +534,7 @@ mod tests {
             ))
             .add_header(
                 axum::http::header::AUTHORIZATION,
-                bearer_with_role("pki-issuer", "test-secret"),
+                bearer_with_role("pki-issuer", skauswatch_testkit::jwt::signing_key()),
             )
             .await;
         denied.assert_status(StatusCode::FORBIDDEN);
@@ -522,7 +546,7 @@ mod tests {
             ))
             .add_header(
                 axum::http::header::AUTHORIZATION,
-                bearer_with_role("pki-revoker", "test-secret"),
+                bearer_with_role("pki-revoker", skauswatch_testkit::jwt::signing_key()),
             )
             .add_header(
                 crate::tenant::TENANT_HEADER,
@@ -541,7 +565,7 @@ mod tests {
             .get("/api/v1/statistics")
             .add_header(
                 axum::http::header::AUTHORIZATION,
-                bearer_with_role("unmapped-role", "test-secret"),
+                bearer_with_role("unmapped-role", skauswatch_testkit::jwt::signing_key()),
             )
             .await;
         denied.assert_status(StatusCode::FORBIDDEN);
@@ -550,7 +574,7 @@ mod tests {
             .get("/api/v1/statistics")
             .add_header(
                 axum::http::header::AUTHORIZATION,
-                bearer_with_role("pki-reader", "test-secret"),
+                bearer_with_role("pki-reader", skauswatch_testkit::jwt::signing_key()),
             )
             .add_header(
                 crate::tenant::TENANT_HEADER,
@@ -571,7 +595,7 @@ mod tests {
             .get("/api/v1/audit")
             .add_header(
                 axum::http::header::AUTHORIZATION,
-                bearer_with_role("pki-reader", "test-secret"),
+                bearer_with_role("pki-reader", skauswatch_testkit::jwt::signing_key()),
             )
             .await;
         denied.assert_status(StatusCode::FORBIDDEN);
@@ -580,7 +604,7 @@ mod tests {
             .get("/api/v1/audit")
             .add_header(
                 axum::http::header::AUTHORIZATION,
-                bearer_with_role("admin", "test-secret"),
+                bearer_with_role("admin", skauswatch_testkit::jwt::signing_key()),
             )
             .add_header(
                 crate::tenant::TENANT_HEADER,
@@ -600,7 +624,7 @@ mod tests {
     #[tokio::test]
     async fn requests_exceeding_the_burst_are_rate_limited() {
         let server = test_server();
-        let auth = bearer("test-secret");
+        let auth = bearer(skauswatch_testkit::jwt::signing_key());
         let mut saw_429 = false;
         for _ in 0..30 {
             let res = server

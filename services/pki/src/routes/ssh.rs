@@ -559,7 +559,12 @@ mod tests {
     }
 
     fn bearer() -> String {
-        match skauswatch_auth::issue_service_token("tester", "admin", "test-secret", 300) {
+        match skauswatch_auth::issue_service_token(
+            "tester",
+            "admin",
+            skauswatch_testkit::jwt::signing_key(),
+            300,
+        ) {
             Ok(t) => format!("Bearer {t}"),
             Err(e) => panic!("issue test token: {e}"),
         }

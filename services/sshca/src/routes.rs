@@ -12,8 +12,8 @@
 //! reached by the manager/pki plane"), but a security audit determined that
 //! posture is unacceptable for a service holding an SSH CA signing key —
 //! anyone who can reach the pod can mint host/user SSH certificates. Every
-//! route now requires `Authorization: Bearer <jwt>` (HS256, shared
-//! `JWT_SECRET_KEY`), enforced as a router-wide layer via
+//! route now requires `Authorization: Bearer <jwt>` (ES256 per audit
+//! finding H1b, shared `JWT_VERIFY_KEY`), enforced as a router-wide layer via
 //! `skauswatch_auth::AuthenticatedCaller`. No in-repo caller exists today
 //! (confirmed by repo-wide grep for `sshca`/`SSHCA_URL`) — gating
 //! introduces no breakage; a future caller must present a machine JWT minted
@@ -52,9 +52,12 @@ pub struct AppState {
     pub ca: Arc<SshCa>,
     /// The issued-certificate + revocation store.
     pub store: Arc<CertStore>,
-    /// Shared HS256 signing secret (`JWT_SECRET_KEY`) — every route below
-    /// requires a valid bearer token verified against this (finding #2).
-    pub jwt_secret: Arc<str>,
+    /// Shared ES256 verify key (`JWT_VERIFY_KEY`, PEM SPKI public key) —
+    /// every route below requires a valid bearer token verified against
+    /// this (finding #2; audit finding H1b: ES256, not the shared
+    /// symmetric `JWT_SECRET_KEY`). This service never mints tokens
+    /// itself, so it holds only the public verify half.
+    pub jwt_verify_key: jsonwebtoken::DecodingKey,
     /// License entitlement + PostHog flag client (fail-safe) — gates the
     /// live `/api/v1/ssh/openapi.json` route (see `openapi::OPENAPI_FLAG`).
     /// Not otherwise consulted: certificate issuance itself is unlicensed.
@@ -62,8 +65,8 @@ pub struct AppState {
 }
 
 impl skauswatch_auth::JwtSecretSource for AppState {
-    fn jwt_secret(&self) -> &str {
-        &self.jwt_secret
+    fn jwt_verify_key(&self) -> &jsonwebtoken::DecodingKey {
+        &self.jwt_verify_key
     }
 }
 
@@ -564,8 +567,6 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    const TEST_JWT_SECRET: &str = "test-secret";
-
     /// Dev-mode license client (flags default enabled) — none of the
     /// business routes in this file consult it; only `openapi.rs`'s own
     /// tests exercise the flag-gated path (see that module's `dev_license`/
@@ -592,7 +593,7 @@ mod tests {
         AppState {
             ca: Arc::new(ca),
             store: Arc::new(CertStore::new(crate::test_support::lazy_pool())),
-            jwt_secret: TEST_JWT_SECRET.into(),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license: dev_license(),
         }
     }
@@ -606,16 +607,21 @@ mod tests {
         AppState {
             ca: Arc::new(ca),
             store: Arc::new(CertStore::new(crate::test_support::db_pool().await)),
-            jwt_secret: TEST_JWT_SECRET.into(),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license: dev_license(),
         }
     }
 
     /// `Authorization` header value with a valid bearer token signed with
-    /// `TEST_JWT_SECRET`, matching `test_state()`.
+    /// the shared fixture keypair, matching `test_state()`.
     fn auth_header() -> (&'static str, String) {
-        let token = skauswatch_auth::issue_service_token("tester", "admin", TEST_JWT_SECRET, 300)
-            .expect("issue test token");
+        let token = skauswatch_auth::issue_service_token(
+            "tester",
+            "admin",
+            skauswatch_testkit::jwt::signing_key(),
+            300,
+        )
+        .expect("issue test token");
         ("Authorization", format!("Bearer {token}"))
     }
 
@@ -972,8 +978,13 @@ mod tests {
     #[tokio::test]
     async fn token_signed_with_wrong_secret_is_rejected() {
         let server = axum_test::TestServer::new(router(test_state()));
-        let bad_token = skauswatch_auth::issue_service_token("x", "admin", "wrong-secret", 300)
-            .expect("issue token");
+        let bad_token = skauswatch_auth::issue_service_token(
+            "x",
+            "admin",
+            skauswatch_testkit::jwt::other_signing_key(),
+            300,
+        )
+        .expect("issue token");
         let resp = server
             .get("/api/v1/ssh/ca/public-key")
             .add_header("Authorization", format!("Bearer {bad_token}"))
@@ -1065,7 +1076,7 @@ mod tests {
         let state = AppState {
             ca: Arc::new(ca),
             store: Arc::new(CertStore::new(crate::test_support::db_pool().await)),
-            jwt_secret: TEST_JWT_SECRET.into(),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license: gated_license(),
         };
         let server = axum_test::TestServer::new(router(state));
@@ -1099,8 +1110,12 @@ mod tests {
     /// — for exercising `crate::authz`'s scope gates with a role that
     /// carries less than every capability.
     fn auth_header_with_role(role: &str) -> (&'static str, String) {
-        let token = match skauswatch_auth::issue_service_token("tester", role, TEST_JWT_SECRET, 300)
-        {
+        let token = match skauswatch_auth::issue_service_token(
+            "tester",
+            role,
+            skauswatch_testkit::jwt::signing_key(),
+            300,
+        ) {
             Ok(t) => t,
             Err(e) => panic!("issue test token: {e}"),
         };
