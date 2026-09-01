@@ -101,7 +101,7 @@ pub(crate) async fn create_tenant(
     user: CurrentUser,
     ApiJson(body): ApiJson<CreateTenantRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    user.require_role(&["super_admin"])?;
+    user.require_scope("tenants:root")?;
 
     if !valid_slug(&body.slug) {
         return Err(validation(
@@ -231,7 +231,7 @@ pub(crate) async fn create_enrollment_token(
     Path(tenant_id): Path<uuid::Uuid>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<EnrollmentTokenResponse>), ApiError> {
-    user.require_role(&["super_admin"])?;
+    user.require_scope("tenants:root")?;
 
     let parsed: CreateEnrollmentTokenRequest = if body.is_empty() {
         CreateEnrollmentTokenRequest::default()

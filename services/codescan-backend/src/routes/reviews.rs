@@ -272,7 +272,8 @@ fn build_review_task_fields(
     fields
 }
 
-/// POST /codescan/reviews — maintainer only (see module docs); enqueues onto
+/// POST /codescan/reviews — requires `codescan:write` scope (admin or
+/// maintainer; see `crate::auth` module docs); enqueues onto
 /// `codescan:tasks` after the row is committed.
 #[utoipa::path(
     post,
@@ -668,19 +669,48 @@ mod tests {
         }
     }
 
+    /// `viewer`'s scope bundle carries only `*:read`, which never satisfies
+    /// `crate::auth::WRITE_SCOPE` — this stays forbidden regardless of the
+    /// role→scope migration. `admin` is deliberately *not* tested here
+    /// anymore: see `admin_role_is_also_permitted_via_write_scope_superset`
+    /// and the `crate::auth` module docs for why admin now passes this
+    /// gate (both `admin` and `maintainer` carry `*:write`).
     #[tokio::test]
-    async fn create_review_rejects_non_maintainer_roles() {
-        for role in ["admin", "viewer"] {
-            let state = AppStateInner::for_tests(dev_license());
-            let token = sign_token(&state, "1", role);
-            let server = test_server(state);
-            let resp = server
-                .post("/api/v1/codescan/reviews")
-                .authorization_bearer(&token)
-                .json(&serde_json::json!({}))
-                .await;
-            resp.assert_status(StatusCode::FORBIDDEN);
-        }
+    async fn create_review_rejects_viewer_role() {
+        let state = AppStateInner::for_tests(dev_license());
+        let token = sign_token(&state, "1", "viewer");
+        let server = test_server(state);
+        let resp = server
+            .post("/api/v1/codescan/reviews")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({}))
+            .await;
+        resp.assert_status(StatusCode::FORBIDDEN);
+    }
+
+    /// Regression/behavior-change coverage for the role→scope authz
+    /// migration (`crate::auth` module docs): the old `require_role(&
+    /// ["maintainer"])` gate excluded `admin`; the scope-based
+    /// `crate::auth::WRITE_SCOPE` check admin now satisfies via its
+    /// `*:write` wildcard bundle entry, matching every other
+    /// admin-vs-lower-tier gate in this service (admin is a superset).
+    /// Mirrors `create_rejects_unknown_repo_config`'s minimal-body pattern:
+    /// reaching a 404 (not 403) proves the `MaintainerOnly` extractor let
+    /// the admin token through to the handler.
+    #[tokio::test]
+    async fn admin_role_is_also_permitted_via_write_scope_superset() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = sign_token(&state, "1", "admin");
+        let server = test_server(state);
+        let resp = server
+            .post("/api/v1/codescan/reviews")
+            .authorization_bearer(&token)
+            .json(&serde_json::json!({
+                "repo_config_id": 999999,
+                "pr_url": "https://github.com/a/b/pull/1",
+            }))
+            .await;
+        resp.assert_status(StatusCode::NOT_FOUND);
     }
 
     /// Inserts a `codescan_repo_configs` row directly (bypassing the REST

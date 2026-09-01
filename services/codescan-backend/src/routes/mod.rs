@@ -18,6 +18,20 @@
 //! — this middleware is defense in depth, not a replacement, since
 //! `CurrentUser` is also reachable through the per-module test routers in
 //! `routes/*.rs` tests, which never mount it.
+//!
+//! Rate limiting (HIGH security hardening): [`GovernorLayer`] wraps
+//! `/api/v1` as the new outermost layer — even further out than
+//! `tenant_middleware` — so an excess-rate client is rejected with 429
+//! before any token decode/DB work runs. Per-client-IP
+//! (`PeerIpKeyExtractor`, `tower_governor`'s own recommended default);
+//! `health::router`/metrics (merged separately in `main.rs::serve`, outside
+//! this router) are deliberately NOT rate limited — k8s liveness probes and
+//! Prometheus scraping must never 429. Requires the server to be bound with
+//! `Router::into_make_service_with_connect_info::<SocketAddr>()`
+//! (`main.rs::serve`) — without it `PeerIpKeyExtractor` has no peer address
+//! to key on and every request fails closed with 500
+//! (`GovernorError::UnableToExtractKey`); `routes::tests::full_server` does
+//! the same for the app-wide test router.
 
 mod credentials;
 mod findings;
@@ -35,8 +49,28 @@ pub(crate) mod test_support;
 use axum::Router;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http::StatusCode};
+use tower_governor::GovernorLayer;
+use tower_governor::governor::GovernorConfigBuilder;
 
 use crate::state::AppState;
+
+/// Sustained per-client-IP request rate (requests/second, the rate the
+/// burst bucket refills at) once the burst allowance is exhausted —
+/// overridable via the `RATE_LIMIT_PER_SECOND` env var.
+const DEFAULT_RATE_LIMIT_PER_SECOND: u64 = 10;
+/// Per-client-IP burst allowance (requests) before rate limiting kicks in —
+/// overridable via the `RATE_LIMIT_BURST_SIZE` env var.
+const DEFAULT_RATE_LIMIT_BURST_SIZE: u32 = 20;
+
+/// Reads an env var as the given numeric type, falling back to `default` on
+/// absence *or* an unparseable value — never fails startup over a malformed
+/// rate-limit override.
+fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
 
 /// PostHog module flag gating every codescan route — the v2 equivalent of v1
 /// `has_feature("codescan")` (see services/manager/src/routes/codescan.rs, which
@@ -58,6 +92,25 @@ const SENTINEL_LICENSE_MSG: &str = "CodeScan Sentinel requires the Sentinel feat
 
 /// Builds the full /api/v1 application router.
 pub fn router(state: AppState) -> Router {
+    // See module docs "Rate limiting": construction must not panic, so an
+    // invalid override falls back to tower_governor's own built-in default
+    // (8-request burst, 500ms refill) with a warning rather than crashing.
+    let per_second = env_or("RATE_LIMIT_PER_SECOND", DEFAULT_RATE_LIMIT_PER_SECOND);
+    let burst_size = env_or("RATE_LIMIT_BURST_SIZE", DEFAULT_RATE_LIMIT_BURST_SIZE);
+    let governor_conf = GovernorConfigBuilder::default()
+        .per_second(per_second)
+        .burst_size(burst_size)
+        .finish()
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                per_second,
+                burst_size,
+                "invalid RATE_LIMIT_PER_SECOND/RATE_LIMIT_BURST_SIZE (both must be non-zero); \
+                 falling back to tower_governor's built-in default"
+            );
+            Default::default()
+        });
+
     let protected = status::router()
         .merge(repos::router())
         .merge(reviews::router())
@@ -71,7 +124,10 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             skauswatch_auth::tenant_middleware::<AppState>,
-        ));
+        ))
+        // Outermost: rejects an excess-rate client with 429 before any
+        // token decode/tenant/DB work runs — see module docs.
+        .layer(GovernorLayer::new(governor_conf));
 
     Router::new().nest("/api/v1", protected).with_state(state)
 }
@@ -162,11 +218,22 @@ mod tests {
 
     /// Full app-wide router (this module's own [`router`], not a per-module
     /// test router) backed by a real DB — the only place `tenant_middleware`
-    /// is actually mounted, so only tests against this server exercise it.
+    /// (and, since the rate-limit fix, [`GovernorLayer`]) is actually
+    /// mounted, so only tests against this server exercise either. See
+    /// [`test_support::full_app_test_server`] for why this must go through
+    /// real HTTP transport with connect info rather than
+    /// `axum_test::TestServer::new` directly.
     async fn full_server() -> (axum_test::TestServer, crate::state::AppState) {
         let state = test_support::db_state(dev_license()).await;
-        let server = axum_test::TestServer::new(router(state.clone()));
-        (server, state)
+        (test_support::full_app_test_server(state.clone()), state)
+    }
+
+    /// Like [`full_server`] but backed by a lazy (unconnected) test pool —
+    /// for tests that only need to exercise the outermost layers
+    /// ([`GovernorLayer`]/`tenant_middleware`) against requests that are
+    /// rejected before any handler (and therefore any DB access) runs.
+    fn full_server_no_db() -> axum_test::TestServer {
+        test_support::full_app_test_server(crate::state::AppStateInner::for_tests(dev_license()))
     }
 
     #[tokio::test]
@@ -192,5 +259,23 @@ mod tests {
         // `tenant_middleware` let the request through — a rejection here
         // would be 401/403 before the handler ever ran.
         resp.assert_status_ok();
+    }
+
+    /// [`GovernorLayer`] is the outermost layer, so it counts every request
+    /// against the per-IP burst regardless of what the inner service would
+    /// eventually return — an unauthenticated request (401, well before any
+    /// handler runs) still consumes a token, so this test needs no minted
+    /// JWT. `DEFAULT_RATE_LIMIT_BURST_SIZE` requests are allowed through
+    /// (all still 401, having consumed the burst); the next one is rejected
+    /// with 429 before reaching `tenant_middleware`/`CurrentUser` at all.
+    #[tokio::test]
+    async fn rate_limit_returns_429_after_burst_is_exhausted() {
+        let server = full_server_no_db();
+        for _ in 0..DEFAULT_RATE_LIMIT_BURST_SIZE {
+            let resp = server.get("/api/v1/codescan/status").await;
+            resp.assert_status(StatusCode::UNAUTHORIZED);
+        }
+        let resp = server.get("/api/v1/codescan/status").await;
+        resp.assert_status(StatusCode::TOO_MANY_REQUESTS);
     }
 }

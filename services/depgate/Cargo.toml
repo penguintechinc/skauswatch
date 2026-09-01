@@ -85,6 +85,10 @@ tokio = { workspace = true }
 # built by skauswatch-identity, not this crate directly; mirrors
 # services/pki's `tokio-rustls` usage in its maintenance listener.
 tokio-rustls = { workspace = true }
+# Per-IP rate limiting on the pull-through proxy (`/v2/*`, `/npm/*`,
+# `/pypi/*`, `/crates/*`, `/go/*` — the abuse/egress-cost surface) and the
+# admin/report API (`src/rate_limit.rs`).
+tower_governor = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 utoipa = { workspace = true, features = ["yaml"] }

@@ -190,6 +190,11 @@ up() {
   # that crate's own docs RELEASE_MODE=false is the only supported way to
   # run outside production posture (no domain-based bypass exists, by
   # design). v1 predates SPIFFE identity entirely, so it needs no equivalent.
+  # Rate limiting (tower_governor) is a v2-only feature (v1 has none); parity
+  # compares API behavior, not throttling, so it is neutralized with huge
+  # bursts (RATE_LIMIT_*_BURST below) — the rapid sequential /auth/* replay
+  # would otherwise trip 429s (defaults: global 50 / auth 5). Documented
+  # v1<->v2 divergence, handled here rather than allowlisting 20 auth 429s.
   docker run -d --name "$V2" --network "$NET" -p "$V2_PORT":5000 \
     -v "$SCRATCH/target-parity/debug/skauswatch-manager":/usr/local/bin/skauswatch-manager:ro \
     -v "$REPO/.version":/work/.version:ro \
@@ -201,6 +206,8 @@ up() {
     -e ENDPOINT_API_SECRET="$ENDPOINT_API_SECRET" \
     -e VAULT_MEK="$VAULT_MEK" \
     -e RELEASE_MODE=false \
+    -e RATE_LIMIT_GLOBAL_BURST=1000000 \
+    -e RATE_LIMIT_AUTH_BURST=1000000 \
     -e GRPC_ENABLED=false \
     -e LICENSE_SERVER_URL="http://$STUB:9999" \
     -e SCANNER_URL="http://$STUB:9999" \

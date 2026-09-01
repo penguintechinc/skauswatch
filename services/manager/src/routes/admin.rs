@@ -75,7 +75,7 @@ pub(crate) async fn get_svid_ttl(
     State(state): State<AppState>,
     user: CurrentUser,
 ) -> Result<Json<SvidTtlSettings>, ApiError> {
-    user.require_role(&["super_admin"])?;
+    user.require_scope("spire:root")?;
 
     let row: Option<(i32, i32)> = sqlx::query_as(
         "SELECT x509_ttl_seconds, jwt_ttl_seconds FROM svid_ttl_settings WHERE id = 1",
@@ -194,7 +194,7 @@ pub(crate) async fn update_svid_ttl(
     user: CurrentUser,
     ApiJson(body): ApiJson<UpdateSvidTtlRequest>,
 ) -> Result<Json<SvidTtlSettings>, ApiError> {
-    user.require_role(&["super_admin"])?;
+    user.require_scope("spire:root")?;
 
     let x509_ttl_seconds = validate_ttl(body.x509_ttl_seconds, "x509_ttl_seconds")?;
     let jwt_ttl_seconds = validate_ttl(body.jwt_ttl_seconds, "jwt_ttl_seconds")?;

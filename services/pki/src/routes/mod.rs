@@ -78,11 +78,14 @@ pub(crate) mod test_support {
 }
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::Router;
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use penguin_licensing::axum::{FlagGate, flag_gate};
+use tower_governor::GovernorLayer;
+use tower_governor::governor::GovernorConfigBuilder;
 
 use crate::state::AppState;
 
@@ -127,15 +130,50 @@ pub fn page_params(q: &HashMap<String, String>) -> (i64, i64) {
 /// to gate on between the two, unlike the manager's tenant → scope →
 /// feature contract).
 pub fn router(state: AppState) -> Router {
+    // Security audit finding — real authorization, not just authentication
+    // (see `crate::authz` module docs): every sub-router below carries its
+    // own `crate::authz::ScopeGate` requiring the `pki:*` capability that
+    // matches what it actually does, layered *innermost* relative to the
+    // outer router-wide `AuthenticatedCaller` applied to `api` below — so
+    // ordering is auth (401) → scope (403) → feature flag (404, issuance
+    // only), matching `crates/skauswatch-auth`'s documented layering
+    // contract adapted to this machine-token surface.
     let issuance = Router::new()
         .route("/certificates", post(x509::issue))
         .route("/ssh/certificates", post(ssh::issue))
         .layer(axum::middleware::from_fn_with_state(
             FlagGate::new(state.license.clone(), ISSUANCE_FLAG),
             flag_gate,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            crate::authz::ScopeGate::new(state.clone(), crate::authz::PKI_ISSUE),
+            crate::authz::scope_gate,
         ));
 
-    let api = Router::new()
+    // Certificate revocation (X.509 + SSH) — `pki:revoke`.
+    let revoke = Router::new()
+        .route(
+            "/certificates/serial/{serial}/revoke",
+            post(x509::revoke_by_serial),
+        )
+        .route("/certificates/{cert_id}/revoke", post(x509::revoke_cert))
+        .route("/ssh/certificates/{cert_id}/revoke", post(ssh::revoke_cert))
+        .layer(axum::middleware::from_fn_with_state(
+            crate::authz::ScopeGate::new(state.clone(), crate::authz::PKI_REVOKE),
+            crate::authz::scope_gate,
+        ));
+
+    // Audit log — `pki:admin` (more sensitive than routine lookups).
+    let admin = Router::new().route("/audit", get(common::audit)).layer(
+        axum::middleware::from_fn_with_state(
+            crate::authz::ScopeGate::new(state.clone(), crate::authz::PKI_ADMIN),
+            crate::authz::scope_gate,
+        ),
+    );
+
+    // Everything else: lookup/list/search/CRL/OCSP/CA-info/statistics/SSH
+    // config helpers, and the OpenAPI spec — `pki:read`.
+    let read = Router::new()
         // ---- X.509 (/api/v1/certificates) ----
         .route("/certificates", get(x509::list))
         .route("/certificates/search", post(x509::search))
@@ -144,18 +182,12 @@ pub fn router(state: AppState) -> Router {
         .route("/certificates/ca", get(x509::ca_info))
         .route("/certificates/ca/certificate", get(x509::download_ca_cert))
         .route("/certificates/serial/{serial}", get(x509::get_by_serial))
-        .route(
-            "/certificates/serial/{serial}/revoke",
-            post(x509::revoke_by_serial),
-        )
         .route("/certificates/{cert_id}", get(x509::get_cert))
-        .route("/certificates/{cert_id}/revoke", post(x509::revoke_cert))
         .route("/certificates/{cert_id}/status", get(x509::cert_status))
         // ---- SSH (/api/v1/ssh) ----
         .route("/ssh/certificates", get(ssh::list))
         .route("/ssh/certificates/serial/{serial}", get(ssh::get_by_serial))
         .route("/ssh/certificates/{cert_id}", get(ssh::get_cert))
-        .route("/ssh/certificates/{cert_id}/revoke", post(ssh::revoke_cert))
         .route("/ssh/certificates/{cert_id}/status", get(ssh::cert_status))
         .route("/ssh/krl", get(ssh::get_krl))
         .route("/ssh/ca", get(ssh::ca_info))
@@ -174,16 +206,51 @@ pub fn router(state: AppState) -> Router {
         // `docs/v2-port/service-auth-model.md` §3.
         .route("/statistics", get(common::statistics))
         .route("/ca/info", get(common::all_ca_info))
-        .route("/audit", get(common::audit))
-        .merge(issuance)
         // ---- OpenAPI (/api/v1/openapi.json) ----
         .merge(openapi::router())
-        .layer(axum::middleware::from_extractor_with_state::<
-            skauswatch_auth::AuthenticatedCaller,
-            AppState,
-        >(state.clone()));
+        .layer(axum::middleware::from_fn_with_state(
+            crate::authz::ScopeGate::new(state.clone(), crate::authz::PKI_READ),
+            crate::authz::scope_gate,
+        ));
 
-    Router::new().nest("/api/v1", api).with_state(state)
+    let api =
+        read.merge(issuance).merge(revoke).merge(admin).layer(
+            axum::middleware::from_extractor_with_state::<
+                skauswatch_auth::AuthenticatedCaller,
+                AppState,
+            >(state.clone()),
+        );
+
+    let app = Router::new().nest("/api/v1", api).with_state(state);
+
+    // Per-IP rate limiting (security audit finding), outermost layer so it
+    // also throttles unauthenticated/invalid-token flooding, not just
+    // successfully-authenticated traffic. Requires the listener to be
+    // served via `.into_make_service_with_connect_info::<SocketAddr>()`
+    // (see `main.rs`) for `crate::ratelimit::PeerIpOrGlobalKeyExtractor` to
+    // see the real TCP peer address — see that module's docs for why it's
+    // a custom extractor rather than the crate default. Never panics: an
+    // invalid computed config (should not happen — inputs are always
+    // positive integers, see `crate::ratelimit`) logs loudly and serves
+    // without rate limiting rather than crashing the service.
+    let per_sec = crate::ratelimit::per_second();
+    let burst = crate::ratelimit::burst_size();
+    match GovernorConfigBuilder::default()
+        .key_extractor(crate::ratelimit::PeerIpOrGlobalKeyExtractor)
+        .per_second(per_sec)
+        .burst_size(burst)
+        .finish()
+    {
+        Some(conf) => app.layer(GovernorLayer::new(Arc::new(conf))),
+        None => {
+            tracing::error!(
+                per_sec,
+                burst,
+                "rate limit config could not be constructed; serving without rate limiting"
+            );
+            app
+        }
+    }
 }
 
 #[cfg(test)]
@@ -224,7 +291,14 @@ mod tests {
     }
 
     fn bearer(server_secret: &str) -> String {
-        match skauswatch_auth::issue_service_token("tester", "admin", server_secret, 300) {
+        bearer_with_role("admin", server_secret)
+    }
+
+    /// Same as [`bearer`] but with a caller-chosen `ServiceClaims.role`, for
+    /// exercising `crate::authz`'s scope gates with a role that carries
+    /// less than every capability.
+    fn bearer_with_role(role: &str, server_secret: &str) -> String {
+        match skauswatch_auth::issue_service_token("tester", role, server_secret, 300) {
             Ok(t) => format!("Bearer {t}"),
             Err(e) => panic!("issue test token: {e}"),
         }
@@ -236,7 +310,11 @@ mod tests {
     /// caller with 401 before touching any CA/DB logic.
     #[tokio::test]
     async fn every_route_requires_jwt() {
-        let server = test_server();
+        // A fresh server per path (not one shared instance for all of
+        // these) — otherwise this exceeds `crate::ratelimit`'s default
+        // burst (20) partway through the 21-entry list below, since the
+        // rate-limit layer runs outermost, ahead of the auth check this
+        // test exercises, and would start returning 429 instead of 401.
         for (method, path) in [
             ("GET", "/api/v1/certificates"),
             ("POST", "/api/v1/certificates"),
@@ -260,6 +338,7 @@ mod tests {
             ("GET", "/api/v1/audit"),
             ("GET", "/api/v1/openapi.json"),
         ] {
+            let server = test_server();
             let res = match method {
                 "GET" => server.get(path).await,
                 _ => server.post(path).await,
@@ -374,5 +453,168 @@ mod tests {
             )
             .await;
         assert_ne!(list_res.status_code(), StatusCode::FORBIDDEN);
+    }
+
+    /// Security audit finding #1 (authorization): issuance must require
+    /// `pki:issue`, not just "any valid token" — a `viewer`-role machine
+    /// token (read-only) is denied 403 naming the missing capability, while
+    /// an `admin`-role token (every capability) passes the scope gate and
+    /// proceeds to the real handler.
+    #[tokio::test]
+    async fn issuance_requires_the_issue_scope() {
+        let server = test_server();
+        let tenant = uuid::Uuid::new_v4().to_string();
+
+        let denied = server
+            .post("/api/v1/certificates")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer_with_role("viewer", "test-secret"),
+            )
+            .add_header(crate::tenant::TENANT_HEADER, tenant.clone())
+            .json(&serde_json::json!({ "subject": "CN=no-issue-scope.example.com" }))
+            .await;
+        denied.assert_status(StatusCode::FORBIDDEN);
+        let body: serde_json::Value = denied.json();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(crate::authz::PKI_ISSUE)
+        );
+
+        let allowed = server
+            .post("/api/v1/certificates")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer_with_role("admin", "test-secret"),
+            )
+            .add_header(crate::tenant::TENANT_HEADER, tenant)
+            .json(&serde_json::json!({ "subject": "CN=has-issue-scope.example.com" }))
+            .await;
+        // Passed the scope gate — proceeds to real crypto, then 500s for
+        // lack of a DB (see `x509::tests::issue_valid_body_runs_real_crypto_
+        // then_500s_on_unreachable_db`), never 403.
+        assert_ne!(allowed.status_code(), StatusCode::FORBIDDEN);
+    }
+
+    /// Revocation requires `pki:revoke` — an issue-only role is denied even
+    /// though it can create certificates.
+    #[tokio::test]
+    async fn revocation_requires_the_revoke_scope() {
+        let server = test_server();
+        let denied = server
+            .post(&format!(
+                "/api/v1/certificates/{}/revoke",
+                uuid::Uuid::new_v4()
+            ))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer_with_role("pki-issuer", "test-secret"),
+            )
+            .await;
+        denied.assert_status(StatusCode::FORBIDDEN);
+
+        let allowed = server
+            .post(&format!(
+                "/api/v1/certificates/{}/revoke",
+                uuid::Uuid::new_v4()
+            ))
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer_with_role("pki-revoker", "test-secret"),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .await;
+        assert_ne!(allowed.status_code(), StatusCode::FORBIDDEN);
+    }
+
+    /// Read endpoints require `pki:read` — fails closed for a role with no
+    /// mapped capabilities at all, passes for a read-only role.
+    #[tokio::test]
+    async fn read_endpoints_require_the_read_scope() {
+        let server = test_server();
+        let denied = server
+            .get("/api/v1/statistics")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer_with_role("unmapped-role", "test-secret"),
+            )
+            .await;
+        denied.assert_status(StatusCode::FORBIDDEN);
+
+        let allowed = server
+            .get("/api/v1/statistics")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer_with_role("pki-reader", "test-secret"),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .await;
+        // Passed the scope gate — proceeds to the real (tenant-scoped)
+        // handler, never 403.
+        assert_ne!(allowed.status_code(), StatusCode::FORBIDDEN);
+    }
+
+    /// The audit log requires `pki:admin` specifically — a read-only role
+    /// is not enough, unlike every other lookup endpoint.
+    #[tokio::test]
+    async fn audit_requires_the_admin_scope_not_just_read() {
+        let server = test_server();
+        let denied = server
+            .get("/api/v1/audit")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer_with_role("pki-reader", "test-secret"),
+            )
+            .await;
+        denied.assert_status(StatusCode::FORBIDDEN);
+
+        let allowed = server
+            .get("/api/v1/audit")
+            .add_header(
+                axum::http::header::AUTHORIZATION,
+                bearer_with_role("admin", "test-secret"),
+            )
+            .add_header(
+                crate::tenant::TENANT_HEADER,
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .await;
+        // Passed the scope gate — proceeds to the real (tenant-scoped)
+        // handler, never 403.
+        assert_ne!(allowed.status_code(), StatusCode::FORBIDDEN);
+    }
+
+    /// Rate limiting (security audit finding): firing more requests than
+    /// the default burst (20 — see `crate::ratelimit::burst_size`) in a
+    /// tight loop must eventually trip `tower_governor`'s 429, well before
+    /// the per-second replenishment (10/s = one token per 100ms) can add
+    /// one back.
+    #[tokio::test]
+    async fn requests_exceeding_the_burst_are_rate_limited() {
+        let server = test_server();
+        let auth = bearer("test-secret");
+        let mut saw_429 = false;
+        for _ in 0..30 {
+            let res = server
+                .get("/api/v1/statistics")
+                .add_header(axum::http::header::AUTHORIZATION, auth.clone())
+                .await;
+            if res.status_code() == StatusCode::TOO_MANY_REQUESTS {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "expected at least one 429 after exceeding the rate limit burst"
+        );
     }
 }

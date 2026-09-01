@@ -11,6 +11,11 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
 serviceAccount:
   create: true
   annotations: {}
@@ -142,12 +147,12 @@ env:
   - name: DB_USER
     valueFrom:
       secretKeyRef:
-        name: skauswatch-s3scan-secret
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
         key: db-user
   - name: DB_PASS
     valueFrom:
       secretKeyRef:
-        name: skauswatch-s3scan-secret
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
         key: db-pass
   - name: REDIS_URL
     valueFrom:
@@ -162,7 +167,7 @@ env:
   - name: REDIS_PASSWORD
     valueFrom:
       secretKeyRef:
-        name: skauswatch-s3scan-secret
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
         key: redis-password
         optional: true
   - name: CONSUMER_GROUP
@@ -172,19 +177,19 @@ env:
   - name: VIRUSTOTAL_API_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-s3scan-secret
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
         key: virustotal-api-key
         optional: true
   - name: OTX_API_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-s3scan-secret
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
         key: otx-api-key
         optional: true
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-s3scan-secret
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
         key: license-key
   - name: LICENSE_SERVER_URL
     valueFrom:
@@ -253,9 +258,11 @@ configMapData:
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
 
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
 secretData:
-  db-user: "changeme-in-production"
-  db-pass: "changeme-in-production"
+  db-user: ""
+  db-pass: ""
   redis-password: ""
   virustotal-api-key: ""
   otx-api-key: ""

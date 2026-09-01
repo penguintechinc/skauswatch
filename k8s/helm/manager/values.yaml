@@ -11,6 +11,11 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
 serviceAccount:
   create: true
   annotations: {}
@@ -156,17 +161,17 @@ env:
   - name: DB_USER
     valueFrom:
       secretKeyRef:
-        name: skauswatch-manager-secret
+        name: '{{ include "skauswatch-manager.secretName" . }}'
         key: db-user
   - name: DB_PASS
     valueFrom:
       secretKeyRef:
-        name: skauswatch-manager-secret
+        name: '{{ include "skauswatch-manager.secretName" . }}'
         key: db-pass
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-manager-secret
+        name: '{{ include "skauswatch-manager.secretName" . }}'
         key: license-key
   - name: LICENSE_SERVER_URL
     valueFrom:
@@ -233,7 +238,9 @@ configMapData:
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
 
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
 secretData:
-  db-user: "changeme-in-production"
-  db-pass: "changeme-in-production"
+  db-user: ""
+  db-pass: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

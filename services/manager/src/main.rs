@@ -9,6 +9,7 @@ mod error;
 mod flags;
 mod grpc;
 mod health;
+mod rate_limit;
 mod routes;
 mod state;
 
@@ -84,9 +85,20 @@ async fn serve() -> anyhow::Result<()> {
     // v1-shape /healthz (DB + Redis probes) replaces the generic telemetry
     // health router; /readyz keeps the readiness gate. The fallback serves
     // the v1 Quart framework-404 envelope for unknown routes.
-    let app = routes::router(state.clone())
-        .merge(health::router(state.clone(), readiness.clone()))
-        .fallback(error::fallback_not_found);
+    // Global rate limit (security hardening Fix 2) is applied here, at the
+    // outermost layer of the fully assembled app, never inside
+    // `routes::router()` — see `rate_limit` module docs for why: the many
+    // per-module/full-router unit tests build their own `axum_test`
+    // servers directly from a `Router` and never go through `serve()`, so
+    // this placement keeps every one of them unaffected. The stricter
+    // `/auth/*` limiter is scoped inside `routes::router()` itself, since
+    // it wraps a small dedicated sub-router (`auth::public_router()`)
+    // rather than the whole app.
+    let app = rate_limit::apply_global(
+        routes::router(state.clone())
+            .merge(health::router(state.clone(), readiness.clone()))
+            .fallback(error::fallback_not_found),
+    );
 
     let addr: SocketAddr = ([0, 0, 0, 0], http_port()).into();
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -102,10 +114,17 @@ async fn serve() -> anyhow::Result<()> {
     });
 
     let http = async {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
-            .await
-            .map_err(anyhow::Error::from)
+        // `with_connect_info` gives the rate limiters' `SmartIpKeyExtractor`
+        // a real peer `SocketAddr` fallback for requests that (unlike
+        // traffic through the K8s ingress) carry no X-Forwarded-For/
+        // X-Real-Ip/Forwarded header — e.g. same-namespace or direct calls.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
+        .await
+        .map_err(anyhow::Error::from)
     };
 
     if grpc::enabled() {

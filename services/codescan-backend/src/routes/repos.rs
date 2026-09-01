@@ -5,8 +5,8 @@
 //! already tests (services/manager/src/routes/codescan.rs): `GET/POST /repos`,
 //! `GET/PUT/DELETE /repos/{id}`.
 //!
-//! Mutations are admin-only, matching the manager's already-tested gate
-//! (`user.require_role(&["admin"])`) rather than v1's finer-grained
+//! Mutations are admin-only (`crate::auth::ADMIN_SCOPE`, matching the
+//! manager's already-tested gate) rather than v1's finer-grained
 //! admin+maintainer split — kept consistent with the one contract callers
 //! actually exercise today.
 

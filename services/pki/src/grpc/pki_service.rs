@@ -30,6 +30,31 @@ impl PkiGrpc {
         Self { state }
     }
 
+    /// `PERMISSION_DENIED` unless the caller's `ServiceClaims.role` carries
+    /// `required` — the gRPC counterpart of `crate::routes`'s REST
+    /// `crate::authz::ScopeGate` layer (this transport has no axum
+    /// middleware to mount that on, so every RPC below calls this
+    /// explicitly instead, mirroring the existing
+    /// `require_issuance_enabled` per-RPC-check pattern). The caller
+    /// already passed `grpc::auth_interceptor`'s "is this a genuine,
+    /// current access token" check before this runs; this is the
+    /// authorization layer that check never performed (security audit
+    /// finding #1) — see `crate::authz` module docs.
+    fn require_capability(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+        required: &'static str,
+    ) -> Result<(), Status> {
+        let claims = skauswatch_auth::verify_grpc_bearer(metadata, &self.state.jwt_secret)?;
+        if crate::authz::has_capability(&claims, required) {
+            Ok(())
+        } else {
+            Err(Status::permission_denied(format!(
+                "missing required capability: {required}"
+            )))
+        }
+    }
+
     /// Denies with `PERMISSION_DENIED` while `crate::routes::ISSUANCE_FLAG`
     /// evaluates disabled — the gRPC counterpart of the REST issuance
     /// routes' `penguin_licensing::axum::FlagGate` layer (this transport has
@@ -244,6 +269,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<X509CertRequest>,
     ) -> Result<Response<X509CertResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_ISSUE)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         self.require_issuance_enabled().await?;
         let r = request.into_inner();
@@ -297,6 +323,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<CertQuery>,
     ) -> Result<Response<X509CertResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_READ)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
@@ -315,6 +342,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<RevokeRequest>,
     ) -> Result<Response<RevokeResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_REVOKE)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
@@ -346,6 +374,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<CertQuery>,
     ) -> Result<Response<StatusResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_READ)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
@@ -377,6 +406,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<ListCertRequest>,
     ) -> Result<Response<X509CertListResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_READ)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
@@ -428,6 +458,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<SshCertRequest>,
     ) -> Result<Response<SshCertResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_ISSUE)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         self.require_issuance_enabled().await?;
         let r = request.into_inner();
@@ -470,6 +501,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<CertQuery>,
     ) -> Result<Response<SshCertResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_READ)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
@@ -490,6 +522,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<RevokeRequest>,
     ) -> Result<Response<RevokeResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_REVOKE)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
@@ -521,6 +554,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<CertQuery>,
     ) -> Result<Response<StatusResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_READ)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
@@ -552,6 +586,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<ListCertRequest>,
     ) -> Result<Response<SshCertListResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_READ)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         let r = request.into_inner();
         require_v1(&r.api_version)?;
@@ -601,6 +636,7 @@ impl PkiService for PkiGrpc {
     }
 
     async fn get_crl(&self, request: Request<Empty>) -> Result<Response<CrlResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_READ)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         require_v1(&request.into_inner().api_version)?;
         let d = self
@@ -633,6 +669,7 @@ impl PkiService for PkiGrpc {
 
     async fn get_krl(&self, request: Request<Empty>) -> Result<Response<KrlResponse>, Status> {
         use base64::Engine as _;
+        self.require_capability(request.metadata(), crate::authz::PKI_READ)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         require_v1(&request.into_inner().api_version)?;
         let d = self
@@ -668,6 +705,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<X509caInfoResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_READ)?;
         require_v1(&request.into_inner().api_version)?;
         let info = self.state.manager.x509.info();
         Ok(Response::new(X509caInfoResponse {
@@ -693,6 +731,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<SshcaInfoResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_READ)?;
         require_v1(&request.into_inner().api_version)?;
         Ok(Response::new(SshcaInfoResponse {
             ca_public_key: self.state.manager.ssh.ca_public_key().to_owned(),
@@ -729,6 +768,7 @@ impl PkiService for PkiGrpc {
         &self,
         request: Request<Empty>,
     ) -> Result<Response<StatisticsResponse>, Status> {
+        self.require_capability(request.metadata(), crate::authz::PKI_READ)?;
         let tenant = tenant_from_metadata(request.metadata())?;
         require_v1(&request.into_inner().api_version)?;
         let d = self
@@ -816,7 +856,17 @@ mod tests {
 
     /// Wraps `msg` in a `Request` carrying a valid `x-tenant-id` metadata
     /// entry (the gRPC counterpart of a REST caller's `X-Tenant-ID` header)
-    /// — every RPC below that touches a certificate table requires this.
+    /// — every RPC below that touches a certificate table requires this —
+    /// plus an `authorization: Bearer <jwt>` entry for an `admin`-role
+    /// machine token (every `pki:*` capability — see `crate::authz`), so
+    /// these RPC-level tests keep exercising method-body business logic
+    /// instead of tripping the `require_capability` gate added ahead of it.
+    /// `auth_interceptor` (the *transport*-level "any valid token" gate —
+    /// `grpc/mod.rs`) never runs in these tests at all, since they call
+    /// `PkiGrpc` methods directly rather than through a real tonic server;
+    /// `require_capability` inside the method body is the only auth check
+    /// these tests exercise, so it must see a valid token to reach the
+    /// logic under test — see `req_without_auth` for the negative case.
     #[allow(clippy::panic)] // test-only helper fails loudly by design
     fn req<T>(msg: T) -> Request<T> {
         req_with_tenant(msg, tenant())
@@ -826,7 +876,7 @@ mod tests {
     /// missing-tenant-metadata tests.
     #[allow(clippy::panic)] // test-only helper fails loudly by design
     fn req_with_tenant<T>(msg: T, tenant: uuid::Uuid) -> Request<T> {
-        let mut request = Request::new(msg);
+        let mut request = req_with_role(msg, "admin");
         let value = match tenant.to_string().parse() {
             Ok(v) => v,
             Err(e) => panic!("tenant metadata value: {e}"),
@@ -834,6 +884,25 @@ mod tests {
         request
             .metadata_mut()
             .insert(crate::tenant::TENANT_HEADER, value);
+        request
+    }
+
+    /// Wraps `msg` in a `Request` carrying only an `authorization` metadata
+    /// entry for a machine token with `role` — no tenant metadata — for
+    /// `crate::authz` scope-gate tests, which must 403/`PermissionDenied`
+    /// (or pass) before ever reaching the tenant check.
+    #[allow(clippy::panic)] // test-only helper fails loudly by design
+    fn req_with_role<T>(msg: T, role: &str) -> Request<T> {
+        let mut request = Request::new(msg);
+        let token = match skauswatch_auth::issue_service_token("tester", role, "test-secret", 300) {
+            Ok(t) => t,
+            Err(e) => panic!("issue test token: {e}"),
+        };
+        let value = match format!("Bearer {token}").parse() {
+            Ok(v) => v,
+            Err(e) => panic!("authorization metadata value: {e}"),
+        };
+        request.metadata_mut().insert("authorization", value);
         request
     }
 
@@ -1627,5 +1696,128 @@ mod tests {
             ))
             .await;
         assert!(found.is_ok());
+    }
+
+    // ---------- authorization: pki:* capability gate ----------
+    //
+    // Security audit finding #1: `auth_interceptor`/`verify_grpc_bearer`
+    // only ever checked "is this a genuine, current access token" —
+    // `ServiceClaims.role` was never consulted, so any caller holding ANY
+    // valid mesh JWT could issue or revoke ANY certificate over gRPC too.
+    // `require_capability` (added ahead of every RPC body below) closes
+    // that gap — see `crate::authz` module docs.
+
+    #[tokio::test]
+    async fn issue_x509_certificate_denied_without_issue_scope() {
+        let status = grpc()
+            .issue_x509_certificate(req_with_role(
+                X509CertRequest {
+                    api_version: "v1".into(),
+                    subject: "CN=no-issue-scope.example.com".into(),
+                    ..Default::default()
+                },
+                "viewer",
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::PermissionDenied);
+        assert!(status.message().contains(crate::authz::PKI_ISSUE));
+    }
+
+    #[tokio::test]
+    async fn revoke_x509_certificate_denied_without_revoke_scope() {
+        let status = grpc()
+            .revoke_x509_certificate(req_with_role(
+                RevokeRequest {
+                    api_version: "v1".into(),
+                    ..Default::default()
+                },
+                "pki-issuer",
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::PermissionDenied);
+        assert!(status.message().contains(crate::authz::PKI_REVOKE));
+    }
+
+    #[tokio::test]
+    async fn get_x509_certificate_denied_without_read_scope() {
+        let status = grpc()
+            .get_x509_certificate(req_with_role(
+                CertQuery {
+                    api_version: "v1".into(),
+                    identifier: None,
+                },
+                "unmapped-role",
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn get_statistics_denied_without_read_scope() {
+        let status = grpc()
+            .get_statistics(req_with_role(
+                Empty {
+                    api_version: "v1".into(),
+                },
+                "unmapped-role",
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::PermissionDenied);
+    }
+
+    /// The positive path: a narrowly-scoped `pki-issuer` role (issue + read
+    /// only, per `crate::authz::role_capabilities`) passes the scope gate
+    /// and successfully issues a real certificate end-to-end against the
+    /// real DB — proving this is a real gate, not a stub that always
+    /// denies.
+    #[tokio::test]
+    async fn pki_issuer_role_can_issue_but_not_revoke() {
+        let svc = db_grpc().await;
+        let t = tenant();
+        let mut issue_req = req_with_tenant(
+            X509CertRequest {
+                api_version: "v1".into(),
+                subject: "CN=pki-issuer-scope.example.com".into(),
+                ..Default::default()
+            },
+            t,
+        );
+        let issuer_token = match skauswatch_auth::issue_service_token(
+            "tester",
+            "pki-issuer",
+            "test-secret",
+            300,
+        ) {
+            Ok(tok) => tok,
+            Err(e) => panic!("issue test token: {e}"),
+        };
+        let value = match format!("Bearer {issuer_token}").parse() {
+            Ok(v) => v,
+            Err(e) => panic!("authorization metadata value: {e}"),
+        };
+        issue_req.metadata_mut().insert("authorization", value);
+        let issued = svc
+            .issue_x509_certificate(issue_req)
+            .await
+            .unwrap_or_else(|e| panic!("issue: {e}"))
+            .into_inner();
+
+        // Same `pki-issuer` role cannot revoke what it just issued.
+        let revoke_status = svc
+            .revoke_x509_certificate(req_with_role(
+                RevokeRequest {
+                    api_version: "v1".into(),
+                    identifier: Some(revoke_request::Identifier::Id(issued.id)),
+                    ..Default::default()
+                },
+                "pki-issuer",
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(revoke_status.code(), Code::PermissionDenied);
     }
 }

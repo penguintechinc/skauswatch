@@ -522,7 +522,7 @@ pub(crate) async fn create_alert(
     user: CurrentUser,
     ApiJson(body): ApiJson<CreateBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("alerts:write")?;
     let v = validate_create(&body)?;
 
     let row = sqlx::query_as::<_, CreatedRow>(
@@ -646,7 +646,7 @@ pub(crate) async fn update_alert(
     Path(alert_id): Path<i32>,
     ApiJson(body): ApiJson<UpdateBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("alerts:write")?;
     validate_update(&body)?;
 
     let exists: Option<(i32,)> =
@@ -761,7 +761,7 @@ pub(crate) async fn update_alert_status(
     // authenticated role — including read-only viewers — mutate alert
     // status. That contradicts the role model; gate like the peer
     // alert mutations.
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("alerts:write")?;
     let exists: Option<(i32,)> =
         sqlx::query_as("SELECT id FROM alerts WHERE id = $1 AND tenant_id = $2")
             .bind(alert_id)
@@ -877,7 +877,7 @@ pub(crate) async fn request_ai_review(
     Path(alert_id): Path<i32>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("alerts:write")?;
 
     if !ai_enabled() || !state.license.flag_enabled(AI_REVIEW_FLAG).await {
         // v1 returns this bare body; the shared envelope has no 503 variant.

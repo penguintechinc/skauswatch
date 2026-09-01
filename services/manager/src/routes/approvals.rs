@@ -363,7 +363,7 @@ pub(crate) async fn list_pending_approvals(
     State(state): State<AppState>,
     user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("approvals:write")?;
     let now = Utc::now().naive_utc();
 
     let rows = sqlx::query_as::<_, PendingRow>(
@@ -816,7 +816,7 @@ pub(crate) async fn decide_approval(
     Path(approval_id): Path<i32>,
     ApiJson(body): ApiJson<DecideBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("approvals:write")?;
     let Some(approved) = body.approved else {
         return Err(validation("approved", "Field required"));
     };
@@ -984,7 +984,7 @@ pub(crate) async fn cancel_approval(
     };
 
     let is_requester = requester_id == user.id;
-    let is_admin = user.role == "admin";
+    let is_admin = user.has_scope("approvals:admin");
     if !is_requester && !is_admin {
         return Err(ApiError::Forbidden("Forbidden".to_owned()));
     }
@@ -1056,7 +1056,7 @@ pub(crate) async fn get_statistics(
     State(state): State<AppState>,
     user: CurrentUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("approvals:write")?;
     let now = Utc::now().naive_utc();
 
     let total: i64 =

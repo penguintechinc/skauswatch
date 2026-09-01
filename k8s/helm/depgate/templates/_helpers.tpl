@@ -22,6 +22,15 @@ Create a default fully qualified app name.
 {{- end }}
 
 {{/*
+Name of the Secret this chart consumes. If .Values.existingSecret is
+set, use that pre-provisioned Secret/ExternalSecret instead of the
+chart-managed one (templates/secret.yaml is not rendered in that case).
+*/}}
+{{- define "skauswatch-depgate.secretName" -}}
+{{- .Values.existingSecret | default (printf "%s-secret" (include "skauswatch-depgate.fullname" .)) }}
+{{- end }}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "skauswatch-depgate.chart" -}}

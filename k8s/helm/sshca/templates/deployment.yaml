@@ -16,7 +16,9 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.existingSecret }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -56,14 +58,14 @@ spec:
           {{- toYaml . | nindent 12 }}
         {{- end }}
         env:
-        {{- toYaml .Values.env | nindent 12 }}
+        {{- tpl (toYaml .Values.env) . | nindent 12 }}
         {{- with .Values.volumeMounts }}
         volumeMounts:
           {{- toYaml . | nindent 12 }}
         {{- end }}
       {{- with .Values.volumes }}
       volumes:
-        {{- toYaml . | nindent 8 }}
+        {{- tpl (toYaml .) $ | nindent 8 }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

@@ -195,7 +195,7 @@ pub(crate) async fn list_users(
     user: CurrentUser,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("users:write")?;
     let (page, per_page) = pagination(q.page.as_deref(), q.per_page.as_deref());
     let offset = (page - 1) * per_page;
 
@@ -317,7 +317,7 @@ pub(crate) async fn create_user(
     user: CurrentUser,
     ApiJson(body): ApiJson<CreateRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    user.require_role(&["admin"])?;
+    user.require_scope("users:admin")?;
 
     if !valid_email(&body.email) {
         return Err(validation("email", "value is not a valid email address"));
@@ -464,7 +464,7 @@ pub(crate) async fn update_user(
     ApiJson(body): ApiJson<UpdateRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let is_self = user.id == user_id;
-    let is_admin = user.role == "admin";
+    let is_admin = user.has_scope("users:admin");
     if !is_self && !is_admin {
         return Err(ApiError::Forbidden("Forbidden".to_owned()));
     }
@@ -597,7 +597,7 @@ pub(crate) async fn delete_user(
     user: CurrentUser,
     Path(user_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin"])?;
+    user.require_scope("users:admin")?;
 
     if user.id == user_id {
         return Err(ApiError::BadRequest(

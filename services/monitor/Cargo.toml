@@ -43,6 +43,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true, features = ["sync"] }
 tower-http = { workspace = true }
+# Per-IP rate limiting on the production router (`src/rate_limit.rs`).
+tower_governor = { workspace = true }
 tracing = { workspace = true }
 # File collector (phase 12): recursive host-mounted log file discovery.
 walkdir = { workspace = true }

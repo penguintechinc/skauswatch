@@ -415,7 +415,7 @@ pub(crate) async fn create_asm_scan(
     user: CurrentUser,
     ApiJson(body): ApiJson<AsmScanCreateBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("asm:write")?;
 
     let target = match body.target.as_deref() {
         Some(t) if !t.is_empty() => t,
@@ -1013,7 +1013,7 @@ pub(crate) async fn update_port_settings(
     user: CurrentUser,
     ApiJson(body): ApiJson<PortSettingsBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin"])?;
+    user.require_scope("asm:admin")?;
     let (extra_ports, rate) = validate_ports_config(&body.extra_ports, body.masscan_rate)?;
     let value = serde_json::json!({"extra_ports": extra_ports, "masscan_rate": rate});
 

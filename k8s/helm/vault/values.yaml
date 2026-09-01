@@ -11,6 +11,11 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
 serviceAccount:
   create: true
   annotations: {}
@@ -132,12 +137,12 @@ env:
   - name: DB_USER
     valueFrom:
       secretKeyRef:
-        name: skauswatch-vault-secret
+        name: '{{ include "skauswatch-vault.secretName" . }}'
         key: db-user
   - name: DB_PASS
     valueFrom:
       secretKeyRef:
-        name: skauswatch-vault-secret
+        name: '{{ include "skauswatch-vault.secretName" . }}'
         key: db-pass
   - name: REDIS_URL
     valueFrom:
@@ -152,25 +157,25 @@ env:
   - name: REDIS_PASSWORD
     valueFrom:
       secretKeyRef:
-        name: skauswatch-vault-secret
+        name: '{{ include "skauswatch-vault.secretName" . }}'
         key: redis-password
         optional: true
   - name: JWT_SECRET_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-vault-secret
+        name: '{{ include "skauswatch-vault.secretName" . }}'
         key: jwt-secret-key
   - name: VAULT_MEK_CURRENT_VERSION
     value: "1"
   - name: VAULT_MEK_V1
     valueFrom:
       secretKeyRef:
-        name: skauswatch-vault-secret
+        name: '{{ include "skauswatch-vault.secretName" . }}'
         key: vault-mek-v1
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-vault-secret
+        name: '{{ include "skauswatch-vault.secretName" . }}'
         key: license-key
   - name: LICENSE_SERVER_URL
     valueFrom:
@@ -217,11 +222,13 @@ configMapData:
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
 
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
 secretData:
-  db-user: "changeme-in-production"
-  db-pass: "changeme-in-production"
+  db-user: ""
+  db-pass: ""
   redis-password: ""
-  jwt-secret-key: "changeme-in-production"
+  jwt-secret-key: ""
   # REQUIRED: 32-byte key, base64-encoded (`openssl rand -base64 32`) —
   # placeholder here means data cannot be decrypted after redeploy. Rotate
   # by bumping VAULT_MEK_CURRENT_VERSION and adding VAULT_MEK_V{n}.

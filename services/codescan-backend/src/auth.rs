@@ -3,9 +3,37 @@
 //! `skauswatch_auth::Claims` shape (`sub/iss/aud/iat/exp/scope/tenant/teams/
 //! roles`). This service has no local identity table (see
 //! migrations/0001_codescan_schema.sql), so `CurrentUser` trusts the decoded
-//! claims directly rather than round-tripping to a users table; role-based
-//! authorization decisions are made on `roles` (the JWT's role list) only,
-//! matching the v1 Flask `role_required` decorator this service replaces.
+//! claims directly rather than round-tripping to a users table.
+//!
+//! Security hardening (`security.md` Authentication & Authorization:
+//! "authorization decisions use `scope` only, never role names"):
+//! authorization used to branch on `Claims::roles` directly
+//! (`CurrentUser::require_role`, matching the v1 Flask `role_required`
+//! decorator this service originally ported). That is replaced here with
+//! scope checks against [`ADMIN_SCOPE`]/[`WRITE_SCOPE`] via
+//! `skauswatch_auth::Claims::require_scope` — the same wildcard-aware
+//! matcher `services/depgate/src/auth.rs`'s `AuthedUser` and
+//! `services/vault/src/auth.rs` already authorize through. `roles` is now
+//! purely informational/audit (still carried on [`CurrentUser`] for that
+//! purpose), never branched on for an authz decision.
+//!
+//! The manager mints `scope` from `role_scope_bundle`
+//! (`services/manager/src/auth/mod.rs`): `admin` gets `*:admin` (and
+//! `*:write`/`*:read`), `maintainer` gets `*:write`/`*:read` only, `viewer`
+//! gets `*:read` only. [`ADMIN_SCOPE`] (`codescan:admin`) is therefore
+//! satisfied by `admin` alone — identical to the old `require_role(&
+//! ["admin"])` gate. [`WRITE_SCOPE`] (`codescan:write`) is satisfied by
+//! both `admin` and `maintainer` (both bundles carry the `*:write`
+//! wildcard) — a deliberate broadening of the old `require_role(&
+//! ["maintainer"])` gate on `POST /codescan/reviews`
+//! (`routes::reviews::create_review`), which excluded `admin` outright.
+//! `has_scope`'s wildcard semantics make "maintainer-only, admin excluded"
+//! inexpressible without a codescan-specific scope literal the manager
+//! doesn't mint (out of scope for this change — manager is untouched);
+//! admin gaining the superset access every other admin-vs-lower-tier gate
+//! in this service already grants is the correct, standard scope-hierarchy
+//! outcome, not a regression. See `routes::reviews` test module for the
+//! updated coverage.
 //!
 //! Tenancy retrofit (docs/v2-port/tenancy-model.md): this service used to
 //! decode a local, tenant-free `AccessClaims` shape (`{sub, role, type, exp,
@@ -34,6 +62,19 @@ use skauswatch_auth::Claims;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// Scope required by every admin-tier management endpoint in this service
+/// (credential CRUD, repo-config admin mutations, license-policy mutations,
+/// policy-rule mutations) — the [`AdminOnly`] gate. `{service}:{action}`
+/// naming matches `depgate:admin`/`monitor:admin`/`secrets:admin`
+/// (`services/depgate/src/auth.rs`, `services/monitor/src/auth.rs`,
+/// `services/vault/src/auth.rs`).
+pub const ADMIN_SCOPE: &str = "codescan:admin";
+/// Scope required by maintainer-tier write endpoints (creating a review) —
+/// the [`MaintainerOnly`] gate. Satisfied by both `admin` and `maintainer`
+/// role bundles (see module docs for why this admin inclusion is
+/// intentional, not a preserved-behavior gap).
+pub const WRITE_SCOPE: &str = "codescan:write";
+
 /// Decodes and tenant-validates an access token: HS256 signature, expiry,
 /// and a non-empty `tenant` claim — the same boundary
 /// `skauswatch_auth::tenant_middleware` enforces at the router layer.
@@ -58,36 +99,41 @@ pub fn decode_access(token: &str, secret: &str) -> Result<Claims, ApiError> {
 pub struct CurrentUser {
     /// User id, from the token's `sub` claim.
     pub id: i64,
-    /// Role name (admin/maintainer/viewer) — the token's primary role, i.e.
-    /// the first entry of `Claims::roles` (the manager mints exactly one
-    /// role per token today; see `role_scope_bundle` in
-    /// `services/manager/src/auth/mod.rs`).
-    pub role: String,
     /// Tenant boundary, parsed from the validated `Claims::tenant` claim.
     /// The *only* legitimate source of this value — never a client-supplied
     /// request body/path/query field. Every tenant-scoped query/insert a
     /// handler issues must filter/stamp on this (see
     /// docs/v2-port/tenancy-model.md §4).
     pub tenant_id: uuid::Uuid,
+    /// Full decoded claims for this request. Scope-based authorization
+    /// ([`require_scope`](CurrentUser::require_scope)) delegates to
+    /// `skauswatch_auth::Claims::require_scope` rather than reimplementing
+    /// scope matching; `claims.roles` remains available for audit/display
+    /// but MUST NOT be branched on for an authz decision (`security.md`).
+    pub claims: Claims,
 }
 
 impl CurrentUser {
-    /// v1 `role_required` equivalent: 403 unless role is in `roles`.
-    pub fn require_role(&self, roles: &[&str]) -> Result<(), ApiError> {
-        if roles.contains(&self.role.as_str()) {
-            Ok(())
-        } else {
-            Err(ApiError::Forbidden("Insufficient permissions".to_owned()))
-        }
+    /// Enforces a required `resource:action` scope, mapping a miss to the
+    /// same 403 body every role-based check in this service returned before
+    /// this migration (`{"error": "Insufficient permissions"}`) — the wire
+    /// contract asserted by `routes::repos`'s
+    /// `mutations_require_admin_role` and documented on every
+    /// `#[utoipa::path]` `responses(...)` clause is unchanged, only the
+    /// enforcement mechanism is.
+    pub fn require_scope(&self, scope: &str) -> Result<(), ApiError> {
+        self.claims
+            .require_scope(scope)
+            .map_err(|_| ApiError::Forbidden("Insufficient permissions".to_owned()))
     }
 }
 
-/// Extractor requiring the `admin` role. Implemented as a `FromRequestParts`
+/// Extractor requiring [`ADMIN_SCOPE`]. Implemented as a `FromRequestParts`
 /// extractor (not an inline check in the handler body) so it runs — and can
 /// reject with 403 — *before* axum evaluates a later body extractor like
 /// `ApiJson`. This matters: axum evaluates extractors left-to-right and
 /// short-circuits on the first failure, so an inline
-/// `user.require_role(...)?` placed after the body parameter in the
+/// `user.require_scope(...)?` placed after the body parameter in the
 /// function body would never run if the body itself failed to parse first.
 /// Matches the v1 decorator ordering (`@auth_required` then
 /// `@role_required(...)`, both ahead of the view function).
@@ -98,13 +144,15 @@ impl FromRequestParts<AppState> for AdminOnly {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         let user = CurrentUser::from_request_parts(parts, state).await?;
-        user.require_role(&["admin"])?;
+        user.require_scope(ADMIN_SCOPE)?;
         Ok(AdminOnly(user))
     }
 }
 
-/// Extractor requiring the `maintainer` role only — see [`AdminOnly`] for
-/// why this is an extractor rather than an inline check.
+/// Extractor requiring [`WRITE_SCOPE`] (`admin` or `maintainer`) — see
+/// [`AdminOnly`] for why this is an extractor rather than an inline check,
+/// and the module docs for why `admin` is included here where the old
+/// role-string gate excluded it.
 pub struct MaintainerOnly(pub CurrentUser);
 
 impl FromRequestParts<AppState> for MaintainerOnly {
@@ -112,7 +160,7 @@ impl FromRequestParts<AppState> for MaintainerOnly {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         let user = CurrentUser::from_request_parts(parts, state).await?;
-        user.require_role(&["maintainer"])?;
+        user.require_scope(WRITE_SCOPE)?;
         Ok(MaintainerOnly(user))
     }
 }
@@ -144,8 +192,8 @@ impl FromRequestParts<AppState> for CurrentUser {
             .map_err(|_| ApiError::Forbidden("missing or empty tenant claim".to_owned()))?;
         Ok(CurrentUser {
             id: user_id,
-            role: claims.roles.first().cloned().unwrap_or_default(),
             tenant_id,
+            claims,
         })
     }
 }
@@ -244,23 +292,42 @@ mod tests {
         }
     }
 
-    #[test]
-    fn require_role_matches_v1_role_required() {
-        let admin = CurrentUser {
+    /// Builds a [`CurrentUser`] carrying `scope` directly, for exercising
+    /// [`CurrentUser::require_scope`] without a full token round-trip.
+    fn current_user(scope: &str) -> CurrentUser {
+        let mut c = claims("1", TENANT, &[], 60);
+        c.scope = scope.to_owned();
+        CurrentUser {
             id: 1,
-            role: "admin".to_owned(),
             tenant_id: TENANT.parse().unwrap_or_else(|e| panic!("uuid: {e}")),
-        };
-        assert!(admin.require_role(&["admin", "maintainer"]).is_ok());
-        let viewer = CurrentUser {
-            id: 2,
-            role: "viewer".to_owned(),
-            tenant_id: TENANT.parse().unwrap_or_else(|e| panic!("uuid: {e}")),
-        };
-        match viewer.require_role(&["admin", "maintainer"]) {
+            claims: c,
+        }
+    }
+
+    #[test]
+    fn require_scope_matches_old_admin_only_gate() {
+        let admin = current_user("*:read *:write *:admin *:delete settings:write users:admin");
+        assert!(admin.require_scope(ADMIN_SCOPE).is_ok());
+        let viewer = current_user("*:read");
+        match viewer.require_scope(ADMIN_SCOPE) {
             Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
             other => panic!("expected 403, got {other:?}"),
         }
+    }
+
+    /// Regression: the old `require_role(&["maintainer"])` gate on
+    /// `POST /codescan/reviews` excluded `admin` outright; the scope-based
+    /// [`crate::auth::WRITE_SCOPE`] replacement deliberately includes it
+    /// (both bundles carry `*:write`) — see module docs. `viewer` (read-only
+    /// bundle) must remain excluded either way.
+    #[test]
+    fn require_scope_write_is_satisfied_by_admin_and_maintainer_not_viewer() {
+        let admin = current_user("*:read *:write *:admin *:delete settings:write users:admin");
+        assert!(admin.require_scope(WRITE_SCOPE).is_ok());
+        let maintainer = current_user("*:read *:write teams:read reports:read analytics:read");
+        assert!(maintainer.require_scope(WRITE_SCOPE).is_ok());
+        let viewer = current_user("*:read");
+        assert!(viewer.require_scope(WRITE_SCOPE).is_err());
     }
 
     #[tokio::test]
@@ -298,7 +365,7 @@ mod tests {
             Err(e) => panic!("extract: {e:?}"),
         };
         assert_eq!(user.id, 5);
-        assert_eq!(user.role, "admin");
+        assert_eq!(user.claims.roles, vec!["admin".to_owned()]);
         assert_eq!(user.tenant_id.to_string(), TENANT);
     }
 }

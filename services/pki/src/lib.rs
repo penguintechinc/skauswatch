@@ -2,6 +2,7 @@
 //! REST/gRPC surface, and persistence — a Rust port of the v1 Quart service.
 //! Modules are re-exported for the service binary and the parity harness.
 
+pub mod authz;
 pub mod ca;
 pub mod config;
 pub mod error;
@@ -10,6 +11,7 @@ pub mod health;
 pub mod maintenance;
 pub mod manager;
 pub mod models;
+pub mod ratelimit;
 pub mod routes;
 pub mod state;
 pub mod tenant;

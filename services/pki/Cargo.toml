@@ -48,6 +48,7 @@ tokio = { workspace = true }
 tonic = { workspace = true, features = ["tls-connect-info"] }
 tokio-rustls = { workspace = true }
 tokio-stream = { workspace = true }
+tower_governor = { workspace = true }
 tracing = { workspace = true }
 # "yaml" adds serde_yaml so `skauswatch-pki openapi` can emit true YAML for
 # openapi/v1.yaml (workspace default features are json-only) — see

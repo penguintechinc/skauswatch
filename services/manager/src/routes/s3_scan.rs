@@ -755,7 +755,7 @@ pub(crate) async fn create_bucket(
     user: CurrentUser,
     ApiJson(body): ApiJson<BucketCreateBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("s3_scan:write")?;
     let v = validate_bucket_create(&body)?;
 
     let existing: Option<(i32,)> = sqlx::query_as(
@@ -1146,7 +1146,7 @@ pub(crate) async fn update_bucket(
     Path(bucket_id): Path<i32>,
     ApiJson(body): ApiJson<BucketUpdateBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("s3_scan:write")?;
     let v = validate_bucket_update(&body)?;
 
     let existing = fetch_bucket(&state.db, user.tenant_id, bucket_id)
@@ -1289,7 +1289,7 @@ pub(crate) async fn delete_bucket(
     user: CurrentUser,
     Path(bucket_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin"])?;
+    user.require_scope("s3_scan:admin")?;
     if !bucket_exists(&state.db, user.tenant_id, bucket_id).await? {
         return Err(ApiError::NotFound(
             "Bucket configuration not found".to_owned(),
@@ -1344,7 +1344,7 @@ pub(crate) async fn test_bucket_connection(
     user: CurrentUser,
     Path(bucket_id): Path<i32>,
 ) -> Result<Response, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("s3_scan:write")?;
     let bucket = fetch_bucket(&state.db, user.tenant_id, bucket_id)
         .await?
         .ok_or_else(|| ApiError::NotFound("Bucket configuration not found".to_owned()))?;
@@ -1557,7 +1557,7 @@ pub(crate) async fn trigger_scan(
     Path(bucket_id): Path<i32>,
     body: Bytes,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("s3_scan:write")?;
     let parsed: TriggerBody = if body.is_empty() {
         TriggerBody::default()
     } else {
@@ -1934,7 +1934,7 @@ pub(crate) async fn cancel_job(
     user: CurrentUser,
     Path(job_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("s3_scan:write")?;
     let row: Option<(Option<String>,)> =
         sqlx::query_as("SELECT status FROM s3_scan_jobs WHERE id = $1 AND tenant_id = $2")
             .bind(job_id)
@@ -2642,7 +2642,7 @@ pub(crate) async fn set_schedule(
     Path(bucket_id): Path<i32>,
     ApiJson(body): ApiJson<ScheduleBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("s3_scan:write")?;
     let (cron, timezone, enabled) = validate_schedule(&body)?;
 
     if !bucket_exists(&state.db, user.tenant_id, bucket_id).await? {
@@ -2712,7 +2712,7 @@ pub(crate) async fn delete_schedule(
     user: CurrentUser,
     Path(bucket_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("s3_scan:write")?;
     if !bucket_exists(&state.db, user.tenant_id, bucket_id).await? {
         return Err(ApiError::NotFound(
             "Bucket configuration not found".to_owned(),
@@ -2945,7 +2945,7 @@ struct AdhocRow {
 
 /// v1 owner gate: uploader or admin only (403 "Access denied").
 fn check_upload_access(row: &AdhocRow, user: &CurrentUser) -> Result<(), ApiError> {
-    if row.uploaded_by != user.id && user.role != "admin" {
+    if row.uploaded_by != user.id && !user.has_scope("s3_scan:admin") {
         return Err(ApiError::Forbidden("Access denied".to_owned()));
     }
     Ok(())
@@ -3096,7 +3096,7 @@ pub(crate) async fn list_upload_history(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (page, per_page) = parse_page_params(&params);
     let offset = (page - 1) * per_page;
-    let scope_to_user = user.role != "admin";
+    let scope_to_user = !user.has_scope("s3_scan:admin");
 
     let mut qb = QueryBuilder::new(ADHOC_COLUMNS);
     qb.push(" AND tenant_id = ").push_bind(user.tenant_id);
@@ -3311,7 +3311,7 @@ pub(crate) async fn create_ti_indicator(
     user: CurrentUser,
     Path(result_id): Path<i32>,
 ) -> Result<Response, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("s3_scan:write")?;
     let result = fetch_ti_source(&state.db, user.tenant_id, result_id)
         .await?
         .ok_or_else(|| ApiError::NotFound("Scan result not found".to_owned()))?;
@@ -3692,25 +3692,26 @@ mod tests {
     }
 
     #[test]
-    fn role_gates_match_v1() {
+    fn scope_gates_match_v1() {
         // admin/maintainer gates: create/update/test bucket, trigger scan,
-        // cancel job, schedule put/delete, create-indicator.
+        // cancel job, schedule put/delete, create-indicator — all gated on
+        // `s3_scan:write`, which both bundles' `*:write` wildcard satisfies.
         for role in ["admin", "maintainer"] {
-            assert!(
-                user_with_role(role)
-                    .require_role(&["admin", "maintainer"])
-                    .is_ok()
-            );
+            assert!(user_with_role(role).require_scope("s3_scan:write").is_ok());
         }
-        match user_with_role("viewer").require_role(&["admin", "maintainer"]) {
+        match user_with_role("viewer").require_scope("s3_scan:write") {
             Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
             other => panic!("expected 403 for viewer, got {other:?}"),
         }
-        // delete bucket is admin-only.
-        assert!(user_with_role("admin").require_role(&["admin"]).is_ok());
+        // delete bucket is gated on `s3_scan:admin` — admin only.
+        assert!(
+            user_with_role("admin")
+                .require_scope("s3_scan:admin")
+                .is_ok()
+        );
         for role in ["maintainer", "viewer"] {
             assert!(matches!(
-                user_with_role(role).require_role(&["admin"]),
+                user_with_role(role).require_scope("s3_scan:admin"),
                 Err(ApiError::Forbidden(_))
             ));
         }

@@ -33,20 +33,48 @@ use crate::state::AppState;
 /// `docs/v2-port/v2.1-depgate.md` §10).
 pub const DEPGATE_FLAG: &str = "skauswatch.depgate";
 
-/// Builds the full application router.
+/// Builds the full application router — the version every unit test in
+/// this crate exercises. Carries no rate limiting; see
+/// [`rate_limited_router`] and `crate::rate_limit` module docs for why that
+/// is a deliberately separate entrypoint rather than a flag here.
+/// `cfg(test)`-only: `main.rs::serve()` calls [`rate_limited_router`]
+/// exclusively, so this has no production caller.
 ///
 /// Middleware ordering contract (per `skauswatch_auth::tenant_middleware`'s
 /// docs: the LAST `.layer()` call is outermost/first-executed): tenant
 /// check runs before the feature-flag check, matching every other service
 /// in this workspace.
+#[cfg(test)]
 pub fn router(state: AppState) -> Router {
-    let api = Router::new().nest("/api/v1", admin::router());
-    let protected = api
-        .merge(oci::router())
+    router_inner(state, false)
+}
+
+/// Identical route composition to [`router`], plus per-IP rate limiting on
+/// the pull-through proxy and admin/report surfaces (`crate::rate_limit`).
+/// This is the entrypoint `main.rs::serve()` uses; kept separate from
+/// [`router`] because `tower_governor`'s key extractor needs a
+/// forwarded-IP header or a populated `ConnectInfo` that `axum-test`'s
+/// mock transport (what every existing test in this crate uses) doesn't
+/// provide — see `crate::rate_limit` module docs.
+pub fn rate_limited_router(state: AppState) -> Router {
+    router_inner(state, true)
+}
+
+fn router_inner(state: AppState, rate_limit: bool) -> Router {
+    let mut admin_router = admin::router();
+    let mut proxy_router = oci::router()
         .merge(npm::router())
         .merge(pypi::router())
         .merge(crates_io::router())
-        .merge(go::router())
+        .merge(go::router());
+    if rate_limit {
+        admin_router = crate::rate_limit::admin(admin_router);
+        proxy_router = crate::rate_limit::proxy(proxy_router);
+    }
+
+    let api = Router::new().nest("/api/v1", admin_router);
+    let protected = api
+        .merge(proxy_router)
         .layer(axum::middleware::from_fn_with_state(
             FlagGate::new(state.license.clone(), DEPGATE_FLAG),
             flag_gate,
@@ -73,7 +101,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::router;
+    use super::{rate_limited_router, router};
     use crate::auth::{ADMIN_SCOPE, READ_SCOPE};
     use crate::db::{self, UpsertArtifact};
     use crate::state::AppStateInner;
@@ -730,5 +758,38 @@ mod tests {
             .authorization_bearer(&token)
             .await;
         res.assert_status(StatusCode::NO_CONTENT);
+    }
+
+    // -- `rate_limited_router` wiring (`crate::rate_limit`) ------------------
+    // Burst/429 behavior itself is covered in `crate::rate_limit`'s own
+    // tests, in isolation from DB/auth setup; this proves the two
+    // `GovernorLayer`s are actually wired into the real router assembly
+    // (not just the standalone helper) without breaking the existing
+    // auth/tenant middleware chain. A forwarded-for header is required
+    // here — `SmartIpKeyExtractor` has no peer IP to fall back to under
+    // `axum-test`'s mock transport (see module docs).
+
+    #[tokio::test]
+    async fn rate_limited_router_still_enforces_auth_on_the_admin_surface() {
+        let pool = test_pool().await;
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        let server = axum_test::TestServer::new(rate_limited_router(state));
+        let res = server
+            .get("/api/v1/depgate/artifacts")
+            .add_header("x-forwarded-for", "203.0.113.30")
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn rate_limited_router_still_enforces_auth_on_the_proxy_surface() {
+        let pool = test_pool().await;
+        let state = AppStateInner::for_tests_with_db(pool, dev_license());
+        let server = axum_test::TestServer::new(rate_limited_router(state));
+        let res = server
+            .get("/v2/")
+            .add_header("x-forwarded-for", "203.0.113.31")
+            .await;
+        res.assert_status(StatusCode::UNAUTHORIZED);
     }
 }
