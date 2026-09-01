@@ -11,13 +11,22 @@
 //! extract — see that function's docs for the exact axum layer ordering
 //! this requires.
 //!
-//! This crate also carries the house fail-fast secret policy
-//! ([`load_jwt_secret`]) and a service-to-service JWT verifier
+//! Audit finding H1b: every token in this workspace used to be signed AND
+//! verified with one shared symmetric `JWT_SECRET_KEY` (HS256) — a single
+//! leak of that one value let the leaker forge any user or machine token
+//! mesh-wide. This crate now mints/verifies with asymmetric ES256
+//! (ECDSA P-256) instead: [`load_jwt_signing_key`] loads the PEM-encoded
+//! **private** key (`JWT_SIGNING_KEY`) held only by the issuer (the
+//! manager), and [`load_jwt_verify_key`] loads the PEM-encoded **public**
+//! key (`JWT_VERIFY_KEY`) every verifying service holds — a leaked verify
+//! key lets an attacker read/validate tokens, never forge them. Hard
+//! cutover, no HS256 fallback. This crate also carries the house fail-fast
+//! key-loading policy and a service-to-service JWT verifier
 //! ([`verify_service_token`], [`AuthenticatedCaller`], [`verify_grpc_bearer`])
 //! shared by services (pki, sshca) that have no local user database
 //! and therefore can't run the manager's full `CurrentUser` extractor, but
-//! still must require a valid HS256 access token signed with the same
-//! `JWT_SECRET_KEY` on every request.
+//! still must require a valid ES256 access token verifiable with the same
+//! `JWT_VERIFY_KEY` on every request.
 
 use axum::Json;
 use axum::extract::{FromRequestParts, Request, State};
@@ -26,6 +35,7 @@ use axum::http::request::Parts;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use pkcs8::{EncodePrivateKey, EncodePublicKey};
 use serde::{Deserialize, Serialize};
 
 /// Mandatory claims carried by every skauswatch token, per the PenguinTech
@@ -174,10 +184,10 @@ pub const EXPECTED_ISS: &str = "https://auth.skauswatch.app";
 pub const EXPECTED_AUD: &str = "skauswatch";
 
 /// Decodes and signature/expiry/issuer/audience-validates the mandatory
-/// [`Claims`] shape from an HS256 token signed with `secret`. Does not
-/// itself enforce the tenant boundary — callers needing that call
-/// [`Claims::require_tenant`] on the result (this is exactly what
-/// [`tenant_middleware`] does).
+/// [`Claims`] shape from an ES256 token verifiable with `key` (the public
+/// half loaded by [`load_jwt_verify_key`]). Does not itself enforce the
+/// tenant boundary — callers needing that call [`Claims::require_tenant`]
+/// on the result (this is exactly what [`tenant_middleware`] does).
 ///
 /// `iss` and `aud` are both REQUIRED and must equal [`EXPECTED_ISS`]/
 /// [`EXPECTED_AUD`] exactly — a token missing either claim, or carrying a
@@ -187,23 +197,19 @@ pub const EXPECTED_AUD: &str = "skauswatch";
 /// token was accepted regardless of who issued it or what audience it was
 /// minted for. Every issuer of a [`Claims`] token MUST set `iss =
 /// EXPECTED_ISS` and `aud = EXPECTED_AUD` or its tokens will be rejected.
-pub fn decode_claims(token: &str, secret: &str) -> Result<Claims, TenantAuthError> {
-    let mut validation = Validation::new(Algorithm::HS256);
+pub fn decode_claims(token: &str, key: &DecodingKey) -> Result<Claims, TenantAuthError> {
+    let mut validation = Validation::new(Algorithm::ES256);
     validation.validate_exp = true;
     validation.validate_aud = true;
     validation.set_issuer(&[EXPECTED_ISS]);
     validation.set_audience(&[EXPECTED_AUD]);
     validation.set_required_spec_claims(&["exp", "iss", "aud"]);
-    jsonwebtoken::decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .map(|data| data.claims)
-    .map_err(|e| match e.kind() {
-        jsonwebtoken::errors::ErrorKind::ExpiredSignature => TenantAuthError::Expired,
-        _ => TenantAuthError::Invalid,
-    })
+    jsonwebtoken::decode::<Claims>(token, key, &validation)
+        .map(|data| data.claims)
+        .map_err(|e| match e.kind() {
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature => TenantAuthError::Expired,
+            _ => TenantAuthError::Invalid,
+        })
 }
 
 /// A validated tenant identifier. The *only* legitimate source of a
@@ -320,7 +326,7 @@ where
         .and_then(bearer_token);
 
     let outcome = match token {
-        Some(token) => decode_claims(token, state.jwt_secret()).and_then(|claims| {
+        Some(token) => decode_claims(token, state.jwt_verify_key()).and_then(|claims| {
             claims
                 .require_tenant()
                 .map(|tenant| TenantContext {
@@ -340,11 +346,11 @@ where
     }
 }
 
-/// Claims carried by the shared HS256 access token issued by the manager's
-/// login endpoint (`services/manager/src/auth::AccessClaims`): `sub`,
-/// `role`, `type: "access"`, `exp`, `iat`. Any service that verifies with the
-/// same `JWT_SECRET_KEY` can consume it — this is the "machine JWT" shape
-/// used to gate pki, sshca, and the manager's own gRPC surface.
+/// Claims carried by the shared ES256 machine access token: `sub`, `role`,
+/// `type: "access"`, `exp`, `iat`. Any service holding the shared
+/// `JWT_VERIFY_KEY` can verify it (only [`issue_service_token`]'s caller
+/// needs `JWT_SIGNING_KEY`) — this is the "machine JWT" shape used to gate
+/// pki, sshca, and the manager's own gRPC surface.
 ///
 /// Deliberately carries no `iss`/`aud` claims and is exempt from the
 /// [`EXPECTED_ISS`]/[`EXPECTED_AUD`] enforcement added to [`decode_claims`]:
@@ -408,37 +414,39 @@ impl From<ServiceTokenError> for tonic::Status {
     }
 }
 
-/// Verifies an HS256 token signed with `secret`: valid signature, unexpired,
-/// and `type == "access"`. This is the sole authz input for services with no
-/// local user database (pki, sshca) — there is no role/scope check
-/// here beyond "this is a genuine, current access token".
-pub fn verify_service_token(token: &str, secret: &str) -> Result<ServiceClaims, ServiceTokenError> {
-    let mut validation = Validation::new(Algorithm::HS256);
+/// Verifies an ES256 token verifiable with `key`: valid signature,
+/// unexpired, and `type == "access"`. This is the sole authz input for
+/// services with no local user database (pki, sshca) — there is no
+/// role/scope check here beyond "this is a genuine, current access token".
+pub fn verify_service_token(
+    token: &str,
+    key: &DecodingKey,
+) -> Result<ServiceClaims, ServiceTokenError> {
+    let mut validation = Validation::new(Algorithm::ES256);
     validation.validate_exp = true;
     validation.required_spec_claims.clear();
-    let data = jsonwebtoken::decode::<ServiceClaims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .map_err(|e| match e.kind() {
-        jsonwebtoken::errors::ErrorKind::ExpiredSignature => ServiceTokenError::Expired,
-        _ => ServiceTokenError::Invalid,
-    })?;
+    let data =
+        jsonwebtoken::decode::<ServiceClaims>(token, key, &validation).map_err(|e| {
+            match e.kind() {
+                jsonwebtoken::errors::ErrorKind::ExpiredSignature => ServiceTokenError::Expired,
+                _ => ServiceTokenError::Invalid,
+            }
+        })?;
     if data.claims.token_type != "access" {
         return Err(ServiceTokenError::InvalidType);
     }
     Ok(data.claims)
 }
 
-/// Issues an HS256 access token in the shared house shape. Mirrors
+/// Issues an ES256 access token in the shared house shape, signed with
+/// `key` (the private half loaded by [`load_jwt_signing_key`]). Mirrors
 /// `services/manager/src/auth::create_access_token`; exposed here so any
 /// service (or test) that needs to mint a machine/service token doesn't
 /// hand-roll JWT encoding against a different claim shape.
 pub fn issue_service_token(
     sub: &str,
     role: &str,
-    secret: &str,
+    key: &EncodingKey,
     ttl_seconds: i64,
 ) -> Result<String, jsonwebtoken::errors::Error> {
     let now = std::time::SystemTime::now()
@@ -452,11 +460,7 @@ pub fn issue_service_token(
         exp: now + ttl_seconds,
         iat: now,
     };
-    jsonwebtoken::encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
-    )
+    jsonwebtoken::encode(&Header::new(Algorithm::ES256), &claims, key)
 }
 
 fn bearer_token(raw: &str) -> Option<&str> {
@@ -464,40 +468,44 @@ fn bearer_token(raw: &str) -> Option<&str> {
 }
 
 /// Verifies the `authorization: Bearer <jwt>` gRPC metadata entry against
-/// `secret` — the tonic-side counterpart to [`AuthenticatedCaller`], for
+/// `key` — the tonic-side counterpart to [`AuthenticatedCaller`], for
 /// gating tonic services (pki's `PKIService`, the manager's
 /// `ManagerService`/`S3ScanService`).
 pub fn verify_grpc_bearer(
     metadata: &tonic::metadata::MetadataMap,
-    secret: &str,
+    key: &DecodingKey,
 ) -> Result<ServiceClaims, ServiceTokenError> {
     let token = metadata
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(bearer_token)
         .ok_or(ServiceTokenError::MissingOrInvalidHeader)?;
-    verify_service_token(token, secret)
+    verify_service_token(token, key)
 }
 
-/// Implemented by axum state types that expose the shared HS256 signing
-/// secret, so [`AuthenticatedCaller`] can be used as an extractor (or, via
+/// Implemented by axum state types that expose the shared `JWT_VERIFY_KEY`
+/// public key, so [`AuthenticatedCaller`]/[`tenant_middleware`] can verify
+/// tokens as an extractor (or, via
 /// `axum::middleware::from_extractor_with_state`, as a router-wide layer)
-/// without each service reimplementing bearer-header parsing.
+/// without each service reimplementing bearer-header parsing. Only the
+/// issuer (the manager) additionally holds the private `JWT_SIGNING_KEY` —
+/// deliberately not part of this trait, since no verifier needs it.
 pub trait JwtSecretSource {
-    /// Returns the shared `JWT_SECRET_KEY` value used to verify tokens.
-    fn jwt_secret(&self) -> &str;
+    /// Returns the shared `JWT_VERIFY_KEY` (public EC key) used to verify
+    /// tokens.
+    fn jwt_verify_key(&self) -> &DecodingKey;
 }
 
 impl<T: JwtSecretSource + ?Sized> JwtSecretSource for std::sync::Arc<T> {
-    fn jwt_secret(&self) -> &str {
-        (**self).jwt_secret()
+    fn jwt_verify_key(&self) -> &DecodingKey {
+        (**self).jwt_verify_key()
     }
 }
 
-/// Axum extractor requiring a valid Bearer access token signed with the
-/// state's JWT secret. Unlike the manager's `CurrentUser`, this performs no
-/// database lookup — signature + expiry + token type only — because
-/// pki and sshca have no local user table.
+/// Axum extractor requiring a valid Bearer access token verifiable with the
+/// state's `JWT_VERIFY_KEY`. Unlike the manager's `CurrentUser`, this
+/// performs no database lookup — signature + expiry + token type only —
+/// because pki and sshca have no local user table.
 #[derive(Debug, Clone)]
 pub struct AuthenticatedCaller(pub ServiceClaims);
 
@@ -514,7 +522,7 @@ where
             .and_then(|v| v.to_str().ok())
             .and_then(bearer_token)
             .ok_or(ServiceTokenError::MissingOrInvalidHeader)?;
-        verify_service_token(token, state.jwt_secret()).map(AuthenticatedCaller)
+        verify_service_token(token, state.jwt_verify_key()).map(AuthenticatedCaller)
     }
 }
 
@@ -533,84 +541,256 @@ pub fn is_production() -> bool {
     release_mode_is_production(std::env::var("RELEASE_MODE").ok().as_deref())
 }
 
-/// Well-known placeholder secrets — shipped scaffold defaults, sample env
-/// files, or values a developer might type without thinking — that must
-/// never reach production as `JWT_SECRET_KEY`. Compared case-insensitively
-/// (see [`is_denylisted_secret`]). Mirrors
-/// `services/manager/src/state.rs::ENDPOINT_DEFAULT_SECRET`'s
-/// fail-fast-on-known-default policy for `ENDPOINT_API_SECRET`, generalized
-/// to the small set of defaults known to circulate for this secret.
-const DENYLISTED_SECRETS: &[&str] = &[
-    "changeme-in-production",
-    "changeme",
-    "change-me",
-    "changeme-in-prod",
-    "secret",
-    "password",
-];
-
-/// True when `value` case-insensitively matches a well-known placeholder
-/// default (see [`DENYLISTED_SECRETS`]) rather than a real secret.
-fn is_denylisted_secret(value: &str) -> bool {
-    DENYLISTED_SECRETS
-        .iter()
-        .any(|denied| value.eq_ignore_ascii_case(denied))
+/// A required JWT key (`JWT_SIGNING_KEY`/`JWT_VERIFY_KEY`) failed to load:
+/// either missing/blank in production, or present but not a well-formed
+/// PEM-encoded EC (P-256) key. The malformed-PEM case fails closed in
+/// *every* environment (not just production) — a configured-but-broken
+/// value must never be silently swapped for something else (a dev
+/// ephemeral fallback there would be far more confusing to debug than a
+/// hard failure at startup). Mirrors the pre-ES256 `MissingProductionSecret`
+/// fail-fast style; the old `changeme`-style denylist no longer applies —
+/// there's no equivalent "guessable placeholder" concept for a PEM key.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum JwtKeyError {
+    /// The named env var (`JWT_SIGNING_KEY`/`JWT_VERIFY_KEY`) was
+    /// missing/blank and `RELEASE_MODE != "false"` requires a real key.
+    #[error(
+        "{0} must be set to a PEM-encoded EC (P-256) key in production (RELEASE_MODE != \"false\")"
+    )]
+    MissingInProduction(&'static str),
+    /// The named env var was set but did not parse as a PEM-encoded EC key;
+    /// the second field carries the underlying `jsonwebtoken` parse error.
+    #[error("{0} is set but is not a valid PEM-encoded EC key: {1}")]
+    InvalidPem(&'static str, String),
 }
 
-/// A required secret was missing/empty/a known placeholder default in
-/// production. Startup must abort rather than fall back to a guessable or
-/// hardcoded value.
-#[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
-#[error("JWT_SECRET_KEY must be set to a real secret in production (RELEASE_MODE != \"false\")")]
-pub struct MissingProductionSecret;
-
-/// Pure fail-fast decision for a required secret: `Ok(Some(value))` when
-/// usable (trimmed non-empty, and — in production — not a known
-/// [`DENYLISTED_SECRETS`] placeholder), `Ok(None)` when absent but
-/// acceptable (non-production), `Err` when production requires a real
-/// secret and the value is missing/blank/a known default.
-fn resolve_required_secret(
-    value: Option<&str>,
+/// Pure fail-fast decision for a required PEM env var: `Ok(Some(value))`
+/// when present (trimmed non-empty), `Ok(None)` when absent but acceptable
+/// (non-production — the ephemeral dev keypair fallback applies, see
+/// [`ephemeral_dev_keypair`]), `Err` when production requires a real value
+/// and none was set.
+fn resolve_required_pem<'a>(
+    value: Option<&'a str>,
     production: bool,
-) -> Result<Option<&str>, MissingProductionSecret> {
+    var_name: &'static str,
+) -> Result<Option<&'a str>, JwtKeyError> {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(v) if production && is_denylisted_secret(v) => Err(MissingProductionSecret),
         Some(v) => Ok(Some(v)),
-        None if production => Err(MissingProductionSecret),
+        None if production => Err(JwtKeyError::MissingInProduction(var_name)),
         None => Ok(None),
     }
 }
 
-/// Loads the shared JWT signing secret from `JWT_SECRET_KEY` per the house
-/// fail-fast policy: a missing/empty value, OR a well-known placeholder
-/// default (see [`DENYLISTED_SECRETS`]), FAILS STARTUP in production (a
-/// guessable per-process fallback — or a shipped default — is worse than
-/// refusing to start). In dev only (`RELEASE_MODE=false`), an unset value
-/// is logged and replaced with a random ephemeral secret — never a
-/// hardcoded/guessable one.
-pub fn load_jwt_secret() -> Result<String, MissingProductionSecret> {
-    let raw = std::env::var("JWT_SECRET_KEY").ok();
-    match resolve_required_secret(raw.as_deref(), is_production())? {
-        Some(v) => Ok(v.to_owned()),
+/// The single, process-lifetime EC (P-256) keypair shared by every
+/// non-production/test consumer in this crate — [`ephemeral_dev_keypair`]
+/// (the `JWT_SIGNING_KEY`/`JWT_VERIFY_KEY`-unset dev fallback every
+/// service's `AppState` falls back to) and
+/// [`test_fixture_keypair`]/[`test_fixture_keypair_pem`] (the fixture
+/// `skauswatch_testkit::jwt` and `services/manager::state`'s
+/// `AuthSettings::for_tests` draw from) all delegate here. These used to be
+/// three independently generated `OnceLock`s, each a different random
+/// keypair: a token minted through the test fixture could not be verified
+/// by a service whose `AppState` loaded its verify key through the
+/// ephemeral-dev fallback, so every router test that minted a token one way
+/// and verified it the other failed with a spurious 401. Generated exactly
+/// once per process; never a hardcoded PEM literal (secret scanners
+/// rightly flag any embedded EC private key, test fixture or not).
+fn shared_dev_keypair() -> &'static ((String, String), (EncodingKey, DecodingKey)) {
+    static KEYPAIR: std::sync::OnceLock<((String, String), (EncodingKey, DecodingKey))> =
+        std::sync::OnceLock::new();
+    KEYPAIR.get_or_init(|| {
+        let secret = p256::SecretKey::random(&mut rand_core::OsRng);
+        let private_pem = secret
+            .to_pkcs8_pem(pkcs8::LineEnding::LF)
+            .unwrap_or_else(|e| {
+                unreachable!("in-memory EC key PKCS#8 PEM encoding cannot fail: {e}")
+            })
+            .to_string();
+        let public_pem = secret
+            .public_key()
+            .to_public_key_pem(pkcs8::LineEnding::LF)
+            .unwrap_or_else(|e| {
+                unreachable!("in-memory EC public key SPKI PEM encoding cannot fail: {e}")
+            });
+        let enc = EncodingKey::from_ec_pem(private_pem.as_bytes())
+            .unwrap_or_else(|e| unreachable!("freshly generated EC private PEM must parse: {e}"));
+        let dec = DecodingKey::from_ec_pem(public_pem.as_bytes())
+            .unwrap_or_else(|e| unreachable!("freshly generated EC public PEM must parse: {e}"));
+        ((private_pem, public_pem), (enc, dec))
+    })
+}
+
+/// A single, process-lifetime ephemeral EC (P-256) keypair, generated only
+/// when `JWT_SIGNING_KEY`/`JWT_VERIFY_KEY` are unset outside production —
+/// mirrors the pre-ES256 `load_jwt_secret`'s "random ephemeral value, never
+/// a hardcoded/guessable one" dev fallback. Delegates to
+/// [`shared_dev_keypair`] rather than generating its own keypair, so a
+/// service running with no configured key still verifies tokens minted by
+/// this crate's own test fixtures (see [`shared_dev_keypair`]'s docs); it
+/// still does NOT let separate processes/services with no configured key
+/// interoperate with each other or with a genuinely production-configured
+/// key, exactly like the old per-process ephemeral HS256 secret never did
+/// either — this is a "don't crash" convenience, not a substitute for real
+/// key configuration in any multi-service environment.
+fn ephemeral_dev_keypair() -> &'static (EncodingKey, DecodingKey) {
+    &shared_dev_keypair().1
+}
+
+/// Parses a `JWT_SIGNING_KEY` PEM value into an [`EncodingKey`], wrapping a
+/// parse failure as [`JwtKeyError::InvalidPem`]. Split out from
+/// [`load_jwt_signing_key`] so the parse failure path is unit-testable
+/// without mutating process environment variables (house policy rules out
+/// `std::env::set_var` in tests).
+fn parse_signing_pem(pem: &str, var_name: &'static str) -> Result<EncodingKey, JwtKeyError> {
+    EncodingKey::from_ec_pem(pem.as_bytes())
+        .map_err(|e| JwtKeyError::InvalidPem(var_name, e.to_string()))
+}
+
+/// Parses a `JWT_VERIFY_KEY` PEM value into a [`DecodingKey`] — see
+/// [`parse_signing_pem`].
+fn parse_verify_pem(pem: &str, var_name: &'static str) -> Result<DecodingKey, JwtKeyError> {
+    DecodingKey::from_ec_pem(pem.as_bytes())
+        .map_err(|e| JwtKeyError::InvalidPem(var_name, e.to_string()))
+}
+
+/// Loads the private EC signing key from `JWT_SIGNING_KEY` (PEM, PKCS#8) —
+/// the issuer-only half of the keypair (audit finding H1b: replaces the
+/// single shared `JWT_SECRET_KEY` symmetric secret every service used to
+/// both sign AND verify with). FAILS STARTUP in production
+/// (`RELEASE_MODE != "false"`) when unset/blank, or unconditionally (any
+/// environment) when set but not a parseable PEM EC key. In dev only, an
+/// unset value falls back to a per-process ephemeral keypair — see
+/// [`ephemeral_dev_keypair`].
+pub fn load_jwt_signing_key() -> Result<EncodingKey, JwtKeyError> {
+    let raw = std::env::var("JWT_SIGNING_KEY").ok();
+    match resolve_required_pem(raw.as_deref(), is_production(), "JWT_SIGNING_KEY")? {
+        Some(pem) => parse_signing_pem(pem, "JWT_SIGNING_KEY"),
         None => {
-            tracing::warn!("JWT_SECRET_KEY not set — using random ephemeral dev secret");
-            Ok(uuid::Uuid::new_v4().to_string())
+            tracing::warn!(
+                "JWT_SIGNING_KEY not set — using an ephemeral in-process dev EC keypair"
+            );
+            Ok(ephemeral_dev_keypair().0.clone())
         }
+    }
+}
+
+/// Loads the public EC verification key from `JWT_VERIFY_KEY` (PEM, SPKI) —
+/// held by every verifying service (all of them; only the issuer also holds
+/// [`load_jwt_signing_key`]'s private half). Same fail-closed policy as
+/// [`load_jwt_signing_key`].
+pub fn load_jwt_verify_key() -> Result<DecodingKey, JwtKeyError> {
+    let raw = std::env::var("JWT_VERIFY_KEY").ok();
+    match resolve_required_pem(raw.as_deref(), is_production(), "JWT_VERIFY_KEY")? {
+        Some(pem) => parse_verify_pem(pem, "JWT_VERIFY_KEY"),
+        None => {
+            tracing::warn!("JWT_VERIFY_KEY not set — using an ephemeral in-process dev EC keypair");
+            Ok(ephemeral_dev_keypair().1.clone())
+        }
+    }
+}
+
+/// The canonical fixture ES256 keypair's PEM text (PKCS#8 private / SPKI
+/// public) — delegates to [`shared_dev_keypair`], the single cache also
+/// backing [`ephemeral_dev_keypair`] (see its docs for why). Crate-private
+/// and `#[cfg(test)]`-gated: unlike [`test_fixture_keypair`] (the `pub`
+/// accessor other crates' non-test `for_tests` code calls, so it can't be
+/// `#[cfg(test)]`-gated), this one exists only so this crate's own tests
+/// can exercise the PEM-parsing path itself with real PEM text — no
+/// non-test caller anywhere in the workspace.
+#[cfg(test)]
+fn test_fixture_keypair_pem() -> &'static (String, String) {
+    &shared_dev_keypair().0
+}
+
+/// The canonical throwaway ES256 (P-256) fixture keypair — delegates to
+/// [`shared_dev_keypair`], the single process-lifetime cache also backing
+/// [`ephemeral_dev_keypair`], so a token minted anywhere (this crate's test
+/// fixture, or any service's non-prod `AppState` verify key loaded via
+/// [`load_jwt_verify_key`]) verifies everywhere in non-prod/test.
+/// `crates/skauswatch-testkit::jwt`'s `signing_key`/`verify_key` and
+/// `services/manager::state`'s test-only `AuthSettings::for_tests`
+/// construction both call this directly (this crate is already a regular,
+/// non-dev dependency of both, unlike `skauswatch-testkit` itself, which
+/// can't be pulled into `skauswatch-manager`'s production dependency graph
+/// — see that module's docs).
+///
+/// Not `#[cfg(test)]`-gated for the same reason [`ephemeral_dev_keypair`]
+/// isn't: `services/manager`'s test-support code that calls this (via
+/// `skauswatch-testkit`) is itself compiled unconditionally in that crate
+/// (see `services/manager/src/state.rs`'s module docs), so this must be a
+/// normal always-available function, not a `#[cfg(test)]` item invisible
+/// outside this crate's own test builds.
+pub fn test_fixture_keypair() -> &'static (EncodingKey, DecodingKey) {
+    &shared_dev_keypair().1
+}
+
+/// Test-only fixture wrappers — never a hardcoded PEM literal (secret
+/// scanners rightly flag any embedded EC private key, test fixture or not).
+/// [`signing_key`]/[`verify_key`] delegate to the crate-wide
+/// [`test_fixture_keypair`] cache (see its docs for why this must be a
+/// shared cache rather than an independently-generated local keypair);
+/// [`other_signing_key`]/[`other_verify_key`] expose a second, independent
+/// keypair — generated fresh per process, matched only with each other —
+/// for exercising "signed with the wrong key" rejection paths.
+#[cfg(test)]
+#[allow(clippy::panic)] // tests fail loudly by design
+mod fixtures {
+    use std::sync::OnceLock;
+
+    use jsonwebtoken::{DecodingKey, EncodingKey};
+    use pkcs8::{EncodePrivateKey, EncodePublicKey};
+
+    pub(super) fn signing_key() -> &'static EncodingKey {
+        &super::test_fixture_keypair().0
+    }
+
+    pub(super) fn verify_key() -> &'static DecodingKey {
+        &super::test_fixture_keypair().1
+    }
+
+    fn generate_other_keypair() -> (EncodingKey, DecodingKey) {
+        let secret = p256::SecretKey::random(&mut rand_core::OsRng);
+        let private_pem = secret
+            .to_pkcs8_pem(pkcs8::LineEnding::LF)
+            .unwrap_or_else(|e| panic!("test fixture other keypair: private PEM encode: {e}"));
+        let public_pem = secret
+            .public_key()
+            .to_public_key_pem(pkcs8::LineEnding::LF)
+            .unwrap_or_else(|e| panic!("test fixture other keypair: public PEM encode: {e}"));
+        let enc = EncodingKey::from_ec_pem(private_pem.as_bytes())
+            .unwrap_or_else(|e| panic!("test fixture other signing key: {e}"));
+        let dec = DecodingKey::from_ec_pem(public_pem.as_bytes())
+            .unwrap_or_else(|e| panic!("test fixture other verify key: {e}"));
+        (enc, dec)
+    }
+
+    fn other_keypair() -> &'static (EncodingKey, DecodingKey) {
+        static KEY: OnceLock<(EncodingKey, DecodingKey)> = OnceLock::new();
+        KEY.get_or_init(generate_other_keypair)
+    }
+
+    pub(super) fn other_signing_key() -> &'static EncodingKey {
+        &other_keypair().0
+    }
+
+    pub(super) fn other_verify_key() -> &'static DecodingKey {
+        &other_keypair().1
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::panic)] // tests fail loudly by design
 mod service_token_tests {
+    use super::fixtures::{other_verify_key, signing_key, verify_key};
     use super::*;
 
     #[test]
     fn issued_token_round_trips() {
-        let token = match issue_service_token("42", "admin", "s3cr3t", 300) {
+        let token = match issue_service_token("42", "admin", signing_key(), 300) {
             Ok(t) => t,
             Err(e) => panic!("issue: {e}"),
         };
-        let claims = match verify_service_token(&token, "s3cr3t") {
+        let claims = match verify_service_token(&token, verify_key()) {
             Ok(c) => c,
             Err(e) => panic!("verify: {e:?}"),
         };
@@ -620,13 +800,13 @@ mod service_token_tests {
     }
 
     #[test]
-    fn wrong_secret_is_invalid() {
-        let token = match issue_service_token("1", "viewer", "right", 300) {
+    fn wrong_key_is_invalid() {
+        let token = match issue_service_token("1", "viewer", signing_key(), 300) {
             Ok(t) => t,
             Err(e) => panic!("issue: {e}"),
         };
         assert_eq!(
-            verify_service_token(&token, "wrong"),
+            verify_service_token(&token, other_verify_key()),
             Err(ServiceTokenError::Invalid)
         );
     }
@@ -635,12 +815,12 @@ mod service_token_tests {
     fn expired_token_is_rejected() {
         // jsonwebtoken's default `Validation` applies a 60s leeway, so the
         // expiry must be further in the past than that to actually trip.
-        let token = match issue_service_token("1", "viewer", "s3cr3t", -120) {
+        let token = match issue_service_token("1", "viewer", signing_key(), -120) {
             Ok(t) => t,
             Err(e) => panic!("issue: {e}"),
         };
         assert_eq!(
-            verify_service_token(&token, "s3cr3t"),
+            verify_service_token(&token, verify_key()),
             Err(ServiceTokenError::Expired)
         );
     }
@@ -654,16 +834,13 @@ mod service_token_tests {
             exp: i64::MAX,
             iat: 0,
         };
-        let token = match jsonwebtoken::encode(
-            &Header::new(Algorithm::HS256),
-            &claims,
-            &EncodingKey::from_secret(b"s3cr3t"),
-        ) {
-            Ok(t) => t,
-            Err(e) => panic!("encode: {e}"),
-        };
+        let token =
+            match jsonwebtoken::encode(&Header::new(Algorithm::ES256), &claims, signing_key()) {
+                Ok(t) => t,
+                Err(e) => panic!("encode: {e}"),
+            };
         assert_eq!(
-            verify_service_token(&token, "s3cr3t"),
+            verify_service_token(&token, verify_key()),
             Err(ServiceTokenError::InvalidType)
         );
     }
@@ -671,7 +848,7 @@ mod service_token_tests {
     #[test]
     fn garbage_token_is_invalid_not_a_panic() {
         assert_eq!(
-            verify_service_token("not-a-jwt", "s3cr3t"),
+            verify_service_token("not-a-jwt", verify_key()),
             Err(ServiceTokenError::Invalid)
         );
     }
@@ -680,14 +857,14 @@ mod service_token_tests {
     fn grpc_bearer_requires_authorization_metadata() {
         let md = tonic::metadata::MetadataMap::new();
         assert_eq!(
-            verify_grpc_bearer(&md, "s3cr3t"),
+            verify_grpc_bearer(&md, verify_key()),
             Err(ServiceTokenError::MissingOrInvalidHeader)
         );
     }
 
     #[test]
     fn grpc_bearer_accepts_valid_token() {
-        let token = match issue_service_token("svc", "worker", "s3cr3t", 300) {
+        let token = match issue_service_token("svc", "worker", signing_key(), 300) {
             Ok(t) => t,
             Err(e) => panic!("issue: {e}"),
         };
@@ -697,19 +874,24 @@ mod service_token_tests {
             Err(e) => panic!("metadata value: {e}"),
         };
         md.insert("authorization", value);
-        assert!(verify_grpc_bearer(&md, "s3cr3t").is_ok());
+        assert!(verify_grpc_bearer(&md, verify_key()).is_ok());
     }
 
     #[test]
-    fn arc_wrapped_state_forwards_jwt_secret() {
-        struct Fixed(String);
+    fn arc_wrapped_state_forwards_jwt_verify_key() {
+        struct Fixed(DecodingKey);
         impl JwtSecretSource for Fixed {
-            fn jwt_secret(&self) -> &str {
+            fn jwt_verify_key(&self) -> &DecodingKey {
                 &self.0
             }
         }
-        let state = std::sync::Arc::new(Fixed("s3cr3t".to_owned()));
-        assert_eq!(state.jwt_secret(), "s3cr3t");
+        let state = std::sync::Arc::new(Fixed(verify_key().clone()));
+        // No `PartialEq` on `DecodingKey` — round-trip a token through it
+        // to prove the Arc-forwarded key is the genuine fixture key, not a
+        // default/empty one.
+        let token = issue_service_token("1", "admin", signing_key(), 300)
+            .unwrap_or_else(|e| panic!("issue: {e}"));
+        assert!(verify_service_token(&token, state.jwt_verify_key()).is_ok());
     }
 
     #[test]
@@ -723,84 +905,108 @@ mod service_token_tests {
     }
 
     #[test]
-    fn resolve_required_secret_fails_closed_in_production() {
+    fn resolve_required_pem_fails_closed_in_production() {
+        assert!(matches!(
+            resolve_required_pem(None, true, "JWT_SIGNING_KEY"),
+            Err(JwtKeyError::MissingInProduction("JWT_SIGNING_KEY"))
+        ));
+        assert!(matches!(
+            resolve_required_pem(Some(""), true, "JWT_SIGNING_KEY"),
+            Err(JwtKeyError::MissingInProduction("JWT_SIGNING_KEY"))
+        ));
+        assert!(matches!(
+            resolve_required_pem(Some("   "), true, "JWT_VERIFY_KEY"),
+            Err(JwtKeyError::MissingInProduction("JWT_VERIFY_KEY"))
+        ));
         assert_eq!(
-            resolve_required_secret(None, true),
-            Err(MissingProductionSecret)
-        );
-        assert_eq!(
-            resolve_required_secret(Some(""), true),
-            Err(MissingProductionSecret)
-        );
-        assert_eq!(
-            resolve_required_secret(Some("   "), true),
-            Err(MissingProductionSecret)
-        );
-        assert_eq!(
-            resolve_required_secret(Some("real"), true),
-            Ok(Some("real"))
+            resolve_required_pem(Some("-----BEGIN..."), true, "JWT_SIGNING_KEY"),
+            Ok(Some("-----BEGIN..."))
         );
     }
 
     #[test]
-    fn resolve_required_secret_allows_absence_outside_production() {
-        assert_eq!(resolve_required_secret(None, false), Ok(None));
-        assert_eq!(resolve_required_secret(Some("x"), false), Ok(Some("x")));
-        assert_eq!(resolve_required_secret(Some(""), false), Ok(None));
+    fn resolve_required_pem_allows_absence_outside_production() {
+        assert_eq!(
+            resolve_required_pem(None, false, "JWT_SIGNING_KEY"),
+            Ok(None)
+        );
+        assert_eq!(
+            resolve_required_pem(Some("x"), false, "JWT_SIGNING_KEY"),
+            Ok(Some("x"))
+        );
+        assert_eq!(
+            resolve_required_pem(Some(""), false, "JWT_SIGNING_KEY"),
+            Ok(None)
+        );
     }
 
     #[test]
-    fn resolve_required_secret_rejects_denylisted_defaults_in_production() {
-        for denied in DENYLISTED_SECRETS {
-            assert_eq!(
-                resolve_required_secret(Some(denied), true),
-                Err(MissingProductionSecret),
-                "expected {denied:?} to be rejected"
-            );
-            // Case-insensitive: an upper-cased and a title-cased variant of
-            // each denylisted value must also be rejected.
-            let upper = denied.to_uppercase();
-            assert_eq!(
-                resolve_required_secret(Some(&upper), true),
-                Err(MissingProductionSecret),
-                "expected {upper:?} to be rejected"
-            );
+    fn parse_signing_pem_rejects_garbage_in_every_environment() {
+        match parse_signing_pem("not a pem", "JWT_SIGNING_KEY") {
+            Err(JwtKeyError::InvalidPem("JWT_SIGNING_KEY", _)) => {}
+            other => panic!("expected InvalidPem, got {other:?}"),
         }
     }
 
     #[test]
-    fn resolve_required_secret_rejects_denylisted_default_with_surrounding_whitespace() {
-        assert_eq!(
-            resolve_required_secret(Some("  ChangeMe  "), true),
-            Err(MissingProductionSecret)
-        );
+    fn parse_verify_pem_rejects_garbage_in_every_environment() {
+        match parse_verify_pem("not a pem", "JWT_VERIFY_KEY") {
+            Err(JwtKeyError::InvalidPem("JWT_VERIFY_KEY", _)) => {}
+            other => panic!("expected InvalidPem, got {other:?}"),
+        }
     }
 
     #[test]
-    fn resolve_required_secret_accepts_real_secret_in_production() {
-        assert_eq!(
-            resolve_required_secret(Some("a-genuinely-random-32-byte-value"), true),
-            Ok(Some("a-genuinely-random-32-byte-value"))
-        );
+    fn parse_signing_pem_rejects_a_public_key_pem_as_a_signing_key() {
+        // A syntactically valid PEM of the wrong kind (public, not
+        // private) must still fail closed, not silently succeed.
+        let (_, verify_pem) = super::test_fixture_keypair_pem();
+        assert!(parse_signing_pem(verify_pem, "JWT_SIGNING_KEY").is_err());
     }
 
     #[test]
-    fn resolve_required_secret_allows_denylisted_value_outside_production() {
-        // Dev/local convenience values are only rejected once RELEASE_MODE
-        // requires a real secret — mirrors
-        // `resolve_required_secret_allows_absence_outside_production`.
-        assert_eq!(
-            resolve_required_secret(Some("changeme"), false),
-            Ok(Some("changeme"))
-        );
+    fn parse_signing_pem_and_parse_verify_pem_accept_the_fixture_keypair() {
+        let (signing_pem, verify_pem) = super::test_fixture_keypair_pem();
+        assert!(parse_signing_pem(signing_pem, "JWT_SIGNING_KEY").is_ok());
+        assert!(parse_verify_pem(verify_pem, "JWT_VERIFY_KEY").is_ok());
     }
 
     #[test]
-    fn load_jwt_secret_never_panics_when_unset() {
-        // Whatever the ambient RELEASE_MODE/JWT_SECRET_KEY happen to be in
-        // this process, load_jwt_secret must not panic — either a real
-        // secret, a random ephemeral one, or a clean Err.
-        let _ = load_jwt_secret();
+    fn ephemeral_dev_keypair_mints_and_verifies_a_round_trip() {
+        // Pure in-memory keygen — no env vars touched, so this is safe to
+        // run in parallel with every other test in this crate.
+        let (enc, dec) = ephemeral_dev_keypair();
+        let token = issue_service_token("1", "admin", enc, 300)
+            .unwrap_or_else(|e| panic!("issue with ephemeral key: {e}"));
+        let claims = verify_service_token(&token, dec)
+            .unwrap_or_else(|e| panic!("verify with ephemeral key: {e:?}"));
+        assert_eq!(claims.sub, "1");
+    }
+
+    #[test]
+    fn ephemeral_dev_keypair_is_cached_across_calls() {
+        // OnceLock semantics: repeated calls return the same keypair, not a
+        // freshly generated one each time — a token minted with the first
+        // call's signing key must still verify against the second call's
+        // verify key.
+        let (enc1, _) = ephemeral_dev_keypair();
+        let token =
+            issue_service_token("1", "admin", enc1, 300).unwrap_or_else(|e| panic!("issue: {e}"));
+        let (_, dec2) = ephemeral_dev_keypair();
+        assert!(verify_service_token(&token, dec2).is_ok());
+    }
+
+    #[test]
+    fn load_jwt_signing_key_never_panics_when_unset() {
+        // Whatever the ambient RELEASE_MODE/JWT_SIGNING_KEY happen to be in
+        // this process, this must not panic — either a real key, an
+        // ephemeral one, or a clean Err.
+        let _ = load_jwt_signing_key();
+    }
+
+    #[test]
+    fn load_jwt_verify_key_never_panics_when_unset() {
+        let _ = load_jwt_verify_key();
     }
 }
 
@@ -860,16 +1066,15 @@ mod tenant_middleware_tests {
     use axum::routing::get;
     use tower::ServiceExt as _;
 
+    use super::fixtures::{other_signing_key, signing_key, verify_key};
     use super::*;
-
-    const SECRET: &str = "s3cr3t";
 
     #[derive(Clone)]
     struct TestState;
 
     impl JwtSecretSource for TestState {
-        fn jwt_secret(&self) -> &str {
-            SECRET
+        fn jwt_verify_key(&self) -> &DecodingKey {
+            verify_key()
         }
     }
 
@@ -887,13 +1092,9 @@ mod tenant_middleware_tests {
         }
     }
 
-    fn sign(claims: &Claims, secret: &str) -> String {
-        jsonwebtoken::encode(
-            &Header::new(Algorithm::HS256),
-            claims,
-            &EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .unwrap_or_else(|e| panic!("sign: {e}"))
+    fn sign(claims: &Claims, key: &EncodingKey) -> String {
+        jsonwebtoken::encode(&Header::new(Algorithm::ES256), claims, key)
+            .unwrap_or_else(|e| panic!("sign: {e}"))
     }
 
     /// A hand-rolled claim set with no `tenant` key at all — simulates a
@@ -909,7 +1110,7 @@ mod tenant_middleware_tests {
         scope: String,
     }
 
-    fn sign_without_tenant(secret: &str) -> String {
+    fn sign_without_tenant(key: &EncodingKey) -> String {
         let claims = ClaimsWithoutTenant {
             sub: "u-1".into(),
             iss: EXPECTED_ISS.into(),
@@ -918,12 +1119,8 @@ mod tenant_middleware_tests {
             exp: i64::MAX,
             scope: "*:read".into(),
         };
-        jsonwebtoken::encode(
-            &Header::new(Algorithm::HS256),
-            &claims,
-            &EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .unwrap_or_else(|e| panic!("sign: {e}"))
+        jsonwebtoken::encode(&Header::new(Algorithm::ES256), &claims, key)
+            .unwrap_or_else(|e| panic!("sign: {e}"))
     }
 
     /// A hand-rolled claim set with no `iss`/`aud` keys at all — simulates a
@@ -939,7 +1136,7 @@ mod tenant_middleware_tests {
         tenant: String,
     }
 
-    fn sign_without_iss_aud(secret: &str) -> String {
+    fn sign_without_iss_aud(key: &EncodingKey) -> String {
         let claims = ClaimsWithoutIssAud {
             sub: "u-1".into(),
             iat: 0,
@@ -947,20 +1144,16 @@ mod tenant_middleware_tests {
             scope: "*:read".into(),
             tenant: "acme".into(),
         };
-        jsonwebtoken::encode(
-            &Header::new(Algorithm::HS256),
-            &claims,
-            &EncodingKey::from_secret(secret.as_bytes()),
-        )
-        .unwrap_or_else(|e| panic!("sign: {e}"))
+        jsonwebtoken::encode(&Header::new(Algorithm::ES256), &claims, key)
+            .unwrap_or_else(|e| panic!("sign: {e}"))
     }
 
     // -- decode_claims -------------------------------------------------
 
     #[test]
     fn decode_claims_round_trips_tenant() {
-        let token = sign(&claims_with_tenant("acme"), SECRET);
-        let decoded = match decode_claims(&token, SECRET) {
+        let token = sign(&claims_with_tenant("acme"), signing_key());
+        let decoded = match decode_claims(&token, verify_key()) {
             Ok(c) => c,
             Err(e) => panic!("decode: {e:?}"),
         };
@@ -969,8 +1162,8 @@ mod tenant_middleware_tests {
 
     #[test]
     fn decode_claims_defaults_absent_tenant_to_empty_string() {
-        let token = sign_without_tenant(SECRET);
-        let decoded = match decode_claims(&token, SECRET) {
+        let token = sign_without_tenant(signing_key());
+        let decoded = match decode_claims(&token, verify_key()) {
             Ok(c) => c,
             Err(e) => panic!("decode: {e:?}"),
         };
@@ -978,10 +1171,10 @@ mod tenant_middleware_tests {
     }
 
     #[test]
-    fn decode_claims_rejects_wrong_secret() {
-        let token = sign(&claims_with_tenant("acme"), SECRET);
+    fn decode_claims_rejects_wrong_key() {
+        let token = sign(&claims_with_tenant("acme"), signing_key());
         assert_eq!(
-            decode_claims(&token, "wrong"),
+            decode_claims(&token, super::fixtures::other_verify_key()),
             Err(TenantAuthError::Invalid)
         );
     }
@@ -994,44 +1187,56 @@ mod tenant_middleware_tests {
         // exercise expiry — use a tiny-but-non-negative, long-past value
         // instead (1970-01-01T00:00:01Z), comfortably beyond any leeway.
         c.exp = 1;
-        let token = sign(&c, SECRET);
-        assert_eq!(decode_claims(&token, SECRET), Err(TenantAuthError::Expired));
+        let token = sign(&c, signing_key());
+        assert_eq!(
+            decode_claims(&token, verify_key()),
+            Err(TenantAuthError::Expired)
+        );
     }
 
     #[test]
     fn decode_claims_rejects_garbage() {
         assert_eq!(
-            decode_claims("not-a-jwt", SECRET),
+            decode_claims("not-a-jwt", verify_key()),
             Err(TenantAuthError::Invalid)
         );
     }
 
     #[test]
     fn decode_claims_accepts_correct_issuer_and_audience() {
-        let token = sign(&claims_with_tenant("acme"), SECRET);
-        assert!(decode_claims(&token, SECRET).is_ok());
+        let token = sign(&claims_with_tenant("acme"), signing_key());
+        assert!(decode_claims(&token, verify_key()).is_ok());
     }
 
     #[test]
     fn decode_claims_rejects_wrong_issuer() {
         let mut c = claims_with_tenant("acme");
         c.iss = "https://evil.example.com".into();
-        let token = sign(&c, SECRET);
-        assert_eq!(decode_claims(&token, SECRET), Err(TenantAuthError::Invalid));
+        let token = sign(&c, signing_key());
+        assert_eq!(
+            decode_claims(&token, verify_key()),
+            Err(TenantAuthError::Invalid)
+        );
     }
 
     #[test]
     fn decode_claims_rejects_wrong_audience() {
         let mut c = claims_with_tenant("acme");
         c.aud = "not-skauswatch".into();
-        let token = sign(&c, SECRET);
-        assert_eq!(decode_claims(&token, SECRET), Err(TenantAuthError::Invalid));
+        let token = sign(&c, signing_key());
+        assert_eq!(
+            decode_claims(&token, verify_key()),
+            Err(TenantAuthError::Invalid)
+        );
     }
 
     #[test]
     fn decode_claims_rejects_missing_issuer_and_audience() {
-        let token = sign_without_iss_aud(SECRET);
-        assert_eq!(decode_claims(&token, SECRET), Err(TenantAuthError::Invalid));
+        let token = sign_without_iss_aud(signing_key());
+        assert_eq!(
+            decode_claims(&token, verify_key()),
+            Err(TenantAuthError::Invalid)
+        );
     }
 
     // -- tenant_middleware / TenantContext extractor --------------------
@@ -1062,7 +1267,7 @@ mod tenant_middleware_tests {
 
     #[tokio::test]
     async fn valid_tenant_reaches_handler_via_extractor() {
-        let token = sign(&claims_with_tenant("acme"), SECRET);
+        let token = sign(&claims_with_tenant("acme"), signing_key());
         let resp = app()
             .oneshot(request_with_auth(Some(&format!("Bearer {token}"))))
             .await
@@ -1090,7 +1295,7 @@ mod tenant_middleware_tests {
 
     #[tokio::test]
     async fn empty_tenant_claim_is_403() {
-        let token = sign(&claims_with_tenant("   "), SECRET);
+        let token = sign(&claims_with_tenant("   "), signing_key());
         let resp = app()
             .oneshot(request_with_auth(Some(&format!("Bearer {token}"))))
             .await
@@ -1100,7 +1305,7 @@ mod tenant_middleware_tests {
 
     #[tokio::test]
     async fn absent_tenant_claim_is_403_not_401() {
-        let token = sign_without_tenant(SECRET);
+        let token = sign_without_tenant(signing_key());
         let resp = app()
             .oneshot(request_with_auth(Some(&format!("Bearer {token}"))))
             .await
@@ -1109,8 +1314,8 @@ mod tenant_middleware_tests {
     }
 
     #[tokio::test]
-    async fn wrong_secret_is_401_not_403() {
-        let token = sign(&claims_with_tenant("acme"), "wrong-secret");
+    async fn wrong_key_is_401_not_403() {
+        let token = sign(&claims_with_tenant("acme"), other_signing_key());
         let resp = app()
             .oneshot(request_with_auth(Some(&format!("Bearer {token}"))))
             .await

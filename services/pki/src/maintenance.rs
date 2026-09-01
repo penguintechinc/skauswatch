@@ -19,7 +19,7 @@
 //! These two routes are served **only** here, not on the primary REST
 //! listener (`crate::routes::router`) — see that module and
 //! `crate::routes::openapi` for the corresponding removals. Leaving them
-//! dually reachable via the old HS256-only path would make this listener's
+//! dually reachable via the old bearer-token-only path would make this listener's
 //! cryptographic enforcement pointless.
 //!
 //! FAIL-SAFE: when `AppState::identity` is `None`, or the held
@@ -28,7 +28,7 @@
 //! `/api/v1/expiring`/`/api/v1/cleanup` become unreachable until a SPIRE
 //! agent is attested, rather than falling back to an unauthenticated
 //! plaintext listener the way `grpc::serve` falls back to plaintext-plus-
-//! HS256. There is no HS256 layer to fall back to here, so "serve it
+//! ES256. There is no bearer-token layer to fall back to here, so "serve it
 //! anyway" would mean "serve it with no auth at all" — refusing to bind is
 //! the safe degrade. Production hard-fails inside `AppStateInner::from_env`
 //! instead of ever reaching this fallback.

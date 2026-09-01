@@ -91,9 +91,10 @@ tolerations: []
 
 affinity: {}
 
-# services/monitor/src/config.rs only wires MONITOR_API_*/MONITOR_SECRET_KEY/
-# MONITOR_AUTH_ENABLED/MONITOR_ES_* — no DB_*/REDIS_* vars are read at
-# runtime (event store is OpenSearch, reached via the ES-compatible API).
+# services/monitor/src/config.rs wires MONITOR_API_*/MONITOR_AUTH_ENABLED/
+# MONITOR_ES_* (JWT_VERIFY_KEY is loaded separately via skauswatch_auth,
+# see the env entry below) — no DB_*/REDIS_* vars are read at runtime
+# (event store is OpenSearch, reached via the ES-compatible API).
 env:
   - name: MONITOR_API_HOST
     value: "0.0.0.0"
@@ -119,11 +120,16 @@ env:
       configMapKeyRef:
         name: skauswatch-monitor-config
         key: es-index-pattern
-  - name: MONITOR_SECRET_KEY
+  # NOTE: services/monitor/src/config.rs no longer reads MONITOR_SECRET_KEY
+  # -- it loads the house JWT_VERIFY_KEY via skauswatch_auth (finding #3
+  # hardening), same as manager/vault/pki/sshca/logs/codescan-backend/
+  # depgate. This chart previously wired the now-dead MONITOR_SECRET_KEY
+  # var; corrected here alongside the ES256 migration.
+  - name: JWT_VERIFY_KEY
     valueFrom:
       secretKeyRef:
         name: '{{ include "skauswatch-monitor.secretName" . }}'
-        key: secret-key
+        key: jwt-verify-key
   - name: MONITOR_ES_USERNAME
     valueFrom:
       secretKeyRef:
@@ -187,7 +193,10 @@ configMapData:
 # MUST be set via --set/values or existingSecret; services fail closed
 # on a blank/known-default secret (never ship a real credential here).
 secretData:
-  secret-key: ""
+  # PEM EC P-256 public key (SPKI) verifying ES256 tokens minted by
+  # manager (the sole issuer) -- see k8s/helm/manager/values.yaml
+  # secretData for keypair generation commands.
+  jwt-verify-key: ""
   es-username: ""
   es-password: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

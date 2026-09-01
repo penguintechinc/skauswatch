@@ -32,8 +32,16 @@ pub(crate) fn spiffe_env() -> String {
 /// Auth settings mirroring the v1 `AuthConfig` defaults.
 #[derive(Debug, Clone)]
 pub struct AuthSettings {
-    /// HS256 signing secret (env `JWT_SECRET_KEY`).
-    pub jwt_secret: String,
+    /// Private EC signing key (env `JWT_SIGNING_KEY`, PEM PKCS#8) — this
+    /// service is the sole issuer of user access/refresh tokens, so it's
+    /// the only one that holds this half of the keypair (audit finding
+    /// H1b: replaces the single shared symmetric `JWT_SECRET_KEY`).
+    pub jwt_signing_key: jsonwebtoken::EncodingKey,
+    /// Public EC verify key (env `JWT_VERIFY_KEY`, PEM SPKI) — used to
+    /// verify this service's own minted tokens (`CurrentUser`,
+    /// `tenant_middleware`) and any machine `ServiceClaims` token presented
+    /// to this service's gRPC surface (`require_jwt`).
+    pub jwt_verify_key: jsonwebtoken::DecodingKey,
     /// Access-token lifetime in minutes (v1 default 30).
     pub access_expires_minutes: i64,
     /// Refresh-token lifetime in days (v1 default 7).
@@ -45,19 +53,48 @@ pub struct AuthSettings {
 }
 
 impl AuthSettings {
-    /// Loads auth settings, applying the house fail-fast secret policy to
-    /// `JWT_SECRET_KEY` (see `skauswatch_auth::load_jwt_secret`): production
-    /// refuses to start without a real secret rather than falling back to a
-    /// guessable per-process value.
+    /// Loads auth settings, applying the house fail-fast key-loading policy
+    /// to `JWT_SIGNING_KEY`/`JWT_VERIFY_KEY` (see
+    /// `skauswatch_auth::load_jwt_signing_key`/`load_jwt_verify_key`):
+    /// production refuses to start without real PEM-encoded EC keys rather
+    /// than falling back to a guessable per-process value.
     fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
-            jwt_secret: skauswatch_auth::load_jwt_secret().map_err(|e| anyhow::anyhow!("{e}"))?,
+            jwt_signing_key: skauswatch_auth::load_jwt_signing_key()
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+            jwt_verify_key: skauswatch_auth::load_jwt_verify_key()
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
             access_expires_minutes: 30,
             refresh_expires_days: 7,
             max_login_attempts: 5,
             lockout_minutes: 15,
         })
     }
+}
+
+/// Fixed, throwaway ES256 (P-256) test keypair — draws from
+/// `skauswatch_auth::test_fixture_keypair`'s process-lifetime cache, the
+/// same single source `crates/skauswatch-testkit::jwt`'s `signing_key()`/
+/// `verify_key()` fixture reads from (both crates already depend on
+/// `skauswatch-auth` as a regular, non-dev dependency; `skauswatch-testkit`
+/// itself can't be pulled into this crate's production dependency graph —
+/// see that function's docs). Every `#[cfg(test)]` module in this service
+/// that mints a token via `skauswatch_testkit::jwt::signing_key()`/
+/// `verify_key()` verifies against a state built from these same keys
+/// because both crates draw from the identical cached instance within one
+/// test process, not a byte-for-byte-copied literal. [`AuthSettings::for_tests`]
+/// and friends below are NOT `#[cfg(test)]`-gated — `routes/test_support.rs`'s
+/// integration helpers call them from outside this crate's own test cfg —
+/// so these wrappers can't be `#[cfg(test)]`-gated either.
+#[cfg_attr(not(test), allow(dead_code))]
+fn test_jwt_signing_key() -> jsonwebtoken::EncodingKey {
+    skauswatch_auth::test_fixture_keypair().0.clone()
+}
+
+/// See [`test_jwt_signing_key`].
+#[cfg_attr(not(test), allow(dead_code))]
+fn test_jwt_verify_key() -> jsonwebtoken::DecodingKey {
+    skauswatch_auth::test_fixture_keypair().1.clone()
 }
 
 /// v1 `config.endpoint.api_secret` default — kept only as a value to reject, not
@@ -108,7 +145,7 @@ pub struct AppStateInner {
     /// once a real caller lands, as a client dialing pki. `None` only in
     /// test constructors that don't exercise mTLS at all (`grpc::serve`
     /// treats that identically to a held-but-degraded provider: fall back
-    /// to the pre-mTLS plaintext+HS256 behavior — see that module's docs).
+    /// to the pre-mTLS plaintext+ES256 behavior — see that module's docs).
     /// Real `from_env()` startup always populates `Some`; production
     /// hard-fails inside `IdentityProvider::connect` itself before this
     /// field would ever be `None` in prod.
@@ -131,11 +168,11 @@ pub struct AppStateInner {
 pub type AppState = Arc<AppStateInner>;
 
 /// Lets `skauswatch_auth::tenant_middleware`/`AuthenticatedCaller` verify
-/// tokens against this service's `JWT_SECRET_KEY` without re-threading the
-/// secret through every call site — see `crates/skauswatch-auth`.
+/// tokens against this service's `JWT_VERIFY_KEY` without re-threading the
+/// key through every call site — see `crates/skauswatch-auth`.
 impl skauswatch_auth::JwtSecretSource for AppStateInner {
-    fn jwt_secret(&self) -> &str {
-        &self.auth.jwt_secret
+    fn jwt_verify_key(&self) -> &jsonwebtoken::DecodingKey {
+        &self.auth.jwt_verify_key
     }
 }
 
@@ -265,7 +302,8 @@ impl AppStateInner {
             license,
             db,
             auth: AuthSettings {
-                jwt_secret: "test-secret".to_owned(),
+                jwt_signing_key: test_jwt_signing_key(),
+                jwt_verify_key: test_jwt_verify_key(),
                 access_expires_minutes: 30,
                 refresh_expires_days: 7,
                 max_login_attempts: 5,
@@ -300,7 +338,8 @@ impl AppStateInner {
             license,
             db,
             auth: AuthSettings {
-                jwt_secret: "test-secret".to_owned(),
+                jwt_signing_key: test_jwt_signing_key(),
+                jwt_verify_key: test_jwt_verify_key(),
                 access_expires_minutes: 30,
                 refresh_expires_days: 7,
                 max_login_attempts: 5,

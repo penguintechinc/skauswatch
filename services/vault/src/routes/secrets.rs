@@ -517,7 +517,7 @@ pub(crate) async fn get_secret_value(
     let (actor_id, tenant_id) = match validate_jit_token(&state, token, &id).await {
         Some((grantee_id, tenant_id)) => (grantee_id, tenant_id),
         None => {
-            let user = crate::auth::decode_bearer(token, &state.auth.jwt_secret)?;
+            let user = crate::auth::decode_bearer(token, &state.auth.jwt_verify_key)?;
             user.require_scope("secrets:read")?;
             let tenant_id = user.tenant_uuid()?;
             (user.user_id, tenant_id)
@@ -794,16 +794,16 @@ mod tests {
 
     fn token(scopes: &str) -> String {
         use chrono::Utc;
-        use jsonwebtoken::{EncodingKey, Header};
+        use jsonwebtoken::{Algorithm, Header};
         jsonwebtoken::encode(
-            &Header::default(),
+            &Header::new(Algorithm::ES256),
             &serde_json::json!({
                 "sub": "user-1",
                 "exp": Utc::now().timestamp() + 3600,
                 "scope": scopes,
                 "tenant": crate::routes::test_support::TEST_TENANT,
             }),
-            &EncodingKey::from_secret(b"test-secret"),
+            skauswatch_testkit::jwt::signing_key(),
         )
         .expect("encode")
     }

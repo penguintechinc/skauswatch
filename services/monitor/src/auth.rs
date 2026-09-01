@@ -43,33 +43,30 @@ impl AuthedUser {
     }
 }
 
-/// Decodes and validates a bearer token: HS256 signature, expiry, and a
-/// non-empty `tenant` claim. Kept as a free function so it's testable
+/// Decodes and validates a bearer token: ES256 signature (audit finding
+/// H1b — was HS256 against the shared symmetric `JWT_SECRET_KEY`), expiry,
+/// and a non-empty `tenant` claim. Kept as a free function so it's testable
 /// without standing up an axum request.
 ///
 /// `aud`/`iss` matching is intentionally not enforced — v1's `verify_token`
-/// only ever checked HS256 signature + expiry, and this service has no
+/// only ever checked signature + expiry, and this service has no
 /// configured expected audience/issuer value yet (a real follow-up once one
 /// is defined, not a silent gap: `jsonwebtoken`'s default `validate_aud =
 /// true` would otherwise reject every real token, since it fails closed
 /// when `aud` is present on the token but no expected value is configured).
-pub fn decode_bearer(token: &str, secret: &str) -> Result<Claims, ApiError> {
-    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+pub fn decode_bearer(token: &str, verify_key: &DecodingKey) -> Result<Claims, ApiError> {
+    let mut validation = Validation::new(jsonwebtoken::Algorithm::ES256);
     validation.validate_exp = true;
     validation.validate_aud = false;
     validation.required_spec_claims.clear();
-    let claims = jsonwebtoken::decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .map(|data| data.claims)
-    .map_err(|e| match e.kind() {
-        jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
-            ApiError::Unauthorized("Token expired".to_owned())
-        }
-        _ => ApiError::Unauthorized("Invalid token".to_owned()),
-    })?;
+    let claims = jsonwebtoken::decode::<Claims>(token, verify_key, &validation)
+        .map(|data| data.claims)
+        .map_err(|e| match e.kind() {
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
+                ApiError::Unauthorized("Token expired".to_owned())
+            }
+            _ => ApiError::Unauthorized("Invalid token".to_owned()),
+        })?;
 
     claims
         .require_tenant()
@@ -101,7 +98,7 @@ impl FromRequestParts<AppState> for AuthedUser {
             });
         }
 
-        let claims = decode_bearer(token, &state.jwt_secret)?;
+        let claims = decode_bearer(token, &state.jwt_verify_key)?;
         Ok(AuthedUser { claims })
     }
 }
@@ -124,15 +121,13 @@ fn dev_claims() -> Claims {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use jsonwebtoken::{EncodingKey, Header};
-
-    const SECRET: &str = "test-secret";
+    use jsonwebtoken::{Algorithm, Header};
 
     fn token_with(claims: &Claims) -> String {
         match jsonwebtoken::encode(
-            &Header::default(),
+            &Header::new(Algorithm::ES256),
             claims,
-            &EncodingKey::from_secret(SECRET.as_bytes()),
+            skauswatch_testkit::jwt::signing_key(),
         ) {
             Ok(t) => t,
             Err(e) => panic!("encode: {e}"),
@@ -156,7 +151,7 @@ mod tests {
     #[test]
     fn valid_token_with_tenant_decodes() {
         let token = token_with(&base_claims());
-        let claims = match decode_bearer(&token, SECRET) {
+        let claims = match decode_bearer(&token, skauswatch_testkit::jwt::verify_key()) {
             Ok(c) => c,
             Err(e) => panic!("expected ok, got {e:?}"),
         };
@@ -168,7 +163,7 @@ mod tests {
         let mut c = base_claims();
         c.tenant = String::new();
         let token = token_with(&c);
-        match decode_bearer(&token, SECRET) {
+        match decode_bearer(&token, skauswatch_testkit::jwt::verify_key()) {
             Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Missing or empty tenant claim"),
             other => panic!("expected Forbidden, got {other:?}"),
         }
@@ -179,7 +174,7 @@ mod tests {
         let mut c = base_claims();
         c.exp = 1;
         let token = token_with(&c);
-        match decode_bearer(&token, SECRET) {
+        match decode_bearer(&token, skauswatch_testkit::jwt::verify_key()) {
             Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "Token expired"),
             other => panic!("expected Unauthorized, got {other:?}"),
         }
@@ -187,7 +182,7 @@ mod tests {
 
     #[test]
     fn garbage_token_is_unauthorized() {
-        match decode_bearer("not-a-jwt", SECRET) {
+        match decode_bearer("not-a-jwt", skauswatch_testkit::jwt::verify_key()) {
             Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "Invalid token"),
             other => panic!("expected Unauthorized, got {other:?}"),
         }

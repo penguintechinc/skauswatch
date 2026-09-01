@@ -31,19 +31,21 @@ pub struct AppStateInner {
     /// collectors spawned in `main.rs::serve` — see `src/ingest.rs` module
     /// docs for the producer side this closes.
     pub event_bus: tokio::sync::broadcast::Sender<BaseEvent>,
-    /// HS256 signing secret for bearer tokens (house `JWT_SECRET_KEY`,
-    /// finding #3) — loaded via `skauswatch_auth::load_jwt_secret`, which
-    /// FAILS STARTUP in production rather than the previous
+    /// ES256 verify key for bearer tokens (house `JWT_VERIFY_KEY`,
+    /// finding #3; audit finding H1b — was a shared symmetric
+    /// `JWT_SECRET_KEY`) — loaded via `skauswatch_auth::load_jwt_verify_key`,
+    /// which FAILS STARTUP in production rather than the previous
     /// `MONITOR_SECRET_KEY`-or-random-UUID fallback. That fallback was
     /// worse than refusing to start: a fresh random secret on every
     /// restart silently invalidated every outstanding token, and — because
     /// it was never the *same* secret manager mints access tokens with —
     /// no genuine caller's token could ever validate here in the first
-    /// place. Shared with every other JWT-consuming service (manager,
+    /// place. Shared with every other JWT-verifying service (manager,
     /// vault, pki, sshca, codescan-backend) via the same env var, as it
     /// must be: they all verify tokens minted by manager's login endpoint
-    /// against one shared secret.
-    pub jwt_secret: String,
+    /// against the same public key; only manager also holds the private
+    /// `JWT_SIGNING_KEY` half.
+    pub jwt_verify_key: jsonwebtoken::DecodingKey,
     /// The TAXII threat-intel engine's own Postgres-backed store
     /// (`crate::threat_intel`) — `None` when `DB_*` env vars aren't
     /// configured, degrading exactly like `event_store`: the feed poller
@@ -56,11 +58,11 @@ pub struct AppStateInner {
 pub type AppState = Arc<AppStateInner>;
 
 /// Lets `skauswatch_auth::tenant_middleware`/`AuthenticatedCaller` verify
-/// tokens against this service's `JWT_SECRET_KEY` without re-threading the
-/// secret through every call site — see `crates/skauswatch-auth`.
+/// tokens against this service's `JWT_VERIFY_KEY` without re-threading the
+/// key through every call site — see `crates/skauswatch-auth`.
 impl skauswatch_auth::JwtSecretSource for AppStateInner {
-    fn jwt_secret(&self) -> &str {
-        &self.jwt_secret
+    fn jwt_verify_key(&self) -> &jsonwebtoken::DecodingKey {
+        &self.jwt_verify_key
     }
 }
 
@@ -70,10 +72,12 @@ impl AppStateInner {
     /// warning and leaves `event_store` `None` rather than failing startup
     /// (matches v1: ES/Mongo init failures are caught and logged, service
     /// still starts — see `main.py::startup`). Fails fast (before any
-    /// network I/O) if `JWT_SECRET_KEY` is missing in production — see
-    /// `skauswatch_auth::load_jwt_secret` and the `jwt_secret` field docs.
+    /// network I/O) if `JWT_VERIFY_KEY` is missing in production — see
+    /// `skauswatch_auth::load_jwt_verify_key` and the `jwt_verify_key` field
+    /// docs.
     pub async fn from_env() -> anyhow::Result<AppState> {
-        let jwt_secret = skauswatch_auth::load_jwt_secret().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let jwt_verify_key =
+            skauswatch_auth::load_jwt_verify_key().map_err(|e| anyhow::anyhow!("{e}"))?;
         let config = Config::from_env();
 
         let cfg = LicenseConfig::from_env("skauswatch")
@@ -92,16 +96,17 @@ impl AppStateInner {
             license,
             event_store,
             event_bus,
-            jwt_secret,
+            jwt_verify_key,
             threat_store,
         }))
     }
 
     /// Test constructor: no event store, dev auth bypass off by default so
     /// auth tests exercise the real path unless a test opts in. Fixed
-    /// `jwt_secret` (not loaded from env — mutating process env in tests is
-    /// `unsafe`, denied workspace-wide) so tests can mint valid bearer
-    /// tokens deterministically; see `routes::test_support::sign_claims`.
+    /// `jwt_verify_key` (not loaded from env — mutating process env in
+    /// tests is `unsafe`, denied workspace-wide) so tests can mint valid
+    /// bearer tokens deterministically; see
+    /// `routes::test_support::sign_claims`.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn for_tests(license: Arc<LicenseClient>) -> AppState {
         let (event_bus, _rx) = tokio::sync::broadcast::channel(EVENT_BUS_CAPACITY);
@@ -110,7 +115,7 @@ impl AppStateInner {
             license,
             event_store: None,
             event_bus,
-            jwt_secret: "test-secret".to_owned(),
+            jwt_verify_key: skauswatch_auth::test_fixture_keypair().1.clone(),
             threat_store: None,
         })
     }
@@ -129,7 +134,7 @@ impl AppStateInner {
             license,
             event_store: None,
             event_bus,
-            jwt_secret: "test-secret".to_owned(),
+            jwt_verify_key: skauswatch_auth::test_fixture_keypair().1.clone(),
             threat_store: Some(threat_store),
         })
     }

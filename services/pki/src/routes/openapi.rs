@@ -4,7 +4,7 @@
 //! establishes.
 //!
 //! pki has no login endpoint of its own (every route requires a bearer
-//! token signed with the shared `JWT_SECRET_KEY` — see `routes` module
+//! token verifiable with the shared `JWT_VERIFY_KEY` — see `routes` module
 //! docs), so there is no unauthenticated public doc split here — the entire
 //! spec is reachable only via the router-wide auth layer applied in
 //! `routes::router`. Unlike per-handler-auth services (codescan-backend,
@@ -153,7 +153,12 @@ mod tests {
     }
 
     fn bearer() -> String {
-        match skauswatch_auth::issue_service_token("tester", "admin", "test-secret", 300) {
+        match skauswatch_auth::issue_service_token(
+            "tester",
+            "admin",
+            skauswatch_testkit::jwt::signing_key(),
+            300,
+        ) {
             Ok(t) => format!("Bearer {t}"),
             Err(e) => panic!("issue test token: {e}"),
         }

@@ -128,8 +128,6 @@ mod tests {
     use crate::ca::SshCa;
     use crate::store::CertStore;
 
-    const TEST_JWT_SECRET: &str = "test-secret";
-
     fn dev_license() -> Arc<LicenseClient> {
         let cfg = match LicenseConfig::new("skauswatch") {
             Ok(c) => c,
@@ -162,16 +160,21 @@ mod tests {
         AppState {
             ca: Arc::new(ca),
             store: Arc::new(CertStore::new(crate::test_support::lazy_pool())),
-            jwt_secret: TEST_JWT_SECRET.into(),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license,
         }
     }
 
     /// `Authorization` header value with a valid bearer token signed with
-    /// `TEST_JWT_SECRET`, matching `test_state()`.
+    /// the shared fixture keypair, matching `test_state()`.
     fn auth_header() -> (&'static str, String) {
-        let token = skauswatch_auth::issue_service_token("tester", "admin", TEST_JWT_SECRET, 300)
-            .expect("issue test token");
+        let token = skauswatch_auth::issue_service_token(
+            "tester",
+            "admin",
+            skauswatch_testkit::jwt::signing_key(),
+            300,
+        )
+        .expect("issue test token");
         ("Authorization", format!("Bearer {token}"))
     }
 

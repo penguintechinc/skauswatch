@@ -3556,12 +3556,14 @@ dependencies = [
  "js-sys",
  "p256",
  "p384",
+ "pem",
  "rand 0.8.5",
  "rsa",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "signature",
+ "simple_asn1",
  "zeroize",
 ]
 
@@ -5968,6 +5970,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "simple_asn1"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "thiserror 2.0.18",
+ "time",
+]
+
+[[package]]
 name = "skauswatch-ai"
 version = "2.0.0"
 dependencies = [
@@ -5987,6 +6001,9 @@ version = "2.0.0"
 dependencies = [
  "axum",
  "jsonwebtoken",
+ "p256",
+ "pkcs8",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -6066,6 +6083,7 @@ dependencies = [
  "flate2",
  "futures",
  "hmac 0.12.1",
+ "jsonwebtoken",
  "metrics",
  "penguin-licensing",
  "regex",
@@ -6146,6 +6164,7 @@ dependencies = [
  "axum-test",
  "chrono",
  "clap",
+ "jsonwebtoken",
  "penguin-licensing",
  "reqwest",
  "serde",
@@ -6259,6 +6278,7 @@ dependencies = [
  "base64",
  "chrono",
  "clap",
+ "jsonwebtoken",
  "penguin-licensing",
  "prost-types",
  "rcgen",
@@ -6444,6 +6464,7 @@ dependencies = [
  "axum-test",
  "chrono",
  "clap",
+ "jsonwebtoken",
  "penguin-licensing",
  "reqwest",
  "serde",
@@ -6499,7 +6520,10 @@ name = "skauswatch-testkit"
 version = "2.0.0"
 dependencies = [
  "jsonwebtoken",
+ "p256",
  "penguin-licensing",
+ "pkcs8",
+ "rand_core 0.6.4",
  "skauswatch-auth",
  "sqlx",
  "tokio",

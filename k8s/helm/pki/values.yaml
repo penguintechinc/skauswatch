@@ -163,6 +163,15 @@ env:
       secretKeyRef:
         name: '{{ include "skauswatch-pki.secretName" . }}'
         key: db-pass
+  # PEM EC P-256 public key (SPKI) verifying ES256 tokens minted by
+  # manager (the sole issuer) -- see k8s/helm/manager/values.yaml
+  # secretData for keypair generation commands. Loaded via
+  # skauswatch_auth::load_jwt_secret (services/pki/src/state.rs).
+  - name: JWT_VERIFY_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-pki.secretName" . }}'
+        key: jwt-verify-key
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
@@ -244,3 +253,4 @@ secretData:
   db-user: ""
   db-pass: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
+  jwt-verify-key: ""

@@ -1,7 +1,7 @@
 //! Per-operation authorization for sshca's machine-token surface.
 //!
 //! Security audit finding #2 hardened *authentication* (any validly-signed
-//! `JWT_SECRET_KEY` token was accepted — see `crate::routes` module docs)
+//! `JWT_VERIFY_KEY`-verifiable token was accepted — see `crate::routes` module docs)
 //! but stopped short of *authorization*: `skauswatch_auth::AuthenticatedCaller`
 //! checks "is this a genuine, current access token" only —
 //! `ServiceClaims.role` is decoded but never consulted, so any caller
@@ -80,7 +80,7 @@ fn decode_caller(parts: &Parts, state: &AppState) -> Result<ServiceClaims, Servi
         .and_then(|v| v.to_str().ok())
         .and_then(bearer_token)
         .ok_or(ServiceTokenError::MissingOrInvalidHeader)?;
-    skauswatch_auth::verify_service_token(token, state.jwt_secret())
+    skauswatch_auth::verify_service_token(token, state.jwt_verify_key())
 }
 
 /// 403 — authenticated, but the caller's role lacks `required`. Distinct

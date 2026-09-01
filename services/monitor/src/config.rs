@@ -13,14 +13,15 @@
 //! configurable the same way every other PenguinTech service is (12-factor
 //! env vars, no config file).
 //!
-//! **JWT secret (finding #3, hardened):** `MONITOR_SECRET_KEY`/
-//! `MONITOR_JWT_SECRET` are no longer read at all — this service now shares
-//! the house `JWT_SECRET_KEY` var with every other JWT-consuming service
-//! (manager, vault, pki, sshca, codescan-backend), loaded via
-//! `skauswatch_auth::load_jwt_secret` in `state.rs::AppStateInner::from_env`
-//! (fail-fast in production, no random-UUID fallback). It is intentionally
-//! not part of this module's `Config`/`SecurityConfig` — the shared crate
-//! owns that env var's parsing/fail-fast policy, not each service.
+//! **JWT verify key (finding #3, hardened; ES256 per audit finding H1b):**
+//! `MONITOR_SECRET_KEY`/`MONITOR_JWT_SECRET` are no longer read at all —
+//! this service now shares the house `JWT_VERIFY_KEY` var with every other
+//! JWT-verifying service (manager, vault, pki, sshca, codescan-backend),
+//! loaded via `skauswatch_auth::load_jwt_verify_key` in
+//! `state.rs::AppStateInner::from_env` (fail-fast in production, no
+//! random-UUID fallback). It is intentionally not part of this module's
+//! `Config`/`SecurityConfig` — the shared crate owns that env var's
+//! parsing/fail-fast policy, not each service.
 //!
 //! Parsing is split into pure `from_values` constructors (testable without
 //! touching process env — `unsafe_code = "deny"` at the workspace level
@@ -39,10 +40,10 @@ pub struct ApiConfig {
     pub port: u16,
 }
 
-/// Auth/security config. v1 `SecurityConfig`. The HS256 signing secret
-/// itself is deliberately not a field here — see the module doc comment's
-/// "JWT secret (finding #3, hardened)" note: it lives on `AppStateInner`,
-/// loaded via `skauswatch_auth::load_jwt_secret`.
+/// Auth/security config. v1 `SecurityConfig`. The ES256 verify key itself
+/// is deliberately not a field here — see the module doc comment's
+/// "JWT verify key (finding #3, hardened)" note: it lives on
+/// `AppStateInner`, loaded via `skauswatch_auth::load_jwt_verify_key`.
 #[derive(Debug, Clone)]
 pub struct SecurityConfig {
     /// Dev-only bypass (`MONITOR_AUTH_ENABLED=false`) — never the default.

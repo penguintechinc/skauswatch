@@ -10,30 +10,34 @@ use skauswatch_vault::CredentialCipher;
 use sqlx::PgPool;
 
 /// JWT settings — this service only verifies tokens issued by the manager,
-/// so only the shared signing secret is needed (no issuance/expiry config).
+/// so only the shared ES256 verify key is needed (no issuance/expiry
+/// config; audit finding H1b — was a shared symmetric `JWT_SECRET_KEY`).
 #[derive(Debug, Clone)]
 pub struct AuthSettings {
-    /// HS256 signing secret (env `JWT_SECRET_KEY`), shared with the manager.
-    pub jwt_secret: String,
+    /// ES256 verify key (env `JWT_VERIFY_KEY`, PEM SPKI public key), shared
+    /// with the manager (the sole issuer, which also holds the private
+    /// `JWT_SIGNING_KEY` half).
+    pub jwt_verify_key: jsonwebtoken::DecodingKey,
 }
 
 impl AuthSettings {
-    /// Loads the shared signing secret via the house fail-fast policy
-    /// (`skauswatch_auth::load_jwt_secret`): a missing/empty value FAILS
+    /// Loads the shared verify key via the house fail-fast policy
+    /// (`skauswatch_auth::load_jwt_verify_key`): a missing/empty value FAILS
     /// STARTUP in production rather than falling back to a
     /// process-id-derived, guessable secret — this service verifies every
-    /// non-public request's tenant boundary against this secret, so a weak
+    /// non-public request's tenant boundary against this key, so a weak
     /// fallback was a real auth bypass risk, not just a dev convenience.
     fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
-            jwt_secret: skauswatch_auth::load_jwt_secret().map_err(|e| anyhow::anyhow!("{e}"))?,
+            jwt_verify_key: skauswatch_auth::load_jwt_verify_key()
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
         })
     }
 }
 
 impl skauswatch_auth::JwtSecretSource for AppStateInner {
-    fn jwt_secret(&self) -> &str {
-        &self.auth.jwt_secret
+    fn jwt_verify_key(&self) -> &jsonwebtoken::DecodingKey {
+        &self.auth.jwt_verify_key
     }
 }
 
@@ -137,7 +141,7 @@ impl AppStateInner {
             license,
             db,
             auth: AuthSettings {
-                jwt_secret: "test-secret".to_owned(),
+                jwt_verify_key: skauswatch_auth::test_fixture_keypair().1.clone(),
             },
             crypto: Arc::new(crypto),
             streams: None,

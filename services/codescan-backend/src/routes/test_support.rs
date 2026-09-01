@@ -49,13 +49,13 @@ pub(crate) fn sign_token(state: &AppState, sub: &str, role: &str) -> String {
 /// cross-tenant-isolation tests that need two distinct tenants in play.
 #[allow(clippy::panic)]
 pub(crate) fn sign_token_for_tenant(
-    state: &AppState,
+    _state: &AppState,
     sub: &str,
     role: &str,
     tenant: &str,
 ) -> String {
     skauswatch_testkit::jwt::mint_claims_token(
-        &state.auth.jwt_secret,
+        skauswatch_testkit::jwt::signing_key(),
         sub,
         tenant,
         role_scope_bundle(role),
@@ -68,9 +68,9 @@ pub(crate) fn sign_token_for_tenant(
 /// router-wide `tenant_middleware` must reject this with 403, never a
 /// silent fallback to some default tenant).
 #[allow(clippy::panic)]
-pub(crate) fn sign_token_without_tenant(state: &AppState, sub: &str, role: &str) -> String {
+pub(crate) fn sign_token_without_tenant(_state: &AppState, sub: &str, role: &str) -> String {
     skauswatch_testkit::jwt::mint_claims_token(
-        &state.auth.jwt_secret,
+        skauswatch_testkit::jwt::signing_key(),
         sub,
         "",
         role_scope_bundle(role),

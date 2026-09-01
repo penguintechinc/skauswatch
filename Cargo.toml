@@ -196,8 +196,20 @@ flate2 = "=1.1.9"
 bcrypt = "=0.19.2"
 email_address = "=0.2.9"
 hmac = "=0.12.1"
-jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["rust_crypto"] }
+# `use_pem` on top of `rust_crypto` (audit finding H1b, ES256 migration):
+# EncodingKey::from_ec_pem/DecodingKey::from_ec_pem require the `pem`+
+# `simple_asn1` parsers `use_pem` pulls in — `rust_crypto` alone (the
+# in-memory ecdsa/p256/rsa backends) does not gate them in.
+jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["rust_crypto", "use_pem"] }
 openidconnect = "=4.0.1"
+# Ephemeral dev-only EC keypair generation (skauswatch-auth's
+# JWT_SIGNING_KEY/JWT_VERIFY_KEY unset-in-non-production fallback) — same
+# P-256 backend jsonwebtoken's `rust_crypto` feature already resolves,
+# pinned directly (with explicit features, not relying on jsonwebtoken's own
+# feature selection) so keygen + PKCS#8/SPKI PEM encoding are available.
+p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic", "ecdsa", "pem", "std"] }
+pkcs8 = { version = "=0.10.2", default-features = false, features = ["alloc", "std", "pem"] }
+rand_core = { version = "=0.6.4", default-features = false, features = ["std"] }
 
 # HTTP client
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "gzip"] }

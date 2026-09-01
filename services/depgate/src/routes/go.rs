@@ -156,9 +156,9 @@ mod tests {
         axum_test::TestServer::new(crate::routes::router(state))
     }
 
-    fn token(state: &AppStateInner, tenant: Uuid) -> String {
+    fn token(_state: &AppStateInner, tenant: Uuid) -> String {
         skauswatch_testkit::jwt::mint_claims_token(
-            &state.jwt_secret,
+            skauswatch_testkit::jwt::signing_key(),
             "user-1",
             &tenant.to_string(),
             "*:read",

@@ -15,7 +15,7 @@
 //! authentication and the Elasticsearch queries behind search/get carried
 //! no tenant filter at all — any unauthenticated caller could read every
 //! tenant's security events. All three routes now require a valid
-//! `Authorization: Bearer <jwt>` — an HS256 token carrying the house
+//! `Authorization: Bearer <jwt>` — an ES256 token carrying the house
 //! `skauswatch_auth::Claims` shape with a non-empty `tenant` claim —
 //! enforced as a single router-wide layer via `skauswatch_auth
 //! ::tenant_middleware` (see [`router`]), not the local ad hoc

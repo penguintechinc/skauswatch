@@ -17,25 +17,27 @@ use tokio::sync::RwLock;
 /// penguin-licensing flag check.
 pub const VAULT_FLAG: &str = "skauswatch.vault";
 
-/// Auth settings: HS256 JWT secret shared with the manager and webui.
+/// Auth settings: ES256 JWT verify key shared with the manager and webui
+/// (audit finding H1b — vault never mints tokens, so it holds only the
+/// public verify half, never `JWT_SIGNING_KEY`).
 #[derive(Debug, Clone)]
 pub struct AuthSettings {
-    /// HS256 signing secret (env `JWT_SECRET_KEY`), matching v1
-    /// `AuthConfig.jwt_secret` (env `JWT_SECRET`).
-    pub jwt_secret: String,
+    /// ES256 verify key (env `JWT_VERIFY_KEY`, PEM SPKI public key).
+    pub jwt_verify_key: jsonwebtoken::DecodingKey,
 }
 
 impl AuthSettings {
-    /// Loads the HS256 signing secret via the house fail-fast policy
-    /// (`skauswatch_auth::load_jwt_secret`): a missing/empty
-    /// `JWT_SECRET_KEY` aborts startup in production (`RELEASE_MODE !=
+    /// Loads the ES256 verify key via the house fail-fast policy
+    /// (`skauswatch_auth::load_jwt_verify_key`): a missing/empty
+    /// `JWT_VERIFY_KEY` aborts startup in production (`RELEASE_MODE !=
     /// "false"`) rather than falling back to a guessable value — vault's
     /// own former fallback (`dev-{pid}`) was both weak (a small, guessable
     /// process id) and never checked production posture at all. Non-prod
-    /// only gets a random ephemeral secret, per the shared policy.
-    fn from_env() -> Result<Self, skauswatch_auth::MissingProductionSecret> {
+    /// only gets a random ephemeral keypair's verify half, per the shared
+    /// policy.
+    fn from_env() -> Result<Self, skauswatch_auth::JwtKeyError> {
         Ok(Self {
-            jwt_secret: skauswatch_auth::load_jwt_secret()?,
+            jwt_verify_key: skauswatch_auth::load_jwt_verify_key()?,
         })
     }
 }
@@ -138,7 +140,7 @@ impl AppStateInner {
             license,
             db,
             auth: AuthSettings {
-                jwt_secret: "test-secret".to_owned(),
+                jwt_verify_key: skauswatch_auth::test_fixture_keypair().1.clone(),
             },
             envelope: RwLock::new(envelope),
             streams: None,

@@ -168,6 +168,20 @@ env:
       secretKeyRef:
         name: '{{ include "skauswatch-manager.secretName" . }}'
         key: db-pass
+  # ES256 asymmetric keypair -- manager is the sole issuer of skauswatch
+  # access tokens, so it is the only chart that wires jwt-signing-key
+  # (private). Every other JWT-verifying service (monitor, vault, pki,
+  # sshca, logs, codescan-backend, depgate) only wires jwt-verify-key.
+  - name: JWT_SIGNING_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-manager.secretName" . }}'
+        key: jwt-signing-key
+  - name: JWT_VERIFY_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-manager.secretName" . }}'
+        key: jwt-verify-key
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
@@ -240,7 +254,17 @@ configMapData:
 
 # MUST be set via --set/values or existingSecret; services fail closed
 # on a blank/known-default secret (never ship a real credential here).
+#
+# jwt-signing-key/jwt-verify-key: ES256 (EC P-256) asymmetric keypair.
+# Generate with:
+#   openssl ecparam -genkey -name prime256v1 -noout | \
+#     openssl pkcs8 -topk8 -nocrypt -out jwt-signing-key.pem
+#   openssl ec -in jwt-signing-key.pem -pubout -out jwt-verify-key.pem
 secretData:
   db-user: ""
   db-pass: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
+  # PEM EC P-256 private key (PKCS#8) -- manager only, the sole JWT issuer.
+  jwt-signing-key: ""
+  # PEM EC P-256 public key (SPKI) -- manager also verifies its own tokens.
+  jwt-verify-key: ""

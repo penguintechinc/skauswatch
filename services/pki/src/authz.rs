@@ -1,7 +1,7 @@
 //! Per-operation authorization for pki's machine-token surface.
 //!
 //! Security audit finding #1 hardened *authentication* (any validly-signed
-//! `JWT_SECRET_KEY` token was accepted) but stopped short of
+//! `JWT_VERIFY_KEY`-verifiable token was accepted) but stopped short of
 //! *authorization*: `skauswatch_auth::AuthenticatedCaller` (REST) and
 //! `skauswatch_auth::verify_grpc_bearer` (gRPC) both check "is this a
 //! genuine, current access token" only — `ServiceClaims.role` is decoded
@@ -88,7 +88,7 @@ fn decode_caller(parts: &Parts, state: &AppState) -> Result<ServiceClaims, Servi
         .and_then(|v| v.to_str().ok())
         .and_then(bearer_token)
         .ok_or(ServiceTokenError::MissingOrInvalidHeader)?;
-    skauswatch_auth::verify_service_token(token, state.jwt_secret())
+    skauswatch_auth::verify_service_token(token, state.jwt_verify_key())
 }
 
 /// 403 — authenticated, but the caller's role lacks `required`. Distinct

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use jsonwebtoken::{EncodingKey, Header};
+use jsonwebtoken::{Algorithm, Header};
 use penguin_licensing::LicenseClient;
 use skauswatch_auth::Claims;
 
@@ -16,12 +16,6 @@ use crate::state::{AppState, AppStateInner};
 /// Broadcast capacity for test states — small on purpose, tests never
 /// publish more than a handful of events.
 const TEST_EVENT_BUS_CAPACITY: usize = 64;
-
-/// Fixed HS256 secret shared by every test state below — matches
-/// `AppStateInner::for_tests`'s own fixed value, kept independently here
-/// since `test_support`'s states are constructed directly, not via
-/// `for_tests`.
-const TEST_JWT_SECRET: &str = "test-secret";
 
 fn build_state(
     config: Config,
@@ -34,7 +28,7 @@ fn build_state(
         license,
         event_store,
         event_bus,
-        jwt_secret: TEST_JWT_SECRET.to_owned(),
+        jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
         threat_store: None,
     })
 }
@@ -106,14 +100,18 @@ pub(crate) fn sign_token(state: &AppState, tenant: &str, scope: &str) -> String 
     )
 }
 
-/// Signs arbitrary claims with `state`'s configured secret — for tests that
-/// need to control fields `sign_token` fixes (expiry, empty tenant, ...).
+/// Signs arbitrary claims with the shared fixture signing key — for tests
+/// that need to control fields `sign_token` fixes (expiry, empty tenant,
+/// ...). `state` is unused for the key itself (every test-constructed
+/// [`AppState`] verifies against the matching fixture verify key — see
+/// [`build_state`]) but kept as a parameter so call sites don't need to
+/// change if a future test state ever varies the keypair.
 #[allow(clippy::panic)]
-pub(crate) fn sign_claims(state: &AppState, claims: &Claims) -> String {
+pub(crate) fn sign_claims(_state: &AppState, claims: &Claims) -> String {
     match jsonwebtoken::encode(
-        &Header::default(),
+        &Header::new(Algorithm::ES256),
         claims,
-        &EncodingKey::from_secret(state.jwt_secret.as_bytes()),
+        skauswatch_testkit::jwt::signing_key(),
     ) {
         Ok(t) => t,
         Err(e) => panic!("skauswatch-monitor test_support: sign_claims: {e}"),

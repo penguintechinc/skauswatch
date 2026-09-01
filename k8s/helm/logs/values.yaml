@@ -11,6 +11,11 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
 serviceAccount:
   create: true
   annotations: {}
@@ -92,8 +97,12 @@ tolerations: []
 
 affinity: {}
 
-# services/logs/src/config.rs only reads OPENSEARCH_URL/LOG_RETENTION_DAYS/
-# HTTP_PORT — no DB/license/auth vars are wired up in this ingest path yet.
+# services/logs/src/config.rs reads OPENSEARCH_URL/LOG_RETENTION_DAYS/
+# HTTP_PORT — no DB/license vars are wired up in this ingest path.
+# JWT_VERIFY_KEY is required though: services/logs/src/main.rs and
+# src/ingest.rs load it via skauswatch_auth::load_jwt_secret and require a
+# valid ES256 bearer token (signed by manager, the sole issuer) on every
+# /ingest request.
 env:
   - name: HTTP_PORT
     value: "5010"
@@ -107,6 +116,14 @@ env:
       configMapKeyRef:
         name: skauswatch-logs-config
         key: log-retention-days
+  # PEM EC P-256 public key (SPKI) verifying ES256 tokens minted by
+  # manager (the sole issuer) -- see k8s/helm/manager/values.yaml
+  # secretData for keypair generation commands.
+  - name: JWT_VERIFY_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-logs.secretName" . }}'
+        key: jwt-verify-key
 
 livenessProbe:
   httpGet:
@@ -133,3 +150,8 @@ volumes: []
 configMapData:
   opensearch-url: "http://opensearch:9200"
   log-retention-days: "90"
+
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
+secretData:
+  jwt-verify-key: ""

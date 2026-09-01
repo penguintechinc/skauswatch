@@ -27,6 +27,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+jsonwebtoken = { workspace = true }
 # Gunzips PyPI sdist tarballs for `src/tarutil.rs`'s dependency-free tar
 # reader (`crate::heuristics::evaluate_pypi`'s setup.py-presence check) and
 # air-gap bundle manifest hashing input framing (`src/bundle.rs`) — already
