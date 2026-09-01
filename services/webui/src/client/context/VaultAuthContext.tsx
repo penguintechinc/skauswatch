@@ -4,10 +4,9 @@ import apiVault from '../lib/api';
 
 interface AuthContextValue {
   user: AuthUser | null;
-  token: string | null;
   loading: boolean;
-  login: (token: string, user: AuthUser) => void;
-  logout: () => void;
+  login: (user: AuthUser) => void;
+  logout: () => Promise<void>;
   hasScope: (scope: string) => boolean;
 }
 
@@ -15,45 +14,42 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Validate stored token on mount
+  // Auth is cookie-based (H2 audit fix): the manager sets HttpOnly
+  // sw_access/sw_refresh cookies on login, invisible to JS by design — so
+  // there is no stored token to read on mount. Instead, ask the backend
+  // whether the browser's cookie jar carries a valid session.
   useEffect(() => {
-    const stored = localStorage.getItem('vaultToken');
-    if (!stored) {
-      setLoading(false);
-      return;
-    }
-
     apiVault
-      .get<{ data: AuthUser }>('/api/v1/me', {
-        headers: { Authorization: `Bearer ${stored}` },
-      })
+      .get<{ data: AuthUser }>('/api/v1/me')
       .then((res: { data: { data: AuthUser } }) => {
-        setToken(stored);
         setUser(res.data.data);
-        console.log('[AuthContext] Token validated', { userId: res.data.data.id });
+        console.log('[AuthContext] Session validated', { userId: res.data.data.id });
       })
       .catch(() => {
-        localStorage.removeItem('vaultToken');
-        console.log('[AuthContext] Stored token invalid — cleared');
+        setUser(null);
+        console.log('[AuthContext] No active session');
       })
       .finally(() => setLoading(false));
   }, []);
 
-  const login = useCallback((newToken: string, newUser: AuthUser) => {
-    localStorage.setItem('vaultToken', newToken);
-    setToken(newToken);
+  const login = useCallback((newUser: AuthUser) => {
+    // The login cookies were already set by the backend response — nothing
+    // to store client-side, just sync local UI state.
     setUser(newUser);
     console.log('[AuthContext] Login successful', { userId: newUser.id });
   }, []);
 
-  const logout = useCallback(() => {
-    localStorage.removeItem('vaultToken');
-    setToken(null);
-    setUser(null);
-    console.log('[AuthContext] Logged out');
+  const logout = useCallback(async () => {
+    try {
+      await apiVault.post('/auth/logout');
+    } catch {
+      // Best-effort — local state is cleared below regardless.
+    } finally {
+      setUser(null);
+      console.log('[AuthContext] Logged out');
+    }
   }, []);
 
   const hasScope = useCallback(
@@ -65,7 +61,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, logout, hasScope }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, hasScope }}>
       {children}
     </AuthContext.Provider>
   );

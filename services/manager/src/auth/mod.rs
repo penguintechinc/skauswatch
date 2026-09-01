@@ -33,6 +33,8 @@ use skauswatch_auth::Claims;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+pub(crate) mod cookies;
+
 /// Issuer/audience stamped on every access token this service mints —
 /// matches the fixture values already established elsewhere in the
 /// workspace for `skauswatch_auth::Claims` (e.g. `services/monitor`).
@@ -257,6 +259,88 @@ pub fn token_hash(token: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Marker inserted into request extensions by [`cookie_auth_bridge`] when it
+/// promotes the `sw_access` cookie into a synthesized `Authorization:
+/// Bearer` header. [`CurrentUser`] checks for this so it can still tell a
+/// promoted cookie-authed request apart from a genuine client-supplied
+/// Bearer header even after the header has been overwritten — the
+/// distinction CSRF enforcement depends on (H2 audit fix; see
+/// [`CurrentUser::from_request_parts`]).
+#[derive(Clone, Copy)]
+pub(crate) struct PromotedFromCookie;
+
+/// Outermost layer of this service's protected route tier (mounted in
+/// `routes::mod`, layered OUTSIDE `skauswatch_auth::tenant_middleware`).
+/// That shared crate is used by five services and only understands
+/// `Authorization: Bearer` — it has no concept of the `sw_access` cookie
+/// only this service issues. Rather than teach the shared crate about a
+/// cookie only one of its consumers sets, this bridge promotes `sw_access`
+/// into a synthesized Bearer header before `tenant_middleware` ever sees
+/// the request, so that layer's existing header-only check keeps working
+/// unmodified for every service, cookie-aware or not.
+///
+/// Does nothing when a real `Authorization` header is already present
+/// (header takes precedence, matching [`CurrentUser`]'s own rule) or when
+/// there's no usable `sw_access` cookie either — falls through to
+/// `tenant_middleware`'s existing 401 in that case, same as today.
+pub(crate) async fn cookie_auth_bridge(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let has_bearer = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("Bearer "));
+
+    if !has_bearer
+        && let Some(token) = cookies::cookie_value(request.headers(), cookies::ACCESS_COOKIE)
+        && let Ok(value) = axum::http::HeaderValue::from_str(&format!("Bearer {token}"))
+    {
+        request
+            .headers_mut()
+            .insert(axum::http::header::AUTHORIZATION, value);
+        request.extensions_mut().insert(PromotedFromCookie);
+    }
+
+    next.run(request).await
+}
+
+/// Where a resolved access token came from — determines whether CSRF
+/// double-submit validation applies to a mutating request (`security.md`:
+/// browsers never auto-attach `Authorization`, so a Bearer header isn't a
+/// CSRF vector; a cookie is).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenOrigin {
+    /// A real `Authorization: Bearer` header — CLI, mobile, service-to-
+    /// service, and the golden parity harness.
+    Bearer,
+    /// The `sw_access` cookie, either read directly (per-module test
+    /// routers that never mount [`cookie_auth_bridge`]) or via the
+    /// bridge's promoted header ([`PromotedFromCookie`] marker present).
+    Cookie,
+}
+
+/// Resolves the caller's access token: a real `Authorization: Bearer`
+/// header takes precedence; otherwise the `sw_access` cookie. Deliberately
+/// re-checks the cookie directly here (not solely relying on
+/// [`cookie_auth_bridge`]'s promotion) so this extractor works standalone
+/// against the many per-module test routers in this service that never
+/// mount the full app's middleware stack — the same reasoning
+/// [`CurrentUser::from_request_parts`]'s tenant re-check already documents.
+fn resolve_token(parts: &Parts) -> Option<(String, TokenOrigin)> {
+    if parts.extensions.get::<PromotedFromCookie>().is_none()
+        && let Some(header) = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+        && let Some(token) = header.strip_prefix("Bearer ")
+    {
+        return Some((token.to_owned(), TokenOrigin::Bearer));
+    }
+    cookies::cookie_value(&parts.headers, cookies::ACCESS_COOKIE).map(|t| (t, TokenOrigin::Cookie))
+}
+
 /// The authenticated user, mirroring v1 `g.current_user`.
 #[derive(Debug, Clone, Serialize)]
 pub struct CurrentUser {
@@ -351,15 +435,20 @@ impl FromRequestParts<AppState> for CurrentUser {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
         // v1 uses one message for both missing and non-Bearer headers.
         const HEADER_MSG: &str = "Missing or invalid authorization header";
-        let header = parts
-            .headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| ApiError::Unauthorized(HEADER_MSG.to_owned()))?;
-        let token = header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| ApiError::Unauthorized(HEADER_MSG.to_owned()))?;
-        let claims = decode_access(token, &state.auth.jwt_verify_key)?;
+        // H2 audit fix: the token source is now `Authorization: Bearer` OR
+        // the `sw_access` cookie (header takes precedence) — see
+        // `resolve_token`/`TokenOrigin`. A cookie-sourced token additionally
+        // must clear CSRF double-submit validation on mutating methods;
+        // `Bearer` bypasses it entirely (browsers never auto-attach
+        // `Authorization`, so it can't be a CSRF vector — this is what
+        // keeps CLI/mobile/the golden parity harness's write endpoints
+        // working unchanged).
+        let (token, origin) =
+            resolve_token(parts).ok_or_else(|| ApiError::Unauthorized(HEADER_MSG.to_owned()))?;
+        if origin == TokenOrigin::Cookie && cookies::is_mutating(&parts.method) {
+            cookies::verify_csrf(&parts.headers)?;
+        }
+        let claims = decode_access(&token, &state.auth.jwt_verify_key)?;
         let user_id: i32 = claims
             .sub
             .parse()
@@ -632,6 +721,31 @@ mod tests {
         req.into_parts().0
     }
 
+    /// Like [`parts_with_auth`] but with method/cookie/CSRF-header control,
+    /// for the bearer-or-cookie + CSRF regression tests below.
+    fn parts_for(
+        method: &str,
+        auth_header: Option<&str>,
+        cookie_header: Option<&str>,
+        csrf_header: Option<&str>,
+    ) -> axum::http::request::Parts {
+        let mut builder = axum::http::Request::builder().method(method).uri("/x");
+        if let Some(h) = auth_header {
+            builder = builder.header(axum::http::header::AUTHORIZATION, h);
+        }
+        if let Some(c) = cookie_header {
+            builder = builder.header(axum::http::header::COOKIE, c);
+        }
+        if let Some(x) = csrf_header {
+            builder = builder.header(cookies::CSRF_HEADER, x);
+        }
+        let req = match builder.body(()) {
+            Ok(r) => r,
+            Err(e) => panic!("request: {e}"),
+        };
+        req.into_parts().0
+    }
+
     fn dev_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
         skauswatch_testkit::license::dev_license("skauswatch")
     }
@@ -772,5 +886,215 @@ mod tests {
             Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
             other => panic!("expected 403, got {other:?}"),
         }
+    }
+
+    // -- H2 audit fix: bearer-or-cookie auth + CSRF double-submit ----------
+
+    #[tokio::test]
+    async fn current_user_resolves_via_sw_access_cookie_when_no_bearer_header() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) =
+            crate::routes::test_support::authed_user(&state, "cookie-auth@example.com", "admin")
+                .await;
+        let mut parts = parts_for("GET", None, Some(&format!("sw_access={token}")), None);
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok via sw_access cookie, got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+    }
+
+    /// Regression guard: Bearer auth must keep working byte-for-byte — CLI,
+    /// mobile, and the golden parity harness all depend on it (H2 backend
+    /// task contract: "breaking it fails CI").
+    #[tokio::test]
+    async fn current_user_still_resolves_via_bearer_header_unchanged() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) =
+            crate::routes::test_support::authed_user(&state, "bearer-still@example.com", "admin")
+                .await;
+        let mut parts = parts_for("GET", Some(&format!("Bearer {token}")), None, None);
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok via bearer, got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+    }
+
+    #[tokio::test]
+    async fn current_user_prefers_bearer_header_over_cookie_when_both_present() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (bearer_id, bearer_token) = crate::routes::test_support::authed_user(
+            &state,
+            "precedence-bearer@example.com",
+            "admin",
+        )
+        .await;
+        let (_cookie_id, cookie_token) = crate::routes::test_support::authed_user(
+            &state,
+            "precedence-cookie@example.com",
+            "admin",
+        )
+        .await;
+        let mut parts = parts_for(
+            "GET",
+            Some(&format!("Bearer {bearer_token}")),
+            Some(&format!("sw_access={cookie_token}")),
+            None,
+        );
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(
+            user.id, bearer_id,
+            "header must take precedence over cookie"
+        );
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_cookie_authed_mutation_without_csrf_token() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (_, token) =
+            crate::routes::test_support::authed_user(&state, "csrf-missing@example.com", "admin")
+                .await;
+        let mut parts = parts_for(
+            "POST",
+            None,
+            Some(&format!("sw_access={token}; sw_csrf=expected-token")),
+            None,
+        );
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "CSRF token missing or invalid"),
+            other => panic!("expected 403, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_cookie_authed_mutation_with_mismatched_csrf_token() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (_, token) =
+            crate::routes::test_support::authed_user(&state, "csrf-mismatch@example.com", "admin")
+                .await;
+        let mut parts = parts_for(
+            "POST",
+            None,
+            Some(&format!("sw_access={token}; sw_csrf=expected-token")),
+            Some("wrong-token"),
+        );
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "CSRF token missing or invalid"),
+            other => panic!("expected 403, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_allows_cookie_authed_mutation_with_matching_csrf_token() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) =
+            crate::routes::test_support::authed_user(&state, "csrf-ok@example.com", "admin").await;
+        let mut parts = parts_for(
+            "POST",
+            None,
+            Some(&format!("sw_access={token}; sw_csrf=expected-token")),
+            Some("expected-token"),
+        );
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+    }
+
+    #[tokio::test]
+    async fn current_user_cookie_authed_get_never_requires_csrf() {
+        // Safe methods are exempt regardless of auth mechanism.
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) =
+            crate::routes::test_support::authed_user(&state, "csrf-safe-get@example.com", "admin")
+                .await;
+        let mut parts = parts_for("GET", None, Some(&format!("sw_access={token}")), None);
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok (GET is CSRF-exempt), got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+    }
+
+    /// Critical regression: a Bearer-authed mutating request must NEVER be
+    /// rejected for a missing `X-CSRF-Token` — Bearer isn't auto-attached by
+    /// browsers, so it can't be a CSRF vector. This is what keeps CLI/
+    /// mobile/the parity harness's write endpoints working after the H2
+    /// cookie-auth rollout.
+    #[tokio::test]
+    async fn current_user_bearer_authed_mutation_bypasses_csrf_entirely() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) = crate::routes::test_support::authed_user(
+            &state,
+            "bearer-csrf-bypass@example.com",
+            "admin",
+        )
+        .await;
+        let mut parts = parts_for("POST", Some(&format!("Bearer {token}")), None, None);
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok (bearer bypasses csrf), got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+    }
+
+    #[tokio::test]
+    async fn cookie_auth_bridge_promotes_cookie_to_bearer_for_tenant_middleware() {
+        use axum::body::Body;
+        use axum::extract::Request;
+        use axum::middleware::{self, Next};
+
+        // An opaque string is enough here — this test only checks that the
+        // bridge relays whatever `sw_access` cookie value it finds into a
+        // synthesized Bearer header; JWT validity is exercised by the
+        // `decode_access`/`CurrentUser` tests elsewhere in this module.
+        let token = "opaque-cookie-token-value";
+
+        async fn echo_auth_header(request: Request, next: Next) -> axum::response::Response {
+            let promoted = request
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let mut response = next.run(request).await;
+            if let Some(h) = promoted
+                && let Ok(v) = axum::http::HeaderValue::from_str(&h)
+            {
+                response.headers_mut().insert("x-echo-auth", v);
+            }
+            response
+        }
+
+        let app = axum::Router::new()
+            .route("/probe", axum::routing::get(|| async { "ok" }))
+            .layer(middleware::from_fn(echo_auth_header))
+            .layer(middleware::from_fn(cookie_auth_bridge));
+
+        let req = match Request::builder()
+            .method("GET")
+            .uri("/probe")
+            .header(axum::http::header::COOKIE, format!("sw_access={token}"))
+            .body(Body::empty())
+        {
+            Ok(r) => r,
+            Err(e) => panic!("request: {e}"),
+        };
+
+        let res = match tower::ServiceExt::oneshot(app, req).await {
+            Ok(r) => r,
+            Err(e) => panic!("bridge probe request failed: {e:?}"),
+        };
+        let echoed = res
+            .headers()
+            .get("x-echo-auth")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert_eq!(echoed, format!("Bearer {token}"));
     }
 }

@@ -44,8 +44,8 @@ export interface AuthTokens {
 
 export interface AuthState {
   user: User | null;
-  accessToken: string | null;
-  refreshToken: string | null;
+  // H2 audit fix: access/refresh tokens are HttpOnly cookies set by the
+  // backend, never exposed to or stored by JS — no token fields here.
   isAuthenticated: boolean;
   isLoading: boolean;
 }
