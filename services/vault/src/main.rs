@@ -6,6 +6,7 @@ mod auth;
 mod error;
 mod health;
 mod license_gate;
+mod rate_limit;
 mod routes;
 mod state;
 
@@ -71,7 +72,9 @@ async fn serve() -> anyhow::Result<()> {
     let state = state::AppStateInner::from_env().await?;
     let _license_bg = state.license.spawn_refresh();
 
-    let app = routes::router(state.clone())
+    // `rate_limit::apply` (not applied inside `routes::router` itself) —
+    // see `crate::rate_limit` module docs for why the two stay separate.
+    let app = rate_limit::apply(routes::router(state.clone()))
         .merge(health::router(state.clone()))
         .fallback(error::fallback_not_found);
 
@@ -79,9 +82,15 @@ async fn serve() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "vault REST listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // `into_make_service_with_connect_info` — `tower_governor`'s
+    // `SmartIpKeyExtractor` (`crate::rate_limit`) falls back to the TCP
+    // peer address when no forwarded-for header is present.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

@@ -668,7 +668,7 @@ pub(crate) async fn create_ioc(
     user: CurrentUser,
     ApiJson(body): ApiJson<IocBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("threat_intel:write")?;
     let v = validate_ioc(&body, None)?;
 
     // Dedup is per-tenant: without the tenant_id filter here, tenant A's
@@ -830,7 +830,7 @@ pub(crate) async fn bulk_create_iocs(
     user: CurrentUser,
     ApiJson(body): ApiJson<BulkBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("threat_intel:write")?;
 
     let Some(raw) = body.indicators else {
         return Err(validation_at(
@@ -901,7 +901,7 @@ pub(crate) async fn delete_ioc(
     user: CurrentUser,
     Path(ioc_id): Path<i32>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin"])?;
+    user.require_scope("threat_intel:admin")?;
 
     let exists: Option<(i32,)> =
         sqlx::query_as("SELECT id FROM threat_indicators WHERE id = $1 AND tenant_id = $2")

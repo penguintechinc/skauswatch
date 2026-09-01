@@ -998,7 +998,7 @@ pub(crate) async fn list_agents(
     user: CurrentUser,
     Query(params): Query<Vec<(String, String)>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("endpoint:write")?;
 
     let (page, per_page) = parse_page_params(&params, 20, 100);
     let status: Vec<String> = params
@@ -1252,7 +1252,7 @@ pub(crate) async fn deactivate_agent(
     user: CurrentUser,
     Path(agent_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    user.require_role(&["admin"])?;
+    user.require_scope("endpoint:admin")?;
 
     let exists: Option<(i32,)> =
         sqlx::query_as("SELECT id FROM endpoint_agents WHERE agent_id = $1 AND tenant_id = $2")

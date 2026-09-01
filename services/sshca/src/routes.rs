@@ -31,6 +31,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use penguin_licensing::LicenseClient;
+use tower_governor::GovernorLayer;
+use tower_governor::governor::GovernorConfigBuilder;
 
 use crate::ca::{SignError, SignParams, SshCa};
 use crate::error::ApiJson;
@@ -82,34 +84,92 @@ pub const ISSUANCE_FLAG: &str = "skauswatch.sshca";
 /// routers. The flag layer is applied to `issuance` before it merges, so it
 /// sits *innermost* relative to the outer `AuthenticatedCaller` layer:
 /// auth runs first, then the flag check.
+/// Security audit finding #2b (authorization, distinct from #2's
+/// authentication fix above): `AuthenticatedCaller` only ever checked "is
+/// this a genuine, current access token" — `ServiceClaims.role` was never
+/// consulted, so any caller holding ANY valid mesh JWT could issue or
+/// revoke ANY SSH certificate. Each sub-router below now also carries a
+/// `crate::authz::ScopeGate` requiring the `sshca:*` capability that
+/// matches what it actually does, layered *innermost* relative to the
+/// outer router-wide `AuthenticatedCaller` — auth (401) runs first, then
+/// scope (403), then any feature flag (404, issuance only). See
+/// `crate::authz` module docs.
 pub fn router(state: AppState) -> Router {
     let issuance = Router::new()
         .route("/api/v1/ssh/certificates", post(issue_certificate))
         .layer(axum::middleware::from_fn_with_state(
             penguin_licensing::axum::FlagGate::new(state.license.clone(), ISSUANCE_FLAG),
             penguin_licensing::axum::flag_gate,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            crate::authz::ScopeGate::new(state.clone(), crate::authz::SSHCA_ISSUE),
+            crate::authz::scope_gate,
         ));
 
-    Router::new()
-        .route("/api/v1/ssh/certificates", get(list_certificates))
-        .route("/api/v1/ssh/certificates/{id}", get(get_certificate))
+    let revoke = Router::new()
         .route(
             "/api/v1/ssh/certificates/{id}/revoke",
             post(revoke_certificate),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            crate::authz::ScopeGate::new(state.clone(), crate::authz::SSHCA_REVOKE),
+            crate::authz::scope_gate,
+        ));
+
+    let read = Router::new()
+        .route("/api/v1/ssh/certificates", get(list_certificates))
+        .route("/api/v1/ssh/certificates/{id}", get(get_certificate))
         .route("/api/v1/ssh/krl", get(get_krl))
         .route("/api/v1/ssh/ca/public-key", get(get_ca_public_key))
-        .merge(issuance)
-        // Merged *before* the auth layer below so the router-wide
-        // AuthenticatedCaller layer covers this route the same as every
-        // other one (see openapi.rs module docs and
-        // docs/v2-port/openapi-pattern.md's "router-wide auth" row).
+        // Merged into `read` (not a bare top-level merge) so the openapi
+        // spec route also requires `sshca:read`, same as every other
+        // lookup endpoint (see openapi.rs module docs and
+        // docs/v2-port/openapi-pattern.md's "router-wide auth" row for why
+        // it otherwise takes no extractor of its own).
         .merge(openapi::router())
+        .layer(axum::middleware::from_fn_with_state(
+            crate::authz::ScopeGate::new(state.clone(), crate::authz::SSHCA_READ),
+            crate::authz::scope_gate,
+        ));
+
+    let app = read
+        .merge(issuance)
+        .merge(revoke)
         .layer(axum::middleware::from_extractor_with_state::<
             skauswatch_auth::AuthenticatedCaller,
             AppState,
         >(state.clone()))
-        .with_state(state)
+        .with_state(state);
+
+    // Per-IP rate limiting (security audit finding), outermost layer so it
+    // also throttles unauthenticated/invalid-token flooding — this service
+    // holds an SSH CA signing key, so unthrottled issuance/revocation is
+    // especially costly. Requires the listener to be served via
+    // `.into_make_service_with_connect_info::<SocketAddr>()` (see
+    // `main.rs`) for `crate::ratelimit::PeerIpOrGlobalKeyExtractor` to see
+    // the real TCP peer address — see that module's docs for why it's a
+    // custom extractor rather than the crate default. Never panics: an
+    // invalid computed config (should not happen — inputs are always
+    // positive integers, see `crate::ratelimit`) logs loudly and serves
+    // without rate limiting rather than crashing the service.
+    let per_sec = crate::ratelimit::per_second();
+    let burst = crate::ratelimit::burst_size();
+    match GovernorConfigBuilder::default()
+        .key_extractor(crate::ratelimit::PeerIpOrGlobalKeyExtractor)
+        .per_second(per_sec)
+        .burst_size(burst)
+        .finish()
+    {
+        Some(conf) => app.layer(GovernorLayer::new(Arc::new(conf))),
+        None => {
+            tracing::error!(
+                per_sec,
+                burst,
+                "rate limit config could not be constructed; serving without rate limiting"
+            );
+            app
+        }
+    }
 }
 
 /// The five OpenSSH-standard user-certificate permit extensions, applied by
@@ -1033,5 +1093,149 @@ mod tests {
             .add_header(thdr, tval)
             .await;
         list_res.assert_status_ok();
+    }
+
+    /// Same as [`auth_header`] but with a caller-chosen `ServiceClaims.role`
+    /// — for exercising `crate::authz`'s scope gates with a role that
+    /// carries less than every capability.
+    fn auth_header_with_role(role: &str) -> (&'static str, String) {
+        let token = match skauswatch_auth::issue_service_token("tester", role, TEST_JWT_SECRET, 300)
+        {
+            Ok(t) => t,
+            Err(e) => panic!("issue test token: {e}"),
+        };
+        ("Authorization", format!("Bearer {token}"))
+    }
+
+    /// Security audit finding #2b (authorization): issuance must require
+    /// `sshca:issue`, not just "any valid token" — a `viewer`-role machine
+    /// token (read-only) is denied 403 naming the missing capability, while
+    /// an `admin`-role token passes the scope gate and proceeds to real
+    /// signing.
+    #[tokio::test]
+    async fn issuance_requires_the_issue_scope() {
+        // Real DB-backed store (not `test_state()`'s lazy/unreachable
+        // pool) so the "allowed" case below proves a genuine end-to-end
+        // success (201), not just "didn't get 403" — a stronger version of
+        // the "proceeds past the gate" assertion used elsewhere in this
+        // file for lazy-pool tests.
+        let server = axum_test::TestServer::new(router(db_state().await));
+        let (thdr, tval) = tenant_header();
+        let body = serde_json::json!({
+            "certificate_type": "user",
+            "public_key": subject_pub_line(),
+            "principals": ["alice"],
+        });
+
+        let (hdr, val) = auth_header_with_role("viewer");
+        let denied = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val)
+            .add_header(thdr, tval.clone())
+            .json(&body)
+            .await;
+        denied.assert_status(StatusCode::FORBIDDEN);
+        let denied_body: serde_json::Value = denied.json();
+        assert!(
+            denied_body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(crate::authz::SSHCA_ISSUE)
+        );
+
+        let (hdr, val) = auth_header_with_role("admin");
+        let allowed = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(hdr, val)
+            .add_header(thdr, tval)
+            .json(&body)
+            .await;
+        allowed.assert_status(StatusCode::CREATED);
+    }
+
+    /// Revocation requires `sshca:revoke` — an issue-only role is denied
+    /// even though it can create certificates.
+    #[tokio::test]
+    async fn revocation_requires_the_revoke_scope() {
+        let server = axum_test::TestServer::new(router(db_state().await));
+        let (issue_hdr, issue_val) = auth_header();
+        let (thdr, tval) = tenant_header();
+        let issued = server
+            .post("/api/v1/ssh/certificates")
+            .add_header(issue_hdr, issue_val)
+            .add_header(thdr, tval.clone())
+            .json(&serde_json::json!({
+                "certificate_type": "user",
+                "public_key": subject_pub_line(),
+                "principals": ["alice"],
+            }))
+            .await;
+        issued.assert_status(StatusCode::CREATED);
+        let cert_id = issued.json::<serde_json::Value>()["certificate_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let (hdr, val) = auth_header_with_role("sshca-issuer");
+        let denied = server
+            .post(&format!("/api/v1/ssh/certificates/{cert_id}/revoke"))
+            .add_header(hdr, val)
+            .add_header(thdr, tval.clone())
+            .await;
+        denied.assert_status(StatusCode::FORBIDDEN);
+
+        let (hdr, val) = auth_header_with_role("sshca-revoker");
+        let allowed = server
+            .post(&format!("/api/v1/ssh/certificates/{cert_id}/revoke"))
+            .add_header(hdr, val)
+            .add_header(thdr, tval)
+            .json(&serde_json::json!({}))
+            .await;
+        allowed.assert_status_ok();
+    }
+
+    /// Read endpoints require `sshca:read` — fails closed for a role with
+    /// no mapped capabilities at all, passes for a read-only role.
+    #[tokio::test]
+    async fn read_endpoints_require_the_read_scope() {
+        let server = axum_test::TestServer::new(router(test_state()));
+
+        let (hdr, val) = auth_header_with_role("unmapped-role");
+        let denied = server
+            .get("/api/v1/ssh/ca/public-key")
+            .add_header(hdr, val)
+            .await;
+        denied.assert_status(StatusCode::FORBIDDEN);
+
+        let (hdr, val) = auth_header_with_role("sshca-reader");
+        let allowed = server
+            .get("/api/v1/ssh/ca/public-key")
+            .add_header(hdr, val)
+            .await;
+        allowed.assert_status_ok();
+    }
+
+    /// Rate limiting (security audit finding): firing more requests than
+    /// the default burst (20 — see `crate::ratelimit::burst_size`) in a
+    /// tight loop must eventually trip `tower_governor`'s 429.
+    #[tokio::test]
+    async fn requests_exceeding_the_burst_are_rate_limited() {
+        let server = axum_test::TestServer::new(router(test_state()));
+        let (hdr, val) = auth_header();
+        let mut saw_429 = false;
+        for _ in 0..30 {
+            let res = server
+                .get("/api/v1/ssh/ca/public-key")
+                .add_header(hdr, val.clone())
+                .await;
+            if res.status_code() == StatusCode::TOO_MANY_REQUESTS {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "expected at least one 429 after exceeding the rate limit burst"
+        );
     }
 }

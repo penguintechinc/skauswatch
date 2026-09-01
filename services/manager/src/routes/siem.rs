@@ -515,7 +515,7 @@ pub(crate) async fn update_siem_config(
     user: CurrentUser,
     ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<Response, ApiError> {
-    user.require_role(&["admin"])?;
+    user.require_scope("siem:admin")?;
 
     let empty = serde_json::Map::new();
     let map = match &body {
@@ -646,10 +646,14 @@ mod tests {
     }
 
     #[test]
-    fn config_put_role_gate_is_admin_only() {
-        assert!(user_with_role("admin").require_role(&["admin"]).is_ok());
+    fn config_put_scope_gate_is_admin_only() {
+        // `update_siem_config` gates on `siem:admin`; only `admin`'s bundle
+        // carries the `*:admin` wildcard that satisfies it — same
+        // admin-only semantics the former `require_role(&["admin"])` gate
+        // enforced by literal role-string equality.
+        assert!(user_with_role("admin").require_scope("siem:admin").is_ok());
         for role in ["maintainer", "viewer"] {
-            match user_with_role(role).require_role(&["admin"]) {
+            match user_with_role(role).require_scope("siem:admin") {
                 Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
                 other => panic!("expected 403 for {role}, got {other:?}"),
             }

@@ -51,6 +51,7 @@ mod users;
 use axum::Router;
 use penguin_licensing::axum::{FlagGate, flag_gate};
 
+use crate::rate_limit;
 use crate::state::AppState;
 
 /// Wraps `router` in the crate-provided PostHog flag gate
@@ -72,7 +73,12 @@ fn gated(router: Router<AppState>, state: &AppState, flag: &'static str) -> Rout
 
 /// Builds the full /api/v1 application router.
 pub fn router(state: AppState) -> Router {
-    let public = auth::public_router()
+    // `auth::public_router()` (`/auth/login`, `/auth/register`,
+    // `/auth/refresh`) gets a much stricter rate limit than the rest of the
+    // app — see `crate::rate_limit` module docs — applied here, before the
+    // merge, since this sub-router carries only those three credential-
+    // facing routes and nothing else.
+    let public = rate_limit::apply_auth(auth::public_router())
         .merge(openapi::public_router())
         .merge(siem::public_router());
 
@@ -170,9 +176,14 @@ mod tests {
         // A bad-credentials login must reach the handler (401 "Invalid email
         // or password"), not be rejected by tenant_middleware (which would
         // 401 "Missing or invalid authorization header" — a different
-        // message — since there's no bearer token at all here).
+        // message — since there's no bearer token at all here), and not by
+        // the `/auth/*` rate limiter this test's single request sits well
+        // under (see `crate::rate_limit`; the forwarded-for header gives
+        // `SmartIpKeyExtractor` a real key to bucket on, matching how a
+        // request arrives through the K8s ingress in production).
         let res = server
             .post("/api/v1/auth/login")
+            .add_header("x-forwarded-for", "203.0.113.99")
             .json(&serde_json::json!({"email": "ghost@example.com", "password": "whatever1"}))
             .await;
         res.assert_status(StatusCode::UNAUTHORIZED);

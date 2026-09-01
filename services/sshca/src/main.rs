@@ -6,10 +6,12 @@
 //! Security note: this service holds an SSH CA signing key. The private key is
 //! never logged — only its algorithm and public SHA256 fingerprint are.
 
+mod authz;
 mod ca;
 mod config;
 mod error;
 mod model;
+mod ratelimit;
 mod routes;
 mod store;
 mod tenant;
@@ -132,9 +134,15 @@ async fn serve() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
-        .await?;
+    // `with_connect_info` — required for `routes::router`'s
+    // `tower_governor::GovernorLayer` (default `PeerIpKeyExtractor`) to see
+    // the real TCP peer address; see that module's docs.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
+    .await?;
     tracing::info!("SSH CA service stopped cleanly");
     Ok(())
 }

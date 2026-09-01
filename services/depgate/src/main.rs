@@ -24,6 +24,7 @@ mod oci_path;
 mod policy;
 mod provenance;
 mod pypi;
+mod rate_limit;
 mod rescan;
 mod routes;
 mod scanpipe;
@@ -202,7 +203,10 @@ async fn serve() -> anyhow::Result<()> {
     let _license_bg = state.license.spawn_refresh();
 
     let http_port = state.cfg.http_port;
-    let app = routes::router(state.clone())
+    // `rate_limited_router` (not the plain `routes::router` every unit test
+    // in this crate builds on) — see `crate::rate_limit` module docs for
+    // why the split exists.
+    let app = routes::rate_limited_router(state.clone())
         .merge(skauswatch_telemetry::health_router(readiness.clone()))
         .fallback(crate::error::fallback_not_found);
 
@@ -221,10 +225,19 @@ async fn serve() -> anyhow::Result<()> {
     });
 
     let http = async {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
-            .await
-            .map_err(anyhow::Error::from)
+        // `into_make_service_with_connect_info` — `tower_governor`'s
+        // `SmartIpKeyExtractor` (`crate::rate_limit`) falls back to the TCP
+        // peer address when no forwarded-for header is present (e.g. a
+        // direct, non-ingress caller); without this the fallback has
+        // nothing to read and every such request gets a 500 instead of
+        // being rate-limited.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
+        .await
+        .map_err(anyhow::Error::from)
     };
 
     // Mesh-only mTLS admin listener (SPIFFE-readiness for the admin/report

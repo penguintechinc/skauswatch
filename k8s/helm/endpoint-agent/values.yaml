@@ -9,6 +9,11 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
 serviceAccount:
   create: true
   annotations: {}
@@ -18,6 +23,14 @@ podAnnotations: {}
 
 podSecurityContext:
   runAsNonRoot: false
+  # seccompProfile is set Unconfined (not RuntimeDefault) because
+  # privileged: true below already bypasses seccomp confinement at the
+  # container-runtime level -- declaring RuntimeDefault here would claim a
+  # protection that isn't actually enforced. Unconfined is explicit and
+  # honest given the raw ptrace (process inspection) and netlink/raw-socket
+  # (connection enumeration) syscalls this agent depends on.
+  seccompProfile:
+    type: Unconfined
 
 # ROOT EXCEPTION (approved): endpoint-agent is a host process/network
 # monitor — it needs SYS_PTRACE to inspect other processes and NET_ADMIN
@@ -30,6 +43,8 @@ securityContext:
     add:
       - SYS_PTRACE
       - NET_ADMIN
+  seccompProfile:
+    type: Unconfined
 
 # Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml) is the
 # PRIMARY control for this pod -- see k8s/helm/README.md "endpoint-agent:
@@ -79,7 +94,7 @@ env:
   - name: API_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-endpoint-agent-secret
+        name: '{{ include "skauswatch-endpoint-agent.secretName" . }}'
         key: api-key
   - name: AGENT_ID
     valueFrom:
@@ -88,7 +103,7 @@ env:
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-endpoint-agent-secret
+        name: '{{ include "skauswatch-endpoint-agent.secretName" . }}'
         key: license-key
   - name: LICENSE_SERVER_URL
     valueFrom:
@@ -150,6 +165,8 @@ configMapData:
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
 
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
 secretData:
-  api-key: "changeme-in-production"
+  api-key: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

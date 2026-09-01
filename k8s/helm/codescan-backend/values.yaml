@@ -11,6 +11,11 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
 serviceAccount:
   create: true
   annotations: {}
@@ -133,12 +138,12 @@ env:
   - name: DB_USER
     valueFrom:
       secretKeyRef:
-        name: skauswatch-codescan-backend-secret
+        name: '{{ include "skauswatch-codescan-backend.secretName" . }}'
         key: db-user
   - name: DB_PASS
     valueFrom:
       secretKeyRef:
-        name: skauswatch-codescan-backend-secret
+        name: '{{ include "skauswatch-codescan-backend.secretName" . }}'
         key: db-pass
   - name: REDIS_URL
     valueFrom:
@@ -153,35 +158,35 @@ env:
   - name: REDIS_PASSWORD
     valueFrom:
       secretKeyRef:
-        name: skauswatch-codescan-backend-secret
+        name: '{{ include "skauswatch-codescan-backend.secretName" . }}'
         key: redis-password
         optional: true
   - name: JWT_SECRET_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-codescan-backend-secret
+        name: '{{ include "skauswatch-codescan-backend.secretName" . }}'
         key: jwt-secret-key
   - name: CREDENTIAL_ENCRYPTION_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-codescan-backend-secret
+        name: '{{ include "skauswatch-codescan-backend.secretName" . }}'
         key: credential-encryption-key
   - name: ANTHROPIC_API_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-codescan-backend-secret
+        name: '{{ include "skauswatch-codescan-backend.secretName" . }}'
         key: anthropic-api-key
         optional: true
   - name: OPENAI_API_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-codescan-backend-secret
+        name: '{{ include "skauswatch-codescan-backend.secretName" . }}'
         key: openai-api-key
         optional: true
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-codescan-backend-secret
+        name: '{{ include "skauswatch-codescan-backend.secretName" . }}'
         key: license-key
   - name: LICENSE_SERVER_URL
     valueFrom:
@@ -229,12 +234,14 @@ configMapData:
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
 
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
 secretData:
-  db-user: "changeme-in-production"
-  db-pass: "changeme-in-production"
+  db-user: ""
+  db-pass: ""
   redis-password: ""
-  jwt-secret-key: "changeme-in-production"
-  credential-encryption-key: "changeme-in-production"
+  jwt-secret-key: ""
+  credential-encryption-key: ""
   anthropic-api-key: ""
   openai-api-key: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

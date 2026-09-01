@@ -15,6 +15,7 @@ mod jsonord;
 mod ocsf;
 mod openapi;
 mod opensearch;
+mod rate_limit;
 
 use std::net::SocketAddr;
 
@@ -101,15 +102,30 @@ async fn serve() -> anyhow::Result<()> {
         jwt_secret: jwt_secret.into(),
         license,
     };
-    let app = ingest::router(state);
+    // `rate_limit::apply` wraps only the production build of
+    // `ingest::router`, not the function itself — see `crate::rate_limit`
+    // module docs for why the two stay separate. Unlike vault/monitor/
+    // depgate, `GET /healthz` is mounted inside `ingest::router` itself
+    // (not merged in separately here), so it is technically inside the
+    // governed surface — harmless in practice, since the manager's
+    // liveness probe hits it from a distinct source IP with its own
+    // independent quota, never sharing a bucket with client `/ingest`
+    // traffic.
+    let app = rate_limit::apply(ingest::router(state));
 
     let addr: SocketAddr = ([0, 0, 0, 0], cfg.http_port).into();
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, opensearch = %cfg.opensearch_url, "logs ingest listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // `into_make_service_with_connect_info` — `tower_governor`'s
+    // `SmartIpKeyExtractor` (`crate::rate_limit`) falls back to the TCP
+    // peer address when no forwarded-for header is present.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     tracing::info!("logs stopped cleanly");
     Ok(())
 }

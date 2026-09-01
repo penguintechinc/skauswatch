@@ -30,6 +30,9 @@ skauswatch-streams = { workspace = true }
 skauswatch-telemetry = { workspace = true }
 skauswatch-vault = { workspace = true }
 sqlx = { workspace = true }
+# Per-client-IP rate limiting on the /api/v1 router — see routes/mod.rs
+# module docs for the config (HIGH security-hardening fix).
+tower_governor = { workspace = true }
 # Decompresses `codescan_sbom_artifacts.doc_gzip` for
 # GET /codescan/findings/sbom/{scan_run_id} (routes/findings.rs) — same
 # already-locked version worker-codescan compresses with.

@@ -47,6 +47,11 @@ tower = "=0.5.3"
 tower-http = { version = "=0.7.0", features = ["trace", "compression-gzip"] }
 http = "=1.4.2"
 utoipa = { version = "=5.5.0", features = ["axum_extras", "chrono", "uuid"] }
+# Rate-limiting middleware for Axum services (governor-backed token bucket).
+# default-features off: upstream's default set also enables a `tonic`
+# integration feature we don't use (every consumer here is Axum REST, not a
+# tonic interceptor) — `axum` is the only integration feature services need.
+tower_governor = { version = "=0.8.0", default-features = false, features = ["axum"] }
 
 # gRPC
 tonic = "=0.14.6"

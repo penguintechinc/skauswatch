@@ -87,10 +87,16 @@ async fn serve() -> anyhow::Result<()> {
     });
 
     let http = async {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
-            .await
-            .map_err(anyhow::Error::from)
+        // `with_connect_info` — required for `routes::router`'s
+        // `tower_governor::GovernorLayer` (default `PeerIpKeyExtractor`) to
+        // see the real TCP peer address; see that module's docs.
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx.clone()))
+        .await
+        .map_err(anyhow::Error::from)
     };
 
     // mTLS-required maintenance listener (docs/v2-port/service-auth-model.md

@@ -46,7 +46,7 @@ volumeMounts:
 volumes:
   - name: ca-key
     secret:
-      secretName: skauswatch-sshca-secret
+      secretName: '{{ include "skauswatch-sshca.secretName" $ }}'
       items:
         - key: ca-key
           path: sshca
@@ -62,9 +62,13 @@ configMapData:
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
 
+# MUST be set via --set/values or existingSecret; services fail closed on a
+# blank/known-default secret. Prefer existingSecret (a pre-provisioned
+# Secret / ExternalSecret) for production credential rotation over inline
+# secretData below.
 secretData:
-  db-user: "changeme-in-production"
-  db-pass: "changeme-in-production"
+  db-user: ""
+  db-pass: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
   # REQUIRED: replace with `ssh-keygen -t ed25519 -f ca-key` output before
   # deploying — an empty/placeholder value here means every pod falls back

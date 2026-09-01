@@ -326,7 +326,7 @@ pub(crate) async fn create_repo(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    user.require_role(&["admin"])?;
+    user.require_scope("codescan:admin")?;
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
@@ -400,7 +400,7 @@ pub(crate) async fn update_repo(
     Path(repo_id): Path<i32>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    user.require_role(&["admin"])?;
+    user.require_scope("codescan:admin")?;
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
@@ -437,7 +437,7 @@ pub(crate) async fn delete_repo(
     headers: HeaderMap,
     Path(repo_id): Path<i32>,
 ) -> Result<Response, ApiError> {
-    user.require_role(&["admin"])?;
+    user.require_scope("codescan:admin")?;
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
@@ -502,7 +502,7 @@ pub(crate) async fn create_review(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    user.require_role(&["maintainer"])?;
+    user.require_scope("codescan:review")?;
     if let Some(denied) = license_denied(&state).await {
         return Ok(denied);
     }
@@ -991,24 +991,31 @@ mod tests {
     }
 
     #[test]
-    fn role_gates_match_v1() {
-        // repos mutations: admin only.
-        assert!(user_with_role("admin").require_role(&["admin"]).is_ok());
+    fn scope_gates_match_v1() {
+        // repos mutations: gated on `codescan:admin` — admin only, since
+        // only `admin`'s bundle carries the `*:admin` wildcard.
+        assert!(
+            user_with_role("admin")
+                .require_scope("codescan:admin")
+                .is_ok()
+        );
         for role in ["maintainer", "viewer"] {
-            match user_with_role(role).require_role(&["admin"]) {
+            match user_with_role(role).require_scope("codescan:admin") {
                 Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
                 other => panic!("expected 403 for {role}, got {other:?}"),
             }
         }
-        // reviews POST: v1 `role_required("maintainer")` admits ONLY the
-        // maintainer role — admins are rejected too (replicated quirk).
+        // reviews POST: gated on `codescan:review`, granted to
+        // `maintainer`'s bundle only — v1 `role_required("maintainer")`
+        // admitted ONLY the maintainer role, admins rejected too
+        // (replicated quirk; see `role_scope_bundle` docs).
         assert!(
             user_with_role("maintainer")
-                .require_role(&["maintainer"])
+                .require_scope("codescan:review")
                 .is_ok()
         );
         for role in ["admin", "viewer"] {
-            match user_with_role(role).require_role(&["maintainer"]) {
+            match user_with_role(role).require_scope("codescan:review") {
                 Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
                 other => panic!("expected 403 for {role}, got {other:?}"),
             }

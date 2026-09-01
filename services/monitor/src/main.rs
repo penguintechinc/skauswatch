@@ -87,6 +87,7 @@ mod es;
 mod flags;
 mod ingest;
 mod models;
+mod rate_limit;
 mod routes;
 mod state;
 mod threat_intel;
@@ -148,14 +149,20 @@ async fn serve() -> anyhow::Result<()> {
     spawn_background_workers(&state);
 
     let api = routes::router(state.clone());
-    let app: Router<()> = Router::new()
-        .merge(api.clone())
-        // The openapi doc route is nested only, not double-mounted flat —
-        // `docs/v2-port/openapi-pattern.md` documents the canonical
-        // `/api/v1/*` paths only.
-        .nest("/api/v1", api.merge(routes::openapi::router()))
-        .with_state(state.clone())
-        .merge(skauswatch_telemetry::health_router(readiness.clone()));
+    // `rate_limit::apply` wraps only the fully-assembled business-route
+    // app, not `routes::router` itself — see `crate::rate_limit` module
+    // docs for why the two stay separate. Health/readiness stays outside
+    // it: k8s probes hit it constantly and shouldn't be throttled.
+    let governed = rate_limit::apply(
+        Router::new()
+            .merge(api.clone())
+            // The openapi doc route is nested only, not double-mounted flat
+            // — `docs/v2-port/openapi-pattern.md` documents the canonical
+            // `/api/v1/*` paths only.
+            .nest("/api/v1", api.merge(routes::openapi::router()))
+            .with_state(state.clone()),
+    );
+    let app: Router<()> = governed.merge(skauswatch_telemetry::health_router(readiness.clone()));
 
     let host = state.config.api.host.clone();
     let port = state.config.api.port;
@@ -165,9 +172,15 @@ async fn serve() -> anyhow::Result<()> {
     tracing::info!(%addr, "monitor REST listening");
     readiness.set_ready();
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // `into_make_service_with_connect_info` — `tower_governor`'s
+    // `SmartIpKeyExtractor` (`crate::rate_limit`) falls back to the TCP
+    // peer address when no forwarded-for header is present.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

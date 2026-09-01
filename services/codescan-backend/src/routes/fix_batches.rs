@@ -297,7 +297,7 @@ mod tests {
         let other_repo = seed_repo_config(&state.db, other, "b").await;
         seed_batch(&state.db, other, other_repo, "open").await;
 
-        let server = axum_test::TestServer::new(crate::routes::router(state.clone()));
+        let server = test_support::full_app_test_server(state.clone());
         let token = test_support::sign_token(&state, "1", "viewer");
         let resp = server
             .get("/api/v1/codescan/fix-batches")
@@ -350,7 +350,7 @@ mod tests {
         .await
         .unwrap_or_else(|e| panic!("seed batch finding: {e}"));
 
-        let server = axum_test::TestServer::new(crate::routes::router(state.clone()));
+        let server = test_support::full_app_test_server(state.clone());
         let token = test_support::sign_token(&state, "1", "viewer");
         let resp = server
             .get(&format!("/api/v1/codescan/fix-batches/{batch_id}"))
@@ -372,7 +372,7 @@ mod tests {
     #[tokio::test]
     async fn get_batch_404s_for_unknown_id() {
         let state = test_support::db_state(dev_license()).await;
-        let server = axum_test::TestServer::new(crate::routes::router(state.clone()));
+        let server = test_support::full_app_test_server(state.clone());
         let token = test_support::sign_token(&state, "1", "viewer");
         let resp = server
             .get("/api/v1/codescan/fix-batches/999999")

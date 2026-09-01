@@ -94,9 +94,18 @@ async fn serve() -> anyhow::Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
-        .await?;
+    // `into_make_service_with_connect_info` (rather than plain `app`) is
+    // required by `routes::router`'s `GovernorLayer` (rate limiting, see
+    // that module's docs): its `PeerIpKeyExtractor` reads the peer address
+    // from the `ConnectInfo<SocketAddr>` extension this populates — without
+    // it every request would fail closed with 500
+    // (`GovernorError::UnableToExtractKey`).
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
+    .await?;
     tracing::info!("codescan-backend stopped cleanly");
     Ok(())
 }

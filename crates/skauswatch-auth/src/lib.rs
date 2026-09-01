@@ -154,23 +154,46 @@ impl IntoResponse for TenantAuthError {
     }
 }
 
-/// Decodes and signature/expiry-validates the mandatory [`Claims`] shape
-/// from an HS256 token signed with `secret`. Does not itself enforce the
-/// tenant boundary — callers needing that call [`Claims::require_tenant`]
-/// on the result (this is exactly what [`tenant_middleware`] does).
+/// Canonical `iss` claim value for every `skauswatch`-issued access token.
+/// [`decode_claims`] REQUIRES a token's `iss` to equal this exactly —
+/// issuers (the manager's `create_access_token`, and any other service that
+/// mints a [`Claims`] token) MUST stamp this value, not a hand-rolled
+/// literal, to avoid silent drift between mint and verify sides. Matches
+/// the fixture value already established across the workspace before this
+/// constant existed (`services/manager/src/auth::CLAIMS_ISSUER`,
+/// `crates/skauswatch-testkit::jwt::CLAIMS_ISSUER`, and the ad hoc test
+/// literals in `services/monitor`/`services/depgate`/
+/// `services/codescan-backend`).
+pub const EXPECTED_ISS: &str = "https://auth.skauswatch.app";
+
+/// Canonical `aud` claim value for every `skauswatch`-issued access token.
+/// [`decode_claims`] REQUIRES a token's `aud` to equal this exactly —
+/// issuers MUST stamp this value. Matches the fixture value already
+/// established across the workspace (see [`EXPECTED_ISS`] docs for the
+/// full list of prior call sites this constant now centralizes).
+pub const EXPECTED_AUD: &str = "skauswatch";
+
+/// Decodes and signature/expiry/issuer/audience-validates the mandatory
+/// [`Claims`] shape from an HS256 token signed with `secret`. Does not
+/// itself enforce the tenant boundary — callers needing that call
+/// [`Claims::require_tenant`] on the result (this is exactly what
+/// [`tenant_middleware`] does).
 ///
-/// Audience-value matching (`Validation::set_audience`) is deliberately not
-/// performed here: `jsonwebtoken` treats "an `aud` claim is present but no
-/// expected audience was configured" as a hard validation failure, and this
-/// crate has no single expected audience to configure on behalf of every
-/// service. Expected-audience/issuer checks remain a per-service concern
-/// (or a future, explicitly-scoped enhancement here) — this function's
-/// job is strictly the tenant-isolation boundary.
+/// `iss` and `aud` are both REQUIRED and must equal [`EXPECTED_ISS`]/
+/// [`EXPECTED_AUD`] exactly — a token missing either claim, or carrying a
+/// mismatched value, is rejected as [`TenantAuthError::Invalid`] the same
+/// as a bad signature. This closes a prior gap where `validate_aud` was
+/// disabled and `iss` was never checked at all, so any correctly-signed
+/// token was accepted regardless of who issued it or what audience it was
+/// minted for. Every issuer of a [`Claims`] token MUST set `iss =
+/// EXPECTED_ISS` and `aud = EXPECTED_AUD` or its tokens will be rejected.
 pub fn decode_claims(token: &str, secret: &str) -> Result<Claims, TenantAuthError> {
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_exp = true;
-    validation.validate_aud = false;
-    validation.required_spec_claims.clear();
+    validation.validate_aud = true;
+    validation.set_issuer(&[EXPECTED_ISS]);
+    validation.set_audience(&[EXPECTED_AUD]);
+    validation.set_required_spec_claims(&["exp", "iss", "aud"]);
     jsonwebtoken::decode::<Claims>(
         token,
         &DecodingKey::from_secret(secret.as_bytes()),
@@ -322,6 +345,16 @@ where
 /// `role`, `type: "access"`, `exp`, `iat`. Any service that verifies with the
 /// same `JWT_SECRET_KEY` can consume it — this is the "machine JWT" shape
 /// used to gate pki, sshca, and the manager's own gRPC surface.
+///
+/// Deliberately carries no `iss`/`aud` claims and is exempt from the
+/// [`EXPECTED_ISS`]/[`EXPECTED_AUD`] enforcement added to [`decode_claims`]:
+/// this is a structurally different, older wire shape (issued by
+/// [`issue_service_token`], verified by [`verify_service_token`]) with no
+/// issuer/audience fields to validate. Adding them would be a breaking
+/// schema change across every current issuer (pki, sshca, the manager's own
+/// gRPC surface) and is out of scope here — see the [`Claims`]-shape
+/// tenancy retrofit notes above for the token family that *is* iss/aud
+/// enforced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceClaims {
     /// String-encoded caller id (user id, or a machine/service identifier).
@@ -500,21 +533,48 @@ pub fn is_production() -> bool {
     release_mode_is_production(std::env::var("RELEASE_MODE").ok().as_deref())
 }
 
-/// A required secret was missing/empty in production. Startup must abort
-/// rather than fall back to a guessable or hardcoded value.
+/// Well-known placeholder secrets — shipped scaffold defaults, sample env
+/// files, or values a developer might type without thinking — that must
+/// never reach production as `JWT_SECRET_KEY`. Compared case-insensitively
+/// (see [`is_denylisted_secret`]). Mirrors
+/// `services/manager/src/state.rs::ENDPOINT_DEFAULT_SECRET`'s
+/// fail-fast-on-known-default policy for `ENDPOINT_API_SECRET`, generalized
+/// to the small set of defaults known to circulate for this secret.
+const DENYLISTED_SECRETS: &[&str] = &[
+    "changeme-in-production",
+    "changeme",
+    "change-me",
+    "changeme-in-prod",
+    "secret",
+    "password",
+];
+
+/// True when `value` case-insensitively matches a well-known placeholder
+/// default (see [`DENYLISTED_SECRETS`]) rather than a real secret.
+fn is_denylisted_secret(value: &str) -> bool {
+    DENYLISTED_SECRETS
+        .iter()
+        .any(|denied| value.eq_ignore_ascii_case(denied))
+}
+
+/// A required secret was missing/empty/a known placeholder default in
+/// production. Startup must abort rather than fall back to a guessable or
+/// hardcoded value.
 #[derive(Debug, Clone, Copy, thiserror::Error, PartialEq, Eq)]
 #[error("JWT_SECRET_KEY must be set to a real secret in production (RELEASE_MODE != \"false\")")]
 pub struct MissingProductionSecret;
 
 /// Pure fail-fast decision for a required secret: `Ok(Some(value))` when
-/// usable (trimmed non-empty), `Ok(None)` when absent but acceptable
-/// (non-production), `Err` when production requires it and it's
-/// missing/blank.
+/// usable (trimmed non-empty, and — in production — not a known
+/// [`DENYLISTED_SECRETS`] placeholder), `Ok(None)` when absent but
+/// acceptable (non-production), `Err` when production requires a real
+/// secret and the value is missing/blank/a known default.
 fn resolve_required_secret(
     value: Option<&str>,
     production: bool,
 ) -> Result<Option<&str>, MissingProductionSecret> {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) if production && is_denylisted_secret(v) => Err(MissingProductionSecret),
         Some(v) => Ok(Some(v)),
         None if production => Err(MissingProductionSecret),
         None => Ok(None),
@@ -522,10 +582,12 @@ fn resolve_required_secret(
 }
 
 /// Loads the shared JWT signing secret from `JWT_SECRET_KEY` per the house
-/// fail-fast policy: a missing/empty value FAILS STARTUP in production
-/// (a guessable per-process fallback is worse than refusing to start). In
-/// dev only (`RELEASE_MODE=false`), an unset value is logged and replaced
-/// with a random ephemeral secret — never a hardcoded/guessable one.
+/// fail-fast policy: a missing/empty value, OR a well-known placeholder
+/// default (see [`DENYLISTED_SECRETS`]), FAILS STARTUP in production (a
+/// guessable per-process fallback — or a shipped default — is worse than
+/// refusing to start). In dev only (`RELEASE_MODE=false`), an unset value
+/// is logged and replaced with a random ephemeral secret — never a
+/// hardcoded/guessable one.
 pub fn load_jwt_secret() -> Result<String, MissingProductionSecret> {
     let raw = std::env::var("JWT_SECRET_KEY").ok();
     match resolve_required_secret(raw.as_deref(), is_production())? {
@@ -688,6 +750,52 @@ mod service_token_tests {
     }
 
     #[test]
+    fn resolve_required_secret_rejects_denylisted_defaults_in_production() {
+        for denied in DENYLISTED_SECRETS {
+            assert_eq!(
+                resolve_required_secret(Some(denied), true),
+                Err(MissingProductionSecret),
+                "expected {denied:?} to be rejected"
+            );
+            // Case-insensitive: an upper-cased and a title-cased variant of
+            // each denylisted value must also be rejected.
+            let upper = denied.to_uppercase();
+            assert_eq!(
+                resolve_required_secret(Some(&upper), true),
+                Err(MissingProductionSecret),
+                "expected {upper:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_required_secret_rejects_denylisted_default_with_surrounding_whitespace() {
+        assert_eq!(
+            resolve_required_secret(Some("  ChangeMe  "), true),
+            Err(MissingProductionSecret)
+        );
+    }
+
+    #[test]
+    fn resolve_required_secret_accepts_real_secret_in_production() {
+        assert_eq!(
+            resolve_required_secret(Some("a-genuinely-random-32-byte-value"), true),
+            Ok(Some("a-genuinely-random-32-byte-value"))
+        );
+    }
+
+    #[test]
+    fn resolve_required_secret_allows_denylisted_value_outside_production() {
+        // Dev/local convenience values are only rejected once RELEASE_MODE
+        // requires a real secret — mirrors
+        // `resolve_required_secret_allows_absence_outside_production`.
+        assert_eq!(
+            resolve_required_secret(Some("changeme"), false),
+            Ok(Some("changeme"))
+        );
+    }
+
+    #[test]
     fn load_jwt_secret_never_panics_when_unset() {
         // Whatever the ambient RELEASE_MODE/JWT_SECRET_KEY happen to be in
         // this process, load_jwt_secret must not panic — either a real
@@ -768,8 +876,8 @@ mod tenant_middleware_tests {
     fn claims_with_tenant(tenant: &str) -> Claims {
         Claims {
             sub: "u-1".into(),
-            iss: "https://auth.skauswatch.app".into(),
-            aud: "skauswatch".into(),
+            iss: EXPECTED_ISS.into(),
+            aud: EXPECTED_AUD.into(),
             iat: 0,
             exp: i64::MAX,
             scope: "*:read".into(),
@@ -804,11 +912,40 @@ mod tenant_middleware_tests {
     fn sign_without_tenant(secret: &str) -> String {
         let claims = ClaimsWithoutTenant {
             sub: "u-1".into(),
-            iss: "https://auth.skauswatch.app".into(),
-            aud: "skauswatch".into(),
+            iss: EXPECTED_ISS.into(),
+            aud: EXPECTED_AUD.into(),
             iat: 0,
             exp: i64::MAX,
             scope: "*:read".into(),
+        };
+        jsonwebtoken::encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap_or_else(|e| panic!("sign: {e}"))
+    }
+
+    /// A hand-rolled claim set with no `iss`/`aud` keys at all — simulates a
+    /// pre-`EXPECTED_ISS`/`EXPECTED_AUD` or third-party-issued token, to
+    /// prove [`decode_claims`] rejects a token that never carried either
+    /// claim (not just one carrying a mismatched value).
+    #[derive(Serialize)]
+    struct ClaimsWithoutIssAud {
+        sub: String,
+        iat: i64,
+        exp: i64,
+        scope: String,
+        tenant: String,
+    }
+
+    fn sign_without_iss_aud(secret: &str) -> String {
+        let claims = ClaimsWithoutIssAud {
+            sub: "u-1".into(),
+            iat: 0,
+            exp: i64::MAX,
+            scope: "*:read".into(),
+            tenant: "acme".into(),
         };
         jsonwebtoken::encode(
             &Header::new(Algorithm::HS256),
@@ -867,6 +1004,34 @@ mod tenant_middleware_tests {
             decode_claims("not-a-jwt", SECRET),
             Err(TenantAuthError::Invalid)
         );
+    }
+
+    #[test]
+    fn decode_claims_accepts_correct_issuer_and_audience() {
+        let token = sign(&claims_with_tenant("acme"), SECRET);
+        assert!(decode_claims(&token, SECRET).is_ok());
+    }
+
+    #[test]
+    fn decode_claims_rejects_wrong_issuer() {
+        let mut c = claims_with_tenant("acme");
+        c.iss = "https://evil.example.com".into();
+        let token = sign(&c, SECRET);
+        assert_eq!(decode_claims(&token, SECRET), Err(TenantAuthError::Invalid));
+    }
+
+    #[test]
+    fn decode_claims_rejects_wrong_audience() {
+        let mut c = claims_with_tenant("acme");
+        c.aud = "not-skauswatch".into();
+        let token = sign(&c, SECRET);
+        assert_eq!(decode_claims(&token, SECRET), Err(TenantAuthError::Invalid));
+    }
+
+    #[test]
+    fn decode_claims_rejects_missing_issuer_and_audience() {
+        let token = sign_without_iss_aud(SECRET);
+        assert_eq!(decode_claims(&token, SECRET), Err(TenantAuthError::Invalid));
     }
 
     // -- tenant_middleware / TenantContext extractor --------------------

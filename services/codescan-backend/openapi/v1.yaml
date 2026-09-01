@@ -954,7 +954,8 @@ paths:
       tags:
       - codescan
       summary: |-
-        POST /codescan/reviews — maintainer only (see module docs); enqueues onto
+        POST /codescan/reviews — requires `codescan:write` scope (admin or
+        maintainer; see `crate::auth` module docs); enqueues onto
         `codescan:tasks` after the row is committed.
       operationId: create_review
       requestBody:

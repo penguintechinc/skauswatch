@@ -124,7 +124,7 @@ pub(crate) async fn trigger_scanner_task(
     user: CurrentUser,
     ApiJson(body): ApiJson<ScannerScanBody>,
 ) -> Result<(StatusCode, Json<ScannerScanResponse>), ApiError> {
-    user.require_role(&["admin", "maintainer"])?;
+    user.require_scope("scanner:write")?;
 
     let target = match body.target.as_deref() {
         Some(t) if !t.is_empty() => t,

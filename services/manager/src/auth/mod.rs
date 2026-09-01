@@ -59,22 +59,36 @@ pub(crate) fn default_tenant_uuid() -> uuid::Uuid {
 
 /// Expands a role name into the house OIDC scope bundle it corresponds to
 /// (`security.md` "Scope bundles"). `users.role` remains the authoritative
-/// permission model for this service's existing role-gated routes
-/// (`CurrentUser::require_role` — the ~89-site scope-based-authz migration
-/// is out of scope for the tenancy retrofit); `scope` is populated on the
-/// minted JWT so any current/future consumer that authorizes on
-/// `skauswatch_auth::Claims::has_scope` instead sees an equivalent bundle.
-/// Unknown roles get no scope at all — fail closed, never a guessed bundle.
+/// permission model — every route handler's authz gate
+/// (`CurrentUser::require_scope`/`has_scope`) resolves this bundle from the
+/// DB-authoritative `role` column on every call, never from a token's own
+/// (possibly stale) `scope` claim; `scope` is also populated on the minted
+/// JWT so any other consumer that authorizes on
+/// `skauswatch_auth::Claims::has_scope` sees the same bundle. Unknown roles
+/// get no scope at all — fail closed, never a guessed bundle.
+///
+/// `super_admin` and `maintainer` both carry scopes with no `*:<action>`
+/// counterpart in `admin`'s bundle (`tenants:root`/`spire:root`,
+/// `codescan:review`) — this is deliberate, not an oversight: it preserves
+/// two pre-existing role-string quirks byte-for-byte across the
+/// role-string → scope mechanism swap (`docs/v2-port/`; see call sites in
+/// `routes::tenants`/`routes::admin` and `routes::codescan::create_review`):
+/// `super_admin` is disjoint from `admin` (a `super_admin`-role user does
+/// NOT also pass `admin`-gated endpoints), and `routes::codescan::
+/// create_review` admits ONLY the `maintainer` role, admin included.
 pub(crate) fn role_scope_bundle(role: &str) -> &'static str {
     match role {
         "admin" => "*:read *:write *:admin *:delete settings:write users:admin",
-        "maintainer" => "*:read *:write teams:read reports:read analytics:read",
+        "maintainer" => "*:read *:write teams:read reports:read analytics:read codescan:review",
         "viewer" => "*:read",
-        // `super_admin` is a manager-internal, DB-only role (never settable
-        // via the public users API — see `routes/users.rs::ROLES`) used
-        // solely to gate `routes::tenants::create_tenant`; it needs no
-        // scope bundle of its own today since that gate checks
-        // `CurrentUser::require_role` directly, not `Claims::has_scope`.
+        // Manager-internal, DB-only role (never settable via the public
+        // users API — see `routes/users.rs::ROLES`), gating exactly four
+        // operational endpoints (`routes::tenants::create_tenant`/
+        // `create_enrollment_token`, `routes::admin::get_svid_ttl`/
+        // `update_svid_ttl`) via the `tenants:root`/`spire:root` scopes
+        // below — literals chosen so no `admin` wildcard (`*:read`/
+        // `*:write`/`*:admin`/`*:delete`) accidentally satisfies them.
+        "super_admin" => "tenants:root spire:root",
         _ => "",
     }
 }
@@ -274,9 +288,59 @@ pub struct CurrentUser {
 
 impl CurrentUser {
     /// v1 `role_required` equivalent: 403 unless role is in `roles`.
-    #[allow(dead_code)] // consumed by the users/alerts/... routers as they land
+    /// Superseded by [`CurrentUser::require_scope`] as the mechanism every
+    /// route handler's authz gate actually uses (`security.md` OIDC Claims
+    /// & Scopes: "middleware checks scopes only, never role names") — kept
+    /// as a thin, still-tested wrapper for any future caller that
+    /// genuinely needs a literal-role gate rather than a scope one.
+    #[allow(dead_code)] // no production caller since the scope-authz migration; direct-tested below
     pub fn require_role(&self, roles: &[&str]) -> Result<(), ApiError> {
         if roles.contains(&self.role.as_str()) {
+            Ok(())
+        } else {
+            Err(ApiError::Forbidden("Insufficient permissions".to_owned()))
+        }
+    }
+
+    /// Builds a transient `skauswatch_auth::Claims` view of this user for
+    /// scope checks. Scope is resolved from the DB-authoritative `role`
+    /// column (via [`role_scope_bundle`]) on every call — never from a
+    /// bearer token's own `scope` claim, which could be stale relative to
+    /// a role change made after the token was minted (same "DB row is
+    /// authoritative" contract `role`/`tenant_id` already follow — see
+    /// [`CurrentUser`] struct docs). Only `.scope` is read by
+    /// [`skauswatch_auth::Claims::has_scope`]/`require_scope`; the other
+    /// fields are unused placeholders, not re-verified here.
+    fn scope_claims(&self) -> Claims {
+        Claims {
+            sub: self.id.to_string(),
+            iss: CLAIMS_ISSUER.to_owned(),
+            aud: CLAIMS_AUDIENCE.to_owned(),
+            iat: 0,
+            exp: 0,
+            scope: role_scope_bundle(&self.role).to_owned(),
+            tenant: self.tenant_id.to_string(),
+            teams: vec![],
+            roles: vec![self.role.clone()],
+        }
+    }
+
+    /// Scope-based authorization check (`security.md` OIDC Claims &
+    /// Scopes) — the mechanism every route handler's authz gate uses in
+    /// place of [`CurrentUser::require_role`]. Wildcards on the resource
+    /// segment are honored (`*:read` satisfies `alerts:read`) per
+    /// [`skauswatch_auth::Claims::has_scope`].
+    pub fn has_scope(&self, required: &str) -> bool {
+        self.scope_claims().has_scope(required)
+    }
+
+    /// Enforces a required scope, 403 "Insufficient permissions" on
+    /// absence — same response shape [`CurrentUser::require_role`] always
+    /// returned, so this is a pure mechanism swap for every existing
+    /// caller (role-string branching → scope branching), never a policy
+    /// change.
+    pub fn require_scope(&self, required: &str) -> Result<(), ApiError> {
+        if self.has_scope(required) {
             Ok(())
         } else {
             Err(ApiError::Forbidden("Insufficient permissions".to_owned()))
@@ -390,6 +454,98 @@ mod tests {
         assert!(role_scope_bundle("maintainer").contains("teams:read"));
         assert_eq!(role_scope_bundle("viewer"), "*:read");
         assert_eq!(role_scope_bundle("not-a-role"), "");
+    }
+
+    fn user_with_role(role: &str) -> CurrentUser {
+        CurrentUser {
+            id: 1,
+            email: "u@example.com".to_owned(),
+            full_name: None,
+            role: role.to_owned(),
+            is_active: true,
+            mfa_enabled: false,
+            created_at: None,
+            tenant_id: uuid::Uuid::nil(),
+        }
+    }
+
+    #[test]
+    fn require_scope_allows_and_denies_like_the_role_gate_it_replaces() {
+        // Mirrors `require_role_allows_and_denies` below, one level down the
+        // stack: `admin`'s bundle carries `*:admin`, which satisfies any
+        // `<resource>:admin` requirement (the shape every former
+        // `require_role(&["admin"])` call site now uses).
+        assert!(
+            user_with_role("admin")
+                .require_scope("codescan:admin")
+                .is_ok()
+        );
+        for role in ["maintainer", "viewer"] {
+            match user_with_role(role).require_scope("codescan:admin") {
+                Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
+                other => panic!("expected 403 for {role}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn require_scope_admin_and_maintainer_gate_via_wildcard_write() {
+        // The former `require_role(&["admin", "maintainer"])` shape: both
+        // bundles carry `*:write`, viewer's `*:read`-only bundle does not.
+        for role in ["admin", "maintainer"] {
+            assert!(user_with_role(role).require_scope("alerts:write").is_ok());
+        }
+        match user_with_role("viewer").require_scope("alerts:write") {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
+            other => panic!("expected 403 for viewer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_scope_super_admin_is_disjoint_from_admin() {
+        // Preserved quirk (`role_scope_bundle` docs): `super_admin` passes
+        // its own root-only scopes but NOT `admin`'s bundle, and `admin`
+        // does not pass `super_admin`'s — exactly like the literal
+        // role-string equality `require_role(&["super_admin"])` enforced.
+        assert!(
+            user_with_role("super_admin")
+                .require_scope("tenants:root")
+                .is_ok()
+        );
+        assert!(
+            user_with_role("super_admin")
+                .require_scope("spire:root")
+                .is_ok()
+        );
+        assert!(
+            user_with_role("super_admin")
+                .require_scope("codescan:admin")
+                .is_err()
+        );
+        assert!(
+            user_with_role("admin")
+                .require_scope("tenants:root")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn require_scope_codescan_review_admits_maintainer_only() {
+        // Preserved quirk: `routes::codescan::create_review`'s
+        // `require_role(&["maintainer"])` rejected admins too — `admin`'s
+        // bundle has no wildcard action named "review", so it still fails.
+        assert!(
+            user_with_role("maintainer")
+                .require_scope("codescan:review")
+                .is_ok()
+        );
+        for role in ["admin", "viewer"] {
+            assert!(
+                user_with_role(role)
+                    .require_scope("codescan:review")
+                    .is_err()
+            );
+        }
     }
 
     #[test]
