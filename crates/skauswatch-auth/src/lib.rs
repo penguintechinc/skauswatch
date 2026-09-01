@@ -581,26 +581,31 @@ fn resolve_required_pem<'a>(
     }
 }
 
-/// A single, process-lifetime ephemeral EC (P-256) keypair, generated only
-/// when `JWT_SIGNING_KEY`/`JWT_VERIFY_KEY` are unset outside production —
-/// mirrors the pre-ES256 `load_jwt_secret`'s "random ephemeral value, never
-/// a hardcoded/guessable one" dev fallback. Cached (rather than regenerated
-/// per call) so a single unconfigured process's own mint/verify round-trips
-/// internally (this crate's own tests aside — they use a fixed fixture
-/// keypair, never this path); it still does NOT let separate
-/// processes/services with no configured key interoperate, exactly like
-/// the old per-process ephemeral HS256 secret never did either — this is a
-/// "don't crash" convenience, not a substitute for real key configuration
-/// in any multi-service environment.
-fn ephemeral_dev_keypair() -> &'static (EncodingKey, DecodingKey) {
-    static KEYPAIR: std::sync::OnceLock<(EncodingKey, DecodingKey)> = std::sync::OnceLock::new();
+/// The single, process-lifetime EC (P-256) keypair shared by every
+/// non-production/test consumer in this crate — [`ephemeral_dev_keypair`]
+/// (the `JWT_SIGNING_KEY`/`JWT_VERIFY_KEY`-unset dev fallback every
+/// service's `AppState` falls back to) and
+/// [`test_fixture_keypair`]/[`test_fixture_keypair_pem`] (the fixture
+/// `skauswatch_testkit::jwt` and `services/manager::state`'s
+/// `AuthSettings::for_tests` draw from) all delegate here. These used to be
+/// three independently generated `OnceLock`s, each a different random
+/// keypair: a token minted through the test fixture could not be verified
+/// by a service whose `AppState` loaded its verify key through the
+/// ephemeral-dev fallback, so every router test that minted a token one way
+/// and verified it the other failed with a spurious 401. Generated exactly
+/// once per process; never a hardcoded PEM literal (secret scanners
+/// rightly flag any embedded EC private key, test fixture or not).
+fn shared_dev_keypair() -> &'static ((String, String), (EncodingKey, DecodingKey)) {
+    static KEYPAIR: std::sync::OnceLock<((String, String), (EncodingKey, DecodingKey))> =
+        std::sync::OnceLock::new();
     KEYPAIR.get_or_init(|| {
         let secret = p256::SecretKey::random(&mut rand_core::OsRng);
         let private_pem = secret
             .to_pkcs8_pem(pkcs8::LineEnding::LF)
             .unwrap_or_else(|e| {
                 unreachable!("in-memory EC key PKCS#8 PEM encoding cannot fail: {e}")
-            });
+            })
+            .to_string();
         let public_pem = secret
             .public_key()
             .to_public_key_pem(pkcs8::LineEnding::LF)
@@ -611,8 +616,24 @@ fn ephemeral_dev_keypair() -> &'static (EncodingKey, DecodingKey) {
             .unwrap_or_else(|e| unreachable!("freshly generated EC private PEM must parse: {e}"));
         let dec = DecodingKey::from_ec_pem(public_pem.as_bytes())
             .unwrap_or_else(|e| unreachable!("freshly generated EC public PEM must parse: {e}"));
-        (enc, dec)
+        ((private_pem, public_pem), (enc, dec))
     })
+}
+
+/// A single, process-lifetime ephemeral EC (P-256) keypair, generated only
+/// when `JWT_SIGNING_KEY`/`JWT_VERIFY_KEY` are unset outside production —
+/// mirrors the pre-ES256 `load_jwt_secret`'s "random ephemeral value, never
+/// a hardcoded/guessable one" dev fallback. Delegates to
+/// [`shared_dev_keypair`] rather than generating its own keypair, so a
+/// service running with no configured key still verifies tokens minted by
+/// this crate's own test fixtures (see [`shared_dev_keypair`]'s docs); it
+/// still does NOT let separate processes/services with no configured key
+/// interoperate with each other or with a genuinely production-configured
+/// key, exactly like the old per-process ephemeral HS256 secret never did
+/// either — this is a "don't crash" convenience, not a substitute for real
+/// key configuration in any multi-service environment.
+fn ephemeral_dev_keypair() -> &'static (EncodingKey, DecodingKey) {
+    &shared_dev_keypair().1
 }
 
 /// Parses a `JWT_SIGNING_KEY` PEM value into an [`EncodingKey`], wrapping a
@@ -668,45 +689,30 @@ pub fn load_jwt_verify_key() -> Result<DecodingKey, JwtKeyError> {
     }
 }
 
-/// Generates (once, cached) the canonical fixture ES256 keypair's PEM text
-/// (PKCS#8 private / SPKI public) — never a hardcoded literal (secret
-/// scanners rightly flag any embedded EC private key, test fixture or not).
-/// Crate-private: [`test_fixture_keypair`] is the pub accessor other crates
-/// use; this one exists only so this crate's own tests can exercise the
-/// PEM-parsing path itself with real PEM text.
+/// The canonical fixture ES256 keypair's PEM text (PKCS#8 private / SPKI
+/// public) — delegates to [`shared_dev_keypair`], the single cache also
+/// backing [`ephemeral_dev_keypair`] (see its docs for why). Crate-private
+/// and `#[cfg(test)]`-gated: unlike [`test_fixture_keypair`] (the `pub`
+/// accessor other crates' non-test `for_tests` code calls, so it can't be
+/// `#[cfg(test)]`-gated), this one exists only so this crate's own tests
+/// can exercise the PEM-parsing path itself with real PEM text — no
+/// non-test caller anywhere in the workspace.
+#[cfg(test)]
 fn test_fixture_keypair_pem() -> &'static (String, String) {
-    static PEM: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
-    PEM.get_or_init(|| {
-        let secret = p256::SecretKey::random(&mut rand_core::OsRng);
-        let private_pem = secret
-            .to_pkcs8_pem(pkcs8::LineEnding::LF)
-            .unwrap_or_else(|e| {
-                unreachable!("in-memory EC key PKCS#8 PEM encoding cannot fail: {e}")
-            })
-            .to_string();
-        let public_pem = secret
-            .public_key()
-            .to_public_key_pem(pkcs8::LineEnding::LF)
-            .unwrap_or_else(|e| {
-                unreachable!("in-memory EC public key SPKI PEM encoding cannot fail: {e}")
-            });
-        (private_pem, public_pem)
-    })
+    &shared_dev_keypair().0
 }
 
-/// The canonical throwaway ES256 (P-256) fixture keypair, generated once
-/// per process at runtime and cached — the single source of truth every
-/// consumer that needs this exact matched pair draws from, rather than each
-/// embedding its own copy of the PEM text. `crates/skauswatch-testkit::jwt`'s
-/// `signing_key`/`verify_key` and `services/manager::state`'s test-only
-/// `AuthSettings::for_tests` construction both call this directly (this
-/// crate is already a regular, non-dev dependency of both, unlike
-/// `skauswatch-testkit` itself, which can't be pulled into
-/// `skauswatch-manager`'s production dependency graph — see that module's
-/// docs) — because both draw from the *same cached instance* within one
-/// test process, a token minted via one consumer's `signing_key()` verifies
-/// against the other's `jwt_verify_key` without either crate needing to
-/// embed a byte-identical literal.
+/// The canonical throwaway ES256 (P-256) fixture keypair — delegates to
+/// [`shared_dev_keypair`], the single process-lifetime cache also backing
+/// [`ephemeral_dev_keypair`], so a token minted anywhere (this crate's test
+/// fixture, or any service's non-prod `AppState` verify key loaded via
+/// [`load_jwt_verify_key`]) verifies everywhere in non-prod/test.
+/// `crates/skauswatch-testkit::jwt`'s `signing_key`/`verify_key` and
+/// `services/manager::state`'s test-only `AuthSettings::for_tests`
+/// construction both call this directly (this crate is already a regular,
+/// non-dev dependency of both, unlike `skauswatch-testkit` itself, which
+/// can't be pulled into `skauswatch-manager`'s production dependency graph
+/// — see that module's docs).
 ///
 /// Not `#[cfg(test)]`-gated for the same reason [`ephemeral_dev_keypair`]
 /// isn't: `services/manager`'s test-support code that calls this (via
@@ -715,15 +721,7 @@ fn test_fixture_keypair_pem() -> &'static (String, String) {
 /// normal always-available function, not a `#[cfg(test)]` item invisible
 /// outside this crate's own test builds.
 pub fn test_fixture_keypair() -> &'static (EncodingKey, DecodingKey) {
-    static KEYPAIR: std::sync::OnceLock<(EncodingKey, DecodingKey)> = std::sync::OnceLock::new();
-    KEYPAIR.get_or_init(|| {
-        let (private_pem, public_pem) = test_fixture_keypair_pem();
-        let enc = EncodingKey::from_ec_pem(private_pem.as_bytes())
-            .unwrap_or_else(|e| unreachable!("freshly generated EC private PEM must parse: {e}"));
-        let dec = DecodingKey::from_ec_pem(public_pem.as_bytes())
-            .unwrap_or_else(|e| unreachable!("freshly generated EC public PEM must parse: {e}"));
-        (enc, dec)
-    })
+    &shared_dev_keypair().1
 }
 
 /// Test-only fixture wrappers — never a hardcoded PEM literal (secret

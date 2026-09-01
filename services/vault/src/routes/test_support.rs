@@ -32,8 +32,9 @@ struct TestClaims<'a> {
 /// — for exercising `CurrentUser`. `state` is unused for the key itself
 /// (every test-constructed [`AppState`] verifies against the matching
 /// fixture verify key — see `AppStateInner::for_tests_with_db`'s
-/// `test_jwt_verify_key`) but kept as a parameter so call sites don't need
-/// to change if a future test constructor ever varies the keypair.  Always
+/// `skauswatch_auth::test_fixture_keypair()`) but kept as a parameter so
+/// call sites don't need to change if a future test constructor ever
+/// varies the keypair.  Always
 /// stamped with [`TEST_TENANT`]; use [`sign_token_for_tenant`] for tests
 /// that need a specific (or second) tenant.
 #[allow(clippy::panic)]

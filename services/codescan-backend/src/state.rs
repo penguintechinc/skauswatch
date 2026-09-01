@@ -141,34 +141,10 @@ impl AppStateInner {
             license,
             db,
             auth: AuthSettings {
-                jwt_verify_key: test_jwt_verify_key(),
+                jwt_verify_key: skauswatch_auth::test_fixture_keypair().1.clone(),
             },
             crypto: Arc::new(crypto),
             streams: None,
         })
     }
-}
-
-/// Fixed, throwaway ES256 (P-256) test verify key — identical to
-/// `crates/skauswatch-testkit::jwt`'s `VERIFY_PEM` fixture (duplicated, not
-/// shared: [`AppStateInner::for_tests`]/[`for_tests_with_db`] are NOT
-/// `#[cfg(test)]`-gated, so this module can't pull in `skauswatch-testkit`,
-/// a `[dev-dependencies]`-only crate). Every `#[cfg(test)]` module in this
-/// service that mints a token via `skauswatch_testkit::jwt::signing_key()`
-/// verifies against a state built from this same PEM — keep the two
-/// fixtures byte-identical if either is ever regenerated.
-#[cfg_attr(not(test), allow(dead_code))]
-const TEST_VERIFY_PEM: &str = "-----BEGIN PUBLIC KEY-----
-MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEP0rRGDpY7mvK+4dCItv+ilnNZcl7
-6Y6TyB7Co5+J5qL9l1XVMoIf09g3asOdnSp55o5QtwR7qsf8qg3yVPbHRw==
------END PUBLIC KEY-----
-";
-
-/// Parses [`TEST_VERIFY_PEM`]. Panics on parse failure — a broken fixture
-/// literal is a test-infra fault, never a case under test.
-#[cfg_attr(not(test), allow(dead_code))]
-#[allow(clippy::panic)]
-fn test_jwt_verify_key() -> jsonwebtoken::DecodingKey {
-    jsonwebtoken::DecodingKey::from_ec_pem(TEST_VERIFY_PEM.as_bytes())
-        .unwrap_or_else(|e| panic!("test fixture verify key: {e}"))
 }
