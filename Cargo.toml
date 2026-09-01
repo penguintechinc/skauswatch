@@ -210,6 +210,12 @@ openidconnect = "=4.0.1"
 p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic", "ecdsa", "pem", "std"] }
 pkcs8 = { version = "=0.10.2", default-features = false, features = ["alloc", "std", "pem"] }
 rand_core = { version = "=0.6.4", default-features = false, features = ["std"] }
+# HttpOnly session cookies (H2 audit fix: webui JWT moves out of
+# localStorage) + the `sw_csrf` double-submit cookie — already resolved in
+# the tree as `axum-test`'s dev-dependency; pinned here at the same version
+# (0.18.1) so `services/manager` can depend on it directly for production
+# Set-Cookie construction, not just test-time parsing.
+cookie = { version = "=0.18.1", default-features = false }
 
 # HTTP client
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "gzip"] }

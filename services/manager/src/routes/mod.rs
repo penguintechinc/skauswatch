@@ -113,7 +113,17 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             skauswatch_auth::tenant_middleware::<AppState>,
-        ));
+        ))
+        // H2 audit fix: OUTERMOST layer (last `.layer()` call — see the
+        // ordering note on `tenant_middleware` above), so it runs BEFORE
+        // that shared, Bearer-only crate ever sees the request. Promotes
+        // the `sw_access` cookie into a synthesized `Authorization: Bearer`
+        // header so `tenant_middleware` (shared by five services, none of
+        // which know about this service's cookies) keeps working
+        // unmodified. `crate::auth::CurrentUser` independently re-resolves
+        // bearer-or-cookie and enforces CSRF for mutating cookie-authed
+        // requests — see that module's docs.
+        .layer(axum::middleware::from_fn(crate::auth::cookie_auth_bridge));
 
     Router::new()
         .nest("/api/v1", public.merge(agent).merge(protected))

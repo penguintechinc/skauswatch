@@ -6,11 +6,13 @@
 use std::sync::LazyLock;
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 
+use crate::auth::cookies;
 use crate::auth::{
     self, CurrentUser, create_access_token, create_refresh_token, decode_refresh, token_hash,
 };
@@ -130,7 +132,7 @@ struct LoginRow {
 pub(crate) async fn login(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<LoginRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<(HeaderMap, Json<serde_json::Value>), ApiError> {
     if !valid_email(&body.email) {
         return Err(validation("email", "value is not a valid email address"));
     }
@@ -224,18 +226,32 @@ pub(crate) async fn login(
     let (access, refresh_token) =
         issue_token_pair(&state, user.id, &user.role, user.tenant_id).await?;
 
-    Ok(Json(serde_json::json!({
-        "access_token": access,
-        "refresh_token": refresh_token,
-        "token_type": "Bearer",
-        "expires_in": state.auth.access_expires_minutes * 60,
-        "user": {
-            "id": user.id,
-            "email": user.email,
-            "full_name": user.full_name,
-            "role": user.role,
-        }
-    })))
+    // H2 audit fix: mint the HttpOnly cookie pair + `sw_csrf` alongside the
+    // unchanged response-body token — Bearer clients (CLI/mobile/the golden
+    // parity harness) keep reading the body and never see these cookies.
+    let cookie_headers = cookies::auth_cookies(
+        &access,
+        &refresh_token,
+        &cookies::generate_csrf_token(),
+        state.auth.access_expires_minutes * 60,
+        state.auth.refresh_expires_days * 86_400,
+    )?;
+
+    Ok((
+        cookie_headers,
+        Json(serde_json::json!({
+            "access_token": access,
+            "refresh_token": refresh_token,
+            "token_type": "Bearer",
+            "expires_in": state.auth.access_expires_minutes * 60,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "full_name": user.full_name,
+                "role": user.role,
+            }
+        })),
+    ))
 }
 
 /// Issues an access+refresh pair and stores sha256(refresh) per v1. `tenant`
@@ -315,7 +331,7 @@ struct RefreshRow {
 pub(crate) async fn refresh(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<RefreshRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<(HeaderMap, Json<serde_json::Value>), ApiError> {
     let claims = decode_refresh(&body.refresh_token, &state.auth.jwt_verify_key)?;
     let hash = token_hash(&body.refresh_token);
 
@@ -360,12 +376,26 @@ pub(crate) async fn refresh(
 
     let (access, new_refresh) =
         issue_token_pair(&state, row.user_id, &user.role, row.tenant_id).await?;
-    Ok(Json(serde_json::json!({
-        "access_token": access,
-        "refresh_token": new_refresh,
-        "token_type": "Bearer",
-        "expires_in": state.auth.access_expires_minutes * 60,
-    })))
+
+    // H2 audit fix: rotate all three cookies alongside the rotated
+    // response-body token pair.
+    let cookie_headers = cookies::auth_cookies(
+        &access,
+        &new_refresh,
+        &cookies::generate_csrf_token(),
+        state.auth.access_expires_minutes * 60,
+        state.auth.refresh_expires_days * 86_400,
+    )?;
+
+    Ok((
+        cookie_headers,
+        Json(serde_json::json!({
+            "access_token": access,
+            "refresh_token": new_refresh,
+            "token_type": "Bearer",
+            "expires_in": state.auth.access_expires_minutes * 60,
+        })),
+    ))
 }
 
 /// Documentation-only mirror of `logout`'s `serde_json::json!` body.
@@ -389,17 +419,25 @@ pub(crate) struct LogoutResponse {
 pub(crate) async fn logout(
     State(state): State<AppState>,
     user: CurrentUser,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<(HeaderMap, Json<serde_json::Value>), ApiError> {
     // v1 counts the pyDAL update over ALL of the user's rows (already-
     // revoked ones included) — no `revoked = false` filter.
     let result = sqlx::query("UPDATE refresh_tokens SET revoked = true WHERE user_id = $1")
         .bind(user.id)
         .execute(&state.db)
         .await?;
-    Ok(Json(serde_json::json!({
-        "message": "Successfully logged out",
-        "tokens_revoked": result.rows_affected(),
-    })))
+
+    // H2 audit fix: expire all three cookies on logout, mirroring the
+    // response-body-only contract v1 clients never saw.
+    let cookie_headers = cookies::clear_auth_cookies()?;
+
+    Ok((
+        cookie_headers,
+        Json(serde_json::json!({
+            "message": "Successfully logged out",
+            "tokens_revoked": result.rows_affected(),
+        })),
+    ))
 }
 
 /// Re-renders `CurrentUser.created_at` (Postgres `timestamp::text`, loaded
@@ -561,6 +599,7 @@ pub(crate) async fn register(
 mod tests {
     use super::*;
     use axum::http::StatusCode;
+    use cookie::Cookie as TestCookie;
 
     use crate::routes::test_support::{authed_user, db_state};
 
@@ -730,6 +769,175 @@ mod tests {
         assert!(claims.has_scope("users:admin"));
     }
 
+    /// H2 audit fix: login must set the HttpOnly cookie pair + the
+    /// JS-readable `sw_csrf` cookie, with the exact attributes the webui
+    /// frontend agent's cookie contract requires, IN ADDITION TO the
+    /// unchanged response-body token (Bearer clients keep working).
+    #[tokio::test]
+    async fn login_sets_httponly_secure_cookies_alongside_unchanged_body_token() {
+        let state = db_state(dev_license()).await;
+        seed_login_user(
+            &state,
+            "cookies@example.com",
+            "correct-horse",
+            "admin",
+            true,
+        )
+        .await;
+        let server = test_server_with_state(state).await;
+        let res = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "cookies@example.com", "password": "correct-horse"}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        let body_access = body["access_token"].as_str().unwrap_or_default();
+        assert!(!body_access.is_empty(), "body token must be unchanged");
+
+        let access: TestCookie = res.cookie("sw_access");
+        assert_eq!(access.value(), body_access);
+        assert_eq!(access.http_only(), Some(true));
+        assert_eq!(access.secure(), Some(true));
+        assert_eq!(access.same_site(), Some(cookie::SameSite::Lax));
+        assert_eq!(access.path(), Some("/"));
+
+        let refresh: TestCookie = res.cookie("sw_refresh");
+        assert_eq!(
+            refresh.value(),
+            body["refresh_token"].as_str().unwrap_or_default()
+        );
+        assert_eq!(refresh.http_only(), Some(true));
+        assert_eq!(refresh.secure(), Some(true));
+        assert_eq!(refresh.same_site(), Some(cookie::SameSite::Strict));
+        assert_eq!(refresh.path(), Some("/api/v1/auth"));
+
+        let csrf: TestCookie = res.cookie("sw_csrf");
+        assert_ne!(
+            csrf.http_only(),
+            Some(true),
+            "sw_csrf must be JS-readable, not HttpOnly"
+        );
+        assert_eq!(csrf.secure(), Some(true));
+        assert_eq!(csrf.same_site(), Some(cookie::SameSite::Lax));
+        assert!(!csrf.value().is_empty());
+    }
+
+    /// A request authenticated purely via the `sw_access` cookie (no
+    /// `Authorization` header at all) must succeed exactly like Bearer.
+    #[tokio::test]
+    async fn cookie_authed_request_succeeds_same_as_bearer() {
+        let state = db_state(dev_license()).await;
+        let id = seed_login_user(
+            &state,
+            "cookie-only@example.com",
+            "correct-horse",
+            "admin",
+            true,
+        )
+        .await;
+        let server = test_server_with_state(state).await;
+        let login = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "cookie-only@example.com", "password": "correct-horse"}))
+            .await;
+        login.assert_status_ok();
+        let access: TestCookie = login.cookie("sw_access");
+
+        let res = server
+            .get("/api/v1/auth/me")
+            .add_cookie(TestCookie::new("sw_access", access.value().to_owned()))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        assert_eq!(body["id"], id);
+    }
+
+    /// A cookie-authed mutating request without a matching `X-CSRF-Token`
+    /// must 403; the identical request WITH the header must succeed —
+    /// double-submit CSRF, exercised end-to-end through `/auth/logout`.
+    #[tokio::test]
+    async fn cookie_authed_logout_requires_matching_csrf_token() {
+        let state = db_state(dev_license()).await;
+        seed_login_user(
+            &state,
+            "csrf-logout@example.com",
+            "correct-horse",
+            "viewer",
+            true,
+        )
+        .await;
+        let server = test_server_with_state(state).await;
+        let login = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "csrf-logout@example.com", "password": "correct-horse"}))
+            .await;
+        login.assert_status_ok();
+        let access: TestCookie = login.cookie("sw_access");
+        let csrf: TestCookie = login.cookie("sw_csrf");
+
+        // No X-CSRF-Token header at all → 403.
+        let missing = server
+            .post("/api/v1/auth/logout")
+            .add_cookie(TestCookie::new("sw_access", access.value().to_owned()))
+            .add_cookie(TestCookie::new("sw_csrf", csrf.value().to_owned()))
+            .await;
+        missing.assert_status(StatusCode::FORBIDDEN);
+        let body: serde_json::Value = missing.json();
+        assert_eq!(body["error"], "CSRF token missing or invalid");
+
+        // Matching X-CSRF-Token header → success, cookies cleared.
+        let ok = server
+            .post("/api/v1/auth/logout")
+            .add_cookie(TestCookie::new("sw_access", access.value().to_owned()))
+            .add_cookie(TestCookie::new("sw_csrf", csrf.value().to_owned()))
+            .add_header("x-csrf-token", csrf.value())
+            .await;
+        ok.assert_status_ok();
+        let body: serde_json::Value = ok.json();
+        assert_eq!(body["message"], "Successfully logged out");
+    }
+
+    /// Critical regression: a Bearer-authed mutating request with NO
+    /// `X-CSRF-Token` at all must still succeed — this is what protects the
+    /// CLI/mobile/golden-parity-harness write paths.
+    #[tokio::test]
+    async fn bearer_authed_logout_succeeds_without_any_csrf_token() {
+        let state = db_state(dev_license()).await;
+        let (_, token) = authed_user(&state, "bearer-no-csrf@example.com", "viewer").await;
+        let server = test_server_with_state(state).await;
+        let res = server
+            .post("/api/v1/auth/logout")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status_ok();
+    }
+
+    /// Logout must expire all three cookies (`Max-Age=0`), regardless of
+    /// which auth mechanism reached it.
+    #[tokio::test]
+    async fn logout_expires_all_three_cookies() {
+        let state = db_state(dev_license()).await;
+        let (_, token) = authed_user(&state, "logout-clears-cookies@example.com", "viewer").await;
+        let server = test_server_with_state(state).await;
+        let res = server
+            .post("/api/v1/auth/logout")
+            .authorization_bearer(&token)
+            .await;
+        res.assert_status_ok();
+
+        for name in ["sw_access", "sw_refresh", "sw_csrf"] {
+            let cleared: TestCookie = res.cookie(name);
+            let max_age = cleared
+                .max_age()
+                .unwrap_or_else(|| panic!("{name}: expected Max-Age on cleared cookie"));
+            assert_eq!(
+                max_age,
+                cookie::time::Duration::seconds(0),
+                "{name}: expected Max-Age=0"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn refresh_rejects_garbage_and_unknown_tokens() {
         let state = db_state(dev_license()).await;
@@ -804,6 +1012,56 @@ mod tests {
         reused.assert_status(StatusCode::UNAUTHORIZED);
         let body: serde_json::Value = reused.json();
         assert_eq!(body["error"], "Refresh token has been revoked");
+    }
+
+    /// H2 audit fix: rotation must also re-set the cookie trio, not just
+    /// the response body.
+    #[tokio::test]
+    async fn refresh_sets_rotated_cookies() {
+        let state = db_state(dev_license()).await;
+        seed_login_user(
+            &state,
+            "refresh-cookies@example.com",
+            "correct-horse",
+            "viewer",
+            true,
+        )
+        .await;
+        let server = test_server_with_state(state).await;
+        let login = server
+            .post("/api/v1/auth/login")
+            .json(&serde_json::json!({"email": "refresh-cookies@example.com", "password": "correct-horse"}))
+            .await;
+        login.assert_status_ok();
+        let login_body: serde_json::Value = login.json();
+        let refresh_token = login_body["refresh_token"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+
+        let res = server
+            .post("/api/v1/auth/refresh")
+            .json(&serde_json::json!({"refresh_token": refresh_token}))
+            .await;
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+
+        let access: TestCookie = res.cookie("sw_access");
+        assert_eq!(
+            access.value(),
+            body["access_token"].as_str().unwrap_or_default()
+        );
+        assert_eq!(access.http_only(), Some(true));
+
+        let refresh: TestCookie = res.cookie("sw_refresh");
+        assert_eq!(
+            refresh.value(),
+            body["refresh_token"].as_str().unwrap_or_default()
+        );
+        assert_eq!(refresh.http_only(), Some(true));
+
+        let csrf: TestCookie = res.cookie("sw_csrf");
+        assert!(!csrf.value().is_empty());
     }
 
     #[tokio::test]
