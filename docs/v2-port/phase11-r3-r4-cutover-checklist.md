@@ -283,6 +283,44 @@ audit pass.
    environment once §3 step 2's real role trust policy is applied, per §3
    step 3 above).
 
+5. **Application e2e + smoke (webui + APIs)** — the runtime tier that has
+   NOT been exercised yet (only CI image builds + unit/integration +
+   golden parity have run; no deploy-and-hit-it test, because dal2/beta is
+   offline):
+   ```bash
+   # against a freshly deployed target (see §6.5 for the local first run)
+   make test-e2e          # webui Playwright, incl. src/client/tests/e2e/smoke.spec.ts
+   make test-functional
+   ```
+   Cover: every service's `/healthz` + `/readyz`; authenticated **and**
+   unauthenticated page loads; and — new in v2.0.0 — the **H2 cookie/CSRF
+   auth flow end-to-end** (login sets `sw_access`/`sw_refresh`/`sw_csrf`
+   cookies; a mutating request from the browser carries `X-CSRF-Token`; a
+   Bearer client still works and bypasses CSRF). Playwright `outputDir` =
+   `/tmp/playwright-skauswatch`; clean up after (pass or fail), per
+   `testing.md`.
+
+## 6.5 Local microk8s first run (pre-validation — do BEFORE beta)
+
+Because dal2/beta is offline, run §6 (items 1, 3, 5 — the mesh SVID and
+AWS-identity steps are beta/SPIRE-specific and may be N/A locally) against
+the **`local-alpha`** microk8s cluster first, to catch deploy/runtime
+breakage early rather than on beta.
+
+1. `microk8s start && microk8s enable registry dns hostpath-storage`
+   (registry = `localhost:32000`).
+2. Build the service images locally (amd64) and push to `localhost:32000`,
+   then `make deploy-alpha` (Helm → `local-alpha`, `alpha.yml` values).
+   **Provisions needed** because the charts now fail closed on empty
+   secrets (audit #109/#114): generate an ES256 keypair and supply
+   `jwt-signing-key`/`jwt-verify-key` (+ DB creds) via `existingSecret` or
+   `--set`; stand up the data stores the charts depend on (Postgres,
+   Valkey, OpenSearch).
+3. `kubectl --context local-alpha get pods -n skauswatch` → all Ready;
+   then run item 5 (`make test-e2e`/`test-functional`) against the local
+   ingress. Record results here; a green local run is the pre-req before
+   the beta soak (§7).
+
 ## 7. Beta soak window
 
 1. Leave beta running with real traffic/synthetic load for a defined
