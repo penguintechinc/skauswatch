@@ -93,8 +93,16 @@ affinity: {}
 
 # services/monitor/src/config.rs wires MONITOR_API_*/MONITOR_AUTH_ENABLED/
 # MONITOR_ES_* (JWT_VERIFY_KEY is loaded separately via skauswatch_auth,
-# see the env entry below) — no DB_*/REDIS_* vars are read at runtime
-# (event store is OpenSearch, reached via the ES-compatible API).
+# see the env entry below). No REDIS_* vars are read at runtime (event
+# store is OpenSearch, reached via the ES-compatible API).
+#
+# CHART FIX: DB_* IS wired below, unlike the stale claim this comment
+# previously made — services/monitor/src/state.rs's build_threat_store
+# calls skauswatch_db::DbConfig::from_env() for the optional TAXII
+# threat-intel store (gracefully degrades to disabled when DB_* is
+# absent/unreachable, see that function's doc comment) and the new
+# `migrate` subcommand (services/monitor/src/main.rs, K8s Job target,
+# templates/migrate-job.yaml) requires it and fails closed without it.
 env:
   - name: MONITOR_API_HOST
     value: "0.0.0.0"
@@ -157,6 +165,43 @@ env:
       configMapKeyRef:
         name: skauswatch-monitor-config
         key: release-mode
+  # CHART FIX: see the env-block comment above — wires the optional TAXII
+  # threat-intel store and is required by the `migrate` Job.
+  - name: DB_TYPE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: db-type
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: db-host
+  - name: DB_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: db-port
+  - name: DB_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: db-name
+  - name: DB_POOL_SIZE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: db-pool-size
+  - name: DB_USER
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-monitor.secretName" . }}'
+        key: db-user
+  - name: DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-monitor.secretName" . }}'
+        key: db-pass
 
 # CHART FIX: monitor also serves standardized /healthz + /readyz via
 # skauswatch_telemetry::health_router (services/monitor/src/main.rs), merged
@@ -192,6 +237,13 @@ configMapData:
   es-index-pattern: "skauswatch-events-*"
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
+  # CHART FIX: optional TAXII threat-intel store + required by the
+  # `migrate` Job — see the env-block comment above.
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "2"
 
 # MUST be set via --set/values or existingSecret; services fail closed
 # on a blank/known-default secret (never ship a real credential here).
@@ -203,3 +255,25 @@ secretData:
   es-username: ""
   es-password: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
+  # CHART FIX: see the env-block comment above.
+  db-user: ""
+  db-pass: ""
+
+# templates/migrate-job.yaml — pre-install/pre-upgrade Helm hook Job that
+# runs "<binary> migrate" (sqlx migrations, services/<svc>/migrations/)
+# against the configured database before the Deployment is touched.
+migrateJob:
+  enabled: true
+  # Optional separate admin/DDL-scoped credential for schema migrations,
+  # per the per-service-DB-accounts standard (backend.md "Database Tier
+  # Architecture" — read-write vs admin/DDL grants). Defaults empty
+  # (fail-closed): leave unset to reuse this chart's own DB_USER/DB_PASS
+  # (secretData db-user/db-pass) — fine for local/alpha. Set secretName to
+  # point the Job at a dedicated admin Secret for stricter environments;
+  # an empty secretName never silently falls back to a guessed credential
+  # — it is simply not wired, so the Job keeps using its own DB_USER/
+  # DB_PASS.
+  dbCredentials:
+    secretName: ""
+    userKey: "db-user"
+    passKey: "db-pass"

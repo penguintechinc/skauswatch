@@ -237,3 +237,22 @@ secretData:
   # by bumping VAULT_MEK_CURRENT_VERSION and adding VAULT_MEK_V{n}.
   vault-mek-v1: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
+
+# templates/migrate-job.yaml — pre-install/pre-upgrade Helm hook Job that
+# runs "<binary> migrate" (sqlx migrations, services/<svc>/migrations/)
+# against the configured database before the Deployment is touched.
+migrateJob:
+  enabled: true
+  # Optional separate admin/DDL-scoped credential for schema migrations,
+  # per the per-service-DB-accounts standard (backend.md "Database Tier
+  # Architecture" — read-write vs admin/DDL grants). Defaults empty
+  # (fail-closed): leave unset to reuse this chart's own DB_USER/DB_PASS
+  # (secretData db-user/db-pass) — fine for local/alpha. Set secretName to
+  # point the Job at a dedicated admin Secret for stricter environments;
+  # an empty secretName never silently falls back to a guessed credential
+  # — it is simply not wired, so the Job keeps using its own DB_USER/
+  # DB_PASS.
+  dbCredentials:
+    secretName: ""
+    userKey: "db-user"
+    passKey: "db-pass"

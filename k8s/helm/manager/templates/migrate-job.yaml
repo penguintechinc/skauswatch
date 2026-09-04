@@ -1,0 +1,55 @@
+{{- if .Values.migrateJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "skauswatch-manager.fullname" . }}-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "skauswatch-manager.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "skauswatch-manager.selectorLabels" . | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "skauswatch-manager.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: migrate
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: {{ include "skauswatch-manager.image" . | quote }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args: ["migrate"]
+        env:
+        {{- tpl (toYaml .Values.env) . | nindent 12 }}
+        {{- if .Values.migrateJob.dbCredentials.secretName }}
+            # Overrides the base env block's DB_USER/DB_PASS above
+            # (Kubernetes resolves duplicate env var names within a
+            # container by taking the last-defined entry) with a separate
+            # admin/DDL-scoped credential — see values.yaml
+            # migrateJob.dbCredentials.
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.migrateJob.dbCredentials.secretName | quote }}
+                  key: {{ .Values.migrateJob.dbCredentials.userKey | default "db-user" | quote }}
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.migrateJob.dbCredentials.secretName | quote }}
+                  key: {{ .Values.migrateJob.dbCredentials.passKey | default "db-pass" | quote }}
+        {{- end }}
+{{- end }}
