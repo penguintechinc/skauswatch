@@ -53,7 +53,11 @@ pub(crate) struct HealthResponse {
             this service is never exposed outside the cluster network and \
             has no auth layer of its own."
     ),
-    paths(crate::ingest::handle_ingest, crate::ingest::handle_health),
+    paths(
+        crate::ingest::handle_ingest,
+        crate::ingest::handle_health,
+        crate::ingest::handle_ready,
+    ),
     components(schemas(IngestAcceptedResponse, IngestErrorResponse, HealthResponse)),
     tags((name = "logs", description = "SIEM log ingest and liveness")),
     modifiers(&SecurityAddon),

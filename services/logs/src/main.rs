@@ -1,8 +1,9 @@
 //! SkausWatch logs entry point — the SIEM HTTP ingest endpoint the
 //! manager's siem router proxies to (`LOGS_URL`). `serve` (default)
-//! runs `POST /ingest` + `GET /healthz` on `HTTP_PORT`, applies the OpenSearch
-//! ISM policy at startup, and exposes Prometheus metrics on :9090.
-//! `healthcheck` is the container-native probe (no curl in images).
+//! runs `POST /ingest` + `GET /healthz` (liveness) + `GET /readyz`
+//! (readiness) on `HTTP_PORT`, applies the OpenSearch ISM policy at
+//! startup, and exposes Prometheus metrics on :9090. `healthcheck` is the
+//! container-native probe (no curl in images).
 //!
 //! Scope note: this port covers the HTTP→OpenSearch path that the manager
 //! contract depends on. The v1 secondary paths — the S3/Parquet mirror sink,
@@ -105,16 +106,15 @@ async fn serve() -> anyhow::Result<()> {
         jwt_verify_key,
         license,
     };
-    // `rate_limit::apply` wraps only the production build of
-    // `ingest::router`, not the function itself — see `crate::rate_limit`
-    // module docs for why the two stay separate. Unlike vault/monitor/
-    // depgate, `GET /healthz` is mounted inside `ingest::router` itself
-    // (not merged in separately here), so it is technically inside the
-    // governed surface — harmless in practice, since the manager's
-    // liveness probe hits it from a distinct source IP with its own
-    // independent quota, never sharing a bucket with client `/ingest`
-    // traffic.
-    let app = rate_limit::apply(ingest::router(state));
+    // `rate_limit::apply` wraps only `ingest::business_router` (`POST
+    // /ingest`) — never `ingest::health_router` (`/healthz` + `/readyz`).
+    // First-run microk8s deploy bug: health used to be merged into the
+    // same router `rate_limit::apply` wrapped, so k8s probes (no JWT, no
+    // source-IP diversity, high frequency) got 401'd by the tenant
+    // middleware and/or 429'd by the governor. Both endpoints are merged
+    // in after governing, fully outside auth and rate limiting.
+    let app = rate_limit::apply(ingest::business_router(state.clone()))
+        .merge(ingest::health_router().with_state(state));
 
     let addr: SocketAddr = ([0, 0, 0, 0], cfg.http_port).into();
     let listener = tokio::net::TcpListener::bind(addr).await?;

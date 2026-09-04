@@ -2,17 +2,18 @@
 //! hardened with the auth/tenancy/licensing this service shipped without
 //! (see `docs/v2-port/feature-flags.md`'s `services/logs` gap). Exposes
 //! `POST /ingest` (the endpoint the manager's siem router proxies to via
-//! `LOGS_URL`) and `GET /healthz` (the manager's liveness probe), both on
-//! the v1 `HTTP_PORT` (5010).
+//! `LOGS_URL`), `GET /healthz` (liveness), and `GET /readyz` (readiness —
+//! OpenSearch reachable), all on the v1 `HTTP_PORT` (5010).
 //!
 //! `POST /ingest` now requires a valid tenant-bearing bearer JWT
 //! (`skauswatch_auth::tenant_middleware`) and the `LOG_INGEST_FLAG` PostHog
-//! flag (`penguin_licensing::axum::FlagGate`) — see [`router`]. Every
-//! normalized document is stamped with the caller's `TenantContext` tenant
-//! (never a client-supplied value) before it is bulk-indexed, so downstream
-//! tenant-scoped search (e.g. monitor's `tenant_id` term filter) has
-//! provenance to filter on. `GET /healthz` stays unauthenticated — it is the
-//! manager's liveness probe and carries no tenant-scoped data.
+//! flag (`penguin_licensing::axum::FlagGate`) — see [`business_router`].
+//! Every normalized document is stamped with the caller's `TenantContext`
+//! tenant (never a client-supplied value) before it is bulk-indexed, so
+//! downstream tenant-scoped search (e.g. monitor's `tenant_id` term filter)
+//! has provenance to filter on. `/healthz`/`/readyz` (see [`health_router`])
+//! stay unauthenticated and outside the per-IP rate limiter — they are k8s's
+//! probes and carry no tenant-scoped data.
 
 use std::sync::Arc;
 
@@ -91,18 +92,21 @@ impl skauswatch_auth::JwtSecretSource for AppState {
     }
 }
 
-/// Builds the ingest router (`POST /ingest`, `GET /healthz`).
+/// Builds the `/ingest` sub-router only — tenant + flag gated, applied in
+/// the house tenant → feature ordering
+/// (`skauswatch_auth::tenant_middleware`'s ordering contract): `FlagGate`
+/// (added first, so it sits innermost, closest to the handler) then
+/// `tenant_middleware` (added last, so it sits outermost and runs first) —
+/// a request is tenant-authenticated before the flag is even consulted.
 ///
-/// `/ingest` is wrapped in two layers, applied in the house tenant → feature
-/// ordering (`skauswatch_auth::tenant_middleware`'s ordering contract):
-/// `FlagGate` (added first, so it sits innermost, closest to the handler)
-/// then `tenant_middleware` (added last, so it sits outermost and runs
-/// first) — a request is tenant-authenticated before the flag is even
-/// consulted. `/healthz` is merged in afterward, outside both layers: it is
-/// the manager's unauthenticated liveness probe
-/// (`docs/v2-port/logs-contract.md`) and carries no tenant-scoped data.
-pub fn router(state: AppState) -> Router {
-    let ingest = Router::new()
+/// Deliberately excludes `/healthz`/`/readyz` (see [`health_router`]):
+/// `main.rs::serve()` wraps only this router in `crate::rate_limit`'s
+/// governor. Merging health into this router before the governor is
+/// applied was the first-run microk8s deploy bug — k8s probes carry no
+/// source-IP diversity and no JWT, so they either got 401'd by
+/// `tenant_middleware` or 429'd by the governor depending on mount order.
+pub(crate) fn business_router(state: AppState) -> Router {
+    Router::new()
         .route("/ingest", post(handle_ingest))
         .layer(axum::middleware::from_fn_with_state(
             FlagGate::new(state.license.clone(), LOG_INGEST_FLAG),
@@ -111,12 +115,28 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             skauswatch_auth::tenant_middleware::<AppState>,
-        ));
-
-    Router::new()
-        .merge(ingest)
-        .route("/healthz", get(handle_health))
+        ))
         .with_state(state)
+}
+
+/// `/healthz` (liveness — process is serving HTTP) + `/readyz` (readiness —
+/// the OpenSearch write-path dependency is reachable). Both are always
+/// unauthenticated and — via [`business_router`]'s split — always outside
+/// the per-IP rate limiter; k8s liveness/readiness probes carry no JWT and
+/// hit far more often than any sane per-client burst allows.
+pub(crate) fn health_router() -> Router<AppState> {
+    Router::new()
+        .route("/healthz", get(handle_health))
+        .route("/readyz", get(handle_ready))
+}
+
+/// Convenience combinator used only by this module's own tests — the full
+/// (business + health) surface with no governor applied. Production wiring
+/// (`main.rs::serve()`) calls [`business_router`] and [`health_router`]
+/// separately so it can wrap only the former in `crate::rate_limit`.
+#[cfg(test)]
+fn router(state: AppState) -> Router {
+    business_router(state.clone()).merge(health_router().with_state(state))
 }
 
 /// Stamps the caller's tenant onto a normalized OCSF document as a
@@ -265,6 +285,45 @@ pub(crate) async fn handle_health() -> Response {
         StatusCode::OK,
         &JsonVal::Obj(vec![
             ("status".to_owned(), JsonVal::Str("ok".to_owned())),
+            ("service".to_owned(), JsonVal::Str("logs".to_owned())),
+        ]),
+    )
+}
+
+/// `GET /readyz` — readiness probe: the OpenSearch write path this service
+/// depends on is reachable. Distinct from `/healthz` (liveness, process-up
+/// only): a pod can be alive but not yet ready to receive `/ingest`
+/// traffic if OpenSearch is still starting.
+#[utoipa::path(
+    get,
+    path = "/readyz",
+    tag = "logs",
+    responses(
+        (status = 200, description = "OpenSearch reachable", body = crate::openapi::HealthResponse),
+        (status = 503, description = "OpenSearch unreachable", body = crate::openapi::HealthResponse),
+    ),
+)]
+pub(crate) async fn handle_ready(State(state): State<AppState>) -> Response {
+    let ready = state
+        .http
+        .get(format!("{}/_cluster/health", state.opensearch_url))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .is_ok_and(|resp| resp.status().is_success());
+
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    ordered_json(
+        status,
+        &JsonVal::Obj(vec![
+            (
+                "status".to_owned(),
+                JsonVal::Str((if ready { "ready" } else { "not ready" }).to_owned()),
+            ),
             ("service".to_owned(), JsonVal::Str("logs".to_owned())),
         ]),
     )
@@ -426,6 +485,80 @@ mod tests {
         let res = server.get("/healthz").await;
         res.assert_status_ok();
         assert_eq!(res.text(), r#"{"status":"ok","service":"logs"}"#);
+    }
+
+    #[tokio::test]
+    async fn readyz_is_ok_with_no_authorization_header_when_opensearch_is_reachable() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_cluster/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock)
+            .await;
+
+        let server = test_server(&mock.uri());
+        // No `.authorization_bearer(...)` call — k8s probes carry no JWT.
+        let res = server.get("/readyz").await;
+        res.assert_status_ok();
+        assert_eq!(res.text(), r#"{"status":"ready","service":"logs"}"#);
+    }
+
+    #[tokio::test]
+    async fn readyz_is_503_when_opensearch_is_unreachable() {
+        let server = test_server("http://127.0.0.1:1");
+        let res = server.get("/readyz").await;
+        res.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(res.text(), r#"{"status":"not ready","service":"logs"}"#);
+    }
+
+    /// Regression test for the first-run microk8s deploy bug
+    /// (`docs/v2-port/phase11-r3-r4-cutover-checklist.md`): `/healthz` used
+    /// to be built into the same router `rate_limit::apply` wrapped in
+    /// `main.rs::serve()`, so a k8s probe (no JWT, no source-IP diversity,
+    /// polls far more often than any sane per-client burst) tripped the
+    /// governor once its quota was exhausted by other traffic on the same
+    /// bucket. `business_router` (governed) and `health_router` (never
+    /// governed) must stay structurally separate — this reconstructs
+    /// `main.rs`'s exact assembly with an artificially tiny burst so the
+    /// governor is provably active, then proves `/healthz` never 429s
+    /// while `/ingest` — on the very same source IP — does.
+    #[tokio::test]
+    async fn health_router_is_exempt_from_the_rate_limiter_that_governs_ingest() {
+        let license = skauswatch_testkit::license::dev_license("skauswatch");
+        let state = state_for("http://unused", Clock::Fixed(pinned_now()), license);
+        let app = crate::rate_limit::apply_with(business_router(state.clone()), 60, 1)
+            .merge(health_router().with_state(state));
+        let server = axum_test::TestServer::new(app);
+
+        // Five requests, well past the burst=1 governor limit applied to
+        // `/ingest` below — `/healthz` must never see a 429, with no
+        // Authorization header sent (k8s probes carry none).
+        for _ in 0..5 {
+            server
+                .get("/healthz")
+                .add_header("x-forwarded-for", "203.0.113.9")
+                .await
+                .assert_status_ok();
+        }
+
+        // Sanity: the same source IP genuinely trips the governor on the
+        // governed surface — proving this test would have caught the
+        // original bug rather than passing vacuously.
+        let _ = server
+            .post("/ingest")
+            .authorization_bearer(bearer_for(TEST_TENANT))
+            .add_header("x-forwarded-for", "203.0.113.9")
+            .content_type("application/json")
+            .text(r#"{"message":"x"}"#)
+            .await;
+        let second = server
+            .post("/ingest")
+            .authorization_bearer(bearer_for(TEST_TENANT))
+            .add_header("x-forwarded-for", "203.0.113.9")
+            .content_type("application/json")
+            .text(r#"{"message":"x"}"#)
+            .await;
+        second.assert_status(StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
