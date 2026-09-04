@@ -21,6 +21,12 @@ resources:
 
 configMapData:
   log-level: "debug"
+  # FIRST-RUN FIX (k8s-ops): see values.yaml DB_TYPE env comment.
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "2"
   redis-url: "redis://redis:6379/0"
   redis-key-prefix: "skauswatch"
   ai-provider: "anthropic"

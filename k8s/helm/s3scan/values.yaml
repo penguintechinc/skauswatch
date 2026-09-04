@@ -47,8 +47,8 @@ podAnnotations: {}
 
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
+  runAsUser: 10001  # FIRST-RUN FIX (k8s-ops): matches Dockerfile useradd --uid 10001 "appuser"; was 1000 (mismatch broke pki's ssh-keygen subprocess: "No user exists for uid 1000")
+  fsGroup: 10001
   # Required for Pod Security Admission "restricted" compliance (and
   # good practice under "baseline") -- see k8s/helm/README.md "Cluster
   # security baseline".
@@ -186,6 +186,21 @@ env:
         name: '{{ include "skauswatch-s3scan.secretName" . }}'
         key: otx-api-key
         optional: true
+  # FIRST-RUN FIX (k8s-ops, local alpha bring-up): s3scan links
+  # skauswatch-vault (Cargo.toml) and calls its envelope-encryption init
+  # eagerly at worker startup — confirmed crash: "envelope encryption init
+  # failed: VAULT_MEK_V1 (or VAULT_MEK) environment variable not set".
+  # This chart never wired VAULT_MEK — mirrors k8s/helm/vault's pattern.
+  # NOT committed; flagged to the user for a real chart fix. Same gap
+  # likely affects worker-codescan (also links skauswatch-vault) — check
+  # when that chart is deployed.
+  - name: VAULT_MEK_CURRENT_VERSION
+    value: "1"
+  - name: VAULT_MEK_V1
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
+        key: vault-mek-v1
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
@@ -267,3 +282,5 @@ secretData:
   virustotal-api-key: ""
   otx-api-key: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
+  # FIRST-RUN FIX (k8s-ops): see VAULT_MEK_V1 env comment above.
+  vault-mek-v1: ""

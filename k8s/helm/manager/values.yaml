@@ -46,8 +46,8 @@ podAnnotations: {}
 
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
+  runAsUser: 10001  # FIRST-RUN FIX (k8s-ops): matches Dockerfile useradd --uid 10001 "appuser"; was 1000 (mismatch broke pki's ssh-keygen subprocess: "No user exists for uid 1000")
+  fsGroup: 10001
   # Required for Pod Security Admission "restricted" compliance (and
   # good practice under "baseline") -- see k8s/helm/README.md "Cluster
   # security baseline".
@@ -182,6 +182,20 @@ env:
       secretKeyRef:
         name: '{{ include "skauswatch-manager.secretName" . }}'
         key: jwt-verify-key
+  # FIRST-RUN FIX (k8s-ops, local alpha bring-up): services/manager/src/state.rs
+  # requires VAULT_MEK* for envelope encryption (S3 bucket credential storage,
+  # crates/skauswatch-vault/src/crypto.rs) and hard-fails startup without it
+  # (confirmed: manager crashed with "envelope encryption init failed:
+  # VAULT_MEK_V1 (or VAULT_MEK) environment variable not set"). This chart
+  # never wired VAULT_MEK — mirrors k8s/helm/vault/values.yaml's pattern.
+  # NOT committed; flagged to the user for a real chart fix.
+  - name: VAULT_MEK_CURRENT_VERSION
+    value: "1"
+  - name: VAULT_MEK_V1
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-manager.secretName" . }}'
+        key: vault-mek-v1
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
@@ -268,3 +282,9 @@ secretData:
   jwt-signing-key: ""
   # PEM EC P-256 public key (SPKI) -- manager also verifies its own tokens.
   jwt-verify-key: ""
+  # FIRST-RUN FIX (k8s-ops): see VAULT_MEK_V1 env comment above. 32-byte
+  # key, base64-encoded (`openssl rand -base64 32`). MUST match vault's/
+  # worker-vault-sync's vault-mek-v1 if manager and vault ever share
+  # envelope-encrypted data; today they are independent (manager encrypts
+  # its own S3 bucket creds separately from vault's secret store).
+  vault-mek-v1: ""

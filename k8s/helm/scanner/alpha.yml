@@ -8,6 +8,27 @@ image:
 
 imagePullSecrets: []
 
+# FIRST-RUN FIX (k8s-ops, local alpha bring-up): base values.yaml adds
+# CAP_NET_RAW unconditionally for masscan/ASM (services/scanner/src/asm.rs),
+# documented as needing PSA "baseline or looser" — but K8s Pod Security
+# Admission's actual "baseline" policy does NOT allow adding NET_RAW (its
+# capabilities allowlist is {AUDIT_WRITE,CHOWN,DAC_OVERRIDE,FOWNER,FSETID,
+# KILL,MKNOD,NET_BIND_SERVICE,SETFCAP,SETGID,SETPCAP,SETUID,SYS_CHROOT} —
+# confirmed empirically: pod creation rejected under skauswatch namespace's
+# enforce=baseline with "must not include NET_RAW"). asm-enabled is
+# "false" in this env's configMapData below, so ASM/masscan never runs —
+# drop the capability here rather than escalate the namespace. NOT
+# committed; flagged to the user (real fix needs either a scanner-specific
+# `privileged`-tier namespace/Kyverno exception when ASM is actually
+# enabled, or a make-this-conditional-on-asm-enabled chart change).
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+    add: []
+  readOnlyRootFilesystem: true
+
 autoscaling:
   enabled: false
 
@@ -21,6 +42,12 @@ resources:
 
 configMapData:
   log-level: "debug"
+  # FIRST-RUN FIX (k8s-ops): see values.yaml DB_TYPE env comment.
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "2"
   redis-url: "redis://redis:6379/0"
   redis-key-prefix: "skauswatch"
   clamav-host: "clamav"
