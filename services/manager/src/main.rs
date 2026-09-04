@@ -1,7 +1,8 @@
 //! SkausWatch manager service entry point. `serve` (default) runs the REST
 //! /api/v1 + health/metrics stack and the v1-parity gRPC control plane;
 //! `healthcheck` is the container-native health probe (no curl in images,
-//! per container standards).
+//! per container standards); `migrate` applies pending SQL migrations
+//! (K8s Job target only — never run at `serve` startup).
 
 mod auth;
 mod deprecated;
@@ -35,6 +36,12 @@ enum Command {
     /// the authenticated full document (`routes::openapi::ApiDoc`), never
     /// hand-edited. See `docs/v2-port/openapi-pattern.md`.
     Openapi,
+    /// Applies pending SQL migrations from `services/manager/migrations`
+    /// against the configured database and exits — the K8s Job migration
+    /// target (`skauswatch-manager migrate`). Schema authority is `sqlx
+    /// migrate`, never an auto-run at `serve` startup (see
+    /// `skauswatch_db` crate docs).
+    Migrate,
 }
 
 #[tokio::main]
@@ -43,7 +50,30 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve => serve().await,
         Command::Healthcheck => healthcheck().await,
         Command::Openapi => print_openapi(),
+        Command::Migrate => migrate().await,
     }
+}
+
+/// Embeds this service's `migrations/` directory at compile time (no DB
+/// required to build) — applied only via `Command::Migrate`.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
+
+/// Applies every pending migration in [`MIGRATOR`] and exits — see
+/// `Command::Migrate`. Fails closed: any connection or migration error
+/// returns a non-zero exit rather than leaving the schema partially
+/// applied and reporting success.
+async fn migrate() -> anyhow::Result<()> {
+    skauswatch_telemetry::init_tracing("skauswatch-manager");
+    let db_cfg =
+        skauswatch_db::DbConfig::from_env().map_err(|e| anyhow::anyhow!("db config: {e}"))?;
+    let pool = skauswatch_db::connect_postgres(&db_cfg)
+        .await
+        .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+    skauswatch_db::run_migrations(&pool, &MIGRATOR)
+        .await
+        .map_err(|e| anyhow::anyhow!("migration failed: {e}"))?;
+    tracing::info!("migrations applied");
+    Ok(())
 }
 
 /// Emits `routes::openapi::ApiDoc`'s generated spec as YAML — the source of
@@ -180,5 +210,20 @@ async fn healthcheck() -> anyhow::Result<()> {
         Ok(())
     } else {
         anyhow::bail!("healthcheck failed: {}", resp.status())
+    }
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::MIGRATOR;
+
+    /// Guards the embedded migrator against silent drift from
+    /// `services/manager/migrations/*.sql` (e.g. a moved/renamed
+    /// directory that `sqlx::migrate!()` would otherwise embed silently
+    /// as empty) — see `Command::Migrate`. Update this count when adding
+    /// a new migration file.
+    #[test]
+    fn migrator_embeds_expected_migration_count() {
+        assert_eq!(MIGRATOR.iter().count(), 6);
     }
 }

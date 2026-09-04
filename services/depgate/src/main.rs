@@ -4,7 +4,8 @@
 //! runs the `/v2/*` + `/npm/*` + `/pypi/*` proxies + `/api/v1/depgate/*`
 //! admin API + health/metrics; `healthcheck` is the container-native probe
 //! (no curl in images); `seed` warm-starts the cache from a seed manifest;
-//! `openapi` regenerates the committed spec.
+//! `openapi` regenerates the committed spec; `migrate` applies pending SQL
+//! migrations (K8s Job target only — never run at `serve` startup).
 
 mod auth;
 mod bundle;
@@ -75,6 +76,12 @@ enum Command {
     /// stale, then exits — the CLI trigger for the §6 re-scan sweep. Never
     /// run on the hot serve path.
     RescanSweep,
+    /// Applies pending SQL migrations from `services/depgate/migrations`
+    /// against the configured database and exits — the K8s Job migration
+    /// target (`skauswatch-depgate migrate`). Schema authority is `sqlx
+    /// migrate`, never an auto-run at `serve` startup (see
+    /// `skauswatch_db` crate docs).
+    Migrate,
 }
 
 /// `skauswatch-depgate bundle <export|import>` subcommands.
@@ -106,7 +113,30 @@ async fn main() -> anyhow::Result<()> {
         Command::Openapi => print_openapi(),
         Command::Bundle { action } => run_bundle(action).await,
         Command::RescanSweep => run_rescan_sweep().await,
+        Command::Migrate => run_migrate().await,
     }
+}
+
+/// Embeds this service's `migrations/` directory at compile time (no DB
+/// required to build) — applied only via `Command::Migrate`.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
+
+/// Applies every pending migration in [`MIGRATOR`] and exits — see
+/// `Command::Migrate`. Fails closed: any connection or migration error
+/// returns a non-zero exit rather than leaving the schema partially
+/// applied and reporting success.
+async fn run_migrate() -> anyhow::Result<()> {
+    skauswatch_telemetry::init_tracing("skauswatch-depgate");
+    let db_cfg =
+        skauswatch_db::DbConfig::from_env().map_err(|e| anyhow::anyhow!("db config: {e}"))?;
+    let pool = skauswatch_db::connect_postgres(&db_cfg)
+        .await
+        .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+    skauswatch_db::run_migrations(&pool, &MIGRATOR)
+        .await
+        .map_err(|e| anyhow::anyhow!("migration failed: {e}"))?;
+    tracing::info!("migrations applied");
+    Ok(())
 }
 
 /// Emits the aggregated OpenAPI document as YAML — the source of truth for
@@ -300,5 +330,18 @@ async fn healthcheck() -> anyhow::Result<()> {
         Ok(())
     } else {
         anyhow::bail!("healthcheck failed: {}", resp.status())
+    }
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::MIGRATOR;
+
+    /// Guards the embedded migrator against silent drift from
+    /// `services/depgate/migrations/*.sql` — see `Command::Migrate`.
+    /// Update this count when adding a new migration file.
+    #[test]
+    fn migrator_embeds_expected_migration_count() {
+        assert_eq!(MIGRATOR.iter().count(), 3);
     }
 }

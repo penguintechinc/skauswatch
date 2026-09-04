@@ -1,8 +1,9 @@
 //! Vault cloud-sync worker. `serve` (default) consumes all five provider
 //! streams (`vault:sync:{aws,azure,gcp,oracle,kubernetes}`) with the shared
 //! consumer-group harness and runs standard health/metrics endpoints;
-//! `healthcheck` is the container-native probe. Rust port of
-//! `icebox/services/sync-worker/worker.py`.
+//! `healthcheck` is the container-native probe; `migrate` applies pending
+//! SQL migrations (K8s Job target only — never run at `serve` startup).
+//! Rust port of `icebox/services/sync-worker/worker.py`.
 
 mod handler;
 mod providers;
@@ -29,6 +30,13 @@ enum Command {
     Serve,
     /// Probe the local /healthz endpoint and exit 0/1 (container HEALTHCHECK).
     Healthcheck,
+    /// Applies pending SQL migrations from
+    /// `services/worker-vault-sync/migrations` against the configured
+    /// database and exits — the K8s Job migration target
+    /// (`skauswatch-worker-vault-sync migrate`). Schema authority is
+    /// `sqlx migrate`, never an auto-run at `serve` startup (see
+    /// `skauswatch_db` crate docs).
+    Migrate,
 }
 
 /// Providers this worker consumes — matches v1 `PROVIDERS`.
@@ -39,7 +47,30 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command.unwrap_or(Command::Serve) {
         Command::Serve => serve().await,
         Command::Healthcheck => healthcheck().await,
+        Command::Migrate => migrate().await,
     }
+}
+
+/// Embeds this service's `migrations/` directory at compile time (no DB
+/// required to build) — applied only via `Command::Migrate`.
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
+
+/// Applies every pending migration in [`MIGRATOR`] and exits — see
+/// `Command::Migrate`. Fails closed: any connection or migration error
+/// returns a non-zero exit rather than leaving the schema partially
+/// applied and reporting success.
+async fn migrate() -> anyhow::Result<()> {
+    skauswatch_telemetry::init_tracing("skauswatch-worker-vault-sync");
+    let db_cfg =
+        skauswatch_db::DbConfig::from_env().map_err(|e| anyhow::anyhow!("db config: {e}"))?;
+    let pool = skauswatch_db::connect_postgres(&db_cfg)
+        .await
+        .map_err(|e| anyhow::anyhow!("db connect: {e}"))?;
+    skauswatch_db::run_migrations(&pool, &MIGRATOR)
+        .await
+        .map_err(|e| anyhow::anyhow!("migration failed: {e}"))?;
+    tracing::info!("migrations applied");
+    Ok(())
 }
 
 fn health_port() -> u16 {
@@ -216,5 +247,19 @@ async fn healthcheck() -> anyhow::Result<()> {
         Ok(())
     } else {
         anyhow::bail!("healthcheck failed: {}", resp.status())
+    }
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::MIGRATOR;
+
+    /// Guards the embedded migrator against silent drift from
+    /// `services/worker-vault-sync/migrations/*.sql` — see
+    /// `Command::Migrate`. Update this count when adding a new migration
+    /// file.
+    #[test]
+    fn migrator_embeds_expected_migration_count() {
+        assert_eq!(MIGRATOR.iter().count(), 2);
     }
 }
