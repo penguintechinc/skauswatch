@@ -125,6 +125,13 @@ env:
         name: '{{ include "skauswatch-logs.secretName" . }}'
         key: jwt-verify-key
 
+# CHART FIX: services/logs/src/ingest.rs registers GET /healthz only — no
+# /readyz route exists on this service (unlike depgate/s3scan/scanner/
+# sshca/worker-codescan/worker-vault-sync/monitor, which all merge
+# skauswatch_telemetry::health_router). Pointing readinessProbe at /readyz
+# 404s permanently (pod never Ready, blocks Service endpoints + e2e) — until
+# a /readyz route is added to services/logs, alias readiness to the
+# endpoint that actually exists. Flagged for a follow-up code change.
 livenessProbe:
   httpGet:
     path: /healthz
@@ -136,7 +143,7 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /readyz
+    path: /healthz
     port: http
   initialDelaySeconds: 5
   periodSeconds: 5

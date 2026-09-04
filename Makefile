@@ -181,11 +181,21 @@ format: ## Code Quality - Format Rust + webui code
 	@cd services/webui && npm run format --if-present
 
 # === Docker Commands ===
-docker-build: ## Docker - Build all SkausWatch service images (repo-root context)
+# webui builds with its own directory as context (self-contained Node app,
+# Dockerfile COPYs package*.json/./ relative to services/webui/) — every
+# other service builds from the repo root because it path-depends on the
+# shared crates/skauswatch-* workspace members (see each Rust Dockerfile's
+# "context MUST be the repo root" header comment). Forcing repo-root context
+# on webui breaks its COPY package*.json ./ (no package.json at repo root).
+docker-build: ## Docker - Build all SkausWatch service images (repo-root context, webui excepted)
 	@echo "$(BLUE)Building Docker images...$(RESET)"
 	@for svc in $(SERVICES); do \
 		echo "$(YELLOW)Building $$svc...$(RESET)"; \
-		docker build -f services/$$svc/Dockerfile -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(product)/$$svc:$(VERSION) . || exit 1; \
+		if [ "$$svc" = "webui" ]; then \
+			docker build -f services/webui/Dockerfile -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(product)/$$svc:$(VERSION) services/webui || exit 1; \
+		else \
+			docker build -f services/$$svc/Dockerfile -t $(DOCKER_REGISTRY)/$(DOCKER_ORG)/$(product)/$$svc:$(VERSION) . || exit 1; \
+		fi; \
 	done
 	@echo "$(GREEN)All images built!$(RESET)"
 
@@ -197,11 +207,21 @@ docker-push: ## Docker - Push all service images to registry
 	done
 
 # === Deploy Commands ===
+# Release name must be "skauswatch-<svc>" — every chart's Chart.yaml `name:`
+# is already "skauswatch-<svc>" and _helpers.tpl's fullname template assumes
+# .Release.Name is that same string (its `contains $name .Release.Name`
+# check only short-circuits to .Release.Name when it already contains the
+# full chart name). Installing under a bare release name (e.g. "manager")
+# falls through to the "<release>-<chart>" concat branch, producing a
+# mismatched fullname (e.g. "manager-skauswatch-manager") — every chart
+# resource that instead hardcodes the literal "skauswatch-<svc>-*" name
+# (ConfigMap/Secret refs in values.yaml env) then points at a Secret/
+# ConfigMap that was never created, and the pod fails to start.
 deploy-alpha: ## Deploy - Deploy all charts to local-alpha via Helm
 	@echo "$(BLUE)Deploying to local-alpha...$(RESET)"
 	@for svc in $(SERVICES); do \
-		echo "$(YELLOW)helm upgrade --install $$svc (local-alpha)...$(RESET)"; \
-		helm upgrade --install $$svc ./k8s/helm/$$svc \
+		echo "$(YELLOW)helm upgrade --install skauswatch-$$svc (local-alpha)...$(RESET)"; \
+		helm upgrade --install skauswatch-$$svc ./k8s/helm/$$svc \
 			--kube-context local-alpha \
 			--namespace $(product) --create-namespace \
 			--values ./k8s/helm/$$svc/alpha.yml \
@@ -211,8 +231,8 @@ deploy-alpha: ## Deploy - Deploy all charts to local-alpha via Helm
 deploy-beta: ## Deploy - Deploy all charts to dal2-beta via Helm (CI-built images only)
 	@echo "$(BLUE)Deploying to dal2-beta...$(RESET)"
 	@for svc in $(SERVICES); do \
-		echo "$(YELLOW)helm upgrade --install $$svc (dal2-beta)...$(RESET)"; \
-		helm upgrade --install $$svc ./k8s/helm/$$svc \
+		echo "$(YELLOW)helm upgrade --install skauswatch-$$svc (dal2-beta)...$(RESET)"; \
+		helm upgrade --install skauswatch-$$svc ./k8s/helm/$$svc \
 			--kube-context dal2-beta \
 			--namespace $(product) --create-namespace \
 			--values ./k8s/helm/$$svc/beta.yml || exit 1; \

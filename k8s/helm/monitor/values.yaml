@@ -158,11 +158,14 @@ env:
         name: skauswatch-monitor-config
         key: release-mode
 
-# monitor only exposes GET /health (no separate /ready) — see
-# services/monitor/src/routes/health.rs — so liveness and readiness share it.
+# CHART FIX: monitor also serves standardized /healthz + /readyz via
+# skauswatch_telemetry::health_router (services/monitor/src/main.rs), merged
+# on the same listener/port as /health (v1-compat, routes/health.rs) — was
+# pointed at the legacy /health for both probes; align with the
+# liveness=/healthz, readiness=/readyz standard other charts already use.
 livenessProbe:
   httpGet:
-    path: /health
+    path: /healthz
     port: http
   initialDelaySeconds: 10
   periodSeconds: 10
@@ -171,7 +174,7 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /health
+    path: /readyz
     port: http
   initialDelaySeconds: 5
   periodSeconds: 5
