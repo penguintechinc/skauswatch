@@ -1,0 +1,172 @@
+# Default (prod-safe baseline) values for skauswatch-endpoint-agent.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/endpoint-agent
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: false
+  # seccompProfile is set Unconfined (not RuntimeDefault) because
+  # privileged: true below already bypasses seccomp confinement at the
+  # container-runtime level -- declaring RuntimeDefault here would claim a
+  # protection that isn't actually enforced. Unconfined is explicit and
+  # honest given the raw ptrace (process inspection) and netlink/raw-socket
+  # (connection enumeration) syscalls this agent depends on.
+  seccompProfile:
+    type: Unconfined
+
+# ROOT EXCEPTION (approved): endpoint-agent is a host process/network
+# monitor — it needs SYS_PTRACE to inspect other processes and NET_ADMIN
+# for connection enumeration, plus hostPID/hostNetwork (see daemonset.yaml).
+# This mirrors the XDP/NET_ADMIN exception pattern in devops-containers.md;
+# pre-existing in this chart, carried forward and flagged for the record.
+securityContext:
+  privileged: true
+  capabilities:
+    add:
+      - SYS_PTRACE
+      - NET_ADMIN
+  seccompProfile:
+    type: Unconfined
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml) is the
+# PRIMARY control for this pod -- see k8s/helm/README.md "endpoint-agent:
+# CNP does not apply". Requires the Tetragon agent DaemonSet in-cluster.
+tetragon:
+  enabled: true
+
+# No service - agent reports to manager, never receives inbound traffic
+service:
+  enabled: false
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+
+nodeSelector: {}
+
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+affinity: {}
+
+# services/endpoint-agent/src/config.rs reads NO env vars directly — config
+# comes from a YAML file (--config) and CLI flags only (--manager-url,
+# --api-key, --agent-id, --debug). env: below exists solely so Kubernetes
+# can interpolate secret/downward-API values into args via $(VAR) syntax.
+env:
+  - name: MANAGER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-endpoint-agent-config
+        key: manager-url
+  - name: API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-endpoint-agent.secretName" . }}'
+        key: api-key
+  - name: AGENT_ID
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-endpoint-agent.secretName" . }}'
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-endpoint-agent-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-endpoint-agent-config
+        key: release-mode
+
+args:
+  - "--manager-url=$(MANAGER_URL)"
+  - "--api-key=$(API_KEY)"
+  - "--agent-id=$(AGENT_ID)"
+
+# The agent has no HTTP listener (see services/endpoint-agent/src/main.rs) —
+# `--healthcheck` runs a one-shot config-load check and exits, which is the
+# binary's own documented container-native probe.
+livenessProbe:
+  exec:
+    command:
+      - endpoint-agent
+      - --healthcheck
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  exec:
+    command:
+      - endpoint-agent
+      - --healthcheck
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts:
+  - name: host-proc
+    mountPath: /host/proc
+    readOnly: true
+  - name: host-sys
+    mountPath: /host/sys
+    readOnly: true
+
+volumes:
+  - name: host-proc
+    hostPath:
+      path: /proc
+  - name: host-sys
+    hostPath:
+      path: /sys
+
+configMapData:
+  manager-url: "https://skauswatch-manager:5000"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
+secretData:
+  api-key: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

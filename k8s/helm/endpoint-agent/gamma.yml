@@ -1,0 +1,21 @@
+# Gamma overrides — dal2-gamma cluster, namespace: skauswatch.
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/endpoint-agent
+  tag: "gamma-0000000000"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+configMapData:
+  manager-url: "https://skauswatch-gamma.penguintech.cloud/api"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"

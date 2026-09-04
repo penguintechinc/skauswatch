@@ -45,32 +45,32 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 #### PKI Server Service
 ```bash
-docker build -f services/pki-server/Dockerfile \
+docker build -f services/pki/Dockerfile \
   --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
   --build-arg VERSION=0.1.0 \
   --build-arg VCS_REF=$(git rev-parse --short HEAD) \
-  -t skauswatch/pki-server:0.1.0 \
-  -t skauswatch/pki-server:latest .
+  -t skauswatch/pki:0.1.0 \
+  -t skauswatch/pki:latest .
 ```
 
 #### SSH CA Service
 ```bash
-docker build -f services/ssh-ca/Dockerfile \
+docker build -f services/sshca/Dockerfile \
   --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
   --build-arg VERSION=0.1.0 \
   --build-arg VCS_REF=$(git rev-parse --short HEAD) \
-  -t skauswatch/ssh-ca:0.1.0 \
-  -t skauswatch/ssh-ca:latest .
+  -t skauswatch/sshca:0.1.0 \
+  -t skauswatch/sshca:latest .
 ```
 
-#### AAA Monitor Service
+#### Monitor Service
 ```bash
-docker build -f services/aaa-monitor/Dockerfile \
+docker build -f services/monitor/Dockerfile \
   --build-arg BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ') \
   --build-arg VERSION=0.1.0 \
   --build-arg VCS_REF=$(git rev-parse --short HEAD) \
-  -t skauswatch/aaa-monitor:0.1.0 \
-  -t skauswatch/aaa-monitor:latest .
+  -t skauswatch/monitor:0.1.0 \
+  -t skauswatch/monitor:latest .
 ```
 
 ### Building All Services
@@ -90,7 +90,7 @@ VCS_REF=$(git rev-parse --short HEAD)
 REGISTRY=${REGISTRY:-skauswatch}
 
 # Services to build
-SERVICES=("manager" "pki-server" "ssh-ca" "aaa-monitor")
+SERVICES=("manager" "pki" "sshca" "monitor")
 
 echo "Building SkausWatch services..."
 echo "Build Date: $BUILD_DATE"
@@ -145,7 +145,7 @@ docker buildx create --name multiarch --use
 docker buildx inspect --bootstrap
 
 # Build and push multi-arch images
-for service in manager pki-server ssh-ca aaa-monitor; do
+for service in manager pki sshca monitor; do
     docker buildx build \
         --platform linux/amd64,linux/arm64 \
         -f services/$service/Dockerfile \
@@ -176,7 +176,7 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
     aquasec/trivy image skauswatch/manager:0.1.0
 
 # Scan all built images
-for service in manager pki-server ssh-ca aaa-monitor; do
+for service in manager pki sshca monitor; do
     echo "Scanning $service..."
     docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
         aquasec/trivy image skauswatch/$service:0.1.0
@@ -210,7 +210,7 @@ jobs:
 
     strategy:
       matrix:
-        service: [manager, pki-server, ssh-ca, aaa-monitor]
+        service: [manager, pki, sshca, monitor]
 
     steps:
     - name: Checkout repository
@@ -289,20 +289,20 @@ build-manager:
   variables:
     SERVICE_NAME: manager
 
-build-pki-server:
+build-pki:
   <<: *docker-build
   variables:
-    SERVICE_NAME: pki-server
+    SERVICE_NAME: pki
 
-build-ssh-ca:
+build-sshca:
   <<: *docker-build
   variables:
-    SERVICE_NAME: ssh-ca
+    SERVICE_NAME: sshca
 
-build-aaa-monitor:
+build-monitor:
   <<: *docker-build
   variables:
-    SERVICE_NAME: aaa-monitor
+    SERVICE_NAME: monitor
 ```
 
 ## Performance Optimization
@@ -380,7 +380,7 @@ After building and deploying:
 ```bash
 # Quick health check script
 #!/bin/bash
-services=("manager:8000" "pki-server:8001" "ssh-ca:8002" "aaa-monitor:8003")
+services=("manager:8000" "pki:8001" "sshca:8002" "monitor:8003")
 
 for service in "${services[@]}"; do
     name="${service%:*}"

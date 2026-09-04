@@ -22,6 +22,15 @@ Create a default fully qualified app name.
 {{- end }}
 
 {{/*
+Name of the Secret this chart consumes. If .Values.existingSecret is
+set, use that pre-provisioned Secret/ExternalSecret instead of the
+chart-managed one (templates/secret.yaml is not rendered in that case).
+*/}}
+{{- define "skauswatch-manager.secretName" -}}
+{{- .Values.existingSecret | default (printf "%s-secret" (include "skauswatch-manager.fullname" .)) }}
+{{- end }}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "skauswatch-manager.chart" -}}
@@ -56,5 +65,19 @@ Create the name of the service account to use
 {{- default (include "skauswatch-manager.fullname" .) .Values.serviceAccount.name }}
 {{- else }}
 {{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
+
+{{/*
+Full image reference. Production pins by SHA256 digest (tag starts with
+"sha256:") -> "repo@sha256:...". Alpha/beta/gamma use a mutable tag ->
+"repo:tag".
+*/}}
+{{- define "skauswatch-manager.image" -}}
+{{- $tag := .Values.image.tag | default .Chart.AppVersion }}
+{{- if hasPrefix "sha256:" $tag }}
+{{- printf "%s@%s" .Values.image.repository $tag }}
+{{- else }}
+{{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}
 {{- end }}

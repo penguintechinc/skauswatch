@@ -1,0 +1,80 @@
+# DepGate seed manifest — warm-starts the vetted cache ahead of demand
+# (docs/v2-port/v2.1-depgate.md §2, §9 P1 "seed-manifest warm-start
+# (pinned)"; §4 P2 extends this to npm/PyPI). `skauswatch-depgate seed
+# --manifest seeds/penguintech.yaml` pulls, scans, tags, and pins every
+# entry below.
+#
+# Deviation from the spec's illustrative filename: the spec names this file
+# `penguintech.toml`, but `toml` is not yet a workspace dependency and
+# `serde_yaml` already is (pinned in the root Cargo.toml for
+# `endpoint-agent`'s config) — reusing it here avoids adding a new
+# dependency for what is otherwise a plain key/value list. Content and
+# purpose are unchanged from the spec's intent.
+#
+# Kept small but real: every entry below is a dependency this repo's own
+# ecosystems actually pull, sourced from their lockfiles/manifests, so
+# seeding this list warms exactly what DepGate's own CI/dev builds need —
+# the air-gap warm-start (§6b) for this repo specifically.
+images:
+  - name: library/rust
+    reference: "1.97-slim-bookworm"
+  - name: library/debian
+    reference: "bookworm-slim"
+  - name: library/postgres
+    reference: "17-bookworm"
+  - name: valkey/valkey
+    reference: "8-bookworm"
+  - name: library/node
+    reference: "26-bookworm-slim"
+
+# Sourced from ./package.json (root project template) and
+# services/webui/package.json — exact-pinned versions those manifests
+# already declare.
+npm:
+  - name: express
+    version: "4.19.2"
+  - name: axios
+    version: "1.15.2"
+  - name: jsonwebtoken
+    version: "9.0.2"
+  - name: pg
+    version: "8.12.0"
+  - name: redis
+    version: "4.7.0"
+
+# Sourced from tests/parity/requirements.txt (uv-compiled, hash-pinned) —
+# the parity test suite's own Python dependency set.
+pypi:
+  - name: requests
+    version: "2.34.2"
+  - name: urllib3
+    version: "2.7.0"
+  - name: certifi
+    version: "2026.7.22"
+  - name: idna
+    version: "3.18"
+
+# Sourced from the root Cargo.toml `[workspace.dependencies]` table
+# (exact-pinned) — real crates this repo's own Rust services depend on.
+crates:
+  - name: serde
+    version: "1.0.228"
+  - name: tokio
+    version: "1.52.3"
+  - name: uuid
+    version: "1.23.5"
+  - name: clap
+    version: "4.6.1"
+
+# NOTE: skauswatch itself has no go.mod (it is a Rust workspace) — there is
+# no lockfile to source real entries from for this ecosystem the way the
+# sections above are sourced from Cargo.toml/package.json/requirements.txt.
+# The two modules below are real, well-known public Go modules (illustrative
+# warm-start targets for the `/go/*` proxy, representative of the kind of
+# dependency PenguinTech's existing Go services — see `backend-go.md` — pull
+# via `go get`), not modules this specific repo consumes.
+go:
+  - module: github.com/google/uuid
+    version: v1.6.0
+  - module: golang.org/x/mod
+    version: v0.19.0

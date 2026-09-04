@@ -1,0 +1,38 @@
+# Alpha overrides — local MicroK8s (local-alpha context), namespace: skauswatch.
+# Public entrypoint — reachable at localhost:30080, no port-forward needed.
+replicaCount: 1
+
+image:
+  repository: localhost:32000/skauswatch/webui
+  tag: "alpha-latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+service:
+  type: NodePort
+  nodePort: 30080
+
+ingress:
+  enabled: false
+
+httproute:
+  enabled: false
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+configMapData:
+  node-env: "development"
+  manager-url: "http://skauswatch-manager:5000"
+  vault-backend-url: "http://skauswatch-vault:8080"
+  codescan-backend-url: "http://skauswatch-codescan-backend:5005"
+  monitor-url: "http://skauswatch-monitor:8003"

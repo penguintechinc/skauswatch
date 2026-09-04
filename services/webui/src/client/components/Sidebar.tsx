@@ -20,9 +20,10 @@ const navigation: NavCategory[] = [
   {
     label: 'Security',
     items: [
+      { label: 'SPIRE Identity', path: '/security/spire', icon: '🔐', roles: ['admin', 'maintainer'] },
       { label: 'Threat Intel', path: '/threat-intel', icon: '🛡️' },
       { label: 'S3 Scanning', path: '/s3-scan', icon: '🔍' },
-      { label: 'Darwin AI Review', path: '/darwin', icon: '🤖' },
+      { label: 'CodeScan AI Review', path: '/codescan', icon: '🤖' },
     ],
   },
   {
@@ -70,12 +71,14 @@ export default function Sidebar({ collapsed, onToggle }: SidebarProps) {
 
   return (
     <SidebarMenu
+      // @ts-expect-error - NavCategory vs MenuCategory type mismatch in shared library
       categories={navigation}
       currentPath={location.pathname}
       onNavigate={handleNavigate}
       userRole={user?.role}
       isCollapsed={collapsed}
       onToggleCollapse={onToggle}
+      // @ts-expect-error - footerItems type mismatch in shared library
       footerItems={footerItems}
       appName="SkausWatch"
       theme={{

@@ -1,0 +1,17 @@
+{{- if .Values.spire.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-server
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "skauswatch-spire.fullname" . }}-server
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "skauswatch-spire.serverServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

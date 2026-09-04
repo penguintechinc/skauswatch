@@ -169,7 +169,7 @@ message Finding {
 
 ## 🔐 PKI Server (Port 5001)
 
-**Note:** In v1.x, this is a shim proxy to IceBox PKI. Requests forward to `$ICEBOX_PKI_URL`.
+**Note:** In v1.x, this is a shim proxy to Vault PKI. Requests forward to `$VAULT_PKI_URL`.
 
 ### REST API
 
@@ -222,18 +222,18 @@ Response: {
 
 ```bash
 GET /health
-Response: { "status": "healthy", "backend": "icebox" }  # or "unavailable"
+Response: { "status": "healthy", "backend": "vault" }  # or "unavailable"
 ```
 
 **Deprecation headers (v1.x):**
 ```
 Deprecation: true
-Link: <https://icebox.example.com/api/v1/certificates>; rel="successor-version"
+Link: <https://vault.example.com/api/v1/certificates>; rel="successor-version"
 ```
 
 ## 🔑 SSH CA (Port 5002)
 
-**Note:** In v1.x, this is a shim proxy to IceBox SSH CA. Requests forward to `$ICEBOX_SSH_CA_URL`.
+**Note:** In v1.x, this is a shim proxy to Vault SSH CA. Requests forward to `$VAULT_SSHCA_URL`.
 
 ### REST API
 
@@ -280,7 +280,7 @@ GET /ssh-certs
 Response: { "certificates": [...] }
 ```
 
-## 📊 AAA Monitor (Port 5003)
+## 📊 Monitor (Port 5003)
 
 ### REST API
 
@@ -359,9 +359,9 @@ Workers communicate via **gRPC** with Manager. No direct API; jobs published to 
 }
 ```
 
-### EDR Agent
+### ENDPOINT Agent
 
-EDR Agent runs as Kubernetes DaemonSet. Reports via:
+ENDPOINT Agent runs as Kubernetes DaemonSet. Reports via:
 - Kubernetes API (logs, events)
 - gRPC to Manager (host info, process events, threat signals)
 
@@ -420,16 +420,16 @@ WebUI is a React frontend that consumes Manager API.
 | `SERVICE_ERROR` | 500 | Internal server error |
 | `SERVICE_UNAVAILABLE` | 503 | Service temporarily unavailable |
 
-## 🔗 IceBox API (Sub-Module)
+## 🔗 Vault API (Sub-Module)
 
-When IceBox is installed, additional endpoints are available (port 5100):
+When Vault is installed, additional endpoints are available (port 5100):
 - `POST /api/v1/secrets` — Create secret
 - `GET /api/v1/secrets` — List secrets
 - `GET /api/v1/secrets/{id}` — Retrieve secret
 - `POST /api/v1/jit-access` — Request JIT access
 - `POST /api/v1/one-time-secrets` — Create view-once secret
 
-See `docs/icebox/API.md` for full reference.
+See `docs/vault/API.md` for full reference.
 
 ---
 

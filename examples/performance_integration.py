@@ -25,9 +25,9 @@ from shared.performance import (
 
 # Import service-specific optimizations
 from services.manager.async_database import AsyncDatabaseManager
-from services.pki_server.async_certificate_processor import AsyncCertificateProcessor
-from services.ssh_ca.async_ssh_processor import AsyncSSHProcessor
-from services.aaa_monitor.async_log_collector import AsyncLogCollector
+from services.pki.async_certificate_processor import AsyncCertificateProcessor
+from services.sshca.async_ssh_processor import AsyncSSHProcessor
+from services.monitor.async_log_collector import AsyncLogCollector
 
 # Configure logging
 logging.basicConfig(
@@ -301,9 +301,9 @@ class SkausWatchIntegrationExample:
             }
         )
         
-        # AAA monitor requesting health status from all services
+        # monitor requesting health status from all services
         health_checks = []
-        for service in ["database", "pki", "ssh_ca"]:
+        for service in ["database", "pki", "sshca"]:
             response = await self.message_queue.request(
                 destination=service,
                 message_type="health_check",
@@ -326,7 +326,7 @@ class SkausWatchIntegrationExample:
         
         # Get service-specific metrics
         service_metrics = {}
-        for service in ["database", "pki", "ssh_ca", "aaa_monitor"]:
+        for service in ["database", "pki", "sshca", "monitor"]:
             metrics = await self.performance_monitor.get_service_metrics(service)
             service_metrics[service] = metrics
         

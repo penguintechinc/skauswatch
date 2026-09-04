@@ -1,175 +1,215 @@
-name: Build and Security Scan
+name: Build and Push Images
+
+# Matrix image build for the 12 Rust services + webui. Every Dockerfile lives
+# at services/<dir>/Dockerfile and is built from the REPO ROOT context
+# (docker build -f services/<dir>/Dockerfile .) — see BUILD.md.
+#
+# Tagging (see devops.md CI/CD Tag Naming):
+#   release/**  -> beta-<epoch64>   (pushed) + rolling :beta-latest
+#   main        -> gamma-<epoch64>  (pushed) + rolling :gamma-latest
+#   tags v*     -> v{semver}        (pushed)
+#   pull_request -> build-only, never pushed
+#
+# This is the SINGLE build+push authority for all images (the former beta.yml /
+# publish.yml duplicated it and were removed). The rolling :beta-latest tag is
+# what scripts/deploy-beta.sh pulls by default. The stable :latest tag is owned
+# separately by promote-latest.yml (fires on GitHub `release: released`, not on
+# every tag push — so :latest tracks the latest *released* version, by design).
+#
+# rust.yml (fmt/clippy/test/audit+deny/coverage) gates correctness; this
+# workflow only builds/publishes images and does not duplicate those checks.
 
 on:
   push:
     branches:
       - main
-      - develop
-      - v1.x
+      - 'release/**'
+    tags:
+      - 'v*'
     paths:
       - 'services/**'
-      - 'deployment/**'
-      - 'tests/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.version'
       - '.github/workflows/build.yml'
   pull_request:
-    branches:
-      - main
-      - develop
-      - v1.x
     paths:
       - 'services/**'
-      - 'deployment/**'
-      - 'tests/**'
-      - '.version'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/build.yml'
 
 permissions:
   contents: read
-  packages: read
-  security-events: write
 
 jobs:
-  security-scan:
-    name: Security Scan (Bandit)
+  determine-tag:
+    name: Determine image tag
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      push: ${{ steps.tag.outputs.push }}
+      rolling: ${{ steps.tag.outputs.rolling }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-          cache: 'pip'
-
-      - name: Install bandit
-        run: pip install bandit
-
-      - name: Run bandit security scan
-        id: bandit
+      - name: Determine tag and push eligibility
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
         run: |
-          bandit -r services/ \
-            -f json -o bandit-report.json \
-            -ll || true
-        continue-on-error: true
+          # Grouped redirects (SC2129): one append per branch, not three.
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
+            {
+              echo "tag=pr-${SHA:0:12}"
+              echo "push=false"
+              echo "rolling="
+            } >> "$GITHUB_OUTPUT"
+          elif [[ "${REF}" == refs/tags/v* ]]; then
+            {
+              echo "tag=${REF_NAME}"
+              echo "push=true"
+              echo "rolling="
+            } >> "$GITHUB_OUTPUT"
+          elif [ "${REF}" = "refs/heads/main" ]; then
+            {
+              echo "tag=gamma-$(date +%s)000"
+              echo "push=true"
+              echo "rolling=gamma-latest"
+            } >> "$GITHUB_OUTPUT"
+          elif [[ "${REF}" == refs/heads/release/* ]]; then
+            {
+              echo "tag=beta-$(date +%s)000"
+              echo "push=true"
+              echo "rolling=beta-latest"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "tag=alpha-$(date +%s)000"
+              echo "push=false"
+              echo "rolling="
+            } >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Display bandit results
-        if: always()
-        run: |
-          python3 << 'EOF'
-          import json
-          try:
-              with open('bandit-report.json', 'r') as f:
-                  data = json.load(f)
-                  print(f"\nBandit Security Report Summary")
-                  print(f"==============================")
-                  print(f"Metrics: {data.get('metrics', {})}")
-                  if data.get('results'):
-                      print(f"\nIssues Found: {len(data['results'])}")
-                      for issue in data['results']:
-                          print(f"\n- {issue.get('issue_text')}")
-                          print(f"  Severity: {issue.get('severity')}")
-                          print(f"  Confidence: {issue.get('confidence')}")
-          except:
-              print("Could not parse bandit report")
-          EOF
-
-      - name: Upload bandit report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bandit-report
-          path: bandit-report.json
-
-  lint:
-    name: Lint Python Code
+  build-platform:
+    name: Build ${{ matrix.service }} (${{ matrix.platform }})
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-          cache: 'pip'
-
-      - name: Install linting tools
-        run: pip install flake8 black isort mypy
-
-      - name: Run black check
-        run: black --check services/
-
-      - name: Run isort check
-        run: isort --check-only services/
-
-      - name: Run flake8
-        run: flake8 services/ --count --select=E9,F63,F7,F82 --show-source
-
-      - name: Run mypy type checking
-        run: mypy services/ --ignore-missing-imports || true
-        continue-on-error: true
-
-  build:
-    name: Build Services
-    runs-on: ubuntu-latest
-    needs: [security-scan, lint]
+    needs: determine-tag
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
-        service: [manager-new, pki-server-new, ssh-ca, aaa-monitor, worker-s3, worker-scanner, webui, edr-agent]
+        service:
+          - manager
+          - pki
+          - sshca
+          - logs
+          - codescan-backend
+          - depgate
+          - monitor
+          - vault
+          - s3scan
+          - scanner
+          - worker-codescan
+          - worker-vault-sync
+          - endpoint-agent
+          - webui
+        platform: [linux/amd64, linux/arm64]
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
-      - name: Read version
-        id: version
-        run: |
-          VERSION=$(cat .version | xargs)
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "EPOCH64=$(date +%s)000" >> $GITHUB_OUTPUT
+      - name: Determine arch suffix
+        id: arch
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "suffix=${PLATFORM#linux/}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a  # v4
 
-      - name: Build Docker image for ${{ matrix.service }}
-        uses: docker/build-push-action@v5
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+
+      - name: Log in to GitHub Container Registry
+        if: needs.determine-tag.outputs.push == 'true'
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
         with:
-          context: ./services/${{ matrix.service }}
-          push: false
-          tags: |
-            ghcr.io/penguintechinc/skauswatch-${{ matrix.service }}:${{ steps.version.outputs.VERSION }}
-            ghcr.io/penguintechinc/skauswatch-${{ matrix.service }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build ${{ matrix.service }} (${{ matrix.platform }})
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
+        with:
+          # webui is a self-contained Node build (its Dockerfile COPYs
+          # package.json/.npmrc/src relative to its own dir); every Rust service
+          # is a Cargo workspace build that needs the repo root as context.
+          context: ${{ matrix.service == 'webui' && 'services/webui' || '.' }}
+          file: services/${{ matrix.service }}/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: ${{ needs.determine-tag.outputs.push == 'true' }}
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ steps.arch.outputs.suffix }}
+          cache-to: type=gha,scope=${{ matrix.service }}-${{ steps.arch.outputs.suffix }},mode=max
           build-args: |
-            VERSION=${{ steps.version.outputs.VERSION }}
-            BUILD_TIME=${{ steps.version.outputs.EPOCH64 }}
-            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+            VERSION=${{ needs.determine-tag.outputs.tag }}
+          tags: |
+            ghcr.io/penguintechinc/skauswatch/${{ matrix.service }}:${{ needs.determine-tag.outputs.tag }}-${{ steps.arch.outputs.suffix }}
 
-  test:
-    name: Run Tests
+  merge-manifests:
+    name: Merge ${{ matrix.service }} manifest
     runs-on: ubuntu-latest
-    needs: lint
+    needs: [determine-tag, build-platform]
+    if: needs.determine-tag.outputs.push == 'true'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - manager
+          - pki
+          - sshca
+          - logs
+          - codescan-backend
+          - depgate
+          - monitor
+          - vault
+          - s3scan
+          - scanner
+          - worker-codescan
+          - worker-vault-sync
+          - endpoint-agent
+          - webui
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
         with:
-          python-version: '3.13'
-          cache: 'pip'
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install dependencies
-        run: pip install pytest pytest-asyncio pytest-cov
-
-      - name: Run tests
-        run: pytest tests/ -v --cov=services --cov-report=xml --ignore=tests/integration --ignore=tests/e2e
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
+      - name: Create and push multi-arch manifest for ${{ matrix.service }}
+        env:
+          SERVICE: ${{ matrix.service }}
+          TAG: ${{ needs.determine-tag.outputs.tag }}
+          ROLLING: ${{ needs.determine-tag.outputs.rolling }}
+        run: |
+          # ROLLING is a fixed literal (beta-latest / gamma-latest / empty) set
+          # by determine-tag — never user input — so unquoted expansion below is
+          # a deliberate "add one --tag or nothing", not an injection vector.
+          rolling_tag=""
+          if [ -n "${ROLLING}" ]; then
+            rolling_tag="--tag ghcr.io/penguintechinc/skauswatch/${SERVICE}:${ROLLING}"
+          fi
+          # shellcheck disable=SC2086
+          docker buildx imagetools create \
+            --tag "ghcr.io/penguintechinc/skauswatch/${SERVICE}:${TAG}" \
+            ${rolling_tag} \
+            "ghcr.io/penguintechinc/skauswatch/${SERVICE}:${TAG}-amd64" \
+            "ghcr.io/penguintechinc/skauswatch/${SERVICE}:${TAG}-arm64"

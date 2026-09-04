@@ -1,0 +1,235 @@
+# Default (prod-safe baseline) values for skauswatch-scanner.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/scanner
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and
+  # good practice under "baseline") -- see k8s/helm/README.md "Cluster
+  # security baseline".
+  seccompProfile:
+    type: RuntimeDefault
+
+# NET CAPABILITY EXCEPTION (approved): masscan (services/scanner/src/asm.rs
+# run_masscan) requires CAP_NET_RAW to send raw SYN packets for ASM port
+# discovery. services/scanner/src/asm.rs's own module doc names this
+# requirement explicitly and instructs cluster operators to grant it via an
+# approved exception rather than escalate to root -- this is that grant.
+# NOT compatible with Pod Security Admission "restricted" (which forbids
+# adding any capability beyond NET_BIND_SERVICE) -- this chart's namespace
+# must run at PSA "baseline" or looser. See k8s/helm/README.md "PSA
+# namespace baseline" and devops-containers.md's Rootless Containers
+# exception process.
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - NET_RAW
+  readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
+
+healthPort: 8080
+metricsPort: 9090
+
+service:
+  enabled: true
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# services/scanner/src/config.rs: CONSUMER_NAME unique per pod (downward
+# API); ClamAV is a separate TCP service (CLAMAV_HOST/PORT, not a local
+# socket — contrast with s3scan's clamd UNIX socket); YARA rules load from a
+# local directory mounted read-only below.
+env:
+  - name: CONSUMER_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: HEALTH_PORT
+    value: "8080"
+  - name: RUST_LOG
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: log-level
+  - name: REDIS_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: redis-url
+  - name: REDIS_PREFIX
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: redis-key-prefix
+  - name: REDIS_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-scanner-secret
+        key: redis-password
+        optional: true
+  - name: CONSUMER_GROUP
+    value: "scanner-workers"
+  - name: CLAMAV_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: clamav-host
+  - name: CLAMAV_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: clamav-port
+  - name: CLAMAV_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: clamav-enabled
+  - name: YARA_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: yara-enabled
+  - name: YARA_RULES_PATH
+    value: "/etc/yara/rules"
+  - name: ASM_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: asm-enabled
+  # ASM screenshot stage (services/scanner/src/asm.rs capture_screenshot).
+  # CHROMIUM_BIN points directly at Debian's real chromium ELF binary,
+  # bypassing the /usr/bin/chromium shell-script launcher (which execs
+  # grep/uname/find internally) -- keeps templates/tracingpolicy.yaml's
+  # exec-allowlist to exactly one added path; see services/scanner/Dockerfile.
+  # HOME=/tmp gives Chromium's own default profile/cache dirs a writable
+  # home under the tmp emptyDir below (readOnlyRootFilesystem: true blocks
+  # writes anywhere else, including the tempfile crate's screenshot output).
+  - name: CHROMIUM_BIN
+    value: "/usr/lib/chromium/chromium"
+  - name: HOME
+    value: "/tmp"
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-scanner-secret
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-scanner-config
+        key: release-mode
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+# yaraRules.manage=true creates an (initially empty) ConfigMap this chart
+# owns; set yaraRules.rules (filename -> rule text) or supply real rules
+# out-of-band and set yaraRules.manage=false to reference an
+# operator-managed ConfigMap instead.
+yaraRules:
+  manage: true
+  rules: {}
+
+volumeMounts:
+  - name: yara-rules
+    mountPath: /etc/yara/rules
+    readOnly: true
+  # Writable scratch space required under readOnlyRootFilesystem: true --
+  # ASM screenshot capture's tempfile PNG write (src/asm.rs
+  # capture_screenshot) and Chromium's own HOME=/tmp profile/cache dirs
+  # both land here. sizeLimit bounds node ephemeral-storage usage; PNG
+  # captures + Chromium's small on-disk cache comfortably fit well under it.
+  - name: tmp
+    mountPath: /tmp
+
+volumes:
+  - name: yara-rules
+    configMap:
+      name: skauswatch-scanner-yara-rules
+  - name: tmp
+    emptyDir:
+      sizeLimit: 512Mi
+
+configMapData:
+  log-level: "info"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+  clamav-host: "clamav"
+  clamav-port: "3310"
+  clamav-enabled: "true"
+  yara-enabled: "true"
+  asm-enabled: "true"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+
+secretData:
+  redis-password: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

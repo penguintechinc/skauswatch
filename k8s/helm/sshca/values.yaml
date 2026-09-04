@@ -1,0 +1,207 @@
+# Default (prod-safe baseline) values for skauswatch-sshca.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/sshca
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and
+  # good practice under "baseline") -- see k8s/helm/README.md "Cluster
+  # security baseline".
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
+
+httpPort: 8002
+metricsPort: 9090
+
+# Internal service only — consumed by manager, never exposed externally.
+service:
+  type: ClusterIP
+  port: 8002
+  metricsPort: 9090
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts: []
+  tls: []
+
+httproute:
+  enabled: false
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.app
+  rules: []
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+env:
+  - name: SERVICE_PORT
+    value: "8002"
+  # SshCa::load_or_generate (services/sshca/src/ca.rs) falls back to an
+  # EPHEMERAL in-memory CA key if this path is missing — safe for
+  # alpha/beta/gamma, but production mounts a pre-provisioned CA key via a
+  # Secret (see production.yml) so certs stay verifiable across restarts
+  # and across all replicas.
+  - name: SSHCA_KEY_PATH
+    value: "/etc/pki/sshca"
+  - name: RUST_LOG
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-sshca-config
+        key: log-level
+  - name: DB_TYPE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-sshca-config
+        key: db-type
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-sshca-config
+        key: db-host
+  - name: DB_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-sshca-config
+        key: db-port
+  - name: DB_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-sshca-config
+        key: db-name
+  - name: DB_POOL_SIZE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-sshca-config
+        key: db-pool-size
+  - name: DB_USER
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-sshca.secretName" . }}'
+        key: db-user
+  - name: DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-sshca.secretName" . }}'
+        key: db-pass
+  # PEM EC P-256 public key (SPKI) verifying ES256 tokens minted by
+  # manager (the sole issuer) -- see k8s/helm/manager/values.yaml
+  # secretData for keypair generation commands. Loaded via
+  # skauswatch_auth::load_jwt_secret (services/sshca/src/main.rs).
+  - name: JWT_VERIFY_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-sshca.secretName" . }}'
+        key: jwt-verify-key
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-sshca.secretName" . }}'
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-sshca-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-sshca-config
+        key: release-mode
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts: []
+
+volumes: []
+
+configMapData:
+  log-level: "info"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "20"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
+secretData:
+  db-user: ""
+  db-pass: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
+  jwt-verify-key: ""

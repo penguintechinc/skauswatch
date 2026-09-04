@@ -1,0 +1,178 @@
+# Default (prod-safe baseline) values for skauswatch-worker-codescan.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/worker-codescan
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and
+  # good practice under "baseline") -- see k8s/helm/README.md "Cluster
+  # security baseline".
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
+
+healthPort: 8080
+metricsPort: 9090
+
+service:
+  enabled: true
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# services/worker-codescan/src/config.rs: pure Redis Streams consumer + AI
+# provider — no DB access, no Celery (the Rust rewrite dropped the Python
+# Celery broker entirely; see removed templates/deployment-celery.yaml).
+env:
+  - name: CONSUMER_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: HEALTH_PORT
+    value: "8080"
+  - name: RUST_LOG
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: log-level
+  - name: REDIS_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: redis-url
+  - name: REDIS_KEY_PREFIX
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: redis-key-prefix
+  - name: REDIS_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-codescan-secret
+        key: redis-password
+        optional: true
+  - name: CONSUMER_GROUP
+    value: "codescan-workers"
+  - name: AI_PROVIDER
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: ai-provider
+  - name: AI_MODEL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: ai-model
+  - name: ANTHROPIC_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-codescan-secret
+        key: anthropic-api-key
+        optional: true
+  - name: OPENAI_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-codescan-secret
+        key: openai-api-key
+        optional: true
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: skauswatch-worker-codescan-secret
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-worker-codescan-config
+        key: release-mode
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts: []
+
+volumes: []
+
+configMapData:
+  log-level: "info"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+  ai-provider: "anthropic"
+  ai-model: "claude-opus-4-5"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+
+secretData:
+  redis-password: ""
+  anthropic-api-key: ""
+  openai-api-key: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

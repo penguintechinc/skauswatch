@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import Card from '../Card';
 import Button from '../Button';
+import { getCsrfToken, CSRF_HEADER_NAME } from '../../utils/csrf';
 
 interface BucketConfig {
   id: number;
@@ -95,7 +96,7 @@ export default function ScanResultsTab() {
 
   const loadBuckets = async () => {
     try {
-      const response = await fetch('/api/v1/s3-scan/buckets');
+      const response = await fetch('/api/v1/s3-scan/buckets', { credentials: 'include' });
       if (!response.ok) throw new Error('Failed to load buckets');
       const data = await response.json();
       setBuckets(data.items || []);
@@ -122,7 +123,9 @@ export default function ScanResultsTab() {
       if (filters.date_from) params.append('date_from', filters.date_from);
       if (filters.date_to) params.append('date_to', filters.date_to);
 
-      const response = await fetch(`/api/v1/s3-scan/results?${params.toString()}`);
+      const response = await fetch(`/api/v1/s3-scan/results?${params.toString()}`, {
+        credentials: 'include',
+      });
       if (!response.ok) throw new Error('Failed to load scan results');
 
       const data: PaginatedResponse<ScanResult> = await response.json();
@@ -142,7 +145,9 @@ export default function ScanResultsTab() {
       if (filters.date_from) params.append('date_from', filters.date_from);
       if (filters.date_to) params.append('date_to', filters.date_to);
 
-      const response = await fetch(`/api/v1/s3-scan/statistics?${params.toString()}`);
+      const response = await fetch(`/api/v1/s3-scan/statistics?${params.toString()}`, {
+        credentials: 'include',
+      });
       if (!response.ok) throw new Error('Failed to load statistics');
 
       const data = await response.json();
@@ -231,9 +236,14 @@ export default function ScanResultsTab() {
         },
       };
 
+      const csrfToken = getCsrfToken();
       const response = await fetch('/api/v1/threat-intel/iocs', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrfToken ? { [CSRF_HEADER_NAME]: csrfToken } : {}),
+        },
         body: JSON.stringify(iocData),
       });
 
@@ -246,9 +256,14 @@ export default function ScanResultsTab() {
 
   const submitToSandbox = async (result: ScanResult) => {
     try {
+      const csrfToken = getCsrfToken();
       const response = await fetch('/api/v1/s3-scan/submit-sandbox', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrfToken ? { [CSRF_HEADER_NAME]: csrfToken } : {}),
+        },
         body: JSON.stringify({
           scan_result_id: result.id,
           bucket_name: result.bucket_name,

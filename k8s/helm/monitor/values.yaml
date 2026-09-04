@@ -1,0 +1,202 @@
+# Default (prod-safe baseline) values for skauswatch-monitor.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/monitor
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and
+  # good practice under "baseline") -- see k8s/helm/README.md "Cluster
+  # security baseline".
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
+
+httpPort: 8003
+metricsPort: 9090
+
+# Internal service only — consumed by manager/webui, never exposed externally.
+service:
+  type: ClusterIP
+  port: 8003
+  metricsPort: 9090
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts: []
+  tls: []
+
+httproute:
+  enabled: false
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.app
+  rules: []
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# services/monitor/src/config.rs wires MONITOR_API_*/MONITOR_AUTH_ENABLED/
+# MONITOR_ES_* (JWT_VERIFY_KEY is loaded separately via skauswatch_auth,
+# see the env entry below) — no DB_*/REDIS_* vars are read at runtime
+# (event store is OpenSearch, reached via the ES-compatible API).
+env:
+  - name: MONITOR_API_HOST
+    value: "0.0.0.0"
+  - name: MONITOR_API_PORT
+    value: "8003"
+  - name: MONITOR_AUTH_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: auth-enabled
+  - name: MONITOR_ES_ENABLED
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: es-enabled
+  - name: MONITOR_ES_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: es-url
+  - name: MONITOR_ES_INDEX_PATTERN
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: es-index-pattern
+  # NOTE: services/monitor/src/config.rs no longer reads MONITOR_SECRET_KEY
+  # -- it loads the house JWT_VERIFY_KEY via skauswatch_auth (finding #3
+  # hardening), same as manager/vault/pki/sshca/logs/codescan-backend/
+  # depgate. This chart previously wired the now-dead MONITOR_SECRET_KEY
+  # var; corrected here alongside the ES256 migration.
+  - name: JWT_VERIFY_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-monitor.secretName" . }}'
+        key: jwt-verify-key
+  - name: MONITOR_ES_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-monitor.secretName" . }}'
+        key: es-username
+        optional: true
+  - name: MONITOR_ES_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-monitor.secretName" . }}'
+        key: es-password
+        optional: true
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-monitor.secretName" . }}'
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-monitor-config
+        key: release-mode
+
+# monitor only exposes GET /health (no separate /ready) — see
+# services/monitor/src/routes/health.rs — so liveness and readiness share it.
+livenessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts: []
+
+volumes: []
+
+configMapData:
+  auth-enabled: "true"
+  es-enabled: "true"
+  es-url: "http://opensearch:9200"
+  es-index-pattern: "skauswatch-events-*"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
+secretData:
+  # PEM EC P-256 public key (SPKI) verifying ES256 tokens minted by
+  # manager (the sole issuer) -- see k8s/helm/manager/values.yaml
+  # secretData for keypair generation commands.
+  jwt-verify-key: ""
+  es-username: ""
+  es-password: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

@@ -1,0 +1,49 @@
+# Alpha overrides — local MicroK8s (local-alpha context), namespace: skauswatch.
+replicaCount: 1
+
+image:
+  repository: localhost:32000/skauswatch/depgate
+  tag: "alpha-latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+awsIdentity:
+  mode: "static"
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+service:
+  type: NodePort
+  port: 5050
+  metricsPort: 9090
+  nodePort: 30505
+
+configMapData:
+  log-level: "debug"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "2"
+  s3-endpoint-url: "http://minio:9000"
+  s3-region: "us-east-1"
+  s3-force-path-style: "true"
+  cache-bucket: "depgate-cache"
+  cache-prefix: "sha256/"
+  quarantine-prefix: "quarantine/"
+  max-artifact-bytes: "536870912"
+  upstream-base-url: "https://registry-1.docker.io"
+  upstream-auth-url: "https://auth.docker.io/token"
+  upstream-service: "registry.docker.io"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"

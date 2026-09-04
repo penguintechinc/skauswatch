@@ -1,0 +1,313 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "services/manager", "services/s3scan", "services/sshca", "services/logs", "services/pki", "services/worker-codescan", "services/scanner", "services/vault", "services/worker-vault-sync", "services/endpoint-agent", "services/monitor", "services/codescan-backend", "services/depgate"]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.97"
+license = "AGPL-3.0-only"
+repository = "https://github.com/penguintechinc/skauswatch"
+authors = ["Penguin Tech Inc <support@penguintech.io>"]
+
+[workspace.dependencies]
+# Shared libraries (penguin-libs) — pinned git rev until 0.1.0 hits crates.io
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs", rev = "d9b88bfe2959ea04845b12666c7c193b1028507f", package = "penguin-licensing" }
+
+# Internal crates
+skauswatch-common = { path = "crates/skauswatch-common" }
+skauswatch-telemetry = { path = "crates/skauswatch-telemetry" }
+skauswatch-db = { path = "crates/skauswatch-db" }
+skauswatch-auth = { path = "crates/skauswatch-auth" }
+skauswatch-streams = { path = "crates/skauswatch-streams" }
+skauswatch-proto = { path = "crates/skauswatch-proto" }
+skauswatch-ai = { path = "crates/skauswatch-ai" }
+skauswatch-s3 = { path = "crates/skauswatch-s3" }
+skauswatch-spire-entry = { path = "crates/skauswatch-spire-entry" }
+# Shared ClamAV+YARA-X scan engine (s3scan/scanner adopt it; DepGate/Sentinel
+# foundation) — see docs/v2-port/v2.1-depgate.md §3.
+skauswatch-scan-core = { path = "crates/skauswatch-scan-core" }
+# Test-only harness (isolated-schema DB pools, JWT minting, LicenseClient
+# builders) — see docs/v2-port/testing-pattern.md. Added as a dev-dependency
+# by service crates, never a runtime dependency.
+skauswatch-testkit = { path = "crates/skauswatch-testkit" }
+# SPIFFE Workload API integration (SVID-based mTLS, AWS federation) shared
+# by every service — see crates/skauswatch-identity.
+skauswatch-identity = { path = "crates/skauswatch-identity" }
+
+# Async runtime
+tokio = { version = "=1.52.3", features = ["full"] }
+tokio-stream = "=0.1.18"
+futures = "=0.3.32"
+async-trait = "=0.1.89"
+
+# HTTP / REST
+axum = { version = "=0.8.9", features = ["multipart"] }
+tower = "=0.5.3"
+tower-http = { version = "=0.7.0", features = ["trace", "compression-gzip"] }
+http = "=1.4.2"
+utoipa = { version = "=5.5.0", features = ["axum_extras", "chrono", "uuid"] }
+# Rate-limiting middleware for Axum services (governor-backed token bucket).
+# default-features off: upstream's default set also enables a `tonic`
+# integration feature we don't use (every consumer here is Axum REST, not a
+# tonic interceptor) — `axum` is the only integration feature services need.
+tower_governor = { version = "=0.8.0", default-features = false, features = ["axum"] }
+
+# gRPC
+tonic = "=0.14.6"
+tonic-prost = "=0.14.6"
+prost = "=0.14.4"
+prost-types = "=0.14.4"
+tonic-prost-build = "=0.14.6"
+protox = "=0.9.1"
+# TokioIo: bridges a manually-built tokio_rustls::TlsStream into hyper's
+# rt::Read/Write for tonic::transport::Endpoint::connect_with_connector — see
+# crates/skauswatch-spire-entry, the first manager-as-gRPC-client mTLS
+# transport in this workspace (server side already does the mirror-image
+# TlsAcceptor wiring in services/manager/src/grpc/mod.rs::mtls_incoming).
+hyper-util = { version = "=0.1.20", default-features = false, features = ["tokio"] }
+
+# Database
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "sqlite", "chrono", "uuid", "json", "macros", "migrate"] }
+
+# Cache / streams (Valkey/Redis)
+# default-nil-types: without it, fred's generic collection decode (e.g.
+# HashMap::from_value, used by XReadResponse) rejects a bare RESP nil instead
+# of treating it as an empty collection. A genuinely-idle XREADGROUP poll
+# (block timed out, zero new entries) replies with exactly that bare nil, so
+# every stream consumer (s3scan/scanner/worker-codescan/worker-vault-sync)
+# was surfacing a spurious transport error + extra retry sleep on every idle
+# cycle — see crates/skauswatch-streams/src/consumer.rs::read_new.
+# "i-scripts" adds EVAL support — used by worker-codescan's Sentinel lease
+# (crate::lease::LeaseClient::release) for a compare-and-delete Lua script;
+# purely additive (Cargo features never subtract capability from other
+# workspace members already depending on this shared entry).
+fred = { version = "=10.1.0", features = ["default-nil-types", "i-scripts"] }
+
+# Object storage
+# RUSTSEC-2026-0098/0099/0104 (rustls-webpki 0.101.7 name-constraint bypass +
+# CRL-parse panic): aws-sdk-s3's default `"rustls"` feature pulls the legacy
+# hyper-rustls 0.24 -> rustls 0.21 -> rustls-webpki 0.101.7 path alongside the
+# modern safe default-https-client (rustls-aws-lc -> webpki 0.103.13) we use.
+# Trim to drop the legacy stack. See `cargo tree -i rustls-webpki@0.101.7`.
+# aws-config: mirrors its own upstream `default` feature set (sso/sts +
+# credentials-process for the full credential-resolution chain used by
+# `aws_config::defaults()`, rt-tokio for the async runtime, default-https-client
+# for the modern rustls-aws-lc HTTP client) minus aws-config's own `"rustls"`
+# feature, which is left off deliberately even though it currently aliases to
+# the same safe default-https-client path — never opt in to a feature named
+# "rustls" on an AWS SDK crate, since upstream has repointed that exact name at
+# the legacy `tls-rustls` stack on other SDK crates (see aws-sdk-secretsmanager
+# below) and could do so here in a future release.
+aws-config = { version = "=1.9.0", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+    "credentials-process",
+    "sso",
+] }
+aws-sdk-s3 = { version = "=1.138.0", default-features = false, features = [
+    "sigv4a",
+    "http-1x",
+    "default-https-client",
+    "rt-tokio",
+] }
+# aws-sdk-sts: hybrid S3 bucket-credential model (crates/skauswatch-s3
+# credentials.rs) — sts:AssumeRole is the preferred credential path for
+# real-AWS buckets (envelope-encrypted static keys are the fallback for
+# S3-compatible endpoints with no STS, e.g. MinIO/Wasabi). Already present
+# transitively via aws-config's "sso" feature at a compatible version; same
+# trim as aws-sdk-s3/aws-sdk-secretsmanager above — no sigv4a/http-1x needed
+# for a low-volume control-plane API like STS.
+aws-sdk-sts = { version = "=1.108.0", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+] }
+
+# PKI / X.509 (pki): rcgen builds/signs certs + CRLs, x509-parser reads
+# CA cert/CSR public keys for RFC 5280 method-1 (SHA1) key identifiers. aws_lc_rs
+# backend (default in the tree via rustls) enables RSA key generation; ring off.
+rcgen = { version = "=0.14.8", default-features = false, features = ["crypto", "pem", "aws_lc_rs", "x509-parser"] }
+x509-parser = "=0.18.1"
+time = { version = "=0.3.53", default-features = false, features = ["std"] }
+
+# YARA malware pattern matching (scanner): pure-Rust engine, no C deps
+yara-x = "=1.19.0"
+
+# Vault: shared crypto crate + AES-256-GCM envelope (cross-decrypt parity
+# with v1 Python cryptography AESGCM — see docs/v2-port/vault-crypto-gate.md)
+# + AWS Secrets Manager cloud-sync (other providers NotImplemented in v2.0).
+skauswatch-vault = { path = "crates/skauswatch-vault" }
+# aes-gcm's `getrandom` feature re-exports `OsRng` so codescan-backend can draw
+# git-credential AEAD nonces via `Aes256Gcm::generate_nonce(&mut OsRng)` — the
+# idiomatic AEAD nonce source, which lets that crate drop its direct `rand` dep.
+# (rand 0.8.x remains transitively via fred/jsonwebtoken/rsa — this is a direct-
+# dependency cleanup, not removal from the lock.)
+aes-gcm = { version = "=0.10.3", features = ["getrandom"] }
+# aws-sdk-secretsmanager's default feature set includes `"rustls"`, which (unlike
+# aws-config's same-named feature above) maps directly to the legacy
+# `aws-smithy-runtime/tls-rustls` -> legacy-rustls-ring -> rustls 0.21 ->
+# rustls-webpki 0.101.7 stack (RUSTSEC-2026-0098/0099/0104). worker-vault-sync
+# builds the client directly via `Config::builder()` with static credentials
+# (see services/worker-vault-sync/src/providers/aws.rs) — no SSO/STS/profile
+# resolution needed — so only the modern HTTP client + tokio runtime are kept.
+aws-sdk-secretsmanager = { version = "=1.90.0", default-features = false, features = [
+    "default-https-client",
+    "rt-tokio",
+] }
+
+# Endpoint agent (client-side): viper-shaped YAML config, cross-platform
+# process/network enumeration, directory walking for file integrity checks
+serde_yaml = "=0.9.34"
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system", "user"] }
+netstat2 = "=0.11.2"
+walkdir = "=2.5.0"
+
+# Monitor log collectors (phase 12): audit/syslog/journald/file-log
+# classification patterns (auditd/file/journald/lxc collectors — see
+# services/monitor/src/collectors) and dev-only file-tail fixtures.
+# Both versions already resolve transitively elsewhere in the tree
+# (see `cargo tree -i regex@1.13.0` / `-i tempfile@3.27.0`) — pinning them
+# as direct deps here does not move anything already locked.
+regex = "=1.13.0"
+tempfile = "=3.27.0"
+
+
+# Content scanning (s3scan): magic-byte file typing + SHA1 (md-5/sha2 above)
+infer = "=0.22.0"
+sha1 = "=0.10.7"
+
+# CodeScan Sentinel P2 tool registry (worker-codescan): fetches a branch's
+# tree as a zip archive (GitHub zipball / GitLab archive.zip) rather than a
+# tar.gz — `zip` is already resolved in this lockfile transitively via
+# yara-x (skauswatch-scan-core's malware-scan engine); pinning it here at the
+# exact same version does not move anything already locked. `flate2` is the
+# same story (already resolved as `zip`'s own compression backend) and is
+# reused directly by codescan-backend to gzip/gunzip stored SBOM documents.
+# default-features off: `zip`'s default feature set pulls bzip2 (libbz2-rs-sys,
+# license `bzip2-1.0.6`) and ppmd-rust (`CC0-1.0 OR MIT-0`) — codecs we never
+# use and licenses outside deny.toml's allow list. GitHub zipballs and GitLab
+# `archive.zip` are deflate, so that is the only codec enabled here. Shrinking
+# the dependency surface beats widening license policy for codecs we do not
+# decompress.
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
+flate2 = "=1.1.9"
+
+# AuthN/Z
+bcrypt = "=0.19.2"
+email_address = "=0.2.9"
+hmac = "=0.12.1"
+# `use_pem` on top of `rust_crypto` (audit finding H1b, ES256 migration):
+# EncodingKey::from_ec_pem/DecodingKey::from_ec_pem require the `pem`+
+# `simple_asn1` parsers `use_pem` pulls in — `rust_crypto` alone (the
+# in-memory ecdsa/p256/rsa backends) does not gate them in.
+jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["rust_crypto", "use_pem"] }
+openidconnect = "=4.0.1"
+# Ephemeral dev-only EC keypair generation (skauswatch-auth's
+# JWT_SIGNING_KEY/JWT_VERIFY_KEY unset-in-non-production fallback) — same
+# P-256 backend jsonwebtoken's `rust_crypto` feature already resolves,
+# pinned directly (with explicit features, not relying on jsonwebtoken's own
+# feature selection) so keygen + PKCS#8/SPKI PEM encoding are available.
+p256 = { version = "=0.13.2", default-features = false, features = ["arithmetic", "ecdsa", "pem", "std"] }
+pkcs8 = { version = "=0.10.2", default-features = false, features = ["alloc", "std", "pem"] }
+rand_core = { version = "=0.6.4", default-features = false, features = ["std"] }
+# HttpOnly session cookies (H2 audit fix: webui JWT moves out of
+# localStorage) + the `sw_csrf` double-submit cookie — already resolved in
+# the tree as `axum-test`'s dev-dependency; pinned here at the same version
+# (0.18.1) so `services/manager` can depend on it directly for production
+# Set-Cookie construction, not just test-time parsing.
+cookie = { version = "=0.18.1", default-features = false }
+
+# HTTP client
+reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "gzip"] }
+
+# Serialization
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+
+# Observability
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
+metrics = "=0.24.6"
+metrics-exporter-prometheus = "=0.18.3"
+
+# Utilities
+thiserror = "=2.0.18"
+anyhow = "=1.0.103"
+figment = { version = "=0.10.19", features = ["env"] }
+arc-swap = "=1.9.2"
+sha2 = "=0.10.9"
+md-5 = "=0.11.0"
+url = { version = "=2.5.8", features = ["serde"] }
+uuid = { version = "=1.23.5", features = ["v4", "serde"] }
+
+# SSH certificate authority (sshca): OpenSSH cert signing/parsing. 0.7 is a
+# release candidate (pre-release, forbidden) — pin the current stable 0.6.7.
+ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed25519", "rsa", "p256", "p384", "getrandom"] }
+chrono = { version = "=0.4.45", features = ["serde"] }
+bytes = "=1.12.1"
+base64 = "=0.22.1"
+clap = { version = "=4.6.1", features = ["derive", "env"] }
+tokio-cron-scheduler = "=0.15.1"
+
+# Test-only
+wiremock = "=0.6.5"
+mockall = "=0.15.0"
+axum-test = "=21.0.0"
+
+# SPIFFE Workload API (skauswatch-identity): SVID-based mTLS + JWT-SVID
+# federation. rustls/tokio-rustls are pinned to the exact versions already
+# resolved transitively elsewhere in the tree (reqwest's "rustls" feature,
+# sqlx's "tls-rustls" feature) — see `cargo tree -i rustls@0.23.42` — so
+# adding them as direct dependencies here does not move anything already
+# locked. tokio-rustls is dev-only (mTLS handshake tests); rustls itself is
+# a runtime dependency (building `rustls::ServerConfig`/`ClientConfig`).
+spiffe = { version = "=0.16.0", default-features = false, features = ["workload-api"] }
+rustls = "=0.23.42"
+tokio-rustls = "=0.26.4"
+
+# Vault cloud-sync (Phase 12): Azure Key Vault / GCP Secret Manager /
+# Kubernetes Secrets providers via their actively-maintained SDKs — see
+# services/worker-vault-sync/src/providers/{azure,gcp,kubernetes}.rs.
+# `azure_security_keyvault` (legacy, homepage points at the
+# azure-sdk-for-rust "legacy" branch) is deliberately NOT used —
+# `azure_security_keyvault_secrets` is the current, actively developed
+# replacement (same org, modern azure_core 1.x generated-client stack).
+# OCI has no mature Rust SDK at all — reqwest + hand-rolled RSA-SHA256
+# request signing (`rsa` crate) instead; see providers/oracle.rs.
+azure_security_keyvault_secrets = "=1.0.0"
+azure_identity = "=1.0.0"
+azure_core = "=1.1.0"
+# Test-only: azure_core doesn't re-export `Transport` (used by
+# `worker-vault-sync`'s Azure tests to redirect the pipeline's terminal
+# transport at a wiremock server — see providers/azure.rs test module).
+# Pinned to the exact version azure_core 1.1.0 itself resolves to.
+typespec_client_core = "=1.1.0"
+google-cloud-secretmanager-v1 = "=1.12.0"
+google-cloud-auth = "=1.15.0"
+google-cloud-gax = "=1.13.0"
+kube = { version = "=4.2.0", default-features = false, features = ["client", "rustls-tls"] }
+k8s-openapi = { version = "=0.28.0", features = ["v1_34"] }
+# kube::Config::auth_info.token needs a secrecy::SecretString directly —
+# already in the dependency graph transitively via kube-client, pinned here
+# as a direct dep since providers/kubernetes.rs constructs one explicitly.
+secrecy = "=0.10.3"
+# rsa 0.10 is still release-candidate-only (0.10.0-rc.x) — pre-release,
+# forbidden (same policy already applied to `ssh-key` above); 0.9.10 is the
+# latest stable line. `sha2` feature re-exports the `sha2` crate (used for
+# OCI's RSA-SHA256 request signing) at a version guaranteed compatible with
+# the `Sha256`/digest traits `rsa`'s own signing types expect.
+rsa = { version = "=0.9.10", features = ["sha2"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "warn"
+panic = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

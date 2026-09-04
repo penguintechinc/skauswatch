@@ -1,0 +1,40 @@
+# Tetragon exec-allowlist for {{ include "skauswatch-endpoint-agent.fullname" . }}.
+# ENFORCE: any sys_execve NOT matching one of the listed binaries is
+# SIGKILLed -- blocks a dropped shell/reverse-shell/living-off-the-land
+# binary (bash, sh, curl, nc, wget, python3, perl, ...) in a pod whose only
+# legitimate process is the binaries below. Requires the Tetragon agent
+# DaemonSet running in the cluster (cluster add-on, not part of this chart
+# -- see k8s/helm/README.md "Tetragon prerequisite").
+# endpoint-agent runs privileged: true + hostPID/hostNetwork (pre-existing,
+# documented ROOT EXCEPTION in values.yaml -- SYS_PTRACE/NET_ADMIN for EDR
+# process/connection enumeration). Tetragon exec-allowlist is the PRIMARY
+# control here since a standard Cilium endpointSelector CiliumNetworkPolicy
+# does not meaningfully scope hostNetwork pod traffic -- see
+# k8s/helm/README.md "endpoint-agent: CNP does not apply".
+{{- if .Values.tetragon.enabled | default true }}
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: {{ include "skauswatch-endpoint-agent.fullname" . }}-exec-allowlist
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "skauswatch-endpoint-agent.selectorLabels" . | nindent 6 }}
+  kprobes:
+    - call: "sys_execve"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+        - index: 1
+          type: "string_arr"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "NotEqual"
+              values:
+                - "/usr/local/bin/endpoint-agent"
+          matchActions:
+            - action: Sigkill
+{{- end }}

@@ -11,8 +11,10 @@ const app = express();
 // Configuration from environment
 const config = {
   port: parseInt(process.env.PORT || '3000', 10),
-  flaskApiUrl: process.env.FLASK_API_URL || 'http://localhost:5000',
-  goApiUrl: process.env.GO_API_URL || 'http://localhost:8080',
+  managerUrl: process.env.MANAGER_URL || 'http://localhost:5000',
+  vaultBackendUrl: process.env.VAULT_BACKEND_URL || 'http://vault-backend:8000',
+  codescanBackendUrl: process.env.CODESCAN_BACKEND_URL || 'http://codescan-backend:8080',
+  aaaMonitorUrl: process.env.MONITOR_URL || 'http://monitor:8000',
   nodeEnv: process.env.NODE_ENV || 'development',
 };
 
@@ -29,50 +31,73 @@ app.get('/readyz', (_req: Request, res: Response) => {
   res.json({ status: 'ready', timestamp: new Date().toISOString() });
 });
 
-// Proxy configuration for Flask API (auth, users, hello)
-const flaskProxyOptions: Options = {
-  target: config.flaskApiUrl,
+// Proxy configuration for Manager API (unified auth, users, license features, and all v1 endpoints)
+const managerProxyOptions: Options = {
+  target: config.managerUrl,
   changeOrigin: true,
-  pathRewrite: undefined, // Keep original path
+  pathRewrite: {
+    '^/api': '/api/v1', // Rewrite /api/* to /api/v1/*
+  },
   on: {
     proxyReq: (proxyReq, req) => {
-      console.log(`[Flask Proxy] ${req.method} ${req.url} -> ${config.flaskApiUrl}`);
+      console.log(`[Manager Proxy] ${req.method} ${req.url} -> ${config.managerUrl}`);
     },
     error: (err, _req, res) => {
-      console.error('[Flask Proxy Error]', err);
+      console.error('[Manager Proxy Error]', err);
       if (res && 'writeHead' in res) {
-        (res as Response).status(502).json({ error: 'Flask API unavailable' });
+        (res as Response).status(502).json({ error: 'Manager API unavailable' });
       }
     },
   },
 };
 
-// Proxy configuration for Go API (high-performance endpoints)
-const goProxyOptions: Options = {
-  target: config.goApiUrl,
+// Proxy configuration for Vault backend
+const vaultProxyOptions: Options = {
+  target: config.vaultBackendUrl,
   changeOrigin: true,
   pathRewrite: {
-    '^/api/go': '/api/v1', // Rewrite /api/go/* to /api/v1/*
+    '^/api/vault': '', // Strip /api/vault prefix
   },
   on: {
     proxyReq: (proxyReq, req) => {
-      console.log(`[Go Proxy] ${req.method} ${req.url} -> ${config.goApiUrl}`);
+      console.log(`[Vault Proxy] ${req.method} ${req.url} -> ${config.vaultBackendUrl}`);
     },
     error: (err, _req, res) => {
-      console.error('[Go Proxy Error]', err);
+      console.error('[Vault Proxy Error]', err);
       if (res && 'writeHead' in res) {
-        (res as Response).status(502).json({ error: 'Go API unavailable' });
+        (res as Response).status(502).json({ error: 'Vault backend unavailable' });
+      }
+    },
+  },
+};
+
+// Proxy configuration for CodeScan backend
+const codescanProxyOptions: Options = {
+  target: config.codescanBackendUrl,
+  changeOrigin: true,
+  pathRewrite: {
+    '^/api/codescan': '', // Strip /api/codescan prefix
+  },
+  on: {
+    proxyReq: (proxyReq, req) => {
+      console.log(`[CodeScan Proxy] ${req.method} ${req.url} -> ${config.codescanBackendUrl}`);
+    },
+    error: (err, _req, res) => {
+      console.error('[CodeScan Proxy Error]', err);
+      if (res && 'writeHead' in res) {
+        (res as Response).status(502).json({ error: 'CodeScan backend unavailable' });
       }
     },
   },
 };
 
 // API proxies
-// Go backend proxy (for high-performance endpoints)
-app.use('/api/go', createProxyMiddleware(goProxyOptions));
+// Module-specific proxies (mount before general /api proxy to take precedence)
+app.use('/api/vault', createProxyMiddleware(vaultProxyOptions));
+app.use('/api/codescan', createProxyMiddleware(codescanProxyOptions));
 
-// Flask backend proxy (for auth, users, standard APIs)
-app.use('/api', createProxyMiddleware(flaskProxyOptions));
+// Manager backend proxy (unified API for auth, users, license features, and all core endpoints)
+app.use('/api', createProxyMiddleware(managerProxyOptions));
 
 // Serve static files in production
 if (config.nodeEnv === 'production') {
@@ -95,6 +120,8 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
 app.listen(config.port, () => {
   console.log(`WebUI server running on port ${config.port}`);
   console.log(`Environment: ${config.nodeEnv}`);
-  console.log(`Flask API: ${config.flaskApiUrl}`);
-  console.log(`Go API: ${config.goApiUrl}`);
+  console.log(`Manager API: ${config.managerUrl}`);
+  console.log(`Vault Backend: ${config.vaultBackendUrl}`);
+  console.log(`CodeScan Backend: ${config.codescanBackendUrl}`);
+  console.log(`Monitor: ${config.aaaMonitorUrl}`);
 });

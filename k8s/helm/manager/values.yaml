@@ -1,18 +1,46 @@
+# Default (prod-safe baseline) values for skauswatch-manager.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
 replicaCount: 3
 
 image:
-  repository: ghcr.io/penguintechinc/skauswatch-manager
+  repository: ghcr.io/penguintechinc/skauswatch/manager
   pullPolicy: IfNotPresent
-  tag: latest
+  tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
 serviceAccount:
   create: true
   annotations: {}
   name: ""
+
+# AWS identity mechanism backing services/manager's aws-sdk-s3 credential
+# chain (state.rs). Neither mode uses static AWS keys — see
+# docs/v2-port/aws-identity-runbook.md.
+#   - "spire" (default): SPIRE-issued JWT-SVID federated into AWS via OIDC
+#     (sts:AssumeRoleWithWebIdentity) — renders no ServiceAccount
+#     annotation. Requires SPIFFE_ENDPOINT_SOCKET wired into this pod,
+#     which is a separate, not-yet-done pass
+#     (k8s/helm/spire/README.md "deliberately deferred" #5). Matches
+#     skauswatch's on-prem dal2 clusters (alpha/beta/gamma).
+#   - "irsa": EKS Pod Identity / IRSA — annotates the ServiceAccount with
+#     eks.amazonaws.com/role-arn; the aws-sdk default credential provider
+#     chain picks it up automatically, no code change needed. Set
+#     awsIdentity.irsa.roleArn and override awsIdentity.mode: "irsa" in
+#     the target environment's values file only if that environment's
+#     cluster is EKS.
+#   - "static": legacy S3-compatible-only path — no AWS role assumption.
+awsIdentity:
+  mode: "spire"
+  irsa:
+    roleArn: ""
 
 podAnnotations: {}
 
@@ -20,6 +48,11 @@ podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
   fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and
+  # good practice under "baseline") -- see k8s/helm/README.md "Cluster
+  # security baseline".
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false
@@ -28,13 +61,22 @@ securityContext:
       - ALL
   readOnlyRootFilesystem: true
 
-containerPort: 5000
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
+
+# REST (API_PORT), gRPC control plane (GRPC_PORT), Prometheus metrics.
+httpPort: 5000
+grpcPort: 50051
+metricsPort: 9090
 
 service:
   type: ClusterIP
   port: 5000
-  targetPort: 5000
   grpcPort: 50051
+  metricsPort: 9090
   annotations: {}
 
 ingress:
@@ -42,19 +84,29 @@ ingress:
   className: "nginx"
   annotations: {}
   hosts:
-    - host: skauswatch.example.com
+    - host: skauswatch.app
       paths:
-        - path: /
+        - path: /api
           pathType: Prefix
   tls: []
 
+httproute:
+  enabled: false
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.app
+  rules:
+    - path: /api
+      service: skauswatch-manager
+      port: 5000
+
 resources:
   limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
     cpu: 500m
     memory: 512Mi
-  requests:
-    cpu: 125m
-    memory: 256Mi
 
 autoscaling:
   enabled: true
@@ -70,20 +122,17 @@ tolerations: []
 affinity: {}
 
 env:
-  - name: FLASK_ENV
-    value: "production"
-  - name: FLASK_APP
-    value: "app:create_app()"
-  - name: SECRET_KEY
+  - name: API_PORT
+    value: "5000"
+  - name: GRPC_PORT
+    value: "50051"
+  - name: GRPC_ENABLED
+    value: "true"
+  - name: RUST_LOG
     valueFrom:
-      secretKeyRef:
-        name: skauswatch-manager-secret
-        key: secret-key
-  - name: SECURITY_PASSWORD_SALT
-    valueFrom:
-      secretKeyRef:
-        name: skauswatch-manager-secret
-        key: password-salt
+      configMapKeyRef:
+        name: skauswatch-manager-config
+        key: log-level
   - name: DB_TYPE
     valueFrom:
       configMapKeyRef:
@@ -104,25 +153,39 @@ env:
       configMapKeyRef:
         name: skauswatch-manager-config
         key: db-name
-  - name: DB_USER
-    valueFrom:
-      secretKeyRef:
-        name: skauswatch-manager-secret
-        key: db-user
-  - name: DB_PASS
-    valueFrom:
-      secretKeyRef:
-        name: skauswatch-manager-secret
-        key: db-pass
   - name: DB_POOL_SIZE
     valueFrom:
       configMapKeyRef:
         name: skauswatch-manager-config
         key: db-pool-size
+  - name: DB_USER
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-manager.secretName" . }}'
+        key: db-user
+  - name: DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-manager.secretName" . }}'
+        key: db-pass
+  # ES256 asymmetric keypair -- manager is the sole issuer of skauswatch
+  # access tokens, so it is the only chart that wires jwt-signing-key
+  # (private). Every other JWT-verifying service (monitor, vault, pki,
+  # sshca, logs, codescan-backend, depgate) only wires jwt-verify-key.
+  - name: JWT_SIGNING_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-manager.secretName" . }}'
+        key: jwt-signing-key
+  - name: JWT_VERIFY_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-manager.secretName" . }}'
+        key: jwt-verify-key
   - name: LICENSE_KEY
     valueFrom:
       secretKeyRef:
-        name: skauswatch-manager-secret
+        name: '{{ include "skauswatch-manager.secretName" . }}'
         key: license-key
   - name: LICENSE_SERVER_URL
     valueFrom:
@@ -138,17 +201,17 @@ env:
 livenessProbe:
   httpGet:
     path: /healthz
-    port: 5000
-  initialDelaySeconds: 30
+    port: http
+  initialDelaySeconds: 10
   periodSeconds: 10
   timeoutSeconds: 5
   failureThreshold: 3
 
 readinessProbe:
   httpGet:
-    path: /healthz
-    port: 5000
-  initialDelaySeconds: 10
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
   periodSeconds: 5
   timeoutSeconds: 3
   failureThreshold: 2
@@ -157,18 +220,51 @@ volumeMounts: []
 
 volumes: []
 
+# --- SPIFFE Workload API socket (SPIRE) --------------------------------
+# Wires SPIFFE_ENDPOINT_SOCKET + the agent Workload API socket into this
+# pod so skauswatch-identity::IdentityProvider can fetch an SVID at
+# runtime (see k8s/helm/spire/README.md "Service-pod SVID pattern").
+# NECESSARY BUT NOT SUFFICIENT: the socket is only populated once a
+# spire-agent DaemonSet is actually running on the node — enabling this
+# toggle without a live agent still leaves the mount empty/absent (agent
+# rollout is cutover ops, not this chart). MUST be enabled wherever
+# RELEASE_MODE=true: identity-consuming services hard-fail without a live
+# SVID in release mode — beta/gamma/production all set spire.enabled:
+# true; alpha stays off (no release-mode, no SPIRE agent in local
+# MicroK8s by default).
+spire:
+  enabled: false
+  socketDir: /run/spire/sockets
+  # CSI driver variant — DISABLED BY DEFAULT, matches k8s/helm/spire's own
+  # csiDriver.enabled default. The SPIFFE CSI Driver DaemonSet runs
+  # privileged: true (ROOT EXCEPTION per devops-containers.md) — do not
+  # set true in any env file without explicit user approval first.
+  csiDriver:
+    enabled: false
+
 configMapData:
-  db-type: "postgres"
+  log-level: "info"
+  db-type: "postgresql"
   db-host: "postgres"
   db-port: "5432"
   db-name: "skauswatch"
-  db-pool-size: "10"
+  db-pool-size: "20"
   license-server-url: "https://license.penguintech.io"
-  release-mode: "false"
+  release-mode: "true"
 
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
+#
+# jwt-signing-key/jwt-verify-key: ES256 (EC P-256) asymmetric keypair.
+# Generate with:
+#   openssl ecparam -genkey -name prime256v1 -noout | \
+#     openssl pkcs8 -topk8 -nocrypt -out jwt-signing-key.pem
+#   openssl ec -in jwt-signing-key.pem -pubout -out jwt-verify-key.pem
 secretData:
-  secret-key: "changeme-in-production"
-  password-salt: "changeme-in-production"
-  db-user: "app_user"
-  db-pass: "changeme-in-production"
+  db-user: ""
+  db-pass: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
+  # PEM EC P-256 private key (PKCS#8) -- manager only, the sole JWT issuer.
+  jwt-signing-key: ""
+  # PEM EC P-256 public key (SPKI) -- manager also verifies its own tokens.
+  jwt-verify-key: ""

@@ -1,0 +1,66 @@
+[package]
+publish = false
+name = "skauswatch-worker-vault-sync"
+description = "SkausWatch Vault cloud-vault sync worker — Redis Streams consumer syncing secrets to AWS/Azure/GCP/Oracle/Kubernetes (Rust port of the v1 sync-worker)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "skauswatch-worker-vault-sync"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+aws-sdk-secretsmanager = { workspace = true }
+axum = { workspace = true }
+azure_core = { workspace = true }
+azure_identity = { workspace = true }
+azure_security_keyvault_secrets = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+google-cloud-auth = { workspace = true }
+google-cloud-gax = { workspace = true }
+google-cloud-secretmanager-v1 = { workspace = true }
+http = { workspace = true }
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
+reqwest = { workspace = true }
+rsa = { workspace = true }
+rustls = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+skauswatch-db = { workspace = true }
+skauswatch-identity = { workspace = true }
+skauswatch-s3 = { workspace = true }
+skauswatch-vault = { workspace = true }
+skauswatch-streams = { workspace = true }
+skauswatch-telemetry = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+# `rsa`'s "getrandom" feature (not enabled by the `[dependencies]` entry
+# above) is needed only by the test-only runtime key generator in
+# `providers::test_support` — scoping it to `[dev-dependencies]` keeps it out
+# of the release binary's feature set entirely.
+rsa = { workspace = true, features = ["getrandom"] }
+skauswatch-testkit = { workspace = true }
+time = { workspace = true }
+typespec_client_core = { workspace = true }
+wiremock = { workspace = true }
+
+[lints]
+workspace = true

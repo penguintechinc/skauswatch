@@ -2,63 +2,55 @@
 # Node.js backend + React frontend shell
 
 # Build stage
-FROM node:22-bookworm-slim AS builder
+FROM node:24-bookworm-slim@sha256:03eae3ef7e88a9de535496fb488d67e02b9d96a063a8967bae657744ecd513f2 AS builder
 
 WORKDIR /app
 
-# Copy package files
 COPY package*.json ./
-
-# GitHub Packages authentication
-ARG GITHUB_TOKEN
 COPY .npmrc ./
 
-# Install dependencies
-RUN npm install
+RUN npm ci
 
-# Copy source code
 COPY . .
 
-# Build the application
 RUN npm run build
 
 # Production stage
-FROM node:22-bookworm-slim AS production
+FROM node:24-bookworm-slim@sha256:03eae3ef7e88a9de535496fb488d67e02b9d96a063a8967bae657744ecd513f2 AS production
 
 WORKDIR /app
 
-# Create non-root user
 RUN groupadd -r webui && useradd -r -g webui webui
 
-# Copy package files and registry config for production dependencies
 COPY package*.json ./
-ARG GITHUB_TOKEN
 COPY .npmrc ./
 
-# Install production dependencies only
-RUN npm install --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force
 
-# Copy built assets from builder
 COPY --from=builder /app/dist ./dist
 
-# Set ownership
 RUN chown -R webui:webui /app
 
-# Switch to non-root user
 USER webui
 
-# Environment defaults
+# Env var names/defaults must match what src/server/index.ts actually reads
+# (process.env.MANAGER_URL / VAULT_BACKEND_URL / CODESCAN_BACKEND_URL /
+# MONITOR_URL) — the old FLASK_API_URL/GO_API_URL vars pointed at
+# flask-backend/go-backend, which don't exist post-Rust-port and aren't read
+# by any code path. Hosts match the k8s "service name = directory name"
+# convention; ports match each Rust service's actual default (manager 5000,
+# vault 8080, codescan-backend 5005, monitor 8003) — Helm values override
+# these per environment same as any other service.
 ENV NODE_ENV=production \
     PORT=3000 \
-    FLASK_API_URL=http://flask-backend:5000 \
-    GO_API_URL=http://go-backend:8080
+    MANAGER_URL=http://manager:5000 \
+    VAULT_BACKEND_URL=http://vault:8080 \
+    CODESCAN_BACKEND_URL=http://codescan-backend:5005 \
+    MONITOR_URL=http://monitor:8003
 
-# Expose port
 EXPOSE 3000
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/healthz || exit 1
+    CMD node -e "require('http').get('http://localhost:3000/healthz', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
 
-# Run the server
 CMD ["node", "dist/server/index.js"]

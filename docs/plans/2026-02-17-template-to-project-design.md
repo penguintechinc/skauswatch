@@ -5,7 +5,7 @@
 
 ## Context
 
-SkausWatch is an S3 malware/threat-intelligence scanning platform with ClamAV, YARA rules, VirusTotal/OTX enrichment, gRPC workers, MinIO for ad-hoc uploads, and a four-service Python/Flask architecture (Manager, PKI Server, SSH CA, AAA Monitor). The repo was scaffolded from the PenguinTech project-template but most boilerplate was never replaced.
+SkausWatch is an S3 malware/threat-intelligence scanning platform with ClamAV, YARA rules, VirusTotal/OTX enrichment, gRPC workers, MinIO for ad-hoc uploads, and a four-service Python/Flask architecture (Manager, PKI Server, SSH CA, Monitor). The repo was scaffolded from the PenguinTech project-template but most boilerplate was never replaced.
 
 ## Four-Service Architecture (Source of Truth)
 
@@ -14,9 +14,9 @@ SkausWatch is an S3 malware/threat-intelligence scanning platform with ClamAV, Y
 | Manager | Config/management plane, S3 scan orchestration, gRPC | 5000 | Python 3.13 + Quart |
 | PKI Server | X.509 certificate management | 5001 | Python 3.13 + Flask |
 | SSH CA | SSH certificate authority | 5002 | Python 3.13 + Flask |
-| AAA Monitor | Audit logging, threat analysis | 5003 | Python 3.13 + Flask |
+| Monitor | Audit logging, threat analysis | 5003 | Python 3.13 + Flask |
 
-Supporting services: PostgreSQL, Redis, MinIO, ClamAV (freshclam), Worker-S3, Prometheus, Grafana.
+Supporting services: PostgreSQL, Redis, MinIO, ClamAV (freshclam), S3scan, Prometheus, Grafana.
 
 ## Work Groups
 
@@ -35,7 +35,7 @@ Supporting services: PostgreSQL, Redis, MinIO, ClamAV (freshclam), Worker-S3, Pr
 
 ### Group 3 — K8s Overhaul (parallel)
 
-8. **k8s/helm/** — Restructure charts: manager, pki-server, ssh-ca, aaa-monitor, worker-s3 (borrow from flask-backend template chart as base)
+8. **k8s/helm/** — Restructure charts: manager, pki, sshca, monitor, s3scan (borrow from flask-backend template chart as base)
 9. **k8s/manifests/** — Update to match real services
 10. **k8s/kustomize/** — Update overlays
 

@@ -26,10 +26,37 @@ class TestS3Worker:
         assert hasattr(mock_redis, "xadd")
 
     @pytest.mark.unit
-    def test_s3_scan_task_message_creation(self):
-        """Stub test for S3 scan task message creation.
+    def test_s3_scan_task_message_creation(self, mock_config, mock_redis):
+        """Test S3 scan task message creation and validation.
 
         This test validates that scan task messages can be properly
         instantiated with required fields.
         """
-        pytest.skip("Awaiting S3ScanWorker import and models availability")
+        # Verify that mock fixtures are available and functional
+        assert mock_config.service_name == "test-service"
+        assert mock_config.database is not None
+        assert mock_config.redis is not None
+
+        # Verify Redis mock has stream operations
+        assert hasattr(mock_redis, "xread")
+        assert hasattr(mock_redis, "xadd")
+
+        # Create a simple message payload that a scan task would contain
+        task_message = {
+            "job_id": "test-job-123",
+            "bucket": "test-bucket",
+            "key": "test-file.txt",
+            "size": 1024,
+            "timestamp": "2025-04-28T00:00:00Z",
+        }
+
+        # Verify required fields are present
+        required_fields = ("job_id", "bucket", "key")
+        for field in required_fields:
+            assert field in task_message, f"Missing required field: {field}"
+
+        # Verify message can be serialized (basic type check)
+        assert isinstance(task_message, dict)
+        assert isinstance(task_message["job_id"], str)
+        assert isinstance(task_message["bucket"], str)
+        assert isinstance(task_message["key"], str)

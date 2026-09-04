@@ -12,38 +12,52 @@ import pytest
 class TestServiceHealth:
     """Health endpoint tests for all SkausWatch services."""
 
-    async def test_manager_health(self, manager_service_ready, async_http_client):
-        """Test Manager service (port 5000) health endpoint."""
+    async def test_manager_health(
+        self, service_urls, manager_service_ready, async_http_client
+    ):
+        """Test Manager service health endpoint."""
         if not manager_service_ready:
             pytest.skip("Manager service not reachable")
 
-        response = await async_http_client.get("http://localhost:5000/health")
+        url = service_urls.get("manager")
+        health_endpoint = service_urls.get("manager_health", "/health")
+        response = await async_http_client.get(f"{url}{health_endpoint}")
         assert response.status_code == 200
 
-    async def test_pki_server_health(self, pki_service_ready, async_http_client):
-        """Test PKI Server (port 5001) health endpoint."""
+    async def test_pki_health(
+        self, service_urls, pki_service_ready, async_http_client
+    ):
+        """Test PKI Server health endpoint."""
         if not pki_service_ready:
             pytest.skip("PKI Server not reachable")
 
-        response = await async_http_client.get("http://localhost:5001/health")
+        url = service_urls.get("pki")
+        health_endpoint = service_urls.get("pki_health", "/health")
+        response = await async_http_client.get(f"{url}{health_endpoint}")
         assert response.status_code == 200
 
-    async def test_ssh_ca_health(self, ssh_ca_service_ready, async_http_client):
-        """Test SSH CA (port 5002) health endpoint."""
-        if not ssh_ca_service_ready:
+    async def test_sshca_health(
+        self, service_urls, sshca_service_ready, async_http_client
+    ):
+        """Test SSH CA health endpoint."""
+        if not sshca_service_ready:
             pytest.skip("SSH CA not reachable")
 
-        response = await async_http_client.get("http://localhost:5002/health")
+        url = service_urls.get("sshca")
+        health_endpoint = service_urls.get("sshca_health", "/health")
+        response = await async_http_client.get(f"{url}{health_endpoint}")
         assert response.status_code == 200
 
-    async def test_aaa_monitor_health(
-        self, aaa_monitor_service_ready, async_http_client
+    async def test_monitor_health(
+        self, service_urls, monitor_service_ready, async_http_client
     ):
-        """Test AAA Monitor (port 5003) health endpoint."""
-        if not aaa_monitor_service_ready:
-            pytest.skip("AAA Monitor not reachable")
+        """Test Monitor health endpoint."""
+        if not monitor_service_ready:
+            pytest.skip("Monitor not reachable")
 
-        response = await async_http_client.get("http://localhost:5003/health")
+        url = service_urls.get("monitor")
+        health_endpoint = service_urls.get("monitor_health", "/health")
+        response = await async_http_client.get(f"{url}{health_endpoint}")
         assert response.status_code == 200
 
 

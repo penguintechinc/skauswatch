@@ -1,0 +1,112 @@
+# Cilium default-deny + explicit allow for {{ include "skauswatch-manager.fullname" . }}.
+# Selecting this pod with ANY CiliumNetworkPolicy makes Cilium deny every
+# ingress/egress path not explicitly listed below (Cilium per-endpoint
+# default-deny model) -- there is no separate blanket "default-deny" object
+# needed alongside this one. See k8s/helm/README.md "Cluster security
+# baseline" for the full policy.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "skauswatch-manager.fullname" . }}
+  labels:
+    {{- include "skauswatch-manager.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "skauswatch-manager.selectorLabels" . | nindent 6 }}
+  ingress:
+    # kubelet liveness/readiness probes originate from the node, not a pod
+    # identity -- must be explicitly allowed or probes fail closed once this
+    # pod is selected by any CiliumNetworkPolicy.
+    - fromEntities:
+        - host
+        - remote-node
+    # CONFIRMED (webui values.yaml manager-url): webui BFF proxy (/api)
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: skauswatch-webui
+      toPorts:
+        - ports:
+            - port: "5000"
+              protocol: TCP
+    # CONFIRMED (endpoint-agent values.yaml manager-url): enrollment/heartbeat
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: skauswatch-endpoint-agent
+      toPorts:
+        - ports:
+            - port: "5000"
+              protocol: TCP
+    {{- if or .Values.ingress.enabled .Values.httproute.enabled }}
+    # Cross-namespace: Cilium Gateway / ingress controller in the shared
+    # "gateway" namespace -- only active when this chart's own
+    # ingress/httproute is enabled for the target environment.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.httproute.gatewayNamespace | default "gateway" }}
+      toPorts:
+        - ports:
+            - port: "5000"
+              protocol: TCP
+    {{- end }}
+    # Prometheus scrape (same-namespace collector -- adjust label if the
+    # cluster's Prometheus/Alloy runs in a dedicated monitoring namespace).
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+  egress:
+    # DNS resolution (kube-dns) -- required for any Service/FQDN egress below.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # Postgres (same-namespace dependency; NOT owned by this chart -- see
+    # k8s/helm/README.md "Dependency label assumption"). Labels are the
+    # Bitnami postgresql chart convention per devops-kubernetes.md; verify
+    # against the actual deployed Postgres Service/pod labels before relying
+    # on this in a live cluster.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: postgresql
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # CONFIRMED (services/manager/src/grpc/pki_client.rs): manager is a gRPC client of pki for certificate issuance, over mTLS.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: skauswatch-pki
+      toPorts:
+        - ports:
+            - port: "50052"
+              protocol: TCP
+    # PenguinTech license/feature-flag server (all environments except
+    # domain-bypassed *.penguintech.cloud/*.penguincloud.io deploys still
+    # call out for entitlement checks in the common case).
+    - toFQDNs:
+        - matchName: "license.penguintech.io"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # AWS S3/STS for customer-configured buckets + SPIRE JWT-SVID federation (sts:AssumeRoleWithWebIdentity) -- destination bucket accounts are operator-configured at runtime, so this is a broad AWS pattern rather than a pinned hostname.
+    - toFQDNs:
+        - matchPattern: "*.amazonaws.com"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

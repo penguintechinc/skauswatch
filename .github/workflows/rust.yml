@@ -1,0 +1,251 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'deny.toml'
+      - 'crates/**'
+      - 'services/**/Cargo.toml'
+      - 'services/**/src/**'
+      - 'proto/**'
+      - 'tests/parity/**'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'deny.toml'
+      - 'crates/**'
+      - 'services/**/Cargo.toml'
+      - 'services/**/src/**'
+      - 'proto/**'
+      - 'tests/parity/**'
+      - '.github/workflows/rust.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  # Locked resolution only — Cargo.lock is the source of truth
+  CARGO_NET_RETRY: "3"
+
+jobs:
+  lint:
+    name: Format + Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      # rustup honors rust-toolchain.toml; runner ships rustup preinstalled
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: cargo fmt
+        run: cargo fmt --all --check
+      - name: cargo check
+        run: cargo check --workspace --locked
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    # Real Postgres + Valkey for DB/handler tests (skauswatch-testkit provisions
+    # an isolated schema per test against this instance — see
+    # docs/v2-port/testing-pattern.md). No trait-abstracted/mocked DB layer:
+    # AppState.db is a concrete sqlx::PgPool in every service, so DB-layer
+    # coverage requires a real database in CI, not a double.
+    services:
+      postgres:
+        image: postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      valkey:
+        image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # skauswatch-testkit::db::test_pool builds its connection URL straight
+      # from DB_HOST/PORT/NAME/USER/PASS (crates/skauswatch-testkit/src/db.rs
+      # connection_url()) — it never reads DB_TYPE. DB_TYPE is deliberately
+      # NOT set here: services/monitor/src/state.rs has a unit test
+      # (build_threat_store_is_none_without_db_type_configured) that asserts
+      # skauswatch_db::DbConfig::from_env() fails when DB_TYPE is absent, and
+      # no test in the workspace requires DbConfig::from_env() to succeed —
+      # setting DB_TYPE globally here would silently break that test.
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_NAME: postgres
+      DB_USER: postgres
+      DB_PASS: postgres
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  supply-chain:
+    name: Supply chain (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install cargo-deny (pinned)
+        run: cargo install cargo-deny --version 0.20.2 --locked
+      # cargo-deny's `advisories` check reads the same RustSec DB as cargo-audit
+      # and is a strict superset (it also enforces licenses/bans/sources) — and,
+      # unlike cargo-audit, it honors the documented `[advisories] ignore` list
+      # in deny.toml. Running both meant maintaining two ignore configs, so
+      # cargo-deny is the single supply-chain gate.
+      - name: cargo deny
+        run: cargo deny check
+
+  coverage:
+    name: Coverage (>=90%)
+    runs-on: ubuntu-latest
+    # Same real Postgres + Valkey as the `test` job — coverage must exercise
+    # the same DB-backed handler/repo tests, not a reduced subset.
+    services:
+      postgres:
+        image: postgres:17-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      valkey:
+        image: valkey/valkey:8-bookworm@sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # DB_TYPE deliberately unset here too — see the `test` job's env block
+      # comment above; llvm-cov runs the same workspace test binary, so the
+      # same monitor unit test applies.
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      DB_NAME: postgres
+      DB_USER: postgres
+      DB_PASS: postgres
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - name: Install pinned toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add llvm-tools
+      - name: Install cargo-llvm-cov (pinned)
+        run: cargo install cargo-llvm-cov --version 0.8.7 --locked
+      - name: cargo llvm-cov
+        # main.rs/bin entry points are exercised by the `healthcheck` subcommand
+        # / smoke path, not unit tests — excluded from the denominator so the
+        # gate measures unit-testable code (handlers, DB layer, crypto,
+        # services). No other file category is excluded: every handler/route/
+        # db/service/crypto file must be covered.
+        run: |
+          cargo llvm-cov --workspace --locked --fail-under-lines 90 \
+            --ignore-filename-regex '(^|/)src/main\.rs$|(^|/)src/bin/'
+
+  parity:
+    name: Golden parity harness (manager v1 vs v2)
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    # Full history required: the harness extracts a pristine v1 manager
+    # snapshot via `git archive release/v1.0.x` (see tests/parity/run.sh) —
+    # a shallow checkout of this ref/branch would not have that ref locally.
+    timeout-minutes: 30
+    env:
+      # Matches run.sh's own default when PARITY_SCRATCH is unset — set
+      # explicitly so the actions/cache path below can't silently drift
+      # from what the script actually writes to.
+      PARITY_SCRATCH: /tmp/skauswatch-parity-scratch
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch release/v1.0.x
+        # actions/checkout only fetches the ref that triggered this workflow
+        # — even with fetch-depth: 0 that's the *full history of that one
+        # ref*, not other branches, so origin/release/v1.0.x is never
+        # present locally without this. Full (non-shallow) fetch: `git
+        # archive` in run.sh needs the tree, not just the commit.
+        run: git fetch --no-tags --prune origin +refs/heads/release/v1.0.x:refs/remotes/origin/release/v1.0.x
+      - name: Verify release/v1.0.x is reachable
+        # run.sh resolves local-branch-or-origin/ itself; fail fast here
+        # with a clear message rather than 20 minutes into the harness.
+        run: |
+          git rev-parse --verify --quiet release/v1.0.x >/dev/null || \
+          git rev-parse --verify --quiet origin/release/v1.0.x >/dev/null || \
+          { echo "::error::release/v1.0.x not found — parity harness needs the frozen v1 manager source"; exit 1; }
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.13"
+      - name: Install harness dependencies (hash-pinned)
+        run: pip install --require-hashes -r tests/parity/requirements.txt
+      # Cargo cache for the harness's own docker-run `cargo build` (see
+      # build_v2() in run.sh) — keyed on Cargo.lock so a stale key expires
+      # instead of growing unbounded (see backend-rust.md build hygiene).
+      # Restore/save are split (rather than one `actions/cache` step) so a
+      # pull_request run — which could come from an untrusted fork — can
+      # only ever *read* the shared cache, never write to it; only a
+      # trusted push to main/release can poison-proof-ly save a new entry
+      # (zizmor cache-poisoning finding).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
+        with:
+          path: |
+            /tmp/skauswatch-parity-scratch/cargo-cache
+            /tmp/skauswatch-parity-scratch/cargo-git
+          key: parity-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            parity-cargo-${{ runner.os }}-
+      - name: Run golden parity harness (up + replay + down)
+        run: tests/parity/run.sh
+      - name: Save cargo cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
+        with:
+          path: |
+            /tmp/skauswatch-parity-scratch/cargo-cache
+            /tmp/skauswatch-parity-scratch/cargo-git
+          key: parity-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Upload parity report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: parity-report
+          path: tests/parity/reports/
+          retention-days: 14
+          if-no-files-found: ignore

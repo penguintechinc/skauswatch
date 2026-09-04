@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "skauswatch-depgate.fullname" . }}
+  labels:
+    {{- include "skauswatch-depgate.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "skauswatch-depgate.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "skauswatch-depgate.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "skauswatch-depgate.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: skauswatch-depgate
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: {{ include "skauswatch-depgate.image" . | quote }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.httpPort }}
+          protocol: TCP
+        - name: mesh-admin
+          containerPort: {{ .Values.meshAdminPort }}
+          protocol: TCP
+        - name: metrics
+          containerPort: {{ .Values.metricsPort }}
+          protocol: TCP
+        {{- with .Values.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.resources }}
+        resources:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        env:
+        {{- tpl (toYaml .Values.env) . | nindent 12 }}
+        {{- if .Values.spire.enabled }}
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix://{{ .Values.spire.socketDir }}/agent.sock"
+        {{- end }}
+        {{- if or .Values.volumeMounts .Values.spire.enabled }}
+        volumeMounts:
+          {{- with .Values.volumeMounts }}
+          {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.spire.enabled }}
+            - name: spiffe-workload-api
+              mountPath: {{ .Values.spire.socketDir }}
+              {{- if not .Values.spire.csiDriver.enabled }}
+              readOnly: true
+              {{- end }}
+          {{- end }}
+        {{- end }}
+      {{- if or .Values.volumes .Values.spire.enabled }}
+      volumes:
+        {{- with .Values.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.spire.enabled }}
+        - name: spiffe-workload-api
+          {{- if .Values.spire.csiDriver.enabled }}
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+          {{- else }}
+          hostPath:
+            path: {{ .Values.spire.socketDir }}
+            type: DirectoryOrCreate
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

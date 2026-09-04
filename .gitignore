@@ -160,7 +160,7 @@ docker-compose.override.yml
 *.sqlite3
 
 # Logs
-logs/
+/logs/
 *.log
 
 # Runtime data
@@ -211,3 +211,24 @@ config.local.yaml
 
 # Worktrees
 .worktrees/
+.claude/worktrees/
+
+# Node.js / Frontend
+node_modules/
+services/*/node_modules/
+*/node_modules/
+dist/
+services/*/dist/
+*.tsbuildinfo
+
+# Claude Code crash-recovery state (never commit)
+.PLAN
+.TODO
+
+# scripts/lib/ holds shell helper libraries (e.g. detect-os.sh), not the
+# stale Python packaging `lib/` pattern above — un-ignore it explicitly.
+!scripts/lib/
+!scripts/lib/**
+
+# Stray per-agent CARGO_TARGET_DIRs occasionally created at repo root
+target-*/
