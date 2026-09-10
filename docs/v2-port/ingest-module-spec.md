@@ -196,18 +196,32 @@ This is the fundamental security principle (`security.md` Tenant Isolation) appl
 
 ## 7. Durability & Backpressure
 
-### 7a. NATS JetStream Buffer (Durable, File-Backed)
+### 7a. NATS JetStream Buffer (Durable, File-Backed, Synchronous PublishAck)
 
 **Why JetStream over Valkey:** syslog + OTLP + HTTP can arrive at ~10k events per second (EPS). At 2.5 KB/event (typical), that's ~25 MB/s, or ~8 GB/minute. An in-memory buffer (Valkey) fills in ~5 minutes during an OpenSearch outage and then drops events silently or crashes. JetStream is disk-backed by design: consumers pull from the stream at their own pace, the disk buffers backlog, and older events age off (configurable retention) without crashing the receiver.
+
+**Production-hardening mandatory (security-evidence data):**
+
+1. **NATS server version ≥2.14** — older versions have a message-loss bug under coordinated power-cut with async flush (Jepsen report, Dec 2025). Require 2.14+ in the deployment manifest.
+2. **`sync_always: true` on the JetStream file store** — all published messages are synchronously flushed to disk before the server returns PublishAck to the client. Never rely on async flush for evidence data.
+3. **Receiver awaits `PublishAck` synchronously before returning 2xx to the source** — the enqueue operation MUST block until the broker acknowledges the write to disk. For retryable transports (TCP/TLS/OTLP/HTTPS), the receiver does not return 2xx or send an ack until JetStream PublishAck arrives. Never fire-and-forget a publish. This is the load-bearing guarantee that enables idempotent retries without loss.
+4. **Server-side deduplication via Nats-Msg-Id headers** — every event carries a unique `Nats-Msg-Id` header set by the receiver (e.g., a UUID or a deterministic hash of the event + timestamp). The NATS server performs server-side deduplication: if the same ID is published twice, the second is ignored. This handles client-side timeout + retry scenarios gracefully.
+5. **Critical warning: Do NOT wrap `async-nats::jetstream::publish()` in `tokio::time::timeout()`** — a client timeout can fire while the TCP write persists on the broker's kernel buffer, causing the client to retry while the original write is still in flight. The result is silent duplication despite server-side dedup being disabled. Instead, use MsgId dedup + client-side timeout configuration on the NATS connection itself (`tokio_connector_config.timeout`), or accept that evidence ingest is one operation that does not have a strict timeout (re-raise on a background monitor if needed).
 
 **Config:**
 
 ```toml
-# NATS_JETSTREAM_SUBJECT_PREFIX – base subject for ingest streams
-# (e.g., "svc-ingest.logs", so the actual stream is "svc-ingest.logs.ingest", "svc-ingest.logs.dlq", etc.)
-NATS_JETSTREAM_SUBJECT_PREFIX=svc-ingest.logs
+# NATS server version (K8s StatefulSet, helm chart)
+NATS_SERVER_VERSION=2.14.0  # minimum
+
+# JetStream file store sync
+NATS_JETSTREAM_STORAGE=FILE
+NATS_JETSTREAM_SYNC_ALWAYS=true
 
 # Stream config
+# Base subject for ingest streams (e.g., "svc-ingest.logs")
+NATS_JETSTREAM_SUBJECT_PREFIX=svc-ingest.logs
+
 # Max age: 7 days (events older than 7 days are deleted regardless of max_bytes)
 NATS_MAX_AGE_SECONDS=604800
 
@@ -222,26 +236,49 @@ NATS_CONSUMER_PREFETCH=100
 NATS_EXPLICIT_ACK=true
 ```
 
-### 7b. EventBuffer Trait (Pluggable)
+### 7b. EventBuffer Trait (Pluggable) & Idempotent PublishAck
 
-Behind a **`EventBuffer` trait**, the actual queue implementation is swappable. Receiver enqueues to `EventBuffer::push(event: NormalizedEvent)`, writer consumes via `EventBuffer::consume(batch_size: usize) -> Vec<(event, ack_handle)>`.
+Behind a **`EventBuffer` trait**, the actual queue implementation is swappable. Receiver enqueues to `EventBuffer::push(event: NormalizedEvent)`, waiting for the PublishAck to return; writer consumes via `EventBuffer::consume(batch_size: usize) -> Vec<(event, ack_handle)>`.
 
-**JetStream implementation** (P1):
+**JetStream implementation** (P1) — Synadia `async-nats` client (Tier 1 support, feature-complete, production-proven in Vector):
 
 ```rust
-pub struct JetStreamBuffer { /* ... */ }
+pub struct JetStreamBuffer {
+    client: nats::jetstream::Context,
+    msg_id_counter: AtomicU64,  // or use UUID; must be deterministic per event for idempotency
+}
 
 impl EventBuffer for JetStreamBuffer {
     async fn push(&mut self, event: NormalizedEvent) -> Result<(), BufferError> {
-        // Publish to JetStream stream, return ack or RESOURCE_EXHAUSTED if full
+        // Generate or derive a unique message ID for this event
+        let msg_id = self.compute_msg_id(&event);
+
+        // Publish SYNCHRONOUSLY — await PublishAck before returning
+        // Never fire-and-forget or wrap in tokio::time::timeout()
+        let ack = self.client.publish_with_headers(
+            "svc-ingest.logs.ingest",
+            &event.to_bytes(),
+            &[("Nats-Msg-Id", &msg_id)],
+        ).await?;
+
+        // ack is a PublishAck — the server has synced to disk (sync_always: true)
+        // Return error or RESOURCE_EXHAUSTED if the stream is full
+        Ok(())
     }
+
     async fn consume(&mut self, batch_size: usize) -> Result<Vec<(Event, AckHandle)>> {
         // Fetch next batch from durable consumer, return without acking (caller acks)
+        // Ack only after OpenSearch write succeeds
     }
 }
+
+// Dependency: pinned to exact version, minimal features
+// Cargo.toml:
+// async-nats = { version = "=0.50.0", default-features = false, features = ["jetstream"] }
+// Note: 0.x is Synadia's intentional versioning indicating Tier 1 stability, not pre-release immaturity
 ```
 
-**In-memory fallback** (testing only): a bounded `VecDeque<Event>` that drops oldest on overflow.
+**In-memory fallback** (testing only): a bounded `VecDeque<Event>` that drops oldest on overflow, with a Vec of seen MsgIds for dedup simulation.
 
 ### 7c. Backpressure Per Transport
 
@@ -509,10 +546,12 @@ The current `docs/v2-port/v2.1-backlog.md` and any future consolidation document
 - UDP packet from trusted CIDR → events ingested, tenant stamped from config
 - UDP packet from untrusted CIDR → packet dropped, no error sent
 
-**Durability tests:**
+**Durability tests (production-hardening mandatory):**
+- **PublishAck synchronous blocking:** Send 10 events via HTTP, mock JetStream to delay PublishAck, verify receiver blocks (waits for ack before returning 2xx). Assert that the receiver does NOT fire-and-forget or return success before JetStream ack arrives.
+- **JetStream crash + restart with zero loss and no duplication:** (a) Ingest 100 events into JetStream stream with MsgId dedup enabled; (b) Force-kill JetStream container mid-batch (simulated crash); (c) Restart JetStream container with the same storage volume; (d) Verify all 100 events are in the stream exactly once (no loss, no duplication via MsgId replay). Assert that the receiver's next batch fetch (post-restart) yields no new duplicates.
 - OpenSearch down for 10 min → receiver continues accepting events, JetStream buffers; on OpenSearch recovery, buffered events written (no loss)
 - JetStream stream full → receiver sends 429 (HTTP) / RESOURCE_EXHAUSTED (gRPC) / RST (TCP); client can retry
-- Writer crash mid-batch → events not acked; on restart, JetStream re-delivers same batch (at-least-once, idempotent bulk writes in OpenSearch ensure no duplicates)
+- Writer crash mid-batch → events not acked; on restart, JetStream re-delivers same batch (at-least-once, idempotent bulk writes in OpenSearch ensure no duplicates via OpenSearch `_id` dedup or the EventBuffer's MsgId mapping)
 
 **Per-protocol e2e:**
 - Syslog UDP: send 100 events, verify all reach OpenSearch
@@ -536,6 +575,24 @@ The current `docs/v2-port/v2.1-backlog.md` and any future consolidation document
 ```
 
 Expected duration: <2 min.
+
+### 14c2. Dependency Pinning (async-nats)
+
+**Mandatory for production security-evidence ingest:**
+
+```toml
+# Cargo.toml
+[dependencies]
+async-nats = { version = "=0.50.0", default-features = false, features = ["jetstream"] }
+# Pin to exact version (=, not ~); remove default features (object-store, service, etc. are not needed here)
+# Only enable jetstream (and tls, nkeys if required for NATS auth)
+
+# Note: 0.x version scheme is Synadia's intentional versioning.
+# 0.50.x is Tier 1 stability, not pre-release — this is the production-grade async NATS client used in Vector.
+# Do NOT allow cargo to bump to a newer 0.y.z or 1.x without explicit review and smoke test re-run.
+```
+
+**Rationale:** JetStream + PublishAck synchronous blocking + MsgId dedup are load-bearing for evidence data. Uncontrolled dependency updates could introduce breaking changes (e.g., async-nats 0.51+ changes PublishAck semantics, or a transitive dependency adds a GPL license). Exact pinning ensures reproducible deployments and controlled upgrades.
 
 ### 14d. Coverage Requirement
 
