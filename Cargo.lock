@@ -6170,6 +6170,7 @@ dependencies = [
  "serde",
  "serde_json",
  "skauswatch-auth",
+ "skauswatch-ocsf",
  "skauswatch-streams",
  "skauswatch-telemetry",
  "skauswatch-testkit",
@@ -6267,6 +6268,17 @@ dependencies = [
  "uuid",
  "walkdir",
  "wiremock",
+]
+
+[[package]]
+name = "skauswatch-ocsf"
+version = "2.0.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "skauswatch-streams",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
