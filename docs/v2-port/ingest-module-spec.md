@@ -312,7 +312,55 @@ In-memory queue filled in <1 min during sustained peak + outage → crash or sil
 
 Both the existing `skauswatch-logs-*` (v2 OCSF) and monitor's `aaa-events-*` (v1 BaseEvent) consolidate into a single **`skauswatch-logs-*-YYYY.MM.DD`** daily index pattern (same as today's logs service). All OCSF normalization targets this lake; monitor's collectors are retired from writing directly to `aaa-events-*`.
 
-**ISM lifecycle policy:** reuse the existing `skauswatch-logs-policy` (30-day hot → warm → delete) applied to the unified index.
+**ISM lifecycle policy:** managed via a new Data Lifecycle section (§8a1) below; replaces the existing `skauswatch-logs-policy`.
+
+### 8a1. Data Lifecycle — Hot/Warm/Cold Tiering
+
+Index State Management (ISM) policy orchestrates multi-tier archival: indices roll over by size/age, then transition through tiers based on age.
+
+**Tier definitions:**
+
+| Tier | Storage | Indexing | Query | Cost |
+|------|---------|----------|-------|------|
+| **HOT** | In-cluster hot nodes / local SSD | Full indexing, analyzers | Immediate, sub-second latency | High |
+| **WARM** | Searchable snapshots (S3-compatible backend, MinIO default) | Read-only, snapshot-searchable via repository-s3 plugin | On-demand with local cache; queryable without restore | Medium |
+| **COLD** | Compressed snapshots (cheapest backend — MinIO lifecycle rule or S3 Glacier) | Compressed, offloaded | Explicit restore-on-demand (slow, ~minutes) | Low |
+| **DELETE** | — | — | — | — |
+
+**Transition ages (ADMIN-CONFIGURABLE, not license-tier-driven):**
+
+| Transition | Default | Notes |
+|---|---|---|
+| HOT → WARM | 30 days | Full indexing retention; after 30 days, move to searchable snapshots |
+| WARM → COLD | 90 days | Compressed snapshots; still queryable but slower/with restore |
+| COLD → DELETE | 370 days (~1 year) | Final retention boundary; older data purged |
+
+All three ages are **strictly increasing** (validated at policy creation/update; reject non-monotonic configs). Operators configure these globally (platform/super-admin scope, cluster-wide) via an admin settings endpoint that writes/updates the ISM policy; changes apply to new indices immediately, existing indices re-evaluated on next state transition.
+
+**Snapshot repository:**
+
+- Endpoint: S3-compatible (MinIO, AWS S3, Wasabi, etc.) — MinIO is the default for self-hosted deployments
+- Configuration: `SNAPSHOT_REPO_ENDPOINT` env var (defaults to MinIO internal address)
+- Credentials: from `svc-vault` Secrets engine (no hardcoded S3 keys in config/code)
+- Bucket: dedicated, versioning optional (ISM snapshots are immutable once created)
+
+**Query across tiers:**
+
+- **HOT + WARM transparent:** a search query returns results from both tiers seamlessly (searchable snapshots are queryable in-place)
+- **COLD requires explicit restore:** responses indicate which tiers were searched; if COLD data matches, alert the user that a restore is pending (manual or auto-triggered via an admin flag)
+- **Restore-on-demand:** restore API call (gated by SIEM admin role, audited) triggers a background restore job; restores data to WARM tier temporarily, then automatic re-archive after a TTL (e.g., 7 days)
+
+**Ownership & maintenance:**
+
+- `svc-ingest` (writer mode) creates and maintains the ISM policy and the index scheme (`skauswatch-logs-*-YYYY.MM.DD`)
+- OpenSearch cluster roles and snapshot-repository registration are cluster infrastructure (managed separately, referenced here)
+- Index rollover/state transitions are automatic (ISM handles it); svc-ingest publishes metrics tracking policy application and errors
+
+**Testing:**
+
+- ISM policy validation: reject non-monotonic age transitions (test with invalid config, assert error)
+- WARM tier searchable snapshot: ingest 100 events, force transition to WARM, query and verify results match original
+- COLD tier restore: move events to COLD, trigger restore API, verify data becomes queryable (slow), verify audit log records the restore request
 
 ### 8b. Monitor Collector Retirement
 
