@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/manager", "services/s3scan", "services/sshca", "services/logs", "services/pki", "services/worker-codescan", "services/scanner", "services/vault", "services/worker-vault-sync", "services/endpoint-agent", "services/monitor", "services/codescan-backend", "services/depgate"]
+members = ["crates/*", "services/manager", "services/s3scan", "services/sshca", "services/logs", "services/pki", "services/worker-codescan", "services/scanner", "services/vault", "services/worker-vault-sync", "services/endpoint-agent", "services/monitor", "services/codescan-backend", "services/depgate", "services/svc-ingest"]
 
 [workspace.package]
 version = "2.0.0"

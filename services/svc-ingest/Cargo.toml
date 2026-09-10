@@ -1,0 +1,71 @@
+[package]
+publish = false
+name = "skauswatch-svc-ingest"
+description = "SkausWatch svc-ingest — multi-protocol SIEM log ingest (syslog/OTLP/HTTPS) normalizing to OCSF, buffered through NATS JetStream, writing to the unified OpenSearch lake"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "skauswatch-svc-ingest"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+jsonwebtoken = { workspace = true }
+metrics = { workspace = true }
+penguin-licensing = { workspace = true, features = ["axum"] }
+prost = { workspace = true }
+prost-types = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+skauswatch-auth = { workspace = true }
+skauswatch-db = { workspace = true }
+skauswatch-identity = { workspace = true }
+skauswatch-ocsf = { workspace = true }
+skauswatch-proto = { workspace = true }
+skauswatch-telemetry = { workspace = true }
+spiffe = { workspace = true }
+# sqlx: not in the Spec's explicit svc-ingest dependency list, but required
+# structurally by this task's own Interfaces contract (`static MIGRATOR:
+# sqlx::migrate::Migrator = sqlx::migrate!();` in main.rs) — same
+# migrate-subcommand pattern already used by every other service (see
+# services/pki/Cargo.toml). Justified addition, same precedent as Task
+# 0.1's serde gap (see progress.md).
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+# "yaml" adds serde_yaml so `skauswatch-svc-ingest openapi` can emit true
+# YAML for openapi/v1.yaml (workspace default features are json-only) — see
+# docs/v2-port/openapi-pattern.md.
+utoipa = { workspace = true, features = ["yaml"] }
+uuid = { workspace = true }
+# Pinned directly (not `{ workspace = true }`) per the Spec's exact
+# requirement (§7b, §14c2): "Do NOT allow cargo to bump to a newer 0.y.z or
+# 1.x without explicit review and smoke test re-run." default-features off
+# — only the `jetstream` feature is needed, no core-NATS pub/sub surface.
+async-nats = { version = "=0.50.0", default-features = false, features = ["jetstream"] }
+
+[dev-dependencies]
+axum-test = { workspace = true }
+mockall = { workspace = true }
+skauswatch-testkit = { workspace = true }
+wiremock = { workspace = true }
+
+[lints]
+workspace = true
