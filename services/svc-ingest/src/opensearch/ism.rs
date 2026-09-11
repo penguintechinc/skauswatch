@@ -14,13 +14,20 @@
 //! WARM mounts the index as a searchable snapshot (`searchable_snapshot`
 //! ISM action) against the configured repository -- OpenSearch fetches
 //! segments on demand into a local cache, so WARM data stays transparently
-//! queryable (Spec: "HOT + WARM transparent"). COLD lowers `index_priority`
-//! to the floor rather than mounting anything further -- the Spec's COLD
-//! contract ("Explicit restore-on-demand (slow, ~minutes)") is honored by
-//! `crate::admin`'s restore endpoint, which performs a real snapshot
-//! `_restore` (not a searchable-snapshot mount) against the same
-//! repository; that restore, not an ISM action, is what makes COLD data
-//! queryable again.
+//! queryable (Spec: "HOT + WARM transparent").
+//!
+//! COLD is a genuinely distinct, offloaded tier, not just a
+//! deprioritization of the WARM mount: entering COLD (1) takes a real
+//! `snapshot` action, archiving the index into `snapshot_repo` under the
+//! deterministic name [`cold_snapshot_name`] produces, then (2) `close`s
+//! the local (WARM-mounted) index, making it non-queryable in place. The
+//! archival snapshot survives independently of the closed index's own
+//! lifecycle, so the later COLD -> DELETE transition (which deletes the
+//! closed index) never destroys the archived data -- only
+//! `crate::admin`'s restore endpoint (a real snapshot `_restore`, of that
+//! exact snapshot, into that exact closed index name) makes COLD data
+//! queryable again, matching Spec's "Explicit restore-on-demand (slow,
+//! ~minutes)".
 //!
 //! Transition ages are **admin-configurable, never license-tier-driven**
 //! (Spec §8a1) -- see `crate::admin`'s `PUT /api/v1/admin/ingest/lifecycle`.
@@ -78,6 +85,19 @@ pub struct IsmConfigError {
     pub warm_to_cold_days: i64,
     /// The rejected COLD -> DELETE age.
     pub cold_to_delete_days: i64,
+}
+
+/// Deterministic COLD-tier archival-snapshot name for `index` -- the
+/// **single source of truth** both [`build_ism_policy`]'s COLD state
+/// (called with the OpenSearch runtime template literal `"{{ctx.index}}"`,
+/// which OpenSearch's ISM plugin substitutes with the real index name when
+/// the `snapshot` action actually runs) and `crate::admin`'s restore
+/// handler (called with a real, already-validated index name) use, so the
+/// snapshot name a restore call targets can never drift from the name the
+/// COLD state's own `snapshot` action created.
+#[must_use]
+pub fn cold_snapshot_name(index: &str) -> String {
+    format!("cold-{index}")
 }
 
 /// Enforces Spec §8a1: "All three ages are strictly increasing (validated at
@@ -160,7 +180,13 @@ pub fn build_ism_policy(
                 {
                     "name": "cold",
                     "actions": [
-                        {"index_priority": {"priority": 0}}
+                        {
+                            "snapshot": {
+                                "repository": snapshot_repo,
+                                "snapshot": cold_snapshot_name("{{ctx.index}}")
+                            }
+                        },
+                        {"close": {}}
                     ],
                     "transitions": [
                         {
@@ -201,6 +227,58 @@ pub async fn apply_ism_policy(
         .await?
         .error_for_status()?;
     Ok(())
+}
+
+/// Failures from [`query_hit_count`].
+#[derive(Debug, thiserror::Error)]
+pub enum QueryError {
+    /// Transport failure or non-2xx response.
+    #[error(transparent)]
+    Transport(#[from] reqwest::Error),
+    /// The response body parsed as JSON but didn't carry the expected
+    /// `hits.total.value` shape (e.g. `track_total_hits` was somehow not
+    /// honored by the cluster).
+    #[error("response body did not contain hits.total.value")]
+    UnexpectedShape,
+}
+
+/// Queries `{base_url}/{index}/_search` for a total hit count via
+/// `match_all` + `track_total_hits` -- the production "is this index
+/// queryable, and how much data does it have" primitive both tiers'
+/// queryability guarantees are verified against: WARM (transparently
+/// queryable via its searchable-snapshot mount) and a just-restored COLD
+/// index (queryable again once `crate::admin`'s restore completes). Not
+/// yet wired into any HTTP handler response -- a real OpenSearch
+/// restore is asynchronous and can take minutes (Spec §8a1), so eagerly
+/// querying inside `POST /restore`'s own response would misreport an
+/// in-progress restore as already queryable (or not); confirming true
+/// end-to-end queryability after a live restore is Wave 3 e2e work.
+///
+/// # Errors
+/// Returns [`QueryError::Transport`] on transport failure or a non-2xx
+/// response, or [`QueryError::UnexpectedShape`] if the response body
+/// doesn't parse as JSON with a numeric `hits.total.value`.
+pub async fn query_hit_count(
+    client: &reqwest::Client,
+    base_url: &str,
+    index: &str,
+) -> Result<u64, QueryError> {
+    let url = format!("{base_url}/{index}/_search");
+    let body = json!({
+        "query": {"match_all": {}},
+        "size": 0,
+        "track_total_hits": true
+    });
+    let response = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    let payload: Value = response.json().await?;
+    payload["hits"]["total"]["value"]
+        .as_u64()
+        .ok_or(QueryError::UnexpectedShape)
 }
 
 #[cfg(test)]
@@ -295,21 +373,76 @@ mod tests {
         assert_eq!(warm["transitions"][0]["conditions"]["min_index_age"], "90d");
     }
 
+    /// The Critical fix (round 1 review): COLD must genuinely OFFLOAD the
+    /// index -- a real `snapshot` action archiving it (under the exact name
+    /// [`cold_snapshot_name`] produces, so a later restore call targets a
+    /// snapshot that actually exists), then `close` to make it
+    /// non-queryable in place. Previously COLD only set `index_priority`,
+    /// which changes nothing about queryability or storage cost and left
+    /// `crate::admin`'s restore targeting a snapshot nothing ever created.
     #[test]
-    fn cold_state_transitions_to_delete_at_configured_age_and_never_deletes_itself() {
-        let policy = build_ism_policy(30, 90, 370, "repo-a");
+    fn cold_state_archives_via_snapshot_then_closes_never_deletes_itself() {
+        let policy = build_ism_policy(30, 90, 370, "skauswatch-snapshots");
         let cold = &policy["policy"]["states"][2];
         assert_eq!(cold["name"], "cold");
-        // COLD never deletes directly -- it deprioritizes and waits for the
-        // DELETE transition, so a restore before that age still has an
-        // index to restore into.
         let actions = cold["actions"].as_array().unwrap();
+
+        let snapshot_action = actions
+            .iter()
+            .find(|a| a.get("snapshot").is_some())
+            .expect("cold state must have a snapshot action");
+        assert_eq!(
+            snapshot_action["snapshot"]["repository"],
+            "skauswatch-snapshots"
+        );
+        // Must use the OpenSearch runtime template + the SAME naming
+        // scheme `cold_snapshot_name` produces for a real index -- a
+        // literal, un-templated name would collide across every managed
+        // index.
+        assert_eq!(
+            snapshot_action["snapshot"]["snapshot"],
+            cold_snapshot_name("{{ctx.index}}")
+        );
+        assert_eq!(
+            snapshot_action["snapshot"]["snapshot"],
+            "cold-{{ctx.index}}"
+        );
+
+        assert!(
+            actions.iter().any(|a| a.get("close").is_some()),
+            "cold state must close the index after archiving it"
+        );
+        // COLD never deletes directly -- the archival snapshot survives
+        // independently, and the DELETE transition (below) is what
+        // eventually purges the now-closed local index.
         assert!(actions.iter().all(|a| a.get("delete").is_none()));
+
         assert_eq!(cold["transitions"][0]["state_name"], "delete");
         assert_eq!(
             cold["transitions"][0]["conditions"]["min_index_age"],
             "370d"
         );
+    }
+
+    // -- cold_snapshot_name ---------------------------------------------
+
+    #[test]
+    fn cold_snapshot_name_is_deterministic_from_index() {
+        assert_eq!(
+            cold_snapshot_name("skauswatch-logs-2025.01.01"),
+            "cold-skauswatch-logs-2025.01.01"
+        );
+    }
+
+    #[test]
+    fn cold_snapshot_name_matches_between_policy_template_and_a_real_index() {
+        // The exact property `crate::admin`'s restore handler depends on:
+        // substituting a real index name into the same function that
+        // built the policy's `{{ctx.index}}` template must yield the
+        // identical literal OpenSearch itself would produce at runtime.
+        let real_index = "skauswatch-logs-2025.06.15";
+        let templated = cold_snapshot_name("{{ctx.index}}").replace("{{ctx.index}}", real_index);
+        assert_eq!(templated, cold_snapshot_name(real_index));
     }
 
     #[test]
@@ -378,5 +511,59 @@ mod tests {
         // Nothing listens on this port -- connection refused.
         let result = apply_ism_policy(&client, "http://127.0.0.1:1", &policy).await;
         assert!(result.is_err());
+    }
+
+    // -- query_hit_count -----------------------------------------------
+
+    #[tokio::test]
+    async fn query_hit_count_issues_match_all_track_total_hits_search_and_parses_total() {
+        let mock = MockServer::start().await;
+        let index = "skauswatch-logs-2026.07.25";
+        Mock::given(method("POST"))
+            .and(path(format!("/{index}/_search")))
+            .and(wiremock::matchers::body_json(json!({
+                "query": {"match_all": {}},
+                "size": 0,
+                "track_total_hits": true
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "hits": {"total": {"value": 100}, "hits": []}
+            })))
+            .mount(&mock)
+            .await;
+
+        let client = reqwest::Client::new();
+        let count = query_hit_count(&client, &mock.uri(), index).await.unwrap();
+        assert_eq!(count, 100);
+    }
+
+    #[tokio::test]
+    async fn query_hit_count_propagates_non_2xx_status() {
+        let mock = MockServer::start().await;
+        let index = "skauswatch-logs-2026.07.25";
+        Mock::given(method("POST"))
+            .and(path(format!("/{index}/_search")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&mock)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = query_hit_count(&client, &mock.uri(), index).await;
+        assert!(matches!(result, Err(QueryError::Transport(_))));
+    }
+
+    #[tokio::test]
+    async fn query_hit_count_rejects_a_response_missing_hits_total_value() {
+        let mock = MockServer::start().await;
+        let index = "skauswatch-logs-2026.07.25";
+        Mock::given(method("POST"))
+            .and(path(format!("/{index}/_search")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"unexpected": true})))
+            .mount(&mock)
+            .await;
+
+        let client = reqwest::Client::new();
+        let result = query_hit_count(&client, &mock.uri(), index).await;
+        assert!(matches!(result, Err(QueryError::UnexpectedShape)));
     }
 }

@@ -284,8 +284,12 @@ pub(crate) struct LifecycleResponse {
 /// `POST /api/v1/admin/ingest/restore` request body.
 #[derive(Debug, Deserialize, ToSchema)]
 pub(crate) struct RestoreRequest {
-    /// The COLD-tier index to restore (e.g.
-    /// `skauswatch-logs-2026.01.01`).
+    /// The COLD-tier index to restore — must match
+    /// `skauswatch-logs-YYYY.MM.DD` exactly (see [`validate_index_name`]).
+    /// Client-supplied and interpolated into an OpenSearch URL path
+    /// segment, so anything outside that exact shape (extra `/` segments,
+    /// `..` traversal, arbitrary strings) is rejected before it ever
+    /// reaches [`trigger_cold_restore`].
     pub index: String,
 }
 
@@ -387,6 +391,7 @@ pub(crate) async fn handle_put_lifecycle(
     request_body = RestoreRequest,
     responses(
         (status = 202, description = "Cold-tier restore triggered", body = RestoreResponse),
+        (status = 400, description = "index does not match skauswatch-logs-YYYY.MM.DD", body = AdminErrorResponse),
         (status = 401, description = "Missing, invalid, or expired bearer token", body = AdminErrorResponse),
         (status = 403, description = "Token lacks the SIEM-admin scope, or carries no tenant", body = AdminErrorResponse),
         (status = 502, description = "OpenSearch rejected the restore request", body = AdminErrorResponse),
@@ -398,6 +403,7 @@ pub(crate) async fn handle_post_restore(
     Json(req): Json<RestoreRequest>,
 ) -> Result<(StatusCode, Json<RestoreResponse>), AdminError> {
     admin.require_scope(SIEM_RESTORE_SCOPE)?;
+    validate_index_name(&req.index)?;
 
     trigger_cold_restore(
         &state.http,
@@ -436,10 +442,14 @@ pub(crate) async fn handle_post_restore(
 }
 
 /// POSTs an OpenSearch snapshot restore request for `index`'s COLD-tier
-/// snapshot (`cold-{index}`) in `repo`. A real (non-searchable-snapshot)
-/// restore recreates a normal, fully local index from the snapshot —
-/// matching Spec §8a1's "Explicit restore-on-demand (slow, ~minutes)"
-/// COLD-tier contract.
+/// snapshot ([`ism::cold_snapshot_name`]) in `repo` — the exact snapshot
+/// [`ism::build_ism_policy`]'s COLD state creates on the way into that
+/// state, never an independently-derived name. A real
+/// (non-searchable-snapshot) restore recreates a normal, fully local index
+/// from the snapshot — matching Spec §8a1's "Explicit restore-on-demand
+/// (slow, ~minutes)" COLD-tier contract. `index` MUST already be validated
+/// ([`validate_index_name`]) by the caller — this function interpolates it
+/// directly into the request URL.
 ///
 /// # Errors
 /// Returns the `reqwest` error on transport failure or a non-2xx response.
@@ -449,7 +459,7 @@ async fn trigger_cold_restore(
     repo: &str,
     index: &str,
 ) -> Result<(), reqwest::Error> {
-    let snapshot = format!("cold-{index}");
+    let snapshot = ism::cold_snapshot_name(index);
     let url = format!("{base_url}/_snapshot/{repo}/{snapshot}/_restore");
     client
         .post(url)
@@ -458,6 +468,47 @@ async fn trigger_cold_restore(
         .await?
         .error_for_status()?;
     Ok(())
+}
+
+/// The only index-name shape `POST /restore` accepts: exactly
+/// `skauswatch-logs-YYYY.MM.DD` (matching [`crate::opensearch::daily_index`]'s
+/// output format). `req.index` is client-supplied and gets interpolated
+/// directly into an OpenSearch URL path segment by [`trigger_cold_restore`]
+/// — this closes off path traversal (`..`), extra path segments (`/`), and
+/// any other value that isn't a real daily index this service could
+/// plausibly manage, by construction rather than by escaping/encoding.
+///
+/// # Errors
+/// Returns [`AdminError::BadRequest`] when `index` doesn't match the
+/// expected shape.
+fn validate_index_name(index: &str) -> Result<(), AdminError> {
+    if is_valid_daily_index(index) {
+        Ok(())
+    } else {
+        Err(AdminError::BadRequest(format!(
+            "index must match skauswatch-logs-YYYY.MM.DD, got {index:?}"
+        )))
+    }
+}
+
+/// `true` iff `index` is exactly `skauswatch-logs-` followed by a
+/// `YYYY.MM.DD`-shaped 10-byte date (four ASCII digits, `.`, two digits,
+/// `.`, two digits) and nothing else — no extra characters before, after,
+/// or embedded. A hand-written check (rather than the `regex` crate) so
+/// this stays a total, panic-free function with no fallible construction
+/// step (a compiled-regex `OnceLock` would need one).
+fn is_valid_daily_index(index: &str) -> bool {
+    let Some(date_part) = index.strip_prefix("skauswatch-logs-") else {
+        return false;
+    };
+    let bytes = date_part.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'.'
+        && bytes[7] == b'.'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
 }
 
 /// Builds the admin router (`PUT /api/v1/admin/ingest/lifecycle`,
@@ -657,17 +708,18 @@ mod tests {
         res.assert_status(StatusCode::BAD_GATEWAY);
     }
 
-    /// Task 2.1 brief acceptance criterion (partial — see `ism`'s module
-    /// doc comment "Module wiring notes" for the accompanying BLOCKED note
-    /// on genuine testcontainers coverage): the applied policy's WARM state
-    /// must carry a `searchable_snapshot` action against the configured
-    /// repo, never a delete/evict action, and data ingested before the
-    /// transition must remain queryable afterward. This exercises the full
-    /// PUT handler end-to-end against a mocked OpenSearch: ingest 100
-    /// events via the same `crate::opensearch::write_bulk` bulk path
-    /// `crate::listeners::http` uses, apply the lifecycle policy, capture
-    /// the exact policy body OpenSearch received, and confirm the
-    /// documents are still returned by a post-transition search.
+    /// Task 2.1 brief acceptance criterion. `testcontainers` is not a
+    /// workspace dependency (and `Cargo.toml` is out of this task's file
+    /// scope), so this drives the real production code paths — bulk
+    /// ingest ([`crate::opensearch::write_bulk`]), the actual PUT handler,
+    /// and [`ism::query_hit_count`] (not an ad hoc raw GET) — against a
+    /// wiremock double standing in for OpenSearch: ingest 100 events,
+    /// apply the lifecycle policy, assert the exact WARM-state policy body
+    /// OpenSearch received, then confirm `query_hit_count` issues the
+    /// correct search request and parses the same 100 back out. A genuine
+    /// ingest -> ISM WARM transition -> query data roundtrip needs a live
+    /// OpenSearch cluster with a registered snapshot repository — deferred
+    /// to Wave 3 e2e.
     #[tokio::test]
     async fn warm_tier_searchable_snapshot_roundtrip() {
         let mock = MockServer::start().await;
@@ -729,29 +781,35 @@ mod tests {
         );
 
         // 4. Query across tiers must still return the original 100 events
-        // (Spec: "HOT + WARM transparent").
-        Mock::given(method("GET"))
+        // (Spec: "HOT + WARM transparent") -- via the production
+        // `ism::query_hit_count` helper, not a raw ad hoc GET, so this
+        // proves that function issues the correct request and parses the
+        // response correctly.
+        Mock::given(method("POST"))
             .and(path(format!("/{index}/_search")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "hits": {"total": {"value": 100}, "hits": []}
             })))
             .mount(&mock)
             .await;
-        let search = client
-            .get(format!("{}/{index}/_search", mock.uri()))
-            .send()
+        let count = ism::query_hit_count(&client, &mock.uri(), index)
             .await
             .unwrap();
-        let search_body: serde_json::Value = search.json().await.unwrap();
-        assert_eq!(search_body["hits"]["total"]["value"], 100);
+        assert_eq!(count, 100);
     }
 
-    /// Task 2.1 brief acceptance criterion (partial — see `ism`'s module
-    /// doc comment "Module wiring notes" for the accompanying BLOCKED note
-    /// on genuine testcontainers coverage): moving data to COLD and calling
-    /// the restore endpoint must (a) trigger the real OpenSearch restore
-    /// call, (b) write exactly one audit-log entry, and (c) the restored
-    /// index must become queryable again.
+    /// Task 2.1 brief acceptance criterion. `testcontainers` is not a
+    /// workspace dependency (and `Cargo.toml` is out of this task's file
+    /// scope), so this drives the real production restore handler against
+    /// a wiremock double: moving data to COLD and calling the restore
+    /// endpoint must (a) trigger the real OpenSearch restore call against
+    /// the exact snapshot name [`ism::cold_snapshot_name`] produces
+    /// (matching what `ism::build_ism_policy`'s COLD `snapshot` action
+    /// would have created on a live cluster), (b) write exactly one
+    /// audit-log entry, and (c) [`ism::query_hit_count`] (not an ad hoc raw
+    /// GET) must confirm the restored index is queryable again. A genuine
+    /// COLD -> restore -> queryable roundtrip against a live OpenSearch
+    /// cluster is deferred to Wave 3 e2e.
     #[tokio::test]
     async fn cold_tier_restore_triggers_audit_log_and_becomes_queryable() {
         let mock = MockServer::start().await;
@@ -759,7 +817,8 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path(format!(
-                "/_snapshot/skauswatch-snapshots/cold-{index}/_restore"
+                "/_snapshot/skauswatch-snapshots/{}/_restore",
+                ism::cold_snapshot_name(index)
             )))
             .and(body_json(serde_json::json!({"indices": index})))
             .respond_with(ResponseTemplate::new(200))
@@ -792,8 +851,9 @@ mod tests {
             assert_eq!(entries[0].actor, "admin-user");
         }
 
-        // (c) the restored index becomes queryable.
-        Mock::given(method("GET"))
+        // (c) the restored index becomes queryable -- via the production
+        // `ism::query_hit_count` helper, not a raw ad hoc GET.
+        Mock::given(method("POST"))
             .and(path(format!("/{index}/_search")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "hits": {"total": {"value": 42}, "hits": []}
@@ -801,14 +861,10 @@ mod tests {
             .mount(&mock)
             .await;
         let client = reqwest::Client::new();
-        let search = client
-            .get(format!("{}/{index}/_search", mock.uri()))
-            .send()
+        let count = ism::query_hit_count(&client, &mock.uri(), index)
             .await
             .unwrap();
-        assert!(search.status().is_success());
-        let search_body: serde_json::Value = search.json().await.unwrap();
-        assert_eq!(search_body["hits"]["total"]["value"], 42);
+        assert_eq!(count, 42);
     }
 
     #[tokio::test]
@@ -817,7 +873,8 @@ mod tests {
         let index = "skauswatch-logs-2025.01.01";
         Mock::given(method("POST"))
             .and(path(format!(
-                "/_snapshot/skauswatch-snapshots/cold-{index}/_restore"
+                "/_snapshot/skauswatch-snapshots/{}/_restore",
+                ism::cold_snapshot_name(index)
             )))
             .respond_with(ResponseTemplate::new(500))
             .mount(&mock)
@@ -836,6 +893,65 @@ mod tests {
             audit.entries.lock().unwrap().is_empty(),
             "a failed restore call must not be audited as if it succeeded"
         );
+    }
+
+    // -- Important fix (round 1 review): RestoreRequest.index was
+    // client-supplied and interpolated unvalidated into the OpenSearch
+    // restore URL -- these assert it's rejected (and never reaches
+    // OpenSearch or the audit sink) before `validate_index_name` existed.
+
+    #[tokio::test]
+    async fn restore_endpoint_rejects_path_traversal_index_without_calling_opensearch() {
+        let mock = MockServer::start().await;
+        // No Mock registered -- if the handler ever calls OpenSearch with
+        // this value, wiremock answers 404 and `received_requests` below
+        // catches it.
+        let audit = Arc::new(RecordingAuditSink::default());
+        let server = test_server(&mock.uri(), audit.clone());
+
+        let res = server
+            .post("/api/v1/admin/ingest/restore")
+            .authorization_bearer(bearer_for("tenant-a", SIEM_RESTORE_SCOPE))
+            .json(&serde_json::json!({"index": "../../_snapshot/repo/other/_restore"}))
+            .await;
+
+        res.assert_status(StatusCode::BAD_REQUEST);
+        let requests = mock.received_requests().await.unwrap();
+        assert!(
+            requests.is_empty(),
+            "an invalid index must never reach OpenSearch"
+        );
+        assert!(
+            audit.entries.lock().unwrap().is_empty(),
+            "a rejected request must not be audited"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_endpoint_rejects_index_with_extra_path_segment() {
+        let mock = MockServer::start().await;
+        let server = test_server(&mock.uri(), Arc::new(RecordingAuditSink::default()));
+
+        let res = server
+            .post("/api/v1/admin/ingest/restore")
+            .authorization_bearer(bearer_for("tenant-a", SIEM_RESTORE_SCOPE))
+            .json(&serde_json::json!({"index": "skauswatch-logs-2025.01.01/../secret"}))
+            .await;
+
+        res.assert_status(StatusCode::BAD_REQUEST);
+        assert!(mock.received_requests().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn is_valid_daily_index_accepts_only_the_exact_shape() {
+        assert!(is_valid_daily_index("skauswatch-logs-2025.01.01"));
+        assert!(!is_valid_daily_index("skauswatch-logs-2025.01.01/../x"));
+        assert!(!is_valid_daily_index("../etc/passwd"));
+        assert!(!is_valid_daily_index("skauswatch-logs-2025.01.01x"));
+        assert!(!is_valid_daily_index("xskauswatch-logs-2025.01.01"));
+        assert!(!is_valid_daily_index("skauswatch-logs-"));
+        assert!(!is_valid_daily_index("skauswatch-logs-20a5.01.01"));
+        assert!(!is_valid_daily_index(""));
     }
 
     // -- AdminError::into_response mapping -----------------------------------
