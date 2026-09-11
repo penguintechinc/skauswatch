@@ -84,7 +84,7 @@ use uuid::Uuid;
 /// Upper bound on every container-startup wait in this harness. No wait
 /// anywhere in this module is allowed to block indefinitely (house rule —
 /// `critical-rules.md` Verification Integrity).
-const CONTAINER_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
+const CONTAINER_STARTUP_TIMEOUT: Duration = Duration::from_secs(180);
 /// Upper bound on waiting for a spawned `skauswatch-svc-ingest` process to
 /// either answer its health endpoint or exit early.
 const PROCESS_READY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -668,17 +668,18 @@ pub async fn spawn_receiver(
     let bin = env!("CARGO_BIN_EXE_skauswatch-svc-ingest");
     let jwt = JwtFixture::generate().context("generate receiver JWT fixture")?;
 
-    let ports = free_tcp_ports(5).context("allocate receiver ports")?;
+    let ports = free_tcp_ports(6).context("allocate receiver ports")?;
     let &[
         http_port,
         syslog_port,
         syslog_tls_port,
         otlp_grpc_port,
         otlp_http_port,
+        metrics_port,
     ] = ports.as_slice()
     else {
         bail!(
-            "free_tcp_ports(5) returned {} ports, expected 5",
+            "free_tcp_ports(6) returned {} ports, expected 6",
             ports.len()
         );
     };
@@ -693,6 +694,12 @@ pub async fn spawn_receiver(
         .env("SYSLOG_TLS_PORT", syslog_tls_port.to_string())
         .env("OTLP_GRPC_PORT", otlp_grpc_port.to_string())
         .env("OTLP_HTTP_PORT", otlp_http_port.to_string())
+        // Distinct per-process metrics port: the harness co-locates
+        // receiver + writer on one host (in K8s they're separate pods on
+        // the same well-known :9090), so both would otherwise race to bind
+        // the telemetry crate's default Prometheus port. See
+        // `skauswatch_telemetry::install_metrics_exporter`.
+        .env("METRICS_PORT", metrics_port.to_string())
         .env("OPENSEARCH_URL", &opensearch.url)
         .env("NATS_URL", &nats.url)
         .env("JWT_VERIFY_KEY", &jwt.verify_key_pem)
@@ -767,11 +774,13 @@ pub async fn spawn_writer(
     opensearch: &OpenSearchHandle,
 ) -> Result<WriterProcess> {
     let bin = env!("CARGO_BIN_EXE_skauswatch-svc-ingest");
-    let health_port = free_tcp_ports(1)
-        .context("allocate writer health_port")?
-        .first()
-        .copied()
-        .context("free_tcp_ports(1) returned no ports")?;
+    let ports = free_tcp_ports(2).context("allocate writer ports")?;
+    let &[health_port, metrics_port] = ports.as_slice() else {
+        bail!(
+            "free_tcp_ports(2) returned {} ports, expected 2",
+            ports.len()
+        );
+    };
 
     let mut cmd = Command::new(bin);
     cmd.arg("serve")
@@ -779,6 +788,10 @@ pub async fn spawn_writer(
         .arg("writer")
         .env("RELEASE_MODE", "false")
         .env("WRITER_HEALTH_PORT", health_port.to_string())
+        // See the matching comment in `spawn_receiver`: distinct per-process
+        // metrics port so receiver + writer don't race to bind :9090 when
+        // co-located on one host.
+        .env("METRICS_PORT", metrics_port.to_string())
         .env("OPENSEARCH_URL", &opensearch.url)
         .env("NATS_URL", &nats.url)
         .stdout(Stdio::piped())
