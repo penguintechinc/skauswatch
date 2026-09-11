@@ -197,6 +197,16 @@ env:
       configMapKeyRef:
         name: skauswatch-manager-config
         key: release-mode
+  # SIEM-ingest proxy upstream (routes/siem.rs::proxy_ingest ->
+  # {LOGS_URL}/ingest). Cutover (svc-ingest migration Task 3.3): base
+  # default below preserves the pre-cutover services/logs target;
+  # alpha/beta/gamma/production override configMapData.logs-url to the
+  # svc-ingest receiver Service instead -- see those files' comments.
+  - name: LOGS_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-manager-config
+        key: logs-url
 
 livenessProbe:
   httpGet:
@@ -251,6 +261,10 @@ configMapData:
   db-pool-size: "20"
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
+  # Pre-cutover default (services/logs); every per-env values file below
+  # overrides this to the svc-ingest receiver once svc-ingest is deployed
+  # in that environment (svc-ingest migration Task 3.3).
+  logs-url: "http://logs:5010"
 
 # MUST be set via --set/values or existingSecret; services fail closed
 # on a blank/known-default secret (never ship a real credential here).
