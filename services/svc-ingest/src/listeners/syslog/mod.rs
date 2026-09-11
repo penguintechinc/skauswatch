@@ -276,15 +276,53 @@ fn tls_allowed_matcher() -> anyhow::Result<skauswatch_identity::SpiffeIdMatcher>
 /// tenant from its peer certificate's SPIFFE ID via
 /// [`crate::auth::resolve_via_mtls`].
 ///
+/// # Degrades, never hard-fails, when no SPIFFE identity is available
+///
+/// Unlike [`crate::listeners::otlp::run_grpc`] (which receives an
+/// already-connected `Option<Arc<IdentityProvider>>` from `main.rs`'s
+/// once-per-process Wave-1 wiring), this listener still attests to the
+/// Workload API itself — see that module's doc comment for why re-deriving
+/// identity per listener is a documented gap, not a design goal. Applying
+/// `skauswatch_identity`'s own hard-fail-in-production policy at *this*
+/// call site would crash the whole receiver (`/ingest` included) over one
+/// listener's transport concern, cascading through
+/// `bootstrap::drain_listeners`'s "any listener errors, shut every listener
+/// down" behavior. So both ways an identity can be unavailable —
+/// `IdentityProvider::connect` itself failing, or connecting but holding no
+/// attested identity (`has_identity() == false`, the crate's own
+/// non-production degrade case) — are treated identically here: log a
+/// `tracing::warn!` and return `Ok(())` without ever binding
+/// `cfg.syslog_tls_port`. The receiver stays up with `:6514` simply
+/// unavailable, mirroring `run_grpc`'s plaintext-fallback precedent (this
+/// listener has no plaintext equivalent to fall back to, since mTLS *is*
+/// its authentication mechanism, so "disabled" is the only safe fallback).
+///
 /// # Errors
-/// Returns an error if the SPIFFE Workload API is unreachable (see
-/// `skauswatch_identity::IdentityProvider::connect`'s fail-safe policy),
-/// the mTLS server config cannot be built, the identity-store database is
-/// unreachable, or the TCP listener fails to bind.
+/// Returns an error if the mTLS server config cannot be built despite a
+/// held identity (a genuine bug, e.g. an empty trust bundle), the
+/// identity-store database is unreachable, or the TCP listener fails to
+/// bind.
 pub async fn run_tls(cfg: &Config, buffer: Arc<dyn EventBuffer>) -> anyhow::Result<()> {
-    let identity = skauswatch_identity::IdentityProvider::connect()
-        .await
-        .context("connect to SPIFFE Workload API for syslog TLS listener")?;
+    let identity = match skauswatch_identity::IdentityProvider::connect().await {
+        Ok(identity) => identity,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                port = cfg.syslog_tls_port,
+                "syslog TLS listener degraded: could not attest to the SPIFFE Workload API; \
+                 not binding the TLS port"
+            );
+            return Ok(());
+        }
+    };
+    if !identity.has_identity() {
+        tracing::warn!(
+            port = cfg.syslog_tls_port,
+            "syslog TLS listener degraded: no SPIFFE workload identity held; not binding the \
+             TLS port"
+        );
+        return Ok(());
+    }
     let allowed = tls_allowed_matcher()?;
     let tls_config = identity
         .server_tls_config(&allowed)
@@ -1021,20 +1059,30 @@ mod tests {
 
     // -- run_tls ---------------------------------------------------------------
 
+    // regression: e2e harness finding -- a receiver with no live SPIRE
+    // agent must stay up with `:6514` simply disabled, not crash the whole
+    // process (`bootstrap::drain_listeners` shuts every listener down on
+    // the first `Err`). `run_tls` must degrade (`Ok(())`, never binding the
+    // TLS port) whenever a SPIFFE identity can't be obtained, exactly
+    // mirroring `otlp::run_grpc`'s warn-and-degrade precedent.
     #[tokio::test]
-    async fn run_tls_fails_cleanly_without_a_live_spiffe_workload_api() {
+    async fn run_tls_degrades_to_ok_without_binding_when_no_live_spiffe_workload_api() {
         // No SPIRE agent runs in this test environment and
         // `SPIFFE_ENDPOINT_SOCKET` is unset, so `IdentityProvider::connect`
         // fails fast (no network I/O attempted, matches
         // `skauswatch-identity`'s own
         // `connect_fails_deterministically_without_a_live_workload_api_socket`
-        // regression) — `run_tls` must surface that as a clean `Err`, never
-        // hang or panic.
-        let cfg = untrusted_config();
+        // regression) -- `run_tls` must treat that as a degrade, not
+        // propagate it as an `Err` that would cascade into shutting the
+        // whole receiver down.
+        let mut cfg = untrusted_config();
+        cfg.syslog_tls_port = 0; // never actually bound on the degrade path
         let buffer: Arc<dyn EventBuffer> = Arc::new(InMemoryBuffer::new(1));
-        let err = run_tls(&cfg, buffer)
-            .await
-            .expect_err("no SPIFFE Workload API is available in this test environment");
-        assert!(!err.to_string().is_empty());
+        let result = run_tls(&cfg, buffer).await;
+        assert!(
+            result.is_ok(),
+            "run_tls must degrade (Ok, TLS port left unbound), never hard-fail the receiver \
+             over a missing SPIFFE Workload API: {result:?}"
+        );
     }
 }
