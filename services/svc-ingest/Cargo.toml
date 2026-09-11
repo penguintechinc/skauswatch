@@ -107,6 +107,25 @@ opentelemetry-appender-tracing = "=0.32.0"
 axum-test = { workspace = true }
 mockall = { workspace = true }
 opentelemetry_sdk = { version = "=0.32.1", features = ["testing"] }
+# opentelemetry-proto: already resolved in Cargo.lock at this exact
+# version as a *transitive* dependency of `opentelemetry-otlp` (which this
+# crate's own [dependencies] section already pins to "=0.32.0") — this
+# entry makes it a direct dev-dependency so `tests/e2e_smoke_14c.rs` can
+# stand up a real in-process OTLP gRPC sink (LogsService/MetricsService/
+# TraceService server implementations, pre-generated and checked into the
+# published crate under its "gen-tonic" feature — no protoc/build.rs
+# needed) that svc-ingest's own `crate::otel::init` OTLP exporters
+# (`opentelemetry-otlp`'s `.with_tonic()`) can export real traces+logs
+# into. `default-features = false` + explicit feature list mirrors this
+# crate's existing "only enable what's needed" convention (see the
+# `async-nats` pin's comment below); adding no new dependency edge Cargo
+# hasn't already resolved.
+opentelemetry-proto = { version = "=0.32.0", default-features = false, features = [
+    "gen-tonic",
+    "logs",
+    "metrics",
+    "trace",
+] }
 # p256/pkcs8/rand_core: Task 3.0's `tests/common` harness mints its own
 # ES256 (P-256) fixture keypair (private PEM stays in-process to sign test
 # bearer tokens; public PEM is passed to the spawned receiver subprocess as
@@ -135,6 +154,14 @@ skauswatch-testkit = { workspace = true }
 # containers are built directly on `testcontainers::GenericImage` instead,
 # one dependency covering both rather than a partial-fit second one.
 testcontainers = "=0.28.0"
+# tokio-stream: wraps a pre-bound `tokio::net::TcpListener` as the
+# `Stream` `tonic::transport::Server::serve_with_incoming` needs for
+# `tests/e2e_smoke_14c.rs`'s in-test OTLP sink — binding first and handing
+# the already-open listener to the server avoids the release-then-rebind
+# port race `free_tcp_ports`'s own doc comment above describes for the
+# subprocess-spawning helpers. Already workspace-pinned
+# (`[workspace.dependencies]`, `=0.1.18`).
+tokio-stream = { workspace = true }
 wiremock = { workspace = true }
 
 [lints]
