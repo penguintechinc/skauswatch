@@ -12,7 +12,7 @@
 //! `#![allow(dead_code)]`.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,12 +34,15 @@ pub const NATS_CONSUMER_PREFETCH: usize = 100;
 /// repeatedly ... events ... are moved to a separate ... dlq stream").
 /// Paired with [`backoff_for`]'s doubling delay so a transient blip
 /// retries quickly while a sustained outage backs off between attempts
-/// instead of hot-looping against a downed OpenSearch.
+/// instead of hot-looping against a downed OpenSearch. Compared against
+/// [`effective_failure_count`], not a raw process-local counter, so the
+/// threshold survives a writer restart.
 pub const DLQ_FAILURE_THRESHOLD: u32 = 5;
 
 /// Subject prefix for the dead-letter sink's own JetStream stream. See
 /// [`build_dlq_buffer`]'s doc comment for why this is deliberately NOT
-/// nested under the ingest subject prefix (`svc-ingest.logs`, Spec §7a).
+/// nested under the ingest subject prefix (`svc-ingest.logs`, Spec §7a) —
+/// [`subject_prefixes_collide`] enforces the disjointness at startup.
 const DLQ_SUBJECT_PREFIX: &str = "svc-ingest-dlq";
 
 /// Sleep between `consume()` polls that return no events, so a buffer that
@@ -61,6 +64,35 @@ fn backoff_for(consecutive_failures: u32) -> Duration {
     let exponent = consecutive_failures.saturating_sub(1).min(10);
     let millis = 20u64.saturating_mul(1u64 << exponent);
     Duration::from_millis(millis).min(Duration::from_millis(500))
+}
+
+/// Combines a message's server-tracked JetStream delivery count (when
+/// available — see `crate::buffer::AckHandle::delivery_count`) with the
+/// process-local consecutive-failure counter (the only signal for the
+/// in-memory fallback, which has no server-side delivery tracking). The
+/// JetStream count wins outright when present: it is authoritative and,
+/// unlike a counter held in this process's memory, it survives a writer
+/// restart — Spec §7c's DLQ threshold must not reset to zero just because
+/// the writer process happened to restart mid-outage (the exact failure
+/// mode a process-local-only counter reintroduces: an event surviving
+/// restarts would nack forever and never reach the DLQ).
+fn effective_failure_count(delivery_count: Option<u64>, local_count: u32) -> u32 {
+    match delivery_count {
+        Some(n) => u32::try_from(n).unwrap_or(u32::MAX),
+        None => local_count,
+    }
+}
+
+/// Whether two JetStream stream subject prefixes — each expanded to the
+/// wildcard `{prefix}.>` by [`JetStreamBuffer`] — would collide, one
+/// capturing messages meant for the other. True when one prefix's
+/// dot-separated tokens are a prefix of the other's (including exact
+/// equality), the case a `{prefix}.>` wildcard cannot distinguish between.
+fn subject_prefixes_collide(a: &str, b: &str) -> bool {
+    let a_tokens: Vec<&str> = a.split('.').collect();
+    let b_tokens: Vec<&str> = b.split('.').collect();
+    let shorter_len = a_tokens.len().min(b_tokens.len());
+    a_tokens[..shorter_len] == b_tokens[..shorter_len]
 }
 
 /// Stamps `tenant` onto `doc` as a top-level `tenant_id` field, appended
@@ -110,19 +142,19 @@ fn dlq_envelope(event: &NormalizedEvent, reason: &str, now: DateTime<Utc>) -> Js
     ])
 }
 
-/// Pushes `event` onto `dlq`, wrapped by [`dlq_envelope`]. Never propagates
-/// an error to the caller: a DLQ push failure is logged loudly (Spec §7c
-/// "never silently discarded" — never a silent `Ok`), but the caller still
-/// acks the *original* handle off the main stream regardless (see
-/// `process_batch`); retrying the DLQ push forever would just reintroduce
-/// the "endlessly nacking" problem the DLQ exists to escape, one level
-/// down.
+/// Pushes `event` onto `dlq`, wrapped by [`dlq_envelope`]. Returns whether
+/// the push succeeded — Spec §7c requires DLQ'd events are "never
+/// silently discarded". If OpenSearch AND the dead-letter sink are both
+/// unreachable, the caller (`handle_failed_batch`) must NOT ack the
+/// original handle off the main stream on a failed push — that would lose
+/// the event for good; it nacks instead, so JetStream keeps redelivering
+/// until the DLQ sink recovers.
 async fn route_to_dlq(
     dlq: &Arc<dyn EventBuffer>,
     event: &NormalizedEvent,
     reason: &str,
     now: DateTime<Utc>,
-) {
+) -> bool {
     let envelope = dlq_envelope(event, reason, now);
     let dlq_event = NormalizedEvent {
         tenant: event.tenant.clone(),
@@ -138,6 +170,7 @@ async fn route_to_dlq(
                 "writer_event_routed_to_dlq"
             );
             metrics::counter!("svc_ingest_writer_events_dlq_total").increment(1);
+            true
         }
         Err(e) => {
             tracing::error!(
@@ -146,6 +179,72 @@ async fn route_to_dlq(
                 "writer_dlq_push_failed"
             );
             metrics::counter!("svc_ingest_writer_dlq_push_failures_total").increment(1);
+            false
+        }
+    }
+}
+
+/// Applies the failure-counting/backoff/DLQ-or-nack decision to a set of
+/// events that failed to index — either the whole batch (a bulk-write
+/// transport/status failure) or a subset of it (a 200 response with
+/// per-item bulk errors — see `process_batch`). For each event: if it has
+/// now failed [`DLQ_FAILURE_THRESHOLD`] times in a row
+/// ([`effective_failure_count`]), route it to `dlq` and ack it off the
+/// main stream ONLY if that DLQ push succeeds; otherwise (under threshold,
+/// or the DLQ push itself failed) nack it for JetStream redelivery. A
+/// no-op on an empty `failed`.
+async fn handle_failed_batch(
+    buffer: &Arc<dyn EventBuffer>,
+    dlq: &Arc<dyn EventBuffer>,
+    failures: &mut HashMap<String, u32>,
+    failed: Vec<DeliveredEvent>,
+    reason: &str,
+) {
+    if failed.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        error = reason,
+        batch_size = failed.len(),
+        "writer_bulk_write_failed"
+    );
+    metrics::counter!("svc_ingest_writer_bulk_write_failures_total").increment(1);
+
+    let mut to_nack = Vec::new();
+    let mut max_consecutive = 0u32;
+    for d in failed {
+        let delivery_count = d.handle.delivery_count();
+        let local_count = {
+            let c = failures.entry(d.event.dedup_key.clone()).or_insert(0);
+            *c += 1;
+            *c
+        };
+        let count = effective_failure_count(delivery_count, local_count);
+
+        if count >= DLQ_FAILURE_THRESHOLD && route_to_dlq(dlq, &d.event, reason, Utc::now()).await {
+            failures.remove(&d.event.dedup_key);
+            if let Err(ack_err) = buffer.ack(d.handle).await {
+                tracing::error!(error = %ack_err, dedup_key = %d.event.dedup_key, "writer_dlq_ack_failed");
+            }
+            continue;
+        }
+        // Either still under threshold, or over it but the dead-letter
+        // sink itself is unreachable — never ack on a failed DLQ push
+        // (that would lose the event for good); fall through to nack so
+        // JetStream keeps redelivering until the DLQ sink recovers. The
+        // failure counter is intentionally left as-is in that case: once
+        // the sink comes back, the very next failed attempt routes it
+        // there immediately instead of restarting the threshold
+        // countdown.
+        max_consecutive = max_consecutive.max(count);
+        to_nack.push(d.handle);
+    }
+    if !to_nack.is_empty() {
+        tokio::time::sleep(backoff_for(max_consecutive)).await;
+        for handle in to_nack {
+            if let Err(nack_err) = buffer.nack(handle).await {
+                tracing::error!(error = %nack_err, "writer_nack_failed");
+            }
         }
     }
 }
@@ -157,10 +256,9 @@ async fn route_to_dlq(
 /// per-document `_id` derived from `dedup_key` (so a JetStream-redelivered
 /// event overwrites the same document instead of duplicating it — Spec
 /// §14b `writer_crash_mid_batch_causes_at_least_once_redelivery`), and
-/// resolves every handle: `ack` on success; on failure, `nack` (JetStream
-/// redelivery) unless the event has now failed [`DLQ_FAILURE_THRESHOLD`]
-/// times in a row, in which case it is routed to `dlq` and acked off the
-/// main stream instead (Spec §7c).
+/// resolves every handle: `ack` on success, `ack` only the successfully
+/// indexed subset on a 200-with-per-item-errors response, or defer the
+/// rest to [`handle_failed_batch`] on any failure.
 async fn process_batch(
     buffer: &Arc<dyn EventBuffer>,
     dlq: &Arc<dyn EventBuffer>,
@@ -169,15 +267,14 @@ async fn process_batch(
     delivered: Vec<DeliveredEvent>,
     failures: &mut HashMap<String, u32>,
 ) {
-    let now = Utc::now();
-    let index = opensearch::daily_index(now);
+    let index = opensearch::daily_index(Utc::now());
     let pairs = docs_with_ids(&delivered);
     let body = opensearch::build_bulk_body_with_ids(&index, &pairs);
 
     match opensearch::write_bulk(http, opensearch_url, body).await {
-        Ok(()) => {
+        Ok(outcome) if outcome.all_succeeded() => {
             metrics::counter!("svc_ingest_writer_events_written_total")
-                .increment(pairs.len() as u64);
+                .increment(delivered.len() as u64);
             for d in delivered {
                 failures.remove(&d.event.dedup_key);
                 if let Err(e) = buffer.ack(d.handle).await {
@@ -185,38 +282,33 @@ async fn process_batch(
                 }
             }
         }
+        Ok(outcome) => {
+            // OpenSearch returned 200 but rejected specific documents
+            // (Spec §14b fix: a status-code-only check would silently ack
+            // these away as if they had been written).
+            let failed_ids: HashSet<&str> = outcome.failed_ids.iter().map(String::as_str).collect();
+            let (failed, succeeded): (Vec<_>, Vec<_>) = delivered
+                .into_iter()
+                .partition(|d| failed_ids.contains(d.event.dedup_key.as_str()));
+            metrics::counter!("svc_ingest_writer_events_written_total")
+                .increment(succeeded.len() as u64);
+            for d in succeeded {
+                failures.remove(&d.event.dedup_key);
+                if let Err(e) = buffer.ack(d.handle).await {
+                    tracing::error!(error = %e, dedup_key = %d.event.dedup_key, "writer_ack_failed");
+                }
+            }
+            handle_failed_batch(
+                buffer,
+                dlq,
+                failures,
+                failed,
+                "opensearch bulk response reported per-item errors",
+            )
+            .await;
+        }
         Err(e) => {
-            let reason = e.to_string();
-            tracing::warn!(error = %reason, batch_size = delivered.len(), "writer_bulk_write_failed");
-            metrics::counter!("svc_ingest_writer_bulk_write_failures_total").increment(1);
-
-            let mut to_nack = Vec::new();
-            let mut max_consecutive = 0u32;
-            for d in delivered {
-                let count = {
-                    let c = failures.entry(d.event.dedup_key.clone()).or_insert(0);
-                    *c += 1;
-                    *c
-                };
-                if count >= DLQ_FAILURE_THRESHOLD {
-                    route_to_dlq(dlq, &d.event, &reason, now).await;
-                    failures.remove(&d.event.dedup_key);
-                    if let Err(ack_err) = buffer.ack(d.handle).await {
-                        tracing::error!(error = %ack_err, dedup_key = %d.event.dedup_key, "writer_dlq_ack_failed");
-                    }
-                } else {
-                    max_consecutive = max_consecutive.max(count);
-                    to_nack.push(d.handle);
-                }
-            }
-            if !to_nack.is_empty() {
-                tokio::time::sleep(backoff_for(max_consecutive)).await;
-                for handle in to_nack {
-                    if let Err(nack_err) = buffer.nack(handle).await {
-                        tracing::error!(error = %nack_err, "writer_nack_failed");
-                    }
-                }
-            }
+            handle_failed_batch(buffer, dlq, failures, delivered, &e.to_string()).await;
         }
     }
 }
@@ -269,13 +361,25 @@ async fn run_loop(
 /// land in the *same* stream as ordinary tenant traffic — the writer's own
 /// pull consumer would eventually redeliver its own dead-lettered events
 /// back to itself, exactly the "endlessly nacking" failure mode the DLQ
-/// exists to escape. [`DLQ_SUBJECT_PREFIX`] is disjoint from the ingest
-/// prefix (`svc-ingest.logs`) so it is a genuinely separate stream.
+/// exists to escape. [`subject_prefixes_collide`] enforces at startup that
+/// [`DLQ_SUBJECT_PREFIX`] is genuinely disjoint from `cfg`'s ingest
+/// subject prefix, so a misconfiguration cannot silently reintroduce that
+/// loop.
 ///
 /// # Errors
-/// Returns an error if the NATS connection cannot be established, or the
-/// dead-letter buffer fails to construct.
+/// Returns an error if [`DLQ_SUBJECT_PREFIX`] collides with `cfg`'s
+/// ingest subject prefix, the NATS connection cannot be established, or
+/// the dead-letter buffer fails to construct.
 async fn build_dlq_buffer(cfg: &Config) -> anyhow::Result<Arc<dyn EventBuffer>> {
+    if subject_prefixes_collide(DLQ_SUBJECT_PREFIX, &cfg.nats_jetstream_subject_prefix) {
+        anyhow::bail!(
+            "DLQ subject prefix {DLQ_SUBJECT_PREFIX:?} collides with the ingest subject prefix \
+             {:?} — a JetStream stream subject wildcard ({{prefix}}.>) would capture both, \
+             letting the writer redeliver its own dead-lettered events to itself; refusing to \
+             start",
+            cfg.nats_jetstream_subject_prefix
+        );
+    }
     let client = async_nats::connect(&cfg.nats_url)
         .await
         .map_err(|e| anyhow::anyhow!("dlq nats connect: {e}"))?;
@@ -296,8 +400,9 @@ async fn build_dlq_buffer(cfg: &Config) -> anyhow::Result<Arc<dyn EventBuffer>> 
 ///
 /// # Errors
 /// Returns an error if the dead-letter sink cannot be constructed (e.g.
-/// the configured NATS server is unreachable) — the loop itself does not
-/// otherwise return under normal operation.
+/// the configured NATS server is unreachable, or its subject prefix
+/// collides with the ingest prefix) — the loop itself does not otherwise
+/// return under normal operation.
 pub async fn run(
     cfg: &Config,
     buffer: Arc<dyn EventBuffer>,
@@ -317,7 +422,7 @@ mod tests {
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     use super::*;
-    use crate::buffer::InMemoryBuffer;
+    use crate::buffer::{BufferError, InMemoryBuffer};
 
     fn test_config(opensearch_url: &str) -> Config {
         Config {
@@ -363,6 +468,119 @@ mod tests {
         }
     }
 
+    /// Wraps a real `EventBuffer`, injecting a single simulated crash on
+    /// the FIRST `ack` call: the underlying handle is nacked (so the
+    /// wrapped buffer observably redelivers it — the same externally
+    /// visible outcome a live JetStream ack-wait-timeout produces after a
+    /// genuinely lost ack) and the crash itself is surfaced as an `Err`,
+    /// exactly what a dropped/reset ack RPC looks like to the caller.
+    /// Lets `writer_crash_mid_batch_causes_at_least_once_redelivery` drive
+    /// the REAL `run_loop`/`process_batch` path instead of hand-rolling
+    /// the consume/write/ack sequence.
+    struct CrashOnceBuffer {
+        inner: Arc<dyn EventBuffer>,
+        ack_calls: AtomicUsize,
+    }
+
+    impl CrashOnceBuffer {
+        fn new(inner: Arc<dyn EventBuffer>) -> Self {
+            Self {
+                inner,
+                ack_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventBuffer for CrashOnceBuffer {
+        async fn push(&self, event: NormalizedEvent) -> Result<(), BufferError> {
+            self.inner.push(event).await
+        }
+
+        async fn consume(&self, batch_size: usize) -> Result<Vec<DeliveredEvent>, BufferError> {
+            self.inner.consume(batch_size).await
+        }
+
+        async fn ack(&self, handle: crate::buffer::AckHandle) -> Result<(), BufferError> {
+            if self.ack_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.inner.nack(handle).await?;
+                return Err(BufferError::Transport(
+                    "simulated crash before ack reached the broker".to_owned(),
+                ));
+            }
+            self.inner.ack(handle).await
+        }
+
+        async fn nack(&self, handle: crate::buffer::AckHandle) -> Result<(), BufferError> {
+            self.inner.nack(handle).await
+        }
+    }
+
+    /// Wraps an `EventBuffer`, counting how many times `ack` is actually
+    /// called through to the inner buffer — lets a test assert "never
+    /// acked" without racing a forcibly-cancelled `run_loop` task against
+    /// `consume()`'s in-flight bookkeeping (an event mid-nack, or sitting
+    /// in the in-memory fallback's in-flight table, when the test's
+    /// `tokio::time::timeout` fires is a false negative for "is it still
+    /// on the main stream" — it is evidence of neither ack nor loss).
+    struct AckCountingBuffer {
+        inner: Arc<dyn EventBuffer>,
+        ack_count: AtomicUsize,
+    }
+
+    impl AckCountingBuffer {
+        fn new(inner: Arc<dyn EventBuffer>) -> Self {
+            Self {
+                inner,
+                ack_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventBuffer for AckCountingBuffer {
+        async fn push(&self, event: NormalizedEvent) -> Result<(), BufferError> {
+            self.inner.push(event).await
+        }
+
+        async fn consume(&self, batch_size: usize) -> Result<Vec<DeliveredEvent>, BufferError> {
+            self.inner.consume(batch_size).await
+        }
+
+        async fn ack(&self, handle: crate::buffer::AckHandle) -> Result<(), BufferError> {
+            self.ack_count.fetch_add(1, Ordering::SeqCst);
+            self.inner.ack(handle).await
+        }
+
+        async fn nack(&self, handle: crate::buffer::AckHandle) -> Result<(), BufferError> {
+            self.inner.nack(handle).await
+        }
+    }
+
+    /// An `EventBuffer` whose `push` always fails — simulates a
+    /// dead-letter sink that is itself unreachable (e.g. its own NATS
+    /// connection is down), so `route_to_dlq`'s push fails every time.
+    struct FailingPushBuffer;
+
+    #[async_trait::async_trait]
+    impl EventBuffer for FailingPushBuffer {
+        async fn push(&self, _event: NormalizedEvent) -> Result<(), BufferError> {
+            Err(BufferError::Transport("dlq sink unreachable".to_owned()))
+        }
+
+        async fn consume(&self, _batch_size: usize) -> Result<Vec<DeliveredEvent>, BufferError> {
+            Ok(Vec::new())
+        }
+
+        async fn ack(&self, _handle: crate::buffer::AckHandle) -> Result<(), BufferError> {
+            Ok(())
+        }
+
+        async fn nack(&self, _handle: crate::buffer::AckHandle) -> Result<(), BufferError> {
+            Ok(())
+        }
+    }
+
     // -- pure unit tests -------------------------------------------------
 
     #[test]
@@ -372,6 +590,56 @@ mod tests {
         assert_eq!(backoff_for(3), StdDuration::from_millis(80));
         // Large counts must cap, never overflow or grow unbounded.
         assert_eq!(backoff_for(100), StdDuration::from_millis(500));
+    }
+
+    #[test]
+    fn effective_failure_count_prefers_jetstream_delivery_count_over_fresh_local_counter() {
+        // A message already redelivered past the threshold by JetStream
+        // (e.g. by a prior writer process that crashed and restarted,
+        // losing its local counter) must still count as over-threshold
+        // even though THIS process's local counter starts fresh at 1.
+        let count = effective_failure_count(Some(u64::from(DLQ_FAILURE_THRESHOLD) + 3), 1);
+        assert!(
+            count >= DLQ_FAILURE_THRESHOLD,
+            "a restart-surviving delivery count must still route to the DLQ"
+        );
+    }
+
+    #[test]
+    fn effective_failure_count_falls_back_to_local_counter_without_jetstream_metadata() {
+        assert_eq!(effective_failure_count(None, 3), 3);
+    }
+
+    #[tokio::test]
+    async fn inmemory_ack_handle_has_no_jetstream_delivery_count() {
+        let buffer = InMemoryBuffer::new(1);
+        buffer.push(sample_event("k", "tenant-a")).await.unwrap();
+        let delivered = buffer.consume(1).await.unwrap();
+        assert_eq!(
+            delivered[0].handle.delivery_count(),
+            None,
+            "the in-memory fallback has no server-side delivery tracking"
+        );
+    }
+
+    #[test]
+    fn subject_prefixes_collide_detects_nested_and_equal_prefixes() {
+        assert!(subject_prefixes_collide(
+            "svc-ingest.logs",
+            "svc-ingest.logs.dlq"
+        ));
+        assert!(subject_prefixes_collide(
+            "svc-ingest.logs",
+            "svc-ingest.logs"
+        ));
+        assert!(!subject_prefixes_collide(
+            "svc-ingest-dlq",
+            "svc-ingest.logs"
+        ));
+        assert!(!subject_prefixes_collide(
+            "svc-ingest.logs",
+            "svc-ingest.other"
+        ));
     }
 
     #[test]
@@ -433,18 +701,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn build_dlq_buffer_refuses_to_start_on_subject_prefix_collision() {
+        let mut cfg = test_config("http://127.0.0.1:1");
+        cfg.nats_jetstream_subject_prefix = DLQ_SUBJECT_PREFIX.to_owned();
+
+        let result = build_dlq_buffer(&cfg).await;
+
+        assert!(
+            result.is_err(),
+            "must refuse to start rather than silently building a colliding DLQ stream"
+        );
+    }
+
     // -- durability tests (Spec §14b, in-memory buffer — no live broker) -
 
-    /// `writer_crash_mid_batch_causes_at_least_once_redelivery`: a batch
-    /// that is written to OpenSearch but never acked (simulating the
-    /// writer process dying between the write and the ack — the in-memory
-    /// buffer has no ack-wait-timeout of its own, so an explicit `nack`
-    /// stands in for "never acked", exactly the outcome JetStream's own
-    /// ack-wait expiry produces in production) must be redelivered on the
-    /// next `consume()`, and rewriting it must produce the SAME `_id` both
-    /// times — the property that lets OpenSearch's own overwrite-by-`_id`
-    /// behavior absorb the redelivery without creating a duplicate
-    /// document.
+    /// `writer_crash_mid_batch_causes_at_least_once_redelivery`: drives
+    /// the REAL `run_loop`/`process_batch` path (via `CrashOnceBuffer`,
+    /// not a hand-rolled consume/write/ack sequence) so an ack-before/
+    /// regardless-of-write regression in production code would be caught
+    /// here. The first successful write "crashes" before its ack reaches
+    /// the broker; the same `run_loop` invocation naturally redelivers
+    /// and rewrites it on its next iteration, and both writes must carry
+    /// the same deterministic `_id` — the property that lets OpenSearch's
+    /// own overwrite-by-`_id` behavior absorb the redelivery without
+    /// creating a duplicate document.
     #[tokio::test]
     async fn writer_crash_mid_batch_causes_at_least_once_redelivery() {
         let mock = MockServer::start().await;
@@ -456,46 +737,27 @@ mod tests {
             .mount(&mock)
             .await;
 
-        let buffer: Arc<dyn EventBuffer> = Arc::new(InMemoryBuffer::new(10));
-        buffer
+        let inner: Arc<dyn EventBuffer> = Arc::new(InMemoryBuffer::new(10));
+        inner
             .push(sample_event("evt-crash", "tenant-a"))
             .await
             .unwrap();
+        let buffer: Arc<dyn EventBuffer> = Arc::new(CrashOnceBuffer::new(inner.clone()));
+        let dlq: Arc<dyn EventBuffer> = Arc::new(InMemoryBuffer::new(10));
+        let cfg = test_config(&mock.uri());
         let http = reqwest::Client::new();
 
-        // First attempt: consume, write successfully, but "crash" before
-        // acking — nack instead, simulating the process dying between the
-        // write and the ack.
-        let mut first = buffer.consume(10).await.unwrap();
-        assert_eq!(first.len(), 1);
-        let now = Utc::now();
-        let index = opensearch::daily_index(now);
-        let pairs = docs_with_ids(&first);
-        let body = opensearch::build_bulk_body_with_ids(&index, &pairs);
-        opensearch::write_bulk(&http, &mock.uri(), body)
-            .await
-            .unwrap();
-        let crashed = first.pop().unwrap();
-        buffer.nack(crashed.handle).await.unwrap();
-
-        // "Restart consumption": the same event must be redelivered.
-        let mut redelivered = buffer.consume(10).await.unwrap();
-        assert_eq!(redelivered.len(), 1, "unacked event must be redelivered");
-        assert_eq!(redelivered[0].event.dedup_key, "evt-crash");
-
-        let pairs2 = docs_with_ids(&redelivered);
-        let body2 = opensearch::build_bulk_body_with_ids(&index, &pairs2);
-        opensearch::write_bulk(&http, &mock.uri(), body2)
-            .await
-            .unwrap();
-        let completed = redelivered.pop().unwrap();
-        buffer.ack(completed.handle).await.unwrap();
+        let _ = tokio::time::timeout(
+            StdDuration::from_secs(5),
+            run_loop(&cfg, buffer.clone(), dlq.clone(), http),
+        )
+        .await;
 
         let requests = mock.received_requests().await.unwrap();
         assert_eq!(
             requests.len(),
             2,
-            "both the crashed and redelivered write must reach OpenSearch"
+            "the crashed write and the redelivered write must both reach OpenSearch"
         );
         for req in &requests {
             let text = String::from_utf8(req.body.clone()).unwrap();
@@ -506,8 +768,12 @@ mod tests {
         }
 
         assert!(
-            buffer.consume(10).await.unwrap().is_empty(),
+            inner.consume(10).await.unwrap().is_empty(),
             "nothing left pending after the final ack"
+        );
+        assert!(
+            dlq.consume(10).await.unwrap().is_empty(),
+            "a successfully-recovered crash must never reach the DLQ"
         );
     }
 
@@ -621,6 +887,107 @@ mod tests {
             requests.len(),
             DLQ_FAILURE_THRESHOLD as usize,
             "exactly DLQ_FAILURE_THRESHOLD attempts before routing to the DLQ"
+        );
+    }
+
+    /// Fix-round regression: if OpenSearch is down AND the dead-letter
+    /// sink is also unreachable, the event must never be acked off the
+    /// main stream (that would lose it for good) — it must keep being
+    /// nacked (redelivered) past the threshold instead.
+    #[tokio::test]
+    async fn dlq_push_failure_never_acks_main_handle_nacks_instead() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_bulk"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&mock)
+            .await;
+
+        let inner: Arc<dyn EventBuffer> = Arc::new(InMemoryBuffer::new(10));
+        inner
+            .push(sample_event("evt-dlq-down", "tenant-a"))
+            .await
+            .unwrap();
+        let tracking = Arc::new(AckCountingBuffer::new(inner));
+        let buffer: Arc<dyn EventBuffer> = tracking.clone();
+        let dlq: Arc<dyn EventBuffer> = Arc::new(FailingPushBuffer);
+        let cfg = test_config(&mock.uri());
+        let http = reqwest::Client::new();
+
+        let _ = tokio::time::timeout(
+            StdDuration::from_secs(5),
+            run_loop(&cfg, buffer.clone(), dlq.clone(), http),
+        )
+        .await;
+
+        let requests = mock.received_requests().await.unwrap();
+        assert!(
+            requests.len() as u32 > DLQ_FAILURE_THRESHOLD,
+            "must keep retrying past the threshold when the DLQ sink itself is unreachable: {} requests",
+            requests.len()
+        );
+        assert_eq!(
+            tracking.ack_count.load(Ordering::SeqCst),
+            0,
+            "the event must never be acked off the main stream while the DLQ push keeps failing"
+        );
+    }
+
+    /// Spec §14b fix: OpenSearch can return HTTP 200 with per-item bulk
+    /// failures (`"errors": true`) — those specific documents must be
+    /// nacked, not acked away alongside the documents in the same batch
+    /// that genuinely succeeded.
+    #[tokio::test]
+    async fn partial_bulk_failure_acks_succeeded_docs_and_nacks_failed_ones() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_bulk"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": true,
+                "items": [
+                    {"index": {"_index": "i", "_id": "evt-ok", "status": 201}},
+                    {"index": {"_index": "i", "_id": "evt-bad", "status": 400, "error": {"type": "mapper_parsing_exception", "reason": "boom"}}}
+                ]
+            })))
+            .mount(&mock)
+            .await;
+
+        let buffer: Arc<dyn EventBuffer> = Arc::new(InMemoryBuffer::new(10));
+        buffer
+            .push(sample_event("evt-ok", "tenant-a"))
+            .await
+            .unwrap();
+        buffer
+            .push(sample_event("evt-bad", "tenant-a"))
+            .await
+            .unwrap();
+        let dlq: Arc<dyn EventBuffer> = Arc::new(InMemoryBuffer::new(10));
+        let cfg = test_config(&mock.uri());
+        let http = reqwest::Client::new();
+
+        let delivered = buffer.consume(10).await.unwrap();
+        assert_eq!(delivered.len(), 2);
+        let mut failures = HashMap::new();
+        process_batch(
+            &buffer,
+            &dlq,
+            &http,
+            &cfg.opensearch_url,
+            delivered,
+            &mut failures,
+        )
+        .await;
+
+        let remaining = buffer.consume(10).await.unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "only the failed doc must be redelivered — the succeeded one was acked"
+        );
+        assert_eq!(remaining[0].event.dedup_key, "evt-bad");
+        assert!(
+            dlq.consume(10).await.unwrap().is_empty(),
+            "a single partial failure must not hit the DLQ threshold yet"
         );
     }
 

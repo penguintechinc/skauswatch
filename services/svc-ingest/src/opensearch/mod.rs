@@ -84,27 +84,83 @@ pub fn build_bulk_body_with_ids(index: &str, docs: &[(String, JsonVal)]) -> Stri
     out
 }
 
-/// POSTs the batch to `{base_url}/_bulk`. Mirrors v1 `helpers.async_bulk(...,
-/// raise_on_error=False)`: per-document item errors in a 200 response are
-/// ignored, but a transport failure or non-2xx status propagates (v1 raised →
-/// the caller treats it as a failed batch — `crate::writer` nacks/DLQs on
-/// this `Err`, never acks).
+/// Outcome of a `_bulk` request that completed at the HTTP level (2xx) —
+/// OpenSearch can still report per-document failures inside that
+/// otherwise-successful response (`"errors": true` plus a per-item
+/// `error` object), so a status-code-only check would treat those
+/// documents as written when they were not. `failed_ids` holds the `_id`
+/// (see [`build_bulk_body_with_ids`]) of every document the response
+/// reported as failed — `crate::writer` nacks/DLQs exactly those, and
+/// acks the rest as normal.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BulkOutcome {
+    /// `_id`s the bulk response reported as failed.
+    pub failed_ids: Vec<String>,
+}
+
+impl BulkOutcome {
+    /// Whether every document in the batch was indexed successfully.
+    pub fn all_succeeded(&self) -> bool {
+        self.failed_ids.is_empty()
+    }
+}
+
+/// POSTs the batch to `{base_url}/_bulk` and parses the response for
+/// per-item failures. Mirrors v1 `helpers.async_bulk(..., raise_on_error=
+/// False)`: a transport failure or non-2xx status propagates as `Err` (the
+/// caller treats the whole batch as failed — nacks/DLQs on this, never
+/// acks), but a 200 response is inspected for `"errors": true` — those
+/// specific documents are reported via [`BulkOutcome::failed_ids`] rather
+/// than silently treated as written.
 ///
 /// # Errors
-/// Returns the reqwest error on transport failure or a non-2xx bulk response.
+/// Returns the reqwest error on transport failure, a non-2xx bulk
+/// response, or a response body that isn't valid JSON.
 pub async fn write_bulk(
     client: &reqwest::Client,
     base_url: &str,
     body: String,
-) -> Result<(), reqwest::Error> {
-    client
+) -> Result<BulkOutcome, reqwest::Error> {
+    let response = client
         .post(format!("{base_url}/_bulk"))
         .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson")
         .body(body)
         .send()
         .await?
         .error_for_status()?;
-    Ok(())
+    let payload: serde_json::Value = response.json().await?;
+    Ok(parse_bulk_response(&payload))
+}
+
+/// Extracts the `_id`s of any per-item bulk failures from a parsed `_bulk`
+/// response body. A response that doesn't have the expected `items` array
+/// (missing or malformed) is treated as fully successful — matching v1's
+/// `raise_on_error=False` forgiving behavior for anything short of a hard
+/// transport/status failure, which `write_bulk` already handles before
+/// this function ever runs.
+fn parse_bulk_response(payload: &serde_json::Value) -> BulkOutcome {
+    let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) else {
+        return BulkOutcome::default();
+    };
+    let failed_ids = items
+        .iter()
+        .filter_map(|item| {
+            // Each item is `{"<action>": {...}}` — "index" for every
+            // write this service performs, but read whichever single key
+            // is present rather than hardcoding "index" in case a future
+            // action type is ever added.
+            let action_result = item.as_object()?.values().next()?;
+            action_result.get("error")?;
+            Some(
+                action_result
+                    .get("_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        })
+        .collect();
+    BulkOutcome { failed_ids }
 }
 
 #[cfg(test)]
@@ -184,7 +240,7 @@ mod tests {
         let client = reqwest::Client::new();
         let result = write_bulk(&client, &mock.uri(), "{}\n".to_owned()).await;
 
-        assert!(result.is_ok());
+        assert!(result.as_ref().unwrap().all_succeeded());
         let requests = mock.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1, "exactly one POST to /_bulk");
         assert_eq!(
@@ -217,5 +273,51 @@ mod tests {
         // Nothing listens on this port — connection refused.
         let result = write_bulk(&client, "http://127.0.0.1:1", "{}\n".to_owned()).await;
         assert!(result.is_err());
+    }
+
+    /// A 200 response with `"errors": true` and a per-item `error` object
+    /// must NOT be treated as fully successful — OpenSearch accepted the
+    /// HTTP request but rejected specific documents, and silently acking
+    /// those away would be a silent evidence loss in a SIEM.
+    #[tokio::test]
+    async fn write_bulk_reports_per_item_failures_on_200_with_errors_true() {
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/_bulk"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "errors": true,
+                "items": [
+                    {"index": {"_index": "i", "_id": "evt-ok", "status": 201}},
+                    {"index": {"_index": "i", "_id": "evt-bad", "status": 400, "error": {"type": "mapper_parsing_exception", "reason": "boom"}}}
+                ]
+            })))
+            .mount(&mock)
+            .await;
+
+        let client = reqwest::Client::new();
+        let outcome = write_bulk(&client, &mock.uri(), "{}\n".to_owned())
+            .await
+            .unwrap();
+
+        assert!(
+            !outcome.all_succeeded(),
+            "batch must not be treated as fully successful"
+        );
+        assert_eq!(outcome.failed_ids, vec!["evt-bad".to_owned()]);
+    }
+
+    #[test]
+    fn parse_bulk_response_missing_items_is_treated_as_fully_successful() {
+        let outcome = parse_bulk_response(&serde_json::json!({"errors": false}));
+        assert!(outcome.all_succeeded());
+    }
+
+    #[test]
+    fn parse_bulk_response_with_no_errors_reports_no_failed_ids() {
+        let outcome = parse_bulk_response(&serde_json::json!({
+            "errors": false,
+            "items": [{"index": {"_index": "i", "_id": "evt-ok", "status": 201}}]
+        }));
+        assert!(outcome.all_succeeded());
     }
 }

@@ -87,6 +87,27 @@ enum AckHandleInner {
     InMemory(usize),
 }
 
+impl AckHandle {
+    /// The number of times this message has been delivered, as tracked
+    /// server-side by JetStream (`Info::delivered`, parsed from the
+    /// per-redelivery ack-reply subject) — `None` for the in-memory
+    /// fallback (no server-side delivery tracking) or if the metadata
+    /// can't be parsed. `crate::writer` uses this in preference to a
+    /// process-local failure counter for its DLQ threshold: unlike a
+    /// counter held in this process's memory, the JetStream delivery
+    /// count survives a writer restart — it travels with the message
+    /// itself, not with any one writer process.
+    pub fn delivery_count(&self) -> Option<u64> {
+        match &self.0 {
+            AckHandleInner::JetStream(msg) => msg
+                .info()
+                .ok()
+                .and_then(|info| u64::try_from(info.delivered).ok()),
+            AckHandleInner::InMemory(_) => None,
+        }
+    }
+}
+
 /// Failure modes any `EventBuffer` impl can surface — never leaks a
 /// transport-specific error type across the trait boundary.
 #[derive(Debug, thiserror::Error)]
