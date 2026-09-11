@@ -84,6 +84,41 @@ pub fn build_bulk_body_with_ids(index: &str, docs: &[(String, JsonVal)]) -> Stri
     out
 }
 
+/// One per-item rejection from a `_bulk` response's `items[].index.error`
+/// object — `_id`, `_index`, the OpenSearch-reported error `type`, and
+/// `reason`. Previously this detail was discarded entirely (only the bare
+/// `_id` survived into [`BulkOutcome::failed_ids`]), so a rejection like a
+/// dynamic-mapping conflict was logged as the opaque, undiagnosable
+/// "opensearch bulk response reported per-item errors" with no indication
+/// of which field or why. `crate::writer` logs this via `tracing::error!`
+/// and folds it into the failure reason threaded through to the DLQ
+/// envelope's `dlq_reason`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BulkItemError {
+    /// The document `_id` (see [`build_bulk_body_with_ids`]) OpenSearch
+    /// rejected.
+    pub id: String,
+    /// The target index for the rejected item, when present.
+    pub index: Option<String>,
+    /// OpenSearch's `error.type` (e.g. `mapper_parsing_exception`).
+    pub error_type: Option<String>,
+    /// OpenSearch's `error.reason` — the human-readable rejection cause.
+    pub reason: Option<String>,
+}
+
+impl std::fmt::Display for BulkItemError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "id={} index={} type={} reason={}",
+            self.id,
+            self.index.as_deref().unwrap_or("?"),
+            self.error_type.as_deref().unwrap_or("?"),
+            self.reason.as_deref().unwrap_or("?")
+        )
+    }
+}
+
 /// Outcome of a `_bulk` request that completed at the HTTP level (2xx) —
 /// OpenSearch can still report per-document failures inside that
 /// otherwise-successful response (`"errors": true` plus a per-item
@@ -91,11 +126,15 @@ pub fn build_bulk_body_with_ids(index: &str, docs: &[(String, JsonVal)]) -> Stri
 /// documents as written when they were not. `failed_ids` holds the `_id`
 /// (see [`build_bulk_body_with_ids`]) of every document the response
 /// reported as failed — `crate::writer` nacks/DLQs exactly those, and
-/// acks the rest as normal.
+/// acks the rest as normal. `item_errors` carries the full detail behind
+/// each of those `failed_ids`, in the same order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BulkOutcome {
     /// `_id`s the bulk response reported as failed.
     pub failed_ids: Vec<String>,
+    /// Full per-item error detail (index/type/reason) for each entry in
+    /// [`Self::failed_ids`], same order.
+    pub item_errors: Vec<BulkItemError>,
 }
 
 impl BulkOutcome {
@@ -142,7 +181,7 @@ fn parse_bulk_response(payload: &serde_json::Value) -> BulkOutcome {
     let Some(items) = payload.get("items").and_then(serde_json::Value::as_array) else {
         return BulkOutcome::default();
     };
-    let failed_ids = items
+    let item_errors: Vec<BulkItemError> = items
         .iter()
         .filter_map(|item| {
             // Each item is `{"<action>": {...}}` — "index" for every
@@ -150,17 +189,33 @@ fn parse_bulk_response(payload: &serde_json::Value) -> BulkOutcome {
             // is present rather than hardcoding "index" in case a future
             // action type is ever added.
             let action_result = item.as_object()?.values().next()?;
-            action_result.get("error")?;
-            Some(
-                action_result
+            let error = action_result.get("error")?;
+            Some(BulkItemError {
+                id: action_result
                     .get("_id")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
-            )
+                index: action_result
+                    .get("_index")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                error_type: error
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                reason: error
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+            })
         })
         .collect();
-    BulkOutcome { failed_ids }
+    let failed_ids = item_errors.iter().map(|e| e.id.clone()).collect();
+    BulkOutcome {
+        failed_ids,
+        item_errors,
+    }
 }
 
 #[cfg(test)]
@@ -304,6 +359,18 @@ mod tests {
             "batch must not be treated as fully successful"
         );
         assert_eq!(outcome.failed_ids, vec!["evt-bad".to_owned()]);
+        assert_eq!(
+            outcome.item_errors,
+            vec![BulkItemError {
+                id: "evt-bad".to_owned(),
+                index: Some("i".to_owned()),
+                error_type: Some("mapper_parsing_exception".to_owned()),
+                reason: Some("boom".to_owned()),
+            }],
+            "the full per-item error detail (index/type/reason) must survive parsing, \
+             not just the bare _id — this is what makes the real OpenSearch rejection \
+             reason visible instead of a generic message"
+        );
     }
 
     #[test]

@@ -95,15 +95,38 @@ fn subject_prefixes_collide(a: &str, b: &str) -> bool {
     a_tokens[..shorter_len] == b_tokens[..shorter_len]
 }
 
-/// Stamps `tenant` onto `doc` as a top-level `tenant_id` field, appended
-/// last — mirrors `services/logs/src/ingest.rs`'s `stamp_tenant`. `tenant`
-/// always comes from `NormalizedEvent.tenant` (the buffer's own
-/// header-derived, server-validated value — see
+/// Stamps `tenant` onto `doc` as a top-level `tenant_id` field — mirrors
+/// `services/logs/src/ingest.rs`'s `stamp_tenant`. `tenant` always comes
+/// from `NormalizedEvent.tenant` (the buffer's own header-derived,
+/// server-validated value — see
 /// `buffer::jetstream::normalized_event_from_message`), never read back out
 /// of the document body itself (the house tenant-isolation rule).
+///
+/// Overwrites an existing top-level `tenant_id` entry in place instead of
+/// unconditionally appending a second one (production bug, Task 3.0c):
+/// `JsonVal::Obj` is an insertion-ordered `Vec<(String, JsonVal)>` with no
+/// key-uniqueness invariant of its own (unlike a `HashMap`), and the HTTP
+/// `/ingest` listener already stamps its own top-level `tenant_id` before
+/// enqueuing, for its own independent tenant-spoofing-resistance reasons
+/// (see `listeners::http::stamp_tenant`) — so by the time this function
+/// runs, `doc` may already carry one. Appending unconditionally produced a
+/// genuinely duplicate `"tenant_id"` key in the JSON sent to OpenSearch's
+/// `_bulk` API, which its strict parser rejects outright
+/// (`mapper_parsing_exception` / `caused_by.json_parse_exception:
+/// "Duplicate field 'tenant_id'"`) — every single HTTP-sourced document
+/// failed every bulk write for exactly this reason, permanently (the
+/// per-item error never resolves on retry, so the event eventually DLQs).
+/// `tenant` here is always the same authoritative, JWT/header-derived
+/// value regardless of which listener already stamped one, so overwriting
+/// in place is always safe — never a downgrade of the tenant-isolation
+/// guarantee.
 fn stamp_tenant(doc: &mut JsonVal, tenant: &str) {
     if let JsonVal::Obj(entries) = doc {
-        entries.push(("tenant_id".to_owned(), JsonVal::Str(tenant.to_owned())));
+        if let Some(existing) = entries.iter_mut().find(|(k, _)| k == "tenant_id") {
+            existing.1 = JsonVal::Str(tenant.to_owned());
+        } else {
+            entries.push(("tenant_id".to_owned(), JsonVal::Str(tenant.to_owned())));
+        }
     }
 }
 
@@ -285,7 +308,21 @@ async fn process_batch(
         Ok(outcome) => {
             // OpenSearch returned 200 but rejected specific documents
             // (Spec §14b fix: a status-code-only check would silently ack
-            // these away as if they had been written).
+            // these away as if they had been written). Surface exactly
+            // *why* each one was rejected (index/error type/reason) via
+            // `tracing::error!` — previously the batch-level WARN below
+            // only said "opensearch bulk response reported per-item
+            // errors" with no indication of the actual cause (e.g. a
+            // dynamic-mapping conflict on a specific OCSF field).
+            for item_err in &outcome.item_errors {
+                tracing::error!(
+                    id = %item_err.id,
+                    index = item_err.index.as_deref().unwrap_or("?"),
+                    error_type = item_err.error_type.as_deref().unwrap_or("?"),
+                    reason = item_err.reason.as_deref().unwrap_or("?"),
+                    "opensearch_bulk_item_rejected"
+                );
+            }
             let failed_ids: HashSet<&str> = outcome.failed_ids.iter().map(String::as_str).collect();
             let (failed, succeeded): (Vec<_>, Vec<_>) = delivered
                 .into_iter()
@@ -298,14 +335,18 @@ async fn process_batch(
                     tracing::error!(error = %e, dedup_key = %d.event.dedup_key, "writer_ack_failed");
                 }
             }
-            handle_failed_batch(
-                buffer,
-                dlq,
-                failures,
-                failed,
-                "opensearch bulk response reported per-item errors",
-            )
-            .await;
+            let reason = if outcome.item_errors.is_empty() {
+                "opensearch bulk response reported per-item errors".to_owned()
+            } else {
+                let details = outcome
+                    .item_errors
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                format!("opensearch bulk response reported per-item errors: {details}")
+            };
+            handle_failed_batch(buffer, dlq, failures, failed, &reason).await;
         }
         Err(e) => {
             handle_failed_batch(buffer, dlq, failures, delivered, &e.to_string()).await;
@@ -368,8 +409,9 @@ async fn run_loop(
 ///
 /// # Errors
 /// Returns an error if [`DLQ_SUBJECT_PREFIX`] collides with `cfg`'s
-/// ingest subject prefix, the NATS connection cannot be established, or
-/// the dead-letter buffer fails to construct.
+/// ingest subject prefix, the NATS connection cannot be established, the
+/// dead-letter buffer fails to construct, or its backing JetStream stream
+/// cannot be provisioned (see [`JetStreamBuffer::ensure_stream`]).
 async fn build_dlq_buffer(cfg: &Config) -> anyhow::Result<Arc<dyn EventBuffer>> {
     if subject_prefixes_collide(DLQ_SUBJECT_PREFIX, &cfg.nats_jetstream_subject_prefix) {
         anyhow::bail!(
@@ -386,6 +428,15 @@ async fn build_dlq_buffer(cfg: &Config) -> anyhow::Result<Arc<dyn EventBuffer>> 
     let context = async_nats::jetstream::new(client);
     let dlq = JetStreamBuffer::new(context, DLQ_SUBJECT_PREFIX)
         .map_err(|e| anyhow::anyhow!("dlq buffer init: {e}"))?;
+    // The DLQ buffer is push-only — nothing ever calls `consume()` on it
+    // (see `JetStreamBuffer::ensure_stream`'s doc comment), so unlike the
+    // main ingest buffer its stream is never created as a side effect of
+    // the writer's own loop. Provision it explicitly here, before the
+    // buffer is ever handed to `route_to_dlq`, or every dead-letter push
+    // would fail with "no stream found for given subject".
+    dlq.ensure_stream()
+        .await
+        .map_err(|e| anyhow::anyhow!("dlq stream provisioning: {e}"))?;
     Ok(Arc::new(dlq))
 }
 
@@ -658,6 +709,44 @@ mod tests {
         let mut doc = JsonVal::Str("not an object".to_owned());
         stamp_tenant(&mut doc, "acme-corp");
         assert_eq!(doc, JsonVal::Str("not an object".to_owned()));
+    }
+
+    /// Regression for the production DLQ/bulk-write durability bug fixed
+    /// alongside this test (Task 3.0c): the HTTP `/ingest` listener already
+    /// stamps a top-level `tenant_id` before enqueuing (see
+    /// `listeners::http::stamp_tenant`), so a buffered doc reaching the
+    /// writer may already carry one. Confirmed against a real OpenSearch
+    /// `_bulk` response that the old unconditional-append behavior produced
+    /// a literal duplicate `"tenant_id"` JSON key, rejected outright with
+    /// `mapper_parsing_exception` / `caused_by.json_parse_exception:
+    /// "Duplicate field 'tenant_id'"` — every HTTP-sourced document failed
+    /// every bulk write. `stamp_tenant` must produce exactly one
+    /// `tenant_id` entry, with its own authoritative value winning over
+    /// any stale existing one.
+    #[test]
+    fn stamp_tenant_overwrites_existing_tenant_id_instead_of_duplicating() {
+        let mut doc = JsonVal::Obj(vec![
+            ("a".to_owned(), JsonVal::Num(1.into())),
+            (
+                "tenant_id".to_owned(),
+                JsonVal::Str("stale-value".to_owned()),
+            ),
+        ]);
+        stamp_tenant(&mut doc, "acme-corp");
+
+        let JsonVal::Obj(entries) = &doc else {
+            panic!("expected object");
+        };
+        let tenant_id_count = entries.iter().filter(|(k, _)| k == "tenant_id").count();
+        assert_eq!(
+            tenant_id_count, 1,
+            "must never produce a duplicate tenant_id key: {doc:?}"
+        );
+        assert_eq!(
+            doc.get("tenant_id").and_then(JsonVal::as_str),
+            Some("acme-corp"),
+            "the writer's own authoritative tenant value must win over a stale existing one"
+        );
     }
 
     #[tokio::test]

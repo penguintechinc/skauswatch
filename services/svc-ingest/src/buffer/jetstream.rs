@@ -130,6 +130,54 @@ impl JetStreamBuffer {
         self.subject_prefix.replace('.', "_")
     }
 
+    /// This buffer's backing JetStream stream config — a single wildcard
+    /// subject (`{subject_prefix}.>`) capturing every tenant's traffic
+    /// under this prefix. Shared by [`Self::consumer`] and
+    /// [`Self::ensure_stream`] so both create (or idempotently fetch) the
+    /// exact same stream definition.
+    fn stream_config(&self) -> async_nats::jetstream::stream::Config {
+        async_nats::jetstream::stream::Config {
+            name: self.stream_name(),
+            subjects: vec![format!("{}.>", self.subject_prefix)],
+            ..Default::default()
+        }
+    }
+
+    /// Explicitly creates (idempotently — safe to call from multiple
+    /// processes/replicas concurrently) this buffer's backing JetStream
+    /// stream, without needing to bind a pull consumer.
+    ///
+    /// [`Self::consumer`] already creates the stream as a side effect of
+    /// lazily binding its consumer on first [`EventBuffer::consume`] call,
+    /// which is sufficient for the *main* ingest buffer (the writer's own
+    /// `run_loop` calls `consume()` continuously, so the stream exists
+    /// before any producer's first `push`). A buffer that is only ever
+    /// `push`ed to and never `consume`d — exactly the writer's
+    /// dead-letter sink, see `crate::writer::build_dlq_buffer` — never
+    /// takes that path, so its stream would otherwise never exist and
+    /// every `push` would fail with JetStream's "no stream found for
+    /// given subject". Callers of a push-only buffer must call this once
+    /// after construction, before the first `push`.
+    ///
+    /// # Errors
+    /// Returns an error if this buffer has no bound JetStream context (a
+    /// test-only instance built via `with_acker`), or the stream cannot
+    /// be created/fetched.
+    pub async fn ensure_stream(&self) -> Result<(), BufferError> {
+        let context = self.context.as_ref().ok_or_else(|| {
+            BufferError::Transport(
+                "JetStreamBuffer has no bound JetStream context (test-only instance built via \
+                 with_acker) — ensure_stream requires a real broker connection"
+                    .to_owned(),
+            )
+        })?;
+        context
+            .get_or_create_stream(self.stream_config())
+            .await
+            .map_err(|e| BufferError::Transport(e.to_string()))?;
+        Ok(())
+    }
+
     /// Lazily binds (creating on first use) the durable, explicit-ack
     /// pull consumer every `consume()` call fetches from.
     async fn consumer(
@@ -146,11 +194,7 @@ impl JetStreamBuffer {
             .get_or_try_init(|| async {
                 let stream_name = self.stream_name();
                 let stream = context
-                    .get_or_create_stream(async_nats::jetstream::stream::Config {
-                        name: stream_name.clone(),
-                        subjects: vec![format!("{}.>", self.subject_prefix)],
-                        ..Default::default()
-                    })
+                    .get_or_create_stream(self.stream_config())
                     .await
                     .map_err(|e| BufferError::Transport(e.to_string()))?;
                 let durable_name = format!("{stream_name}-consumer");
@@ -451,6 +495,16 @@ mod tests {
         assert!(matches!(result, Err(BufferError::Transport(_))));
     }
 
+    /// Same mismatch guard as `consume_without_bound_context_errors_cleanly`,
+    /// for `ensure_stream` — a buffer built via `with_acker` has no bound
+    /// broker context and must fail cleanly rather than panicking.
+    #[tokio::test]
+    async fn ensure_stream_without_bound_context_errors_cleanly() {
+        let buffer = JetStreamBuffer::with_acker(FakeAcker::new(Duration::ZERO), "logs");
+        let result = buffer.ensure_stream().await;
+        assert!(matches!(result, Err(BufferError::Transport(_))));
+    }
+
     /// Builds the exact wire body/headers `push` would produce for
     /// `event`, without going through a live broker — `async_nats::
     /// Message`'s fields are all public, so a real message can be
@@ -535,5 +589,65 @@ mod tests {
         let result = normalized_event_from_message(&message);
 
         assert!(matches!(result, Err(BufferError::Serialize(_))));
+    }
+
+    /// Starts a minimal real NATS 2.14+ JetStream container for
+    /// [`ensure_stream_lets_a_push_only_buffer_publish_successfully`] — a
+    /// bare `-js` flag is sufficient here (unlike `tests/common::
+    /// start_nats`'s `sync_interval: always` durability config, which is
+    /// production-fidelity concerned; this test only needs a stream to
+    /// exist).
+    async fn start_test_nats() -> (
+        testcontainers::ContainerAsync<testcontainers::GenericImage>,
+        String,
+    ) {
+        use testcontainers::core::{IntoContainerPort, WaitFor};
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers::{GenericImage, ImageExt};
+
+        let image = GenericImage::new("nats", "2.14-alpine")
+            .with_exposed_port(4222.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+            .with_cmd(["-js"])
+            .with_startup_timeout(Duration::from_secs(180));
+        let container = image.start().await.expect("start nats container");
+        let host = container.get_host().await.expect("nats container host");
+        let port = container
+            .get_host_port_ipv4(4222)
+            .await
+            .expect("nats container mapped port");
+        (container, format!("nats://{host}:{port}"))
+    }
+
+    /// Regression test for the production DLQ durability bug fixed
+    /// alongside this test (Task 3.0c): a [`JetStreamBuffer`] that is only
+    /// ever `push`ed to and never `consume`d — exactly
+    /// `crate::writer::build_dlq_buffer`'s dead-letter sink — previously
+    /// had no path that ever created its backing JetStream stream, so
+    /// every dead-letter `push` failed against a real broker with "no
+    /// stream found for given subject". Proves the fix against a real
+    /// (Docker, `testcontainers`) NATS JetStream broker, not a fake: after
+    /// `ensure_stream()`, a push-only buffer's `push` must succeed.
+    #[tokio::test]
+    async fn ensure_stream_lets_a_push_only_buffer_publish_successfully() {
+        let (_container, url) = start_test_nats().await;
+        let client = async_nats::connect(&url)
+            .await
+            .expect("connect to test nats");
+        let context = async_nats::jetstream::new(client);
+        let buffer =
+            JetStreamBuffer::new(context, "svc-ingest-dlq-test").expect("build dlq test buffer");
+
+        buffer
+            .ensure_stream()
+            .await
+            .expect("ensure_stream must provision the DLQ stream");
+
+        let result = buffer.push(sample_event("dedup-key-dlq-real")).await;
+
+        assert!(
+            result.is_ok(),
+            "push against an ensure_stream-provisioned stream must succeed: {result:?}"
+        );
     }
 }
