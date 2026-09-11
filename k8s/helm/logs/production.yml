@@ -1,5 +1,6 @@
 # Production overrides — pinned by SHA256 digest, HA replicas + HPA.
-replicaCount: 3
+# DEPRECATED (svc-ingest cutover, Task 3.3): see values.yaml's comment.
+replicaCount: 0
 
 image:
   repository: ghcr.io/penguintechinc/skauswatch/logs
@@ -10,8 +11,10 @@ image:
 imagePullSecrets:
   - name: ghcr-pull-secret
 
+# Disabled alongside replicaCount: 0 above (svc-ingest cutover, Task 3.3)
+# -- an enabled HPA would fight the zeroed replica count.
 autoscaling:
-  enabled: true
+  enabled: false
   minReplicas: 3
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70
