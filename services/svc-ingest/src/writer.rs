@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use skauswatch_ocsf::JsonVal;
+use tracing::Instrument as _;
 
 use crate::buffer::{DeliveredEvent, EventBuffer, JetStreamBuffer, NormalizedEvent};
 use crate::config::Config;
@@ -282,12 +283,51 @@ async fn handle_failed_batch(
 /// resolves every handle: `ack` on success, `ack` only the successfully
 /// indexed subset on a 200-with-per-item-errors response, or defer the
 /// rest to [`handle_failed_batch`] on any failure.
-#[tracing::instrument(
-    name = "writer_consume_and_bulk_write",
-    skip(buffer, dlq, http, delivered, failures),
-    fields(batch_size = delivered.len())
-)]
+/// Wraps [`process_batch_inner`] in the `writer_consume_and_bulk_write`
+/// span, reparented (when possible) to the first delivered event's
+/// producer trace context (`DeliveredEvent::trace_context`, set by
+/// `crate::buffer::jetstream::JetStreamBuffer::consume`'s
+/// `extract_trace_context`) — propagates trace context across the
+/// receiver -> NATS -> writer queue hop (`critical-rules.md`
+/// Observability: "propagate trace context across every service
+/// boundary ... queue hops"). A batch can carry events from many
+/// distinct producer traces; OTel has no single-parent representation
+/// for "N unrelated parents", so only the first event's trace is used —
+/// a full fan-out would need span links to every producer trace instead
+/// of a single parent, a documented simplification rather than a
+/// silently-dropped requirement. `set_parent` failing (e.g. already
+/// parented) is logged at DEBUG and never fails the batch — a
+/// telemetry/propagation problem must never break ingest or writer
+/// processing.
 pub(crate) async fn process_batch(
+    buffer: &Arc<dyn EventBuffer>,
+    dlq: &Arc<dyn EventBuffer>,
+    http: &reqwest::Client,
+    opensearch_url: &str,
+    delivered: Vec<DeliveredEvent>,
+    failures: &mut HashMap<String, u32>,
+) {
+    let span = tracing::info_span!(
+        "writer_consume_and_bulk_write",
+        batch_size = delivered.len()
+    );
+    if let Some(cx) = delivered.first().and_then(|d| d.trace_context.clone()) {
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        if let Err(e) = span.set_parent(cx) {
+            tracing::debug!(
+                error = %e,
+                "writer span parent could not be set from the extracted trace context"
+            );
+        }
+    }
+    process_batch_inner(buffer, dlq, http, opensearch_url, delivered, failures)
+        .instrument(span)
+        .await;
+}
+
+/// The real batch-processing body — see [`process_batch`]'s doc comment
+/// for the span/trace-context wiring wrapped around this.
+async fn process_batch_inner(
     buffer: &Arc<dyn EventBuffer>,
     dlq: &Arc<dyn EventBuffer>,
     http: &reqwest::Client,

@@ -104,7 +104,19 @@ impl Drop for OtelGuard {
 /// exporter must never break the app (`critical-rules.md` Observability:
 /// "a dead exporter never breaks the app"). Call once at process startup,
 /// before any `tracing` macros fire.
+///
+/// Also installs the W3C TraceContext propagator as the process-global
+/// OpenTelemetry text-map propagator, unconditionally (even when OTLP
+/// export itself is disabled) — `crate::buffer::jetstream`'s
+/// `inject_trace_context`/`extract_trace_context` depend on a propagator
+/// being registered to carry `traceparent` across the receiver -> NATS ->
+/// writer queue hop (`critical-rules.md` Observability: "propagate trace
+/// context across every service boundary ... queue hops").
 pub fn init(service_name: &str) -> OtelGuard {
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
+
     let endpoint = std::env::var(OTLP_ENDPOINT_ENV)
         .ok()
         .filter(|s| !s.is_empty());

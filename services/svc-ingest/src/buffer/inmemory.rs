@@ -83,6 +83,10 @@ impl EventBuffer for InMemoryBuffer {
             delivered.push(DeliveredEvent {
                 event,
                 handle: AckHandle(AckHandleInner::InMemory(handle_id)),
+                // No header transport in the in-memory fallback -- never
+                // populated, never a JetStream-only behavior gap (see
+                // `DeliveredEvent::trace_context`'s doc comment).
+                trace_context: None,
             });
         }
         Ok(delivered)
