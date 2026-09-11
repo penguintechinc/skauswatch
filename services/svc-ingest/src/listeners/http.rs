@@ -37,6 +37,7 @@ use skauswatch_auth::TenantContext;
 use crate::opensearch::{build_bulk_body, daily_index, write_bulk};
 use skauswatch_ocsf::jsonord::{self, JsonVal};
 use skauswatch_ocsf::normalize;
+use skauswatch_ocsf::schema::{is_native_ocsf, validate_required_fields};
 
 /// v1 batch cap: a single `/ingest` request may carry at most 10,000 records.
 const MAX_BATCH: usize = 10_000;
@@ -229,13 +230,27 @@ pub(crate) async fn handle_ingest(
     let now = state.clock.now();
     let mut docs = Vec::with_capacity(records.len());
     for record in &records {
-        match normalize(record, source, now) {
-            Ok(mut doc) => {
-                stamp_tenant(&mut doc, tenant_ctx.tenant.as_str());
-                docs.push(doc);
+        // Native OCSF documents (with class_uid or metadata field) are strictly
+        // validated for all required fields; missing a required field is a 400.
+        // Generic JSON is normalized (permissive — normalize fills missing fields).
+        if is_native_ocsf(record) {
+            if validate_required_fields(record).is_err() {
+                return (StatusCode::BAD_REQUEST, "Missing required OCSF field").into_response();
             }
-            // v1 raised on non-dict records / bad numeric timestamps → 500.
-            Err(_) => return internal_error(),
+            // Native OCSF is already in the correct structure; just stamp tenant.
+            let mut doc = record.clone();
+            stamp_tenant(&mut doc, tenant_ctx.tenant.as_str());
+            docs.push(doc);
+        } else {
+            // Generic JSON: normalize to OCSF (permissive, adds missing fields).
+            match normalize(record, source, now) {
+                Ok(mut doc) => {
+                    stamp_tenant(&mut doc, tenant_ctx.tenant.as_str());
+                    docs.push(doc);
+                }
+                // v1 raised on non-dict records / bad numeric timestamps → 500.
+                Err(_) => return internal_error(),
+            }
         }
     }
 
@@ -706,13 +721,30 @@ mod tests {
         );
     }
 
-    /// Native OCSF documents (with class_uid/class_name already present) that
-    /// are missing required fields are still accepted in this Task 1.3 (generic
-    /// JSON normalization applies to all inputs). Future tasks may add schema
-    /// validation to reject invalid native OCSF. For now, verify a document
-    /// with OCSF-like structure but missing some fields still indexes.
+    /// Native OCSF documents are identified by presence of class_uid or
+    /// metadata field. If any required OCSF field is missing, the request is
+    /// rejected with 400 (strict validation). This test verifies a native OCSF
+    /// document missing a required field returns 400.
     #[tokio::test]
-    async fn native_ocsf_document_with_partial_structure_is_accepted() {
+    async fn native_ocsf_document_with_missing_required_field_is_400() {
+        let server = test_server("http://unused");
+        // Send a document that has class_uid (OCSF marker) but is missing
+        // other required fields (e.g., time, severity_id, etc.). This should
+        // be rejected with 400 because it's identified as native OCSF.
+        let res = server
+            .post("/ingest")
+            .authorization_bearer(bearer_for(TEST_TENANT))
+            .content_type("application/json")
+            .text(r#"{"class_uid":2001,"message":"incomplete ocsf"}"#)
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(res.text(), "Missing required OCSF field");
+    }
+
+    /// A complete native OCSF document (with all required fields) should be
+    /// accepted and indexed as-is (not re-normalized).
+    #[tokio::test]
+    async fn complete_native_ocsf_document_is_accepted() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/_bulk"))
@@ -724,24 +756,33 @@ mod tests {
             .await;
 
         let server = test_server(&mock.uri());
-        // Send a document that looks partly like OCSF (has class_uid) but
-        // is missing other required fields — normalize will treat it as
-        // generic JSON and add missing OCSF fields.
+        // Send a complete native OCSF document with all required fields.
+        // It should pass validation and be indexed.
+        let ocsf_doc = r#"{
+            "class_uid": 2001,
+            "class_name": "security_finding",
+            "time": "2026-07-25T12:00:00Z",
+            "severity_id": 2,
+            "status_id": 1,
+            "message": "test event",
+            "metadata": {"version": "1.3.0"},
+            "raw_data": {}
+        }"#;
         let res = server
             .post("/ingest")
             .authorization_bearer(bearer_for(TEST_TENANT))
             .content_type("application/json")
-            .text(r#"{"class_uid":2001,"message":"a log"}"#)
+            .text(ocsf_doc)
             .await;
         res.assert_status(StatusCode::ACCEPTED);
         assert_eq!(res.text(), r#"{"ingested":1}"#);
     }
 
-    /// JSON arrays can contain a mix of generic JSON and OCSF-like documents;
-    /// all are normalized and indexed. This verifies that heterogeneous batches
-    /// work correctly (normalized to a uniform OCSF structure).
+    /// JSON arrays can contain a mix of generic JSON (normalized) and complete
+    /// native OCSF documents (validated + indexed as-is). This verifies that
+    /// heterogeneous batches work correctly.
     #[tokio::test]
-    async fn json_array_of_mixed_document_types_are_both_indexed() {
+    async fn json_array_of_generic_and_ocsf_documents_are_both_indexed() {
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/_bulk"))
@@ -753,11 +794,25 @@ mod tests {
             .await;
 
         let server = test_server(&mock.uri());
+        // Mix of generic JSON (no OCSF markers) and complete native OCSF
+        let batch = r#"[
+            {"message": "generic log"},
+            {
+                "class_uid": 2001,
+                "class_name": "security_finding",
+                "time": "2026-07-25T12:00:00Z",
+                "severity_id": 2,
+                "status_id": 1,
+                "message": "complete ocsf",
+                "metadata": {"version": "1.3.0"},
+                "raw_data": {}
+            }
+        ]"#;
         let res = server
             .post("/ingest")
             .authorization_bearer(bearer_for(TEST_TENANT))
             .content_type("application/json")
-            .text(r#"[{"message":"generic-json"},{"class_uid":2001,"message":"ocsf-like"}]"#)
+            .text(batch)
             .await;
         res.assert_status(StatusCode::ACCEPTED);
         assert_eq!(res.text(), r#"{"ingested":2}"#);
