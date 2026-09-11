@@ -436,6 +436,7 @@ mod tests {
             nats_jetstream_subject_prefix: "svc-ingest.logs".to_owned(),
             syslog_udp_enabled: false,
             syslog_trusted_cidrs: Vec::new(),
+            syslog_udp_tenant_id: None,
         }
     }
 
