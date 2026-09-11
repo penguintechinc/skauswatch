@@ -7,38 +7,28 @@
 //! shared test Postgres, and exposes bounded-wait client helpers for
 //! driving `/ingest` and querying OpenSearch.
 //!
-//! # Known upstream blocker (Wave 1/2 scaffolding gap, out of this task's
-//! file scope — `src/bootstrap.rs`/`src/listeners/syslog/mod.rs`)
+//! # Formerly a blocker, now fixed upstream — `listeners::syslog::run_tls`
+//! degrades gracefully without a live SPIFFE Workload API
 //!
-//! [`spawn_receiver`] wires `RELEASE_MODE=false` so `skauswatch_identity::
-//! IdentityProvider::connect` degrades to a WARN instead of a hard error
-//! when no live SPIFFE Workload API is reachable (the harness never stands
-//! one up — see below). That degrade is graceful for every *other*
-//! receiver-mode listener (OTLP gRPC falls back to plaintext with a WARN),
-//! but `listeners::syslog::run_tls` has no such fallback: it calls
-//! `IdentityProvider::server_tls_config`, which returns
-//! `IdentityError::Degraded` whenever no identity is held, and propagates
-//! that as a hard `Err` out of `run_tls`. `bootstrap::drain_listeners`
-//! treats *any* listener erroring as fatal for the whole receiver — it
-//! broadcasts shutdown to every other listener (including the HTTP ingest
-//! listener) and the process exits non-zero, observed here within
-//! ~150ms of startup, before `/healthz` ever answers. This reproduces
-//! deterministically against real NATS/Postgres with no live SPIFFE
-//! Workload API present (the state of every sandbox/CI runner that hasn't
-//! stood up SPIRE) — see the Task 3.0 harness report for the exact
-//! captured error. Fixing it (e.g. mirroring OTLP gRPC's degrade-to-warn
-//! pattern in `run_tls`) requires editing `bootstrap.rs`/
-//! `listeners/syslog/mod.rs`, both out of this task's file scope.
-//! [`spawn_receiver`] still wires environment exactly as a fixed receiver
-//! would need, so this harness starts working the moment that fix lands —
-//! no harness change required.
+//! An earlier revision of this harness documented `run_tls` as hard-failing
+//! (and, via `bootstrap::drain_listeners`, taking the whole receiver down
+//! with it) whenever no live SPIFFE Workload API was reachable — the state
+//! of every sandbox/CI runner that hasn't stood up SPIRE. That has since
+//! been fixed at the source (`run_tls` now warns and returns `Ok(())`
+//! without binding `SYSLOG_TLS_PORT`, mirroring `otlp::run_grpc`'s
+//! plaintext-fallback precedent — see that function's own doc comment for
+//! the exact degrade contract). No harness change was needed for the fix
+//! to take effect: [`spawn_receiver`] already wired the environment a
+//! working receiver needs.
 //!
-//! A real SPIFFE Workload API (SPIRE server+agent) was deliberately not
-//! stood up to work around this: correctly emulating the Workload API's
-//! X.509-SVID streaming gRPC protocol from scratch is a large,
-//! failure-prone undertaking for a "narrow scope" harness task, and a
-//! genuine SPIRE deployment is heavy test infrastructure of its own. The
-//! right fix is the small one in `run_tls`, not a fake identity plane here.
+//! Still true: no real SPIFFE Workload API (SPIRE server+agent) is stood up
+//! by this harness — correctly emulating the Workload API's X.509-SVID
+//! streaming gRPC protocol from scratch is a large, failure-prone
+//! undertaking for a test harness, and a genuine SPIRE deployment is heavy
+//! test infrastructure of its own. This means `:6514` (syslog mTLS) never
+//! actually binds in this environment; a real mTLS-handshake e2e test
+//! against it needs a SPIRE-equipped environment (see `tests/e2e_syslog.rs`'s
+//! `#[ignore]`d placeholder).
 //!
 //! # Public surface
 //!
@@ -49,8 +39,10 @@
 //! | [`setup_test_db`] | Creates + migrates a fresh, uniquely-named Postgres database on the shared test instance |
 //! | [`JwtFixture::generate`] / [`JwtFixture::mint`] | ES256 keypair + tenant-bearing bearer tokens for `/ingest` |
 //! | [`spawn_receiver`] | Spawns `skauswatch-svc-ingest serve --mode receiver` wired to the above |
+//! | [`spawn_receiver_with_env`] | Same as `spawn_receiver`, plus caller-supplied extra env vars (e.g. `SYSLOG_UDP_ENABLED`) |
 //! | [`spawn_writer`] | Spawns `skauswatch-svc-ingest serve --mode writer` wired to NATS + OpenSearch |
 //! | [`post_ingest`] | `POST /ingest` against a running receiver |
+//! | [`send_syslog_udp`] / [`send_syslog_tcp`] | Send one raw syslog line to a receiver's `syslog_port` over UDP/TCP |
 //! | [`wait_for_document`] | Bounded poll of OpenSearch for a document matching a `tenant_id` term |
 
 // This module is `mod common;`-included independently by every Wave-3
@@ -665,6 +657,32 @@ pub async fn spawn_receiver(
     opensearch: &OpenSearchHandle,
     db: &TestDb,
 ) -> Result<ReceiverProcess> {
+    spawn_receiver_with_env(nats, opensearch, db, &[]).await
+}
+
+/// Identical to [`spawn_receiver`], additionally applying every `(name,
+/// value)` pair in `extra_env` on top of the standard wiring — the seam a
+/// later Wave-3 e2e test reaches for instead of hand-rolling its own
+/// process spawn. Introduced for the syslog e2e test's
+/// `SYSLOG_UDP_ENABLED`/`SYSLOG_TRUSTED_CIDRS`/`SYSLOG_UDP_TENANT_ID`, but
+/// generic over any env var: an OTLP or durability e2e test can pass its
+/// own opt-in knobs the same way without another harness change.
+/// `extra_env` is applied via `Command::envs` *after* every other `.env()`
+/// call below, so a caller can also override one of the defaults set here
+/// (e.g. a non-default `HTTP_PORT`) if a future test ever needs to,
+/// though today's only caller ([`spawn_receiver`], via `&[]`) adds new
+/// keys rather than replacing existing ones.
+///
+/// # Errors
+/// Returns an error if the process cannot be spawned, or exits/times out
+/// before `/healthz` answers 2xx (captured stdout/stderr included in the
+/// message).
+pub async fn spawn_receiver_with_env(
+    nats: &NatsHandle,
+    opensearch: &OpenSearchHandle,
+    db: &TestDb,
+    extra_env: &[(&str, &str)],
+) -> Result<ReceiverProcess> {
     let bin = env!("CARGO_BIN_EXE_skauswatch-svc-ingest");
     let jwt = JwtFixture::generate().context("generate receiver JWT fixture")?;
 
@@ -704,6 +722,7 @@ pub async fn spawn_receiver(
         .env("NATS_URL", &nats.url)
         .env("JWT_VERIFY_KEY", &jwt.verify_key_pem)
         .envs(db_env_vars(db))
+        .envs(extra_env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -841,4 +860,66 @@ pub async fn post_ingest(
         .send()
         .await
         .with_context(|| format!("POST {url}"))
+}
+
+// ---------------------------------------------------------------------
+// Raw syslog client helpers (UDP/TCP)
+// ---------------------------------------------------------------------
+
+/// Upper bound on sending a single raw syslog line over UDP or TCP to a
+/// locally spawned receiver.
+const SYSLOG_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Sends `line` as a single UDP datagram to `127.0.0.1:{port}` — one
+/// datagram per call, mirroring how a real syslog UDP sender emits one
+/// whole message per packet (no trailing newline needed or added; see
+/// `listeners::syslog::consume_udp`, which parses the entire received
+/// datagram as one message). Bound by [`SYSLOG_SEND_TIMEOUT`].
+///
+/// # Errors
+/// Returns an error if the ephemeral send socket cannot be bound, or the
+/// datagram cannot be sent, within [`SYSLOG_SEND_TIMEOUT`].
+pub async fn send_syslog_udp(port: u16, line: &str) -> Result<()> {
+    bounded(SYSLOG_SEND_TIMEOUT, "send syslog UDP datagram", async {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .context("bind ephemeral UDP socket for syslog send")?;
+        socket
+            .send_to(line.as_bytes(), ("127.0.0.1", port))
+            .await
+            .context("send syslog UDP datagram")?;
+        Ok(())
+    })
+    .await
+}
+
+/// Sends `line` as a single newline-delimited syslog message to
+/// `127.0.0.1:{port}` over a fresh TCP connection — one message per call
+/// (dial, write, flush, then let the connection close on drop), mirroring
+/// `listeners::syslog::read_and_enqueue_lines`'s newline-framed read loop.
+/// A trailing `\n` is appended to `line` only if it doesn't already have
+/// one. Bound by [`SYSLOG_SEND_TIMEOUT`].
+///
+/// # Errors
+/// Returns an error if the connection cannot be established, or the line
+/// cannot be written and flushed, within [`SYSLOG_SEND_TIMEOUT`].
+pub async fn send_syslog_tcp(port: u16, line: &str) -> Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    bounded(SYSLOG_SEND_TIMEOUT, "send syslog TCP line", async {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .context("connect syslog TCP")?;
+        let mut payload = line.as_bytes().to_vec();
+        if !line.ends_with('\n') {
+            payload.push(b'\n');
+        }
+        stream
+            .write_all(&payload)
+            .await
+            .context("write syslog TCP line")?;
+        stream.flush().await.context("flush syslog TCP line")?;
+        Ok(())
+    })
+    .await
 }
