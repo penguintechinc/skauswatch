@@ -84,6 +84,17 @@ fn passthrough_ocsf_doc(record: &LogRecordFields) -> Option<JsonVal> {
     Some(JsonVal::Obj(record.attributes.clone()))
 }
 
+/// Outcome of resolving the `user_id`/`user` attribute-key alias
+/// precedence — see [`resolve_user_name`].
+struct UserNameResolution {
+    /// The resolved `user_name` value, if either alias was present.
+    value: Option<JsonVal>,
+    /// Whether both `user_id` and `user` were present with *different*
+    /// values — Spec §15 open question #8's "collision" (agreeing values,
+    /// or only one alias present, is not a collision worth a warning).
+    collided: bool,
+}
+
 /// Resolves the `user_id`/`user` attribute-key collision per Spec §15 open
 /// question #8: "log a warning, use `user_id`" — `user_id` always wins
 /// when both are present, regardless of which appears first in
@@ -93,10 +104,10 @@ fn passthrough_ocsf_doc(record: &LogRecordFields) -> Option<JsonVal> {
 /// This is a pure mapping function with no `tracing`/logging dependency
 /// (this crate — `skauswatch-ocsf` — intentionally carries none, so
 /// `skauswatch-svc-ingest` can be normalization's only side-effecting
-/// caller); the caller is expected to log the collision itself if it
-/// wants operator-visible evidence, using this function's return value to
-/// decide whether one occurred.
-fn resolve_user_name(attributes: &[(String, JsonVal)]) -> Option<JsonVal> {
+/// caller); [`UserNameResolution::collided`] (surfaced publicly via
+/// [`user_id_user_collision`]) is how a caller with a logging dependency
+/// detects the collision itself and emits the spec-mandated warning.
+fn resolve_user_name(attributes: &[(String, JsonVal)]) -> UserNameResolution {
     let user_id = attributes
         .iter()
         .find(|(k, _)| k == ATTR_USER_ID)
@@ -106,10 +117,40 @@ fn resolve_user_name(attributes: &[(String, JsonVal)]) -> Option<JsonVal> {
         .find(|(k, _)| k == ATTR_USER)
         .map(|(_, v)| v);
     match (user_id, user) {
-        (Some(uid), _) => Some(uid.clone()),
-        (None, Some(user)) => Some(user.clone()),
-        (None, None) => None,
+        (Some(uid), Some(user)) => UserNameResolution {
+            value: Some(uid.clone()),
+            collided: uid != user,
+        },
+        (Some(uid), None) => UserNameResolution {
+            value: Some(uid.clone()),
+            collided: false,
+        },
+        (None, Some(user)) => UserNameResolution {
+            value: Some(user.clone()),
+            collided: false,
+        },
+        (None, None) => UserNameResolution {
+            value: None,
+            collided: false,
+        },
     }
+}
+
+/// Whether `record.attributes` carries a `user_id`/`user` collision (both
+/// present with different values — Spec §15 open question #8) that
+/// [`log_record_to_ocsf`] will silently resolve in favor of `user_id`.
+/// This crate deliberately has no logging dependency (see
+/// [`resolve_user_name`]'s doc comment), so a caller that does — e.g.
+/// `skauswatch-svc-ingest`'s OTLP listener — calls this alongside
+/// [`log_record_to_ocsf`] to decide whether to emit the spec-mandated
+/// operator-visible warning. Always `false` when [`passthrough_ocsf_doc`]
+/// would apply (the aliasing path this detects never runs in that case).
+#[must_use]
+pub fn user_id_user_collision(record: &LogRecordFields) -> bool {
+    if passthrough_ocsf_doc(record).is_some() {
+        return false;
+    }
+    resolve_user_name(&record.attributes).collided
 }
 
 /// Maps a decoded OTLP `LogRecord` (plus its resource-level attributes) to
@@ -128,7 +169,7 @@ pub fn log_record_to_ocsf(
         return doc;
     }
 
-    let user_name = resolve_user_name(&record.attributes);
+    let user_name = resolve_user_name(&record.attributes).value;
     let src_ip_addr = record
         .attributes
         .iter()
@@ -303,14 +344,20 @@ mod tests {
                 ("user_id", JsonVal::Str("alice-explicit".to_owned())),
             ],
         );
+        // The collision is detectable independently of the mapping fn --
+        // this is what lets `skauswatch-svc-ingest` (which has a
+        // `tracing` dependency this crate deliberately doesn't) emit the
+        // spec-mandated warning (Spec §15 open question #8).
+        assert!(user_id_user_collision(&record));
         let doc = log_record_to_ocsf(&record, &[]);
         assert_eq!(
             doc.get("user_name"),
             Some(&JsonVal::Str("alice-explicit".to_owned()))
         );
 
-        // Order-independence: `user_id` still wins even when it appears
-        // first in the attribute list (iteration order must never decide).
+        // Order-independence: `user_id` still wins, and the collision is
+        // still detected, even when it appears first in the attribute
+        // list (iteration order must never decide either outcome).
         let record_reordered = fields(
             0,
             9,
@@ -320,11 +367,54 @@ mod tests {
                 ("user", JsonVal::Str("alice-generic".to_owned())),
             ],
         );
+        assert!(user_id_user_collision(&record_reordered));
         let doc_reordered = log_record_to_ocsf(&record_reordered, &[]);
         assert_eq!(
             doc_reordered.get("user_name"),
             Some(&JsonVal::Str("alice-explicit".to_owned()))
         );
+    }
+
+    #[test]
+    fn user_id_user_collision_is_false_when_values_agree_or_only_one_present() {
+        let agreeing = fields(
+            0,
+            9,
+            "m",
+            vec![
+                ("user_id", JsonVal::Str("same".to_owned())),
+                ("user", JsonVal::Str("same".to_owned())),
+            ],
+        );
+        assert!(!user_id_user_collision(&agreeing));
+
+        let only_user_id = fields(0, 9, "m", vec![("user_id", JsonVal::Str("a".to_owned()))]);
+        assert!(!user_id_user_collision(&only_user_id));
+
+        let only_user = fields(0, 9, "m", vec![("user", JsonVal::Str("a".to_owned()))]);
+        assert!(!user_id_user_collision(&only_user));
+
+        let neither = fields(0, 9, "m", vec![]);
+        assert!(!user_id_user_collision(&neither));
+    }
+
+    #[test]
+    fn user_id_user_collision_is_false_under_native_ocsf_passthrough() {
+        // A colliding user_id/user pair inside an already OCSF-shaped
+        // attribute set (class_uid present) never reaches the aliasing
+        // path at all -- the detector must agree with that, not report a
+        // collision `log_record_to_ocsf` never actually resolves.
+        let record = fields(
+            0,
+            9,
+            "m",
+            vec![
+                ("class_uid", JsonVal::Num(2001.into())),
+                ("user_id", JsonVal::Str("a".to_owned())),
+                ("user", JsonVal::Str("b".to_owned())),
+            ],
+        );
+        assert!(!user_id_user_collision(&record));
     }
 
     #[test]

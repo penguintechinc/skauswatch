@@ -115,7 +115,7 @@ impl LogsGrpc {
             .await
             .map_err(auth_error_to_status)?;
         for record in decoded {
-            let doc = log_record_to_ocsf(&record.fields, &record.resource_attrs);
+            let doc = normalize_and_log_collision(&record);
             let dedup_key = dedup_key_for(&doc);
             self.buffer
                 .push(NormalizedEvent {
@@ -128,6 +128,26 @@ impl LogsGrpc {
         }
         Ok(())
     }
+}
+
+/// Normalizes `record` to OCSF via
+/// `skauswatch_ocsf::mappings::otlp::log_record_to_ocsf`, first emitting a
+/// `tracing::warn!` if its attributes carry a `user_id`/`user` collision
+/// (Spec §15 open question #8: "log a warning, use `user_id`"; that crate
+/// resolves the precedence itself but deliberately carries no logging
+/// dependency to emit the warning — see
+/// `skauswatch_ocsf::mappings::otlp::user_id_user_collision`'s doc
+/// comment). The sole normalization choke point both `LogsGrpc::ingest`
+/// (`:4317`) and `export_http` (`:4318`) funnel through, so the warning
+/// fires identically regardless of transport.
+fn normalize_and_log_collision(record: &DecodedRecord) -> skauswatch_ocsf::JsonVal {
+    if skauswatch_ocsf::mappings::otlp::user_id_user_collision(&record.fields) {
+        tracing::warn!(
+            "otlp log record attributes carry both user_id and user with \
+             different values -- user_id takes precedence"
+        );
+    }
+    log_record_to_ocsf(&record.fields, &record.resource_attrs)
 }
 
 #[tonic::async_trait]
@@ -454,21 +474,32 @@ fn http_router(state: HttpState) -> axum::Router {
 }
 
 /// `POST /v1/logs` handler shared by both content types — see
-/// [`run_http`]'s doc comment.
+/// [`run_http`]'s doc comment. Returns a plain `axum::response::Response`
+/// (rather than `Result<_, AuthError>`) so a buffer-full condition can
+/// answer HTTP 429 directly — piggybacking that onto `AuthError`'s
+/// `IntoResponse` plumbing (401/403 only) would misrepresent a
+/// retry-with-backoff backpressure signal as a permanent auth failure
+/// (Spec §7c: every non-gRPC transport answers 429 on backpressure, mirrored
+/// by the gRPC side's `RESOURCE_EXHAUSTED`).
 async fn export_http(
     axum::extract::State(state): axum::extract::State<HttpState>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
-) -> Result<axum::http::StatusCode, AuthError> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+
     let bearer_token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    let tenant = resolve_tenant(None, bearer_token, &state.store, &state.cache).await?;
+    let tenant = match resolve_tenant(None, bearer_token, &state.store, &state.cache).await {
+        Ok(tenant) => tenant,
+        Err(err) => return err.into_response(),
+    };
 
     let decoded = decode_http_body(&headers, &body);
     for record in decoded {
-        let doc = log_record_to_ocsf(&record.fields, &record.resource_attrs);
+        let doc = normalize_and_log_collision(&record);
         let dedup_key = dedup_key_for(&doc);
         let push_result = state
             .buffer
@@ -479,29 +510,32 @@ async fn export_http(
             })
             .await;
         if let Err(err) = push_result {
-            return Err(buffer_error_to_auth_like_status(err));
+            return buffer_error_to_http_response(err);
         }
     }
-    Ok(axum::http::StatusCode::OK)
+    axum::http::StatusCode::OK.into_response()
 }
 
-/// `crate::auth::AuthError` already implements `IntoResponse` (401/403);
-/// a buffer-full condition maps onto the same HTTP 429 the spec's
-/// backpressure table assigns every non-gRPC transport (Spec §7c) by
-/// piggybacking on `AuthError`'s `IntoResponse` plumbing is the wrong
-/// shape (429 isn't an auth failure) — so this returns a plain
-/// `axum::response::Response` built directly instead of forcing a
-/// buffer error through `AuthError`.
-fn buffer_error_to_auth_like_status(err: BufferError) -> AuthError {
-    // `export_http`'s `Result<_, AuthError>` return type only has one
-    // error arm today; a buffer-full/transport failure is surfaced as
-    // 403 (closest existing `IntoResponse` mapping) rather than inventing
-    // a second error type for one call site. Logged at `error!` so the
-    // real cause (429-worthy backpressure vs. a genuine transport fault)
-    // is never lost, even though the HTTP status collapses the
-    // distinction.
-    tracing::error!(%err, "otlp HTTP push failed");
-    AuthError::UnknownIdentity
+/// Maps a buffer failure onto the HTTP status the spec's backpressure
+/// table assigns (Spec §7c): `Full` is 429 Too Many Requests (retryable —
+/// never the same "permanent failure" shape as an auth rejection);
+/// `Transport`/`Serialize` are a genuine server-side fault, 500.
+fn buffer_error_to_http_response(err: BufferError) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    match err {
+        BufferError::Full => {
+            tracing::warn!(%err, "otlp HTTP push backpressure: event buffer is full");
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                axum::Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response()
+        }
+        BufferError::Transport(_) | BufferError::Serialize(_) => {
+            tracing::error!(%err, "otlp HTTP push failed");
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 fn decode_http_body(headers: &axum::http::HeaderMap, body: &[u8]) -> Vec<DecodedRecord> {
@@ -711,7 +745,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn otlp_http_full_buffer_returns_a_client_error_status() {
+    async fn otlp_http_full_buffer_returns_429_too_many_requests() {
         let store = store().await;
         let hash = {
             use sha2::{Digest, Sha256};
@@ -759,10 +793,9 @@ mod tests {
                 }]
             }))
             .await;
-        // `buffer_error_to_auth_like_status` collapses a buffer failure
-        // onto `AuthError::UnknownIdentity` (403) -- see that function's
-        // doc comment for why a dedicated 429 status isn't modeled here.
-        response.assert_status(axum::http::StatusCode::FORBIDDEN);
+        // `buffer_error_to_http_response` maps `BufferError::Full` to 429
+        // (retryable backpressure), never a 403/401 auth-style rejection.
+        response.assert_status(axum::http::StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[test]
@@ -778,6 +811,72 @@ mod tests {
             skauswatch_ocsf::JsonVal::Str("y".to_owned()),
         )]);
         assert_ne!(dedup_key_for(&doc), dedup_key_for(&other));
+    }
+
+    #[test]
+    fn normalize_and_log_collision_still_resolves_user_id_precedence() {
+        // Doesn't assert on the emitted `tracing::warn!` line itself (no
+        // tracing-capture dev-dependency in this crate) -- the collision
+        // *detection* is asserted directly against
+        // `skauswatch_ocsf::mappings::otlp::user_id_user_collision` in
+        // that crate's own test suite
+        // (`otlp_attribute_collision_user_id_wins_over_user`); this proves
+        // the wiring here still normalizes correctly regardless.
+        let colliding = DecodedRecord {
+            fields: skauswatch_ocsf::mappings::otlp::LogRecordFields {
+                time_unix_nano: 0,
+                severity_number: 9,
+                body: "m".to_owned(),
+                attributes: vec![
+                    (
+                        "user_id".to_owned(),
+                        skauswatch_ocsf::JsonVal::Str("uid".to_owned()),
+                    ),
+                    (
+                        "user".to_owned(),
+                        skauswatch_ocsf::JsonVal::Str("generic".to_owned()),
+                    ),
+                ],
+            },
+            resource_attrs: Vec::new(),
+        };
+        let doc = normalize_and_log_collision(&colliding);
+        assert_eq!(
+            doc.get("user_name"),
+            Some(&skauswatch_ocsf::JsonVal::Str("uid".to_owned()))
+        );
+
+        let no_collision = DecodedRecord {
+            fields: skauswatch_ocsf::mappings::otlp::LogRecordFields {
+                time_unix_nano: 0,
+                severity_number: 9,
+                body: "m".to_owned(),
+                attributes: Vec::new(),
+            },
+            resource_attrs: Vec::new(),
+        };
+        assert_eq!(
+            normalize_and_log_collision(&no_collision).get("user_name"),
+            None
+        );
+    }
+
+    #[test]
+    fn buffer_error_to_http_response_maps_full_to_429_and_others_to_500() {
+        let full = buffer_error_to_http_response(BufferError::Full);
+        assert_eq!(full.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+
+        let transport = buffer_error_to_http_response(BufferError::Transport("x".to_owned()));
+        assert_eq!(
+            transport.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let serialize = buffer_error_to_http_response(BufferError::Serialize("x".to_owned()));
+        assert_eq!(
+            serialize.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[test]
