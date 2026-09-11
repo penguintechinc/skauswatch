@@ -55,6 +55,15 @@ pub const LOG_INGEST_FLAG: &str = "skauswatch.log-ingest";
 /// always re-queries [`IdentityStore`].
 const TOKEN_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
+/// Expected SPIFFE trust domain for every ingest peer (`penguintech.md`:
+/// `spiffe://penguintech.io/<env>/<service>` -- the environment segment is
+/// part of the *path*, so this constant is env-invariant). `resolve_via_mtls`
+/// checks this itself, as defense-in-depth on top of (never instead of)
+/// `skauswatch_identity::tls`'s handshake-time chain/SPIFFE-ID validation --
+/// this module has no test coverage of that upstream layer, so it should
+/// not rely on it alone to keep a wrong-trust-domain peer from resolving.
+const EXPECTED_TRUST_DOMAIN: &str = "penguintech.io";
+
 /// Failures resolving an ingest source's tenant. Deliberately carries no
 /// underlying `sqlx::Error`/parse detail: any internal failure (DB
 /// unreachable, malformed row) fails CLOSED as [`AuthError::UnknownIdentity`]
@@ -120,19 +129,35 @@ impl axum::response::IntoResponse for AuthError {
 /// reject an invalid chain or a certificate with no valid SPIFFE ID at the
 /// TLS layer itself, before an application-level `SpiffeId` value can even
 /// exist (that rejection surfaces to callers as [`AuthError::InvalidCert`]
-/// without ever reaching this function). This function's only job is the
-/// tenant lookup: an unrecognized `peer.path()` -- no row in
-/// `ingest_identities` -- is [`AuthError::UnknownIdentity`], never a
-/// fallback/default tenant.
+/// without ever reaching this function).
+///
+/// Defense-in-depth: `peer.trust_domain_name()` MUST equal
+/// [`EXPECTED_TRUST_DOMAIN`] before any tenant lookup happens at all -- a
+/// syntactically-valid SPIFFE ID from an unexpected trust domain is
+/// rejected even if its *path* happens to match a provisioned identity's,
+/// never resolved to that identity's tenant. This does not depend on (and
+/// is not a replacement for) the upstream handshake-time check; it exists
+/// so this function is self-defending on its own inputs. Beyond that, an
+/// unrecognized `peer.path()` -- no row in `ingest_identities` -- is
+/// [`AuthError::UnknownIdentity`], never a fallback/default tenant.
 ///
 /// # Errors
-/// Returns [`AuthError::UnknownIdentity`] when `peer`'s SPIFFE path has no
-/// row in `ingest_identities`, or when the lookup itself fails (fail
-/// closed -- never grants access on an internal error).
+/// Returns [`AuthError::UnknownIdentity`] when `peer`'s trust domain isn't
+/// [`EXPECTED_TRUST_DOMAIN`], when its SPIFFE path has no row in
+/// `ingest_identities`, or when the lookup itself fails (fail closed --
+/// never grants access on an internal error).
 pub async fn resolve_via_mtls(
     peer: &spiffe::SpiffeId,
     store: &IdentityStore,
 ) -> Result<skauswatch_auth::Tenant, AuthError> {
+    if peer.trust_domain_name() != EXPECTED_TRUST_DOMAIN {
+        tracing::warn!(
+            trust_domain = peer.trust_domain_name(),
+            spiffe_path = peer.path(),
+            "mTLS peer trust domain mismatch, rejecting without a tenant lookup"
+        );
+        return Err(AuthError::UnknownIdentity);
+    }
     match store.tenant_for_spiffe_path(peer.path()).await {
         Ok(Some(tenant)) => Ok(tenant),
         Ok(None) => Err(AuthError::UnknownIdentity),
@@ -359,6 +384,25 @@ mod tests {
         let err = resolve_via_mtls(&peer, &store).await.unwrap_err();
         assert_eq!(err, AuthError::UnknownIdentity);
         assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn mtls_peer_with_known_path_but_wrong_trust_domain_is_not_resolved() {
+        let store = store().await;
+        // Same path a legitimate peer would use, provisioned for
+        // "tenant-a" -- proves the trust-domain check runs (and rejects)
+        // BEFORE any path-based lookup could resolve this to that tenant.
+        sqlx::query("INSERT INTO ingest_identities (spiffe_path, tenant_id) VALUES ($1, $2)")
+            .bind("/prod/endpoint-agent")
+            .bind("tenant-a")
+            .execute(store_pool(&store))
+            .await
+            .unwrap();
+
+        let peer = spiffe_id("spiffe://evil.example.com/prod/endpoint-agent");
+        let err = resolve_via_mtls(&peer, &store).await.unwrap_err();
+        assert_eq!(err, AuthError::UnknownIdentity);
+        assert_ne!(peer.trust_domain_name(), EXPECTED_TRUST_DOMAIN);
     }
 
     /// `mtls_cert_invalid_is_rejected_403`: an invalid/unparsable
@@ -615,6 +659,37 @@ mod tests {
             tenant,
             Some(skauswatch_auth::Tenant("tenant-v6".to_owned()))
         );
+    }
+
+    #[test]
+    fn cidr_contains_ipv4_prefix_zero_matches_every_address() {
+        let cidr = ipv4_cidr(0, 0, 0, 0, 0);
+        assert!(cidr_contains(&cidr, IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4))));
+        assert!(cidr_contains(
+            &cidr,
+            IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255))
+        ));
+    }
+
+    #[test]
+    fn cidr_contains_ipv4_prefix_32_matches_only_the_exact_host() {
+        let cidr = ipv4_cidr(10, 0, 0, 1, 32);
+        assert!(cidr_contains(&cidr, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(!cidr_contains(
+            &cidr,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
+        ));
+    }
+
+    #[test]
+    fn cidr_contains_ipv6_prefix_128_matches_only_the_exact_host() {
+        let host = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
+        let cidr = ipv6_cidr(host, 128);
+        assert!(cidr_contains(&cidr, IpAddr::V6(host)));
+        assert!(!cidr_contains(
+            &cidr,
+            IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2))
+        ));
     }
 
     /// Test-only accessor -- `IdentityStore`'s pool field is private, but
