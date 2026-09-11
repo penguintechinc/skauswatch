@@ -16,20 +16,27 @@
 //! directly keeps each test focused on the consume → write → ack/nack/DLQ
 //! loop itself.
 //!
+//! # Fix round 1 (false-green correction)
+//!
+//! `writer_crash_and_restart_causes_zero_loss` originally killed writer1
+//! after a fixed 120ms sleep. Review found (and this suite's own author
+//! independently reproduced) that `NATS_CONSUMER_PREFETCH=100`
+//! (`src/writer.rs`) pulls all 50 published events in a single `consume()`
+//! call, and a local NATS + OpenSearch drains and acks the whole batch
+//! well under 120ms every time — the SIGKILL always landed on an
+//! already-idle writer, so writer2 and the redelivery/resume path
+//! contributed nothing to the test passing. Fixed by removing the timing
+//! race entirely: writer1 is now pointed at [`common::StallingOpenSearch`]
+//! (a TCP listener that accepts connections but never responds), so its
+//! bulk-write call is GUARANTEED to block forever with the whole batch
+//! already fetched and ack-pending — no sleep/timing guess involved — and
+//! the test asserts `num_ack_pending > 0` via JetStream's own consumer
+//! info (`common::ingest_consumer_ack_pending`) both before AND
+//! immediately after the kill, failing loudly if that guard does not hold
+//! (see the test's own doc comment for exactly what this proves).
+//!
 //! # Deviations from a literal production failure (documented, not skipped)
 //!
-//! - **Writer-crash timing**
-//!   (`writer_crash_and_restart_causes_zero_loss`): there is no hook into
-//!   the real writer process's internal consume/write/ack loop to
-//!   guarantee a SIGKILL lands exactly mid-batch — it is a genuine
-//!   subprocess, not a mock. The process is killed after a short, fixed
-//!   delay chosen to be long enough for the bulk write to reach OpenSearch
-//!   and for at least some of a 50-event batch's *sequential* per-event
-//!   `ack()` RPCs (`crate::writer::process_batch_inner`) to plausibly still
-//!   be in flight, but short enough that the whole batch is unlikely to
-//!   have fully drained first. The load-bearing assertion — zero loss,
-//!   exactly-once — holds regardless of exactly how many acks landed
-//!   before the kill; see that test's own doc comment.
 //! - **JetStream `AckWait`**: an event the first writer pulled but never
 //!   acked is only redelivered to the second writer once the pull
 //!   consumer's `AckWait` elapses. `crate::buffer::jetstream::
@@ -81,9 +88,10 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use common::{
-    RawEventProducer, count_dlq_messages, search_opensearch, spawn_writer,
-    spawn_writer_with_opensearch_url, start_nats, start_opensearch, wait_for_dlq_count,
-    wait_for_message, wait_for_tenant_hit_count,
+    RawEventProducer, count_dlq_messages, ingest_consumer_ack_pending, search_opensearch,
+    spawn_writer, spawn_writer_with_opensearch_url, start_nats, start_opensearch,
+    start_stalling_opensearch, wait_for_ack_pending_at_least, wait_for_dlq_count, wait_for_message,
+    wait_for_tenant_hit_count,
 };
 use uuid::Uuid;
 
@@ -100,6 +108,12 @@ const DEAD_OPENSEARCH_URL: &str = "http://127.0.0.1:1";
 /// default ~30s — see this file's top-level "Deviations" note), plus margin
 /// for container/process overhead and the second writer's own processing.
 const CRASH_RECOVERY_TIMEOUT: Duration = Duration::from_secs(90);
+/// Upper bound for writer1 to fetch its batch from the durable consumer and
+/// register it as ack-pending — should be near-instant against a
+/// [`common::StallingOpenSearch`]-blocked writer with the whole batch
+/// already sitting on the stream; generous margin for process/container
+/// startup overhead.
+const ACK_PENDING_TIMEOUT: Duration = Duration::from_secs(30);
 /// Upper bound for the dedup scenario — no server-side redelivery wait is
 /// involved (the duplicate is dropped at publish time), so a single
 /// bulk-write round trip is all that's needed.
@@ -111,24 +125,37 @@ const DEDUP_TIMEOUT: Duration = Duration::from_secs(30);
 const DLQ_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// `writer_crash_and_restart_causes_zero_loss` (Spec §14 durability): 50
-/// events are published directly onto the JetStream buffer, a writer is
-/// spawned to start draining them, killed (SIGKILL, no graceful shutdown)
-/// shortly after — before it can plausibly have acked the whole batch — and
-/// a second writer is spawned against the SAME NATS/JetStream + OpenSearch.
-/// The durable consumer (`{stream}-consumer`, a deterministic name — see
-/// `JetStreamBuffer::consumer`) is shared across both writer processes, so
-/// any event the first writer pulled but never acked is redelivered to the
-/// second one once JetStream's `AckWait` elapses. Every event's OpenSearch
-/// `_id` is its dedup key (`crate::writer::docs_with_ids`), so even a
-/// redelivered, re-written event overwrites the same document rather than
-/// duplicating it — the assertion is exact-count-N, not merely "at least
-/// N".
+/// events are published directly onto the JetStream buffer. Writer1 is
+/// spawned pointed at a [`common::StallingOpenSearch`] black hole instead of
+/// a real OpenSearch, so its bulk-write call is GUARANTEED to block forever
+/// — the whole batch is fetched from the durable consumer (marked
+/// ack-pending) and then permanently stuck, deterministically, with no
+/// timing luck required (see this file's top-level "Fix round 1" note for
+/// the false-green this replaces). Once `num_ack_pending > 0` confirms the
+/// batch is genuinely checked out, writer1 is SIGKILLed and — as the
+/// MANDATORY anti-false-green guard — `num_ack_pending` is re-read and
+/// REQUIRED to still be `> 0` immediately after the kill and before writer2
+/// ever starts: a killed writer can only ever reduce that count by acking,
+/// which is impossible here (its bulk-write call never returns), so a
+/// regression to `0` at this point can only mean the kill degraded to a
+/// graceful full drain — this test fails loudly rather than passing
+/// vacuously in that case. Writer2 is then spawned against the SAME
+/// NATS/JetStream durable consumer (`{stream}-consumer`, a deterministic
+/// name — see `JetStreamBuffer::consumer`) but the REAL OpenSearch; the
+/// batch writer1 left ack-pending is redelivered to it once JetStream's
+/// `AckWait` elapses. Every event's OpenSearch `_id` is its dedup key
+/// (`crate::writer::docs_with_ids`), so even a redelivered, re-written event
+/// overwrites the same document rather than duplicating it — the final
+/// assertion is exact-count-N, not merely "at least N".
 #[tokio::test(flavor = "multi_thread")]
 async fn writer_crash_and_restart_causes_zero_loss() {
     let nats = start_nats().await.expect("start nats container");
     let opensearch = start_opensearch()
         .await
         .expect("start opensearch container");
+    let stalling = start_stalling_opensearch()
+        .await
+        .expect("start stalling opensearch black hole");
     let producer = RawEventProducer::connect(&nats)
         .await
         .expect("connect raw event producer");
@@ -144,21 +171,56 @@ async fn writer_crash_and_restart_causes_zero_loss() {
             .expect("publish event directly onto the jetstream buffer");
     }
 
-    let mut writer1 = spawn_writer(&nats, &opensearch)
+    let mut writer1 = spawn_writer_with_opensearch_url(&nats, &stalling.url)
         .await
-        .expect("spawn first writer");
-    // Short, deliberate window before killing — see this file's top-level
-    // "Deviations" note for why this cannot guarantee an exact mid-batch
-    // hit against a real subprocess.
-    tokio::time::sleep(Duration::from_millis(120)).await;
+        .expect("spawn first writer pointed at the stalling opensearch black hole");
+
+    // Deterministic mid-flight wait: writer1 cannot possibly ack any of
+    // these events (its bulk-write call never returns against the black
+    // hole), so a nonzero ack-pending count here is proof the batch was
+    // fetched and is genuinely, permanently checked out — not a timing
+    // guess.
+    let pre_kill_ack_pending =
+        match wait_for_ack_pending_at_least(&nats.url, 1, ACK_PENDING_TIMEOUT).await {
+            Ok(n) => n,
+            Err(e) => panic!(
+                "writer1 never registered any ack-pending messages on the durable consumer \
+                 (it may never have reached the fetch/consume step): {e}\nwriter1 output:\n{}",
+                writer1.output().await
+            ),
+        };
+    eprintln!(
+        "writer_crash_and_restart_causes_zero_loss: ack_pending BEFORE kill = \
+         {pre_kill_ack_pending} (of {N} published)"
+    );
+
     writer1
         .kill_and_wait()
         .await
-        .expect("SIGKILL the first writer mid-drain");
+        .expect("SIGKILL the first writer mid-flight");
+
+    // MANDATORY anti-false-green guard (fix round 1): re-read
+    // `num_ack_pending` directly from JetStream immediately after the kill,
+    // before writer2 ever starts. This is the check that stops this test
+    // from silently passing on writer1's own (nonexistent) work again.
+    let post_kill_ack_pending = ingest_consumer_ack_pending(&nats.url)
+        .await
+        .expect("read post-kill ack-pending count");
+    eprintln!(
+        "writer_crash_and_restart_causes_zero_loss: ack_pending AFTER kill = \
+         {post_kill_ack_pending} (of {N} published)"
+    );
+    assert!(
+        post_kill_ack_pending > 0,
+        "ANTI-FALSE-GREEN GUARD FAILED: ack_pending was {post_kill_ack_pending} immediately \
+         after killing writer1 (pre-kill it was {pre_kill_ack_pending}) — the kill did not \
+         land mid-flight, so the durable-consumer redelivery/resume path this test exists to \
+         prove was never exercised."
+    );
 
     let writer2 = spawn_writer(&nats, &opensearch)
         .await
-        .expect("spawn second (restarted) writer against the same nats + opensearch");
+        .expect("spawn second (restarted) writer against the same nats + real opensearch");
 
     let hits = match wait_for_tenant_hit_count(&opensearch.url, &tenant, N, CRASH_RECOVERY_TIMEOUT)
         .await

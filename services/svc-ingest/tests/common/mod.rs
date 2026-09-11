@@ -1444,3 +1444,155 @@ pub async fn wait_for_tenant_hit_count(
     )
     .await
 }
+
+// ---------------------------------------------------------------------
+// Deterministic mid-flight writer-crash simulation (fix round 1).
+//
+// A fixed sleep-then-kill delay is a race: on a fast local NATS +
+// OpenSearch, a small batch can fully drain (bulk write + every per-event
+// ack) well inside that delay, so the SIGKILL always lands on an already-
+// idle writer and the durable-consumer redelivery/resume path is never
+// exercised — a false green (`writer_crash_and_restart_causes_zero_loss`
+// would pass on writer1's own work alone). [`StallingOpenSearch`] removes
+// the race entirely: a writer pointed at it can never complete a
+// bulk-write call (it never receives a response), so the moment its
+// durable consumer shows a nonzero `num_ack_pending`, the ENTIRE fetched
+// batch is deterministically stuck in flight, unacked, for as long as the
+// test wants — no timing luck involved.
+// ---------------------------------------------------------------------
+
+/// A TCP listener that accepts connections and never responds to them —
+/// see this section's module comment. Any HTTP client (e.g. the writer's
+/// `reqwest::Client`, which carries no request timeout — see
+/// `bootstrap::run_writer`) that sends a request to [`Self::url`] blocks
+/// on `.send().await` forever. Dropping this stops the accept loop; a
+/// connection already accepted before the drop is only released when its
+/// peer (the writer process) itself exits or is killed.
+pub struct StallingOpenSearch {
+    /// `http://127.0.0.1:{port}` — pass to [`spawn_writer_with_opensearch_url`]
+    /// to guarantee that writer's bulk-write call blocks forever.
+    pub url: String,
+    _shutdown: tokio::sync::oneshot::Sender<()>,
+}
+
+/// Starts a [`StallingOpenSearch`] black hole on an ephemeral loopback
+/// port.
+///
+/// # Errors
+/// Returns an error if the listener cannot be bound.
+pub async fn start_stalling_opensearch() -> Result<StallingOpenSearch> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("bind stalling opensearch listener")?;
+    let port = listener
+        .local_addr()
+        .context("read stalling opensearch listener addr")?
+        .port();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                accepted = listener.accept() => {
+                    let Ok((mut socket, _)) = accepted else { break; };
+                    // Hold the connection open forever, never writing a
+                    // response back — the peer's HTTP client blocks
+                    // indefinitely waiting for one. Still drains incoming
+                    // bytes so the writer's own request write doesn't
+                    // itself stall on a full socket receive buffer.
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncReadExt as _;
+                        let mut buf = [0_u8; 4096];
+                        loop {
+                            match socket.read(&mut buf).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(_) => {}
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    });
+    Ok(StallingOpenSearch {
+        url: format!("http://127.0.0.1:{port}"),
+        _shutdown: shutdown_tx,
+    })
+}
+
+/// Name of the main ingest durable, explicit-ack pull consumer
+/// `JetStreamBuffer::consumer` binds — deterministic
+/// (`{stream_name}-consumer`, `stream_name` being [`INGEST_SUBJECT_PREFIX`]
+/// with `.` replaced by `_`; see `JetStreamBuffer::stream_name`/
+/// `consumer`). Duplicated here for the same reason as
+/// [`INGEST_SUBJECT_PREFIX`] above.
+const INGEST_CONSUMER_NAME: &str = "svc-ingest_logs-consumer";
+
+/// Reads the main ingest durable consumer's current `num_ack_pending` —
+/// the count of messages JetStream has delivered to a puller but not yet
+/// received an ack/nack for (a **live** server-side read — `Consumer::
+/// get_info` — not a locally cached value). This is the anti-false-green
+/// guard `tests/e2e_durability.rs`'s crash-recovery scenario requires: if
+/// a just-killed writer left zero messages ack-pending, the kill did not
+/// land mid-flight and the durable-consumer redelivery/resume path this
+/// suite exists to prove was never exercised.
+///
+/// # Errors
+/// Returns an error if the NATS connection, or the stream/consumer lookup,
+/// fails (e.g. called before any writer has ever bound the consumer) —
+/// within [`HTTP_CALL_TIMEOUT`].
+pub async fn ingest_consumer_ack_pending(nats_url: &str) -> Result<usize> {
+    bounded(
+        HTTP_CALL_TIMEOUT,
+        "read ingest consumer ack-pending count",
+        async {
+            let client = async_nats::connect(nats_url)
+                .await
+                .context("connect to nats to read consumer info")?;
+            let context = async_nats::jetstream::new(client);
+            let stream_name = INGEST_SUBJECT_PREFIX.replace('.', "_");
+            let stream = context
+                .get_stream(&stream_name)
+                .await
+                .context("get main ingest stream")?;
+            let consumer: async_nats::jetstream::consumer::PullConsumer = stream
+                .get_consumer(INGEST_CONSUMER_NAME)
+                .await
+                .map_err(|e| anyhow::anyhow!("get main ingest durable consumer: {e}"))?;
+            let info = consumer.get_info().await.context("read consumer info")?;
+            Ok(info.num_ack_pending)
+        },
+    )
+    .await
+}
+
+/// Polls [`ingest_consumer_ack_pending`] (bounded by `timeout`) until it
+/// reports at least `min` — the wait `tests/e2e_durability.rs`'s
+/// crash-recovery scenario uses to confirm a writer has actually fetched a
+/// batch (and, against a [`StallingOpenSearch`], is now genuinely and
+/// permanently stuck on it) before killing that writer.
+///
+/// # Errors
+/// Returns an error (via [`bounded`]'s timeout message) if `min` is not
+/// reached within `timeout`.
+pub async fn wait_for_ack_pending_at_least(
+    nats_url: &str,
+    min: usize,
+    timeout: Duration,
+) -> Result<usize> {
+    bounded(
+        timeout,
+        &format!("ingest consumer to report >= {min} ack-pending messages"),
+        async {
+            loop {
+                if let Ok(n) = ingest_consumer_ack_pending(nats_url).await
+                    && n >= min
+                {
+                    return Ok(n);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        },
+    )
+    .await
+}
