@@ -64,6 +64,14 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use pkcs8::{EncodePrivateKey, EncodePublicKey};
+use prost::Message as _;
+use skauswatch_proto::opentelemetry::proto::collector::logs::v1::{
+    ExportLogsServiceRequest, logs_service_client::LogsServiceClient,
+};
+use skauswatch_proto::opentelemetry::proto::common::v1::{
+    AnyValue, KeyValue, any_value::Value as OtlpAnyValue,
+};
+use skauswatch_proto::opentelemetry::proto::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
@@ -334,6 +342,58 @@ pub async fn wait_for_document(opensearch_url: &str, tenant: &str) -> Result<ser
     .await
 }
 
+/// Upper bound on waiting for one specific marker-bearing message to become
+/// searchable in `skauswatch-logs-*`.
+const MESSAGE_INDEXED_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Polls `{tenant}`-scoped `skauswatch-logs-*` documents for one whose
+/// `message` field contains `marker`, bounded by
+/// [`MESSAGE_INDEXED_TIMEOUT`]. Unlike [`wait_for_document`] (which only
+/// matches on `tenant_id` and returns the first hit for that tenant), this
+/// is the helper to reach for whenever more than one message can land under
+/// the same tenant in one test run — e.g. two OTLP transports (gRPC/HTTP)
+/// or multiple syslog lines sharing one trusted-CIDR tenant — where a bare
+/// tenant-only match would pass on the first message and tell the caller
+/// nothing about the rest. Mirrors `tests/e2e_syslog.rs`'s own
+/// (independently defined, since this helper postdates that test) marker
+/// convention.
+///
+/// # Errors
+/// Returns an error if no matching document becomes searchable within
+/// [`MESSAGE_INDEXED_TIMEOUT`].
+pub async fn wait_for_message(
+    opensearch_url: &str,
+    tenant: &str,
+    marker: &str,
+) -> Result<serde_json::Value> {
+    let query = serde_json::json!({
+        "query": {
+            "bool": {
+                "filter": [{ "term": { "tenant_id.keyword": tenant } }],
+                "must": [{ "match_phrase": { "message": marker } }]
+            }
+        }
+    });
+    bounded(
+        MESSAGE_INDEXED_TIMEOUT,
+        &format!("a document with tenant_id={tenant} message~={marker} to become searchable"),
+        async {
+            loop {
+                if let Ok(body) =
+                    search_opensearch(opensearch_url, "skauswatch-logs-*", &query).await
+                {
+                    let hits = body["hits"]["total"]["value"].as_u64().unwrap_or(0);
+                    if hits > 0 {
+                        return Ok(body);
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        },
+    )
+    .await
+}
+
 // ---------------------------------------------------------------------
 // Test Postgres database
 // ---------------------------------------------------------------------
@@ -451,6 +511,61 @@ impl Drop for TestDb {
             }
         });
     }
+}
+
+/// Upper bound on seeding one `ingest_tokens` row directly against a
+/// [`TestDb`] (a connection separate from [`setup_test_db`]'s own admin
+/// connection).
+const SEED_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Hex-encoded SHA-256 digest of `raw_token` — mirrors
+/// `crate::auth::hash_token` (private to the service binary; this harness
+/// runs as a separate crate/process and cannot call it directly), so a row
+/// seeded via [`seed_ingest_token`] is found by the real
+/// `crate::auth::resolve_via_token` lookup unmodified.
+fn hash_ingest_token(raw_token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(raw_token.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Inserts one unrevoked `ingest_tokens` row (expires in 1 hour) into
+/// `db`'s own database, so a subsequently spawned receiver's ingest-token
+/// fallback (`crate::auth::resolve_via_token`, Spec §6b — the credential
+/// path this harness uses since no live SPIFFE Workload API is available,
+/// see this module's top-level doc comment) resolves `raw_token` to
+/// `tenant`. `raw_token` is the plaintext value a caller then presents as
+/// `authorization: Bearer {raw_token}` via [`send_otlp_http`]/
+/// [`send_otlp_grpc`] — only its SHA-256 hash is ever written to the
+/// database, mirroring the production `resolve_via_token` contract.
+/// Bounded by [`SEED_TOKEN_TIMEOUT`].
+///
+/// # Errors
+/// Returns an error if the connection or insert fails, within
+/// [`SEED_TOKEN_TIMEOUT`].
+pub async fn seed_ingest_token(db: &TestDb, raw_token: &str, tenant: &str) -> Result<()> {
+    let url = format!("postgres://postgres:postgres@localhost:5432/{}", db.name);
+    bounded(SEED_TOKEN_TIMEOUT, "seed ingest_tokens row", async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .context("connect to test database to seed ingest token")?;
+        sqlx::query(
+            "INSERT INTO ingest_tokens (token_hash, tenant_id, revoked_at, expires_at) \
+             VALUES ($1, $2, NULL, $3)",
+        )
+        .bind(hash_ingest_token(raw_token))
+        .bind(tenant)
+        .bind(chrono::Utc::now() + chrono::Duration::hours(1))
+        .execute(&pool)
+        .await
+        .context("insert ingest_tokens row")?;
+        Ok(())
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------
@@ -921,5 +1036,132 @@ pub async fn send_syslog_tcp(port: u16, line: &str) -> Result<()> {
         stream.flush().await.context("flush syslog TCP line")?;
         Ok(())
     })
+    .await
+}
+
+// ---------------------------------------------------------------------
+// OTLP client helpers (gRPC :4317, HTTP/protobuf :4318)
+// ---------------------------------------------------------------------
+
+/// Upper bound on sending one OTLP export call, either transport.
+const OTLP_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Builds a minimal, valid OTLP `ExportLogsServiceRequest` — one
+/// `ResourceLogs` → one `ScopeLogs` → one `LogRecord` whose body is
+/// exactly `marker` (severity INFO, OTLP `severity_number = 9`), plus a
+/// `e2e.marker` attribute carrying the same value. `marker` doubles as the
+/// searchable text [`wait_for_message`] polls OpenSearch for, mirroring
+/// `tests/e2e_syslog.rs`'s marker-per-message convention — every field
+/// besides `marker` is a fixed, always-valid placeholder (this helper
+/// exists to drive the listener/decode/OCSF-mapping path end to end, not
+/// to exercise every possible OTLP field shape; that is
+/// `skauswatch-ocsf`'s and `listeners::otlp::convert`'s own unit-test
+/// responsibility).
+#[must_use]
+pub fn otlp_log_record(marker: &str) -> ExportLogsServiceRequest {
+    ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            resource: None,
+            scope_logs: vec![ScopeLogs {
+                scope: None,
+                log_records: vec![LogRecord {
+                    time_unix_nano: 1_726_000_000_000_000_000,
+                    severity_number: 9, // OTLP INFO
+                    body: Some(AnyValue {
+                        value: Some(OtlpAnyValue::StringValue(marker.to_owned())),
+                    }),
+                    attributes: vec![KeyValue {
+                        key: "e2e.marker".to_owned(),
+                        value: Some(AnyValue {
+                            value: Some(OtlpAnyValue::StringValue(marker.to_owned())),
+                        }),
+                    }],
+                    ..Default::default()
+                }],
+                schema_url: String::new(),
+            }],
+            schema_url: String::new(),
+        }],
+    }
+}
+
+/// POSTs `request` to a running [`ReceiverProcess`]'s `otlp_http_port` at
+/// `/v1/logs`, binary-encoded as `application/x-protobuf` (Spec §4b/§14b's
+/// protobuf variant — distinct from the JSON variant
+/// `listeners::otlp::mod::tests` already covers directly), with `token` as
+/// the `authorization: Bearer` ingest-token credential (Spec §6b — the only
+/// credential path HTTP accepts, see `listeners::otlp::run_http`'s doc
+/// comment). Bounded by [`OTLP_SEND_TIMEOUT`].
+///
+/// # Errors
+/// Returns an error if the request cannot be sent, or the response is not
+/// 2xx, within [`OTLP_SEND_TIMEOUT`].
+pub async fn send_otlp_http(
+    receiver: &ReceiverProcess,
+    token: &str,
+    request: &ExportLogsServiceRequest,
+) -> Result<()> {
+    let body = request.encode_to_vec();
+    let url = format!("http://127.0.0.1:{}/v1/logs", receiver.otlp_http_port);
+    bounded(
+        OTLP_SEND_TIMEOUT,
+        "POST OTLP HTTP/protobuf /v1/logs",
+        async {
+            let resp = reqwest::Client::new()
+                .post(&url)
+                .bearer_auth(token)
+                .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+                .body(body.clone())
+                .timeout(OTLP_SEND_TIMEOUT)
+                .send()
+                .await
+                .with_context(|| format!("POST {url}"))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                bail!("POST {url} returned {status}: {text}");
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+/// Sends `request` via OTLP gRPC (`LogsService.Export`) to a running
+/// [`ReceiverProcess`]'s `otlp_grpc_port`, with `token` as the
+/// `authorization: Bearer` gRPC-metadata ingest-token credential (Spec
+/// §6b). Dials plaintext `http://` rather than attempting mTLS:
+/// `listeners::otlp::serve_grpc` falls back to plaintext without a live
+/// SPIFFE workload identity (see that function's doc comment and this
+/// module's top-level doc comment — no SPIRE is deployed in this sandbox),
+/// so the ingest-token path is the only credential a caller here can
+/// present. Bounded by [`OTLP_SEND_TIMEOUT`].
+///
+/// # Errors
+/// Returns an error if the channel cannot connect, the metadata value
+/// cannot be built, or `export()` returns a non-OK gRPC status, within
+/// [`OTLP_SEND_TIMEOUT`].
+pub async fn send_otlp_grpc(
+    receiver: &ReceiverProcess,
+    token: &str,
+    request: ExportLogsServiceRequest,
+) -> Result<()> {
+    bounded(
+        OTLP_SEND_TIMEOUT,
+        "send OTLP gRPC LogsService.Export",
+        async {
+            let endpoint = format!("http://127.0.0.1:{}", receiver.otlp_grpc_port);
+            let mut client = LogsServiceClient::connect(endpoint.clone())
+                .await
+                .with_context(|| format!("connect OTLP gRPC channel to {endpoint}"))?;
+            let mut req = tonic::Request::new(request);
+            let auth_value = format!("Bearer {token}")
+                .parse()
+                .context("build authorization metadata value")?;
+            req.metadata_mut().insert("authorization", auth_value);
+            client.export(req).await.context("LogsService.Export")?;
+            Ok(())
+        },
+    )
     .await
 }
