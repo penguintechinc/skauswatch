@@ -55,9 +55,15 @@ pub fn legacy_aaa_event_to_ocsf(raw: &JsonVal) -> Result<JsonVal, crate::Normali
         })
         .unwrap_or(0);
 
-    // Update or insert the "level" field (text representation for normalize).
+    // Update or insert the "level" field exactly once (text representation).
+    // Check for existing "level" and replace it, else append.
     let level_text = severity_text(severity);
-    doc.push(("level".to_owned(), JsonVal::Str(level_text.to_owned())));
+    let level_val = JsonVal::Str(level_text.to_owned());
+    if let Some(entry) = doc.iter_mut().find(|(k, _)| k == "level") {
+        entry.1 = level_val;
+    } else {
+        doc.push(("level".to_owned(), level_val));
+    }
 
     // Facility is preserved as-is if present; not added if missing since it's
     // only evidence (not a detection driver for the normalizer).
@@ -163,6 +169,32 @@ mod tests {
             mapped.get("level").and_then(JsonVal::as_str),
             Some("critical"),
             "missing severity should default to critical"
+        );
+    }
+
+    #[test]
+    fn legacy_event_level_field_appears_exactly_once() {
+        let raw = JsonVal::Obj(vec![
+            (
+                "severity".to_owned(),
+                JsonVal::Num(serde_json::Number::from(2)),
+            ),
+            ("level".to_owned(), JsonVal::Str("old_value".to_owned())),
+            ("message".to_owned(), JsonVal::Str("Test".to_owned())),
+        ]);
+        let mapped = legacy_aaa_event_to_ocsf(&raw).expect("mapping failed");
+
+        // Count occurrences of "level" key.
+        let level_count = match &mapped {
+            JsonVal::Obj(fields) => fields.iter().filter(|(k, _)| k == "level").count(),
+            _ => 0,
+        };
+
+        assert_eq!(level_count, 1, "level field should appear exactly once");
+        assert_eq!(
+            mapped.get("level").and_then(JsonVal::as_str),
+            Some("critical"),
+            "level should be updated to critical"
         );
     }
 }
