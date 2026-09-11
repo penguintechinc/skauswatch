@@ -91,16 +91,18 @@ async fn build_grpc_identity_store() -> anyhow::Result<IdentityStore> {
 
 /// Builds the HTTPS OCSF/JSON ingest listener's shared [`http::AppState`]
 /// — factored out of [`run_receiver`] so it is unit-testable without a
-/// live OpenSearch/license-server connection (see this module's own tests).
+/// live NATS/license-server connection (see this module's own tests).
+/// Takes the same [`EventBuffer`] every other receiver-mode listener
+/// publishes through (Task 3.0b: `/ingest` used to write straight to
+/// OpenSearch instead, bypassing the buffer's durability guarantee — see
+/// `listeners::http`'s own doc comment).
 fn build_ingest_state(
-    client: reqwest::Client,
-    opensearch_url: &str,
+    buffer: Arc<dyn EventBuffer>,
     jwt_verify_key: jsonwebtoken::DecodingKey,
     license: Arc<penguin_licensing::LicenseClient>,
 ) -> http::AppState {
     http::AppState {
-        http: client,
-        opensearch_url: opensearch_url.into(),
+        buffer,
         clock: http::Clock::System,
         jwt_verify_key,
         license,
@@ -217,9 +219,6 @@ pub(crate) async fn run_receiver(cfg: Config) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("otlp gRPC SPIFFE workload identity: {e}"))?,
     );
 
-    let http_client = reqwest::Client::builder()
-        .build()
-        .map_err(|e| anyhow::anyhow!("http client: {e}"))?;
     let jwt_verify_key =
         skauswatch_auth::load_jwt_verify_key().map_err(|e| anyhow::anyhow!("{e}"))?;
     let license_cfg = penguin_licensing::LicenseConfig::from_env("skauswatch")
@@ -231,8 +230,10 @@ pub(crate) async fn run_receiver(cfg: Config) -> anyhow::Result<()> {
     // License/flag refresh loop — fail-safe by design; startup never blocks
     // on the license server (mirrors `services/logs/src/main.rs`).
     let _license_bg = license.spawn_refresh();
-    let ingest_state =
-        build_ingest_state(http_client, &cfg.opensearch_url, jwt_verify_key, license);
+    // Shares the same `EventBuffer` every other receiver-mode listener
+    // publishes through — the writer, never this listener, owns all
+    // OpenSearch writes (Task 3.0b).
+    let ingest_state = build_ingest_state(Arc::clone(&buffer), jwt_verify_key, license);
 
     let addr: SocketAddr = ([0, 0, 0, 0], cfg.http_port).into();
     let listener = tokio::net::TcpListener::bind(addr)
@@ -419,19 +420,18 @@ mod tests {
     }
 
     /// Gate-1→2 wiring smoke test: the shared dependencies `run_receiver`
-    /// assembles (a reqwest client, a JWT verify key, a license client)
+    /// assembles (the `EventBuffer`, a JWT verify key, a license client)
     /// really do fit `listeners::http::AppState`'s shape, and
     /// `listeners::http::router` accepts the result and builds a router
     /// without panicking — proves this integration point compiles *and*
     /// runs, not just that the types happen to line up on paper. A live
-    /// end-to-end run against real NATS/OpenSearch/Postgres is Wave 3, not
-    /// this gate.
+    /// end-to-end run against real NATS/Postgres is Wave 3, not this gate.
     #[test]
     fn build_ingest_state_produces_a_router_without_panicking() {
         let license = skauswatch_testkit::license::dev_license("skauswatch");
+        let buffer: Arc<dyn EventBuffer> = Arc::new(crate::buffer::InMemoryBuffer::new(10));
         let state = build_ingest_state(
-            reqwest::Client::new(),
-            "http://localhost:9200",
+            buffer,
             skauswatch_testkit::jwt::verify_key().clone(),
             license,
         );
