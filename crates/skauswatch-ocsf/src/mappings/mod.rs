@@ -4,5 +4,6 @@
 //! editing this file again.
 
 pub mod generic;
+pub mod legacy_aaa_events;
 pub mod otlp;
 pub mod syslog;

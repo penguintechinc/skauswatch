@@ -22,6 +22,7 @@
 
 mod admin;
 mod auth;
+mod backfill;
 mod bootstrap;
 mod buffer;
 mod config;
@@ -31,6 +32,7 @@ mod openapi;
 mod opensearch;
 mod writer;
 
+use chrono::NaiveDate;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::Config;
@@ -67,6 +69,23 @@ enum Command {
     /// migrate`, never an auto-run at `serve` startup (see `skauswatch_db`
     /// crate docs).
     Migrate,
+    /// Backfill: scroll through legacy `aaa-events-*` indices, map to OCSF,
+    /// and bulk-write to the unified `skauswatch-logs-*` lake. One-time
+    /// administrative operation; see the Task 2.3 brief for full context.
+    Backfill {
+        /// Start date (inclusive, format: YYYY-MM-DD).
+        #[arg(long)]
+        start_date: String,
+        /// End date (inclusive, format: YYYY-MM-DD).
+        #[arg(long)]
+        end_date: String,
+        /// Batch size for bulk writes.
+        #[arg(long, default_value = "1000")]
+        batch_size: usize,
+        /// If set, map documents but do not POST to `_bulk`.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Which half of the ingest pipeline a `serve` process runs — see
@@ -90,6 +109,12 @@ async fn main() -> anyhow::Result<()> {
         Command::Healthcheck => healthcheck().await,
         Command::Openapi => print_openapi(),
         Command::Migrate => migrate().await,
+        Command::Backfill {
+            start_date,
+            end_date,
+            batch_size,
+            dry_run,
+        } => backfill_command(&start_date, &end_date, batch_size, dry_run).await,
     }
 }
 
@@ -124,6 +149,51 @@ async fn migrate() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("migration failed: {e}"))?;
     tracing::info!("migrations applied");
+    Ok(())
+}
+
+/// Executes the backfill: scrolls through legacy `aaa-events-*` indices,
+/// maps each document to OCSF, and bulk-writes to `skauswatch-logs-*`.
+/// Parses date arguments and delegates to [`backfill::run_backfill`].
+async fn backfill_command(
+    start_date_str: &str,
+    end_date_str: &str,
+    batch_size: usize,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    skauswatch_telemetry::init_tracing("skauswatch-svc-ingest");
+
+    // Parse dates.
+    let start_date = NaiveDate::parse_from_str(start_date_str, "%Y-%m-%d")
+        .map_err(|e| anyhow::anyhow!("invalid start_date: {e}"))?;
+    let end_date = NaiveDate::parse_from_str(end_date_str, "%Y-%m-%d")
+        .map_err(|e| anyhow::anyhow!("invalid end_date: {e}"))?;
+
+    // Load configuration.
+    let cfg = Config::from_env().map_err(|e| anyhow::anyhow!("config: {e}"))?;
+
+    // Run backfill.
+    let backfill_cfg = backfill::BackfillConfig {
+        start_date,
+        end_date,
+        batch_size,
+        dry_run,
+    };
+    let result = backfill::run_backfill(&cfg, backfill_cfg).await?;
+
+    // Report results.
+    tracing::info!(
+        total_mapped = result.total_mapped,
+        total_written = result.total_written,
+        total_failed = result.total_failed,
+        "backfill operation completed"
+    );
+
+    println!(
+        "Backfill complete: {} mapped, {} written, {} failed",
+        result.total_mapped, result.total_written, result.total_failed
+    );
+
     Ok(())
 }
 
