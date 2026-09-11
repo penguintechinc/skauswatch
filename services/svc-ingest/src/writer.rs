@@ -282,7 +282,12 @@ async fn handle_failed_batch(
 /// resolves every handle: `ack` on success, `ack` only the successfully
 /// indexed subset on a 200-with-per-item-errors response, or defer the
 /// rest to [`handle_failed_batch`] on any failure.
-async fn process_batch(
+#[tracing::instrument(
+    name = "writer_consume_and_bulk_write",
+    skip(buffer, dlq, http, delivered, failures),
+    fields(batch_size = delivered.len())
+)]
+pub(crate) async fn process_batch(
     buffer: &Arc<dyn EventBuffer>,
     dlq: &Arc<dyn EventBuffer>,
     http: &reqwest::Client,
@@ -294,7 +299,12 @@ async fn process_batch(
     let pairs = docs_with_ids(&delivered);
     let body = opensearch::build_bulk_body_with_ids(&index, &pairs);
 
-    match opensearch::write_bulk(http, opensearch_url, body).await {
+    let bulk_started = std::time::Instant::now();
+    let bulk_result = opensearch::write_bulk(http, opensearch_url, body).await;
+    metrics::histogram!(crate::otel::metric_names::WRITER_BULK_WRITE_DURATION_MS)
+        .record(bulk_started.elapsed().as_secs_f64() * 1000.0);
+
+    match bulk_result {
         Ok(outcome) if outcome.all_succeeded() => {
             metrics::counter!("svc_ingest_writer_events_written_total")
                 .increment(delivered.len() as u64);
@@ -322,6 +332,11 @@ async fn process_batch(
                     reason = item_err.reason.as_deref().unwrap_or("?"),
                     "opensearch_bulk_item_rejected"
                 );
+                metrics::counter!(
+                    crate::otel::metric_names::WRITER_OPENSEARCH_ERRORS_TOTAL,
+                    "error_code" => item_err.error_type.clone().unwrap_or_else(|| "unknown".to_owned())
+                )
+                .increment(1);
             }
             let failed_ids: HashSet<&str> = outcome.failed_ids.iter().map(String::as_str).collect();
             let (failed, succeeded): (Vec<_>, Vec<_>) = delivered
@@ -349,6 +364,14 @@ async fn process_batch(
             handle_failed_batch(buffer, dlq, failures, failed, &reason).await;
         }
         Err(e) => {
+            let error_code = e
+                .status()
+                .map_or_else(|| "transport".to_owned(), |s| s.as_u16().to_string());
+            metrics::counter!(
+                crate::otel::metric_names::WRITER_OPENSEARCH_ERRORS_TOTAL,
+                "error_code" => error_code
+            )
+            .increment(1);
             handle_failed_batch(buffer, dlq, failures, delivered, &e.to_string()).await;
         }
     }

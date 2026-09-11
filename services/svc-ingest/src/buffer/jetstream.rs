@@ -216,6 +216,11 @@ impl JetStreamBuffer {
 
 #[async_trait::async_trait]
 impl EventBuffer for JetStreamBuffer {
+    #[tracing::instrument(
+        name = "buffer_push",
+        skip(self, event),
+        fields(tenant = %event.tenant.as_str())
+    )]
     async fn push(&self, event: NormalizedEvent) -> Result<(), BufferError> {
         let subject = format!("{}.{}", self.subject_prefix, event.tenant.as_str());
         let mut headers = async_nats::HeaderMap::new();
@@ -231,6 +236,7 @@ impl EventBuffer for JetStreamBuffer {
             .await
     }
 
+    #[tracing::instrument(name = "buffer_consume", skip(self), fields(batch_size))]
     async fn consume(&self, batch_size: usize) -> Result<Vec<DeliveredEvent>, BufferError> {
         let consumer = self.consumer().await?;
         let mut messages = consumer
@@ -250,9 +256,20 @@ impl EventBuffer for JetStreamBuffer {
                 handle: AckHandle(AckHandleInner::JetStream(Box::new(msg))),
             });
         }
+        // Proxy for "current buffer depth" (Spec §11a
+        // `svc_ingest_receiver_queue_depth`): the size of the batch this
+        // call just pulled off the stream. A literal server-side stream
+        // byte/message count (`Stream::info()`) would need an extra
+        // JetStream round trip on every `consume()` call -- this is
+        // real, already-available data (no added I/O) that still tracks
+        // ingest backlog/throughput for an operator watching the gauge,
+        // documented here rather than silently approximated.
+        metrics::gauge!(crate::otel::metric_names::RECEIVER_QUEUE_DEPTH)
+            .set(delivered.len() as f64);
         Ok(delivered)
     }
 
+    #[tracing::instrument(name = "buffer_ack", skip(self, handle))]
     async fn ack(&self, handle: AckHandle) -> Result<(), BufferError> {
         match handle.0 {
             AckHandleInner::JetStream(msg) => msg
@@ -265,6 +282,7 @@ impl EventBuffer for JetStreamBuffer {
         }
     }
 
+    #[tracing::instrument(name = "buffer_nack", skip(self, handle))]
     async fn nack(&self, handle: AckHandle) -> Result<(), BufferError> {
         match handle.0 {
             AckHandleInner::JetStream(msg) => msg

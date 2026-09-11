@@ -46,8 +46,23 @@ static RFC3164_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// rather than crashing (mirrors
 /// `services/monitor/src/collectors/syslog.rs::parse_rfc3164`'s "no match,
 /// no panic" contract).
+/// Span name: `receiver_parse` (Spec §11a "per-event processing: parse,
+/// normalize, enqueue, ack" — this covers the "parse" leg; `mod.rs::enqueue`
+/// covers normalize+enqueue+ack).
 #[must_use]
+#[tracing::instrument(name = "receiver_parse", skip(raw), fields(otel.kind = "internal"))]
 pub fn detect_and_parse(raw: &str) -> Option<ParsedSyslog> {
+    let started = std::time::Instant::now();
+    let result = detect_and_parse_inner(raw);
+    metrics::histogram!(
+        crate::otel::metric_names::RECEIVER_PARSE_DURATION_MS,
+        "parser" => "syslog"
+    )
+    .record(started.elapsed().as_secs_f64() * 1000.0);
+    result
+}
+
+fn detect_and_parse_inner(raw: &str) -> Option<ParsedSyslog> {
     let trimmed = raw.trim();
     if !trimmed.starts_with('<') {
         return None;
