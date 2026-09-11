@@ -9,7 +9,7 @@
 //! | Transport | Tenant source | Backpressure (buffer full, Spec §7c) |
 //! |---|---|---|
 //! | UDP | `SYSLOG_TRUSTED_CIDRS` (`crate::auth::resolve_via_udp_cidr`) | Drop packet (UDP has no feedback channel) |
-//! | Plain TCP | Same trusted-CIDR config as UDP — plain TCP is equally unauthenticated and Spec §6c/Config expose no separate TCP-specific trust knob (documented reuse, not a bug) | Close the connection; source reconnects and retries |
+//! | Plain TCP | Same trusted-CIDR config as UDP — plain TCP is equally unauthenticated and Spec §6c/Config expose no separate TCP-specific trust knob (documented reuse, not a bug); also gated by `SYSLOG_UDP_ENABLED` the same way UDP is, so the flag is a real "unauthenticated plain syslog off" switch rather than leaving a discoverable TCP port open | Close the connection; source reconnects and retries |
 //! | TLS | mTLS peer certificate's SPIFFE ID (`crate::auth::resolve_via_mtls`) | Close the connection |
 
 // `crate::listeners::syslog`'s `run_udp`/`run_tcp`/`run_tls` aren't wired
@@ -142,11 +142,23 @@ pub(crate) async fn consume_udp(socket: &UdpSocket, cfg: &Config, buffer: &Arc<d
 /// Runs the syslog TCP listener until it errors or is aborted. Shares
 /// `cfg.syslog_port` with [`run_udp`] (Spec §3b) — see this module's
 /// top-level doc table for why plain (non-TLS) TCP reuses UDP's
-/// trusted-CIDR tenant resolution.
+/// trusted-CIDR tenant resolution. Gated by the same
+/// `cfg.syslog_udp_enabled` flag as [`run_udp`] (a no-op, no bind, when
+/// `false`): plain TCP is exactly as unauthenticated as UDP, so an
+/// operator using the flag as "unauthenticated plain-syslog off" must not
+/// still find a listening, discoverable `:syslog_port` TCP socket — only
+/// [`run_tls`] (mTLS-authenticated) stays always-on regardless of this
+/// flag.
 ///
 /// # Errors
 /// Returns an error if the TCP listener fails to bind.
 pub async fn run_tcp(cfg: &Config, buffer: Arc<dyn EventBuffer>) -> anyhow::Result<()> {
+    if !cfg.syslog_udp_enabled {
+        tracing::info!(
+            "syslog plain-TCP listener disabled (SYSLOG_UDP_ENABLED=false); not binding"
+        );
+        return Ok(());
+    }
     let listener = TcpListener::bind(("0.0.0.0", cfg.syslog_port))
         .await
         .with_context(|| format!("bind syslog TCP :{}", cfg.syslog_port))?;
@@ -862,6 +874,15 @@ mod tests {
             "run_tcp should still be serving, not have errored out"
         );
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn run_tcp_disabled_returns_ok_without_binding() {
+        let cfg = test_config(false, vec![], None);
+        let buffer: Arc<dyn EventBuffer> = Arc::new(InMemoryBuffer::new(1));
+        run_tcp(&cfg, buffer)
+            .await
+            .unwrap_or_else(|e| panic!("disabled run_tcp must return Ok: {e}"));
     }
 
     // -- read_and_enqueue_lines (direct, transport-agnostic) ------------------
