@@ -14,10 +14,19 @@
 //! (`skauswatch_auth::tenant_middleware`) and the `LOG_INGEST_FLAG` PostHog
 //! flag (`penguin_licensing::axum::FlagGate`) — see [`router`]. Every
 //! normalized document is stamped with the caller's `TenantContext` tenant
-//! (never a client-supplied value) before it is bulk-indexed, so downstream
-//! tenant-scoped search (e.g. monitor's `tenant_id` term filter) has
-//! provenance to filter on. `GET /healthz` + `/readyz` stay unauthenticated —
-//! they are the manager's liveness and readiness probes.
+//! (never a client-supplied value) before it is durably enqueued, so
+//! downstream tenant-scoped search (e.g. monitor's `tenant_id` term filter)
+//! has provenance to filter on. `GET /healthz` + `/readyz` stay
+//! unauthenticated — they are the manager's liveness and readiness probes.
+//!
+//! Task 3.0b fix: this handler used to write straight to OpenSearch via
+//! `opensearch::write_bulk`, bypassing the JetStream-backed
+//! [`crate::buffer::EventBuffer`] entirely — so HTTPS-ingested events got
+//! none of the durability the buffer→writer architecture exists to
+//! provide, unlike syslog/OTLP which already enqueued correctly. Every
+//! normalized document is now pushed through the same `EventBuffer` seam
+//! (see [`crate::buffer`]'s durability contract); the writer, never this
+//! listener, owns all OpenSearch writes.
 
 #![allow(dead_code)]
 
@@ -32,9 +41,10 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use penguin_licensing::LicenseClient;
 use penguin_licensing::axum::{FlagGate, flag_gate};
+use sha2::{Digest, Sha256};
 use skauswatch_auth::TenantContext;
 
-use crate::opensearch::{build_bulk_body, daily_index, write_bulk};
+use crate::buffer::{BufferError, EventBuffer, NormalizedEvent};
 use skauswatch_ocsf::jsonord::{self, JsonVal};
 use skauswatch_ocsf::normalize;
 use skauswatch_ocsf::schema::{is_native_ocsf, validate_required_fields};
@@ -72,14 +82,14 @@ impl Clock {
     }
 }
 
-/// Shared handler state: the reqwest client, the OpenSearch base URL, the
-/// clock, the shared JWT signing secret, and the license/flag client.
+/// Shared handler state: the durable event buffer, the clock, the shared
+/// JWT signing secret, and the license/flag client.
 #[derive(Clone)]
 pub struct AppState {
-    /// HTTP client used for OpenSearch `_bulk` writes.
-    pub http: reqwest::Client,
-    /// OpenSearch base URL (`OPENSEARCH_URL`).
-    pub opensearch_url: std::sync::Arc<str>,
+    /// Durable event buffer every normalized document is enqueued to
+    /// (Task 3.0b) — the writer, never this listener, owns all OpenSearch
+    /// writes. See `crate::buffer`'s module-level durability contract.
+    pub buffer: Arc<dyn EventBuffer>,
     /// Time source.
     pub clock: Clock,
     /// Shared ES256 verify key (`JWT_VERIFY_KEY`, PEM SPKI public key —
@@ -169,6 +179,42 @@ fn internal_error() -> Response {
     )
 }
 
+/// Deterministic content-hash `Nats-Msg-Id` dedup key for one normalized,
+/// tenant-stamped document — mirrors `listeners::syslog::dedup_key`'s
+/// tenant+doc content-hash convention, so a retried publish of the same
+/// event is a server-side no-op on the buffer (see `crate::buffer`'s
+/// durability contract) rather than a duplicate document.
+fn dedup_key_for(tenant: &str, doc: &JsonVal) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(tenant.as_bytes());
+    hasher.update(doc.to_compact_string().as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Maps a buffer-push failure onto the ingest HTTP contract: `Full` is 429
+/// Too Many Requests (retryable backpressure — matches the OTLP HTTP
+/// listener's same convention, Spec §7c); `Transport`/`Serialize` are a
+/// genuine server-side fault, 500.
+fn buffer_error_to_response(err: BufferError) -> Response {
+    match err {
+        BufferError::Full => {
+            tracing::warn!(%err, "http ingest push backpressure: event buffer is full");
+            ordered_json(
+                StatusCode::TOO_MANY_REQUESTS,
+                &JsonVal::Obj(vec![("error".to_owned(), JsonVal::Str(err.to_string()))]),
+            )
+        }
+        BufferError::Transport(_) | BufferError::Serialize(_) => {
+            tracing::error!(%err, "http ingest push failed");
+            internal_error()
+        }
+    }
+}
+
 /// `POST /ingest` — accepts a single JSON object or a JSON array of records,
 /// normalizes each to OCSF, bulk-indexes them into the daily OpenSearch index,
 /// and answers `202 {"ingested": <count>}`. Ported verbatim from v1
@@ -193,7 +239,8 @@ fn internal_error() -> Response {
         (status = 401, description = "Missing, invalid, or expired bearer token", body = crate::openapi::IngestErrorResponse),
         (status = 403, description = "Token carries no usable tenant claim, or the skauswatch.log-ingest flag is disabled", body = crate::openapi::IngestErrorResponse),
         (status = 413, description = "Batch exceeds the 10,000 record cap", body = String, content_type = "text/plain"),
-        (status = 500, description = "OCSF normalization failed or the OpenSearch bulk write errored", body = crate::openapi::IngestErrorResponse),
+        (status = 429, description = "Event buffer is full; retry with backoff", body = crate::openapi::IngestErrorResponse),
+        (status = 500, description = "OCSF normalization failed or the event buffer push errored", body = crate::openapi::IngestErrorResponse),
     ),
 )]
 pub(crate) async fn handle_ingest(
@@ -254,13 +301,21 @@ pub(crate) async fn handle_ingest(
         }
     }
 
-    // v1 writes the batch to OpenSearch; an empty batch makes no request.
-    if !docs.is_empty() {
-        let index = daily_index(now);
-        let bulk = build_bulk_body(&index, &docs);
-        if let Err(e) = write_bulk(&state.http, &state.opensearch_url, bulk).await {
-            tracing::error!(error = %e, "opensearch_bulk_failed");
-            return internal_error();
+    // Durably enqueue each normalized, tenant-stamped document — the
+    // writer (never this listener) owns all OpenSearch writes (Task 3.0b;
+    // see this module's doc comment).
+    for doc in &docs {
+        let dedup_key = dedup_key_for(tenant_ctx.tenant.as_str(), doc);
+        let push_result = state
+            .buffer
+            .push(NormalizedEvent {
+                tenant: tenant_ctx.tenant.clone(),
+                doc: doc.clone(),
+                dedup_key,
+            })
+            .await;
+        if let Err(err) = push_result {
+            return buffer_error_to_response(err);
         }
     }
 
@@ -319,13 +374,14 @@ fn jsonro_parse(body: &[u8]) -> Result<JsonVal, ()> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::TimeZone as _;
     use penguin_licensing::LicenseClient;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::buffer::InMemoryBuffer;
+    use crate::opensearch::{build_bulk_body, daily_index};
 
     /// The authoritative `_bulk` body captured from v1 source + opensearch-py
     /// 2.7.1 (see tests/fixtures + docs/v2-port/logs-contract.md). Predates
@@ -381,23 +437,34 @@ mod tests {
         out.into_bytes()
     }
 
-    fn state_for(opensearch_url: &str, clock: Clock, license: Arc<LicenseClient>) -> AppState {
+    fn state_for(
+        buffer: Arc<dyn EventBuffer>,
+        clock: Clock,
+        license: Arc<LicenseClient>,
+    ) -> AppState {
         AppState {
-            http: reqwest::Client::new(),
-            opensearch_url: opensearch_url.into(),
+            buffer,
             clock,
             jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license,
         }
     }
 
+    /// A bounded in-process [`EventBuffer`] with room for `capacity` events
+    /// — the default sink for tests that don't care about buffer behavior
+    /// itself, plus the ones that do (e.g. `capacity == 0` always answers
+    /// [`BufferError::Full`]).
+    fn buffer(capacity: usize) -> Arc<dyn EventBuffer> {
+        Arc::new(InMemoryBuffer::new(capacity))
+    }
+
     /// Boots a `TestServer` for the ingest router with a pinned clock and a
     /// dev-mode (flag-enabled) license client — the default posture for
     /// tests exercising the ingest success/error paths, not the flag gate
     /// itself (see [`test_server_with_license`] for that).
-    fn test_server(opensearch_url: &str) -> axum_test::TestServer {
+    fn test_server(buffer: Arc<dyn EventBuffer>) -> axum_test::TestServer {
         test_server_with_license(
-            opensearch_url,
+            buffer,
             skauswatch_testkit::license::dev_license("skauswatch"),
         )
     }
@@ -406,14 +473,70 @@ mod tests {
     /// by the flag-gate-denied test to exercise the `LOG_INGEST_FLAG` 403
     /// path with a release-mode (flags default OFF) client.
     fn test_server_with_license(
-        opensearch_url: &str,
+        buffer: Arc<dyn EventBuffer>,
         license: Arc<LicenseClient>,
     ) -> axum_test::TestServer {
         axum_test::TestServer::new(router(state_for(
-            opensearch_url,
+            buffer,
             Clock::Fixed(pinned_now()),
             license,
         )))
+    }
+
+    /// `EventBuffer` test double whose `push` always fails with a
+    /// `BufferError::Transport` — exercises the handler's 500 branch, since
+    /// `InMemoryBuffer` never itself produces anything but `Full` (see
+    /// `buffer::inmemory`'s own doc comment).
+    struct AlwaysTransportErrorBuffer;
+
+    #[async_trait::async_trait]
+    impl EventBuffer for AlwaysTransportErrorBuffer {
+        async fn push(&self, _event: NormalizedEvent) -> Result<(), BufferError> {
+            Err(BufferError::Transport(
+                "simulated transport failure".to_owned(),
+            ))
+        }
+        async fn consume(
+            &self,
+            _batch_size: usize,
+        ) -> Result<Vec<crate::buffer::DeliveredEvent>, BufferError> {
+            Ok(Vec::new())
+        }
+        async fn ack(&self, _handle: crate::buffer::AckHandle) -> Result<(), BufferError> {
+            Ok(())
+        }
+        async fn nack(&self, _handle: crate::buffer::AckHandle) -> Result<(), BufferError> {
+            Ok(())
+        }
+    }
+
+    /// `EventBuffer` test double that only counts `push` calls — proves
+    /// `/ingest` enqueues through the buffer and nothing else: after Task
+    /// 3.0b, `AppState` carries no HTTP/OpenSearch client at all, so this
+    /// buffer is the only sink the handler can possibly reach.
+    #[derive(Clone, Default)]
+    struct CountingBuffer {
+        count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl EventBuffer for CountingBuffer {
+        async fn push(&self, _event: NormalizedEvent) -> Result<(), BufferError> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn consume(
+            &self,
+            _batch_size: usize,
+        ) -> Result<Vec<crate::buffer::DeliveredEvent>, BufferError> {
+            Ok(Vec::new())
+        }
+        async fn ack(&self, _handle: crate::buffer::AckHandle) -> Result<(), BufferError> {
+            Ok(())
+        }
+        async fn nack(&self, _handle: crate::buffer::AckHandle) -> Result<(), BufferError> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -426,7 +549,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_object_record_in_batch_returns_internal_error() {
-        let server = test_server("http://unused");
+        let server = test_server(buffer(10));
         let res = server
             .post("/ingest")
             .authorization_bearer(bearer_for(TEST_TENANT))
@@ -437,16 +560,13 @@ mod tests {
         assert_eq!(res.text(), r#"{"error":"Internal Server Error"}"#);
     }
 
+    /// A buffer transport failure (never surfaced by `InMemoryBuffer`
+    /// itself — see [`AlwaysTransportErrorBuffer`]) maps to the same 500
+    /// contract v1's OpenSearch bulk-write failure used to.
     #[tokio::test]
-    async fn opensearch_bulk_failure_returns_internal_error() {
-        let mock = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/_bulk"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&mock)
-            .await;
-
-        let server = test_server(&mock.uri());
+    async fn buffer_push_transport_error_returns_internal_error() {
+        let erased: Arc<dyn EventBuffer> = Arc::new(AlwaysTransportErrorBuffer);
+        let server = test_server(erased);
         let res = server
             .post("/ingest")
             .authorization_bearer(bearer_for(TEST_TENANT))
@@ -457,11 +577,53 @@ mod tests {
         assert_eq!(res.text(), r#"{"error":"Internal Server Error"}"#);
     }
 
+    /// A full buffer answers 429 (retryable backpressure), never a 500 —
+    /// matches the OTLP HTTP listener's identical convention (Spec §7c).
+    #[tokio::test]
+    async fn ingest_returns_429_when_buffer_is_full() {
+        let server = test_server(buffer(0));
+        let res = server
+            .post("/ingest")
+            .authorization_bearer(bearer_for(TEST_TENANT))
+            .content_type("application/json")
+            .text(r#"{"message":"x"}"#)
+            .await;
+        res.assert_status(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// The architectural bug this task fixes: `/ingest` must durably
+    /// enqueue through the shared `EventBuffer` — never bypass it with a
+    /// direct OpenSearch write. `AppState` carries no HTTP/OpenSearch
+    /// client after this fix, so `CountingBuffer` is provably the only
+    /// sink the handler can reach; this test additionally pins the exact
+    /// push count against the response's `ingested` count.
+    #[tokio::test]
+    async fn ingest_pushes_exactly_n_events_to_the_buffer_and_writes_nothing_directly() {
+        let counting = CountingBuffer::default();
+        let erased: Arc<dyn EventBuffer> = Arc::new(counting.clone());
+        let server = test_server(erased);
+
+        let batch = r#"[{"message":"one"},{"message":"two"},{"message":"three"}]"#;
+        let res = server
+            .post("/ingest")
+            .authorization_bearer(bearer_for(TEST_TENANT))
+            .content_type("application/json")
+            .text(batch)
+            .await;
+        res.assert_status(StatusCode::ACCEPTED);
+        assert_eq!(res.text(), r#"{"ingested":3}"#);
+        assert_eq!(
+            counting.count.load(Ordering::SeqCst),
+            3,
+            "exactly 3 events must be pushed to the buffer, none written elsewhere"
+        );
+    }
+
     /// `/healthz` stays outside both the tenant and flag layers — it is the
     /// manager's unauthenticated liveness probe.
     #[tokio::test]
     async fn healthz_body_matches_v1_bytes() {
-        let server = test_server("http://unused");
+        let server = test_server(buffer(10));
         let res = server.get("/healthz").await;
         res.assert_status_ok();
         assert_eq!(res.text(), r#"{"status":"ok","service":"svc-ingest"}"#);
@@ -469,7 +631,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_json_is_plain_text_400() {
-        let server = test_server("http://unused");
+        let server = test_server(buffer(10));
         let res = server
             .post("/ingest")
             .authorization_bearer(bearer_for(TEST_TENANT))
@@ -481,7 +643,7 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_batch_is_413() {
-        let server = test_server("http://unused");
+        let server = test_server(buffer(10));
         let big = format!("[{}]", vec!["{}"; MAX_BATCH + 1].join(","));
         let res = server
             .post("/ingest")
@@ -495,17 +657,8 @@ mod tests {
 
     #[tokio::test]
     async fn single_object_is_wrapped_and_ingested() {
-        let mock = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/_bulk"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"errors": false, "items": []})),
-            )
-            .mount(&mock)
-            .await;
-
-        let server = test_server(&mock.uri());
+        let buf = buffer(10);
+        let server = test_server(buf.clone());
         let res = server
             .post("/ingest")
             .authorization_bearer(bearer_for(TEST_TENANT))
@@ -514,13 +667,20 @@ mod tests {
             .await;
         res.assert_status(StatusCode::ACCEPTED);
         assert_eq!(res.text(), r#"{"ingested":1}"#);
+
+        let delivered = buf.consume(10).await.unwrap();
+        assert_eq!(
+            delivered.len(),
+            1,
+            "the single record must be enqueued to the buffer"
+        );
     }
 
     /// No `Authorization` header at all — `tenant_middleware` rejects before
     /// the handler (or the flag gate) ever runs.
     #[tokio::test]
     async fn ingest_without_bearer_token_is_401() {
-        let server = test_server("http://unused");
+        let server = test_server(buffer(10));
         let res = server
             .post("/ingest")
             .content_type("application/json")
@@ -533,7 +693,7 @@ mod tests {
     /// 401 — matches `skauswatch_auth::TenantAuthError`'s house contract.
     #[tokio::test]
     async fn ingest_with_no_tenant_claim_is_403() {
-        let server = test_server("http://unused");
+        let server = test_server(buffer(10));
         let token = skauswatch_testkit::jwt::mint_claims_token(
             skauswatch_testkit::jwt::signing_key(),
             "tester",
@@ -555,7 +715,7 @@ mod tests {
     #[tokio::test]
     async fn ingest_denied_when_flag_disabled_returns_403() {
         let server = test_server_with_license(
-            "http://unused",
+            buffer(10),
             skauswatch_testkit::license::gated_license("skauswatch"),
         );
         let res = server
@@ -567,23 +727,14 @@ mod tests {
         res.assert_status(StatusCode::FORBIDDEN);
     }
 
-    /// Every document bulk-indexed by `/ingest` carries the caller's JWT
-    /// tenant as a top-level `tenant_id` field — the ingest-side provenance
+    /// Every document enqueued by `/ingest` carries the caller's JWT tenant
+    /// as a top-level `tenant_id` field — the ingest-side provenance
     /// downstream tenant-scoped search (e.g. monitor's `tenant_id` term
     /// filter) depends on.
     #[tokio::test]
     async fn ingested_document_is_stamped_with_caller_tenant() {
-        let mock = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/_bulk"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"errors": false, "items": []})),
-            )
-            .mount(&mock)
-            .await;
-
-        let server = test_server(&mock.uri());
+        let buf = buffer(10);
+        let server = test_server(buf.clone());
         let res = server
             .post("/ingest")
             .authorization_bearer(bearer_for("acme-corp"))
@@ -592,12 +743,14 @@ mod tests {
             .await;
         res.assert_status(StatusCode::ACCEPTED);
 
-        let requests = mock.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 1);
-        let body = String::from_utf8(requests[0].body.clone()).unwrap();
-        assert!(
-            body.contains(r#""tenant_id":"acme-corp""#),
-            "bulk body must carry the JWT tenant: {body}"
+        let delivered = buf.consume(10).await.unwrap();
+        assert_eq!(delivered.len(), 1);
+        let event = &delivered[0].event;
+        assert_eq!(event.tenant.as_str(), "acme-corp");
+        assert_eq!(
+            event.doc.get("tenant_id").and_then(JsonVal::as_str),
+            Some("acme-corp"),
+            "buffered doc must carry the JWT tenant as a top-level field"
         );
     }
 
@@ -608,17 +761,8 @@ mod tests {
     /// tenant boundary via request content (`docs/v2-port/tenancy-model.md`).
     #[tokio::test]
     async fn body_supplied_tenant_id_does_not_override_jwt_tenant() {
-        let mock = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/_bulk"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"errors": false, "items": []})),
-            )
-            .mount(&mock)
-            .await;
-
-        let server = test_server(&mock.uri());
+        let buf = buffer(10);
+        let server = test_server(buf.clone());
         let res = server
             .post("/ingest")
             .authorization_bearer(bearer_for("honest-tenant"))
@@ -627,35 +771,28 @@ mod tests {
             .await;
         res.assert_status(StatusCode::ACCEPTED);
 
-        let requests = mock.received_requests().await.unwrap();
-        let body = String::from_utf8(requests[0].body.clone()).unwrap();
-        // The document line ends with the stamped top-level `tenant_id` —
-        // the JWT tenant, not the body-supplied one — appended after the
+        let delivered = buf.consume(10).await.unwrap();
+        let doc_str = delivered[0].event.doc.to_compact_string();
+        // The document ends with the stamped top-level `tenant_id` — the
+        // JWT tenant, not the body-supplied one — appended after the
         // `raw_data` object that still echoes the caller's original (evil)
         // value verbatim as inert, untrusted payload data.
-        let expected_doc_suffix = "\"raw_data\":{\"tenant_id\":\"evil-tenant\",\"message\":\"spoof attempt\"},\"tenant_id\":\"honest-tenant\"}\n";
+        let expected_doc_suffix = "\"raw_data\":{\"tenant_id\":\"evil-tenant\",\"message\":\"spoof attempt\"},\"tenant_id\":\"honest-tenant\"}";
         assert!(
-            body.ends_with(expected_doc_suffix),
-            "expected doc to end with {expected_doc_suffix:?}, got: {body}"
+            doc_str.ends_with(expected_doc_suffix),
+            "expected doc to end with {expected_doc_suffix:?}, got: {doc_str}"
         );
     }
 
     /// End-to-end parity: POST the exact v1 batch (now authenticated) and
-    /// assert both the response shape AND the outgoing OpenSearch `_bulk`
-    /// body match v1 byte-for-byte, modulo the tenant stamp this pass adds.
+    /// assert both the response shape AND the buffered documents —
+    /// reassembled into a `_bulk` body — match v1 byte-for-byte, modulo the
+    /// tenant stamp this pass adds. Proves the fix without reintroducing a
+    /// direct OpenSearch dependency into the handler under test.
     #[tokio::test]
-    async fn ingest_bulk_body_matches_v1_reference() {
-        let mock = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/_bulk"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"errors": false, "items": []})),
-            )
-            .mount(&mock)
-            .await;
-
-        let server = test_server(&mock.uri());
+    async fn ingest_buffered_docs_reproduce_v1_bulk_reference_bytes() {
+        let buf = buffer(10);
+        let server = test_server(buf.clone());
 
         let res = server
             .post("/ingest")
@@ -667,12 +804,18 @@ mod tests {
         res.assert_status(StatusCode::ACCEPTED);
         assert_eq!(res.text(), r#"{"ingested":7}"#);
 
-        let requests = mock.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 1, "exactly one _bulk POST");
+        let delivered = buf.consume(10).await.unwrap();
         assert_eq!(
-            requests[0].body,
-            stamp_bulk_reference(BULK_REFERENCE, TEST_TENANT),
-            "outgoing _bulk body must match v1 byte-for-byte, plus the tenant stamp"
+            delivered.len(),
+            7,
+            "all 7 records must be enqueued to the buffer"
+        );
+        let docs: Vec<JsonVal> = delivered.into_iter().map(|d| d.event.doc).collect();
+        let body = build_bulk_body(&daily_index(pinned_now()), &docs);
+        assert_eq!(
+            body.as_bytes(),
+            stamp_bulk_reference(BULK_REFERENCE, TEST_TENANT).as_slice(),
+            "buffered docs must reconstruct the v1 bulk body byte-for-byte, plus the tenant stamp"
         );
     }
 
@@ -692,7 +835,7 @@ mod tests {
             .iter()
             .map(|r| normalize(r, "ingest-test", now).unwrap())
             .collect();
-        let body = build_bulk_body(&crate::opensearch::daily_index(now), &docs);
+        let body = build_bulk_body(&daily_index(now), &docs);
         assert_eq!(body.as_bytes(), BULK_REFERENCE);
     }
 
@@ -727,7 +870,7 @@ mod tests {
     /// document missing a required field returns 400.
     #[tokio::test]
     async fn native_ocsf_document_with_missing_required_field_is_400() {
-        let server = test_server("http://unused");
+        let server = test_server(buffer(10));
         // Send a document that has class_uid (OCSF marker) but is missing
         // other required fields (e.g., time, severity_id, etc.). This should
         // be rejected with 400 because it's identified as native OCSF.
@@ -745,19 +888,10 @@ mod tests {
     /// accepted and indexed as-is (not re-normalized).
     #[tokio::test]
     async fn complete_native_ocsf_document_is_accepted() {
-        let mock = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/_bulk"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"errors": false, "items": []})),
-            )
-            .mount(&mock)
-            .await;
-
-        let server = test_server(&mock.uri());
+        let buf = buffer(10);
+        let server = test_server(buf.clone());
         // Send a complete native OCSF document with all required fields.
-        // It should pass validation and be indexed.
+        // It should pass validation and be enqueued.
         let ocsf_doc = r#"{
             "class_uid": 2001,
             "class_name": "security_finding",
@@ -776,24 +910,22 @@ mod tests {
             .await;
         res.assert_status(StatusCode::ACCEPTED);
         assert_eq!(res.text(), r#"{"ingested":1}"#);
+
+        let delivered = buf.consume(10).await.unwrap();
+        assert_eq!(
+            delivered.len(),
+            1,
+            "the native OCSF document must be enqueued to the buffer"
+        );
     }
 
     /// JSON arrays can contain a mix of generic JSON (normalized) and complete
-    /// native OCSF documents (validated + indexed as-is). This verifies that
+    /// native OCSF documents (validated + enqueued as-is). This verifies that
     /// heterogeneous batches work correctly.
     #[tokio::test]
-    async fn json_array_of_generic_and_ocsf_documents_are_both_indexed() {
-        let mock = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/_bulk"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"errors": false, "items": []})),
-            )
-            .mount(&mock)
-            .await;
-
-        let server = test_server(&mock.uri());
+    async fn json_array_of_generic_and_ocsf_documents_are_both_enqueued() {
+        let buf = buffer(10);
+        let server = test_server(buf.clone());
         // Mix of generic JSON (no OCSF markers) and complete native OCSF
         let batch = r#"[
             {"message": "generic log"},
@@ -817,11 +949,11 @@ mod tests {
         res.assert_status(StatusCode::ACCEPTED);
         assert_eq!(res.text(), r#"{"ingested":2}"#);
 
-        let requests = mock.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 1, "exactly one _bulk POST");
-        let body = String::from_utf8(requests[0].body.clone()).unwrap();
-        // Both documents should have been indexed (2 action+doc line pairs = 4 lines).
-        let line_count = body.lines().count();
-        assert_eq!(line_count, 4, "batch must contain both documents");
+        let delivered = buf.consume(10).await.unwrap();
+        assert_eq!(
+            delivered.len(),
+            2,
+            "both documents must be enqueued to the buffer"
+        );
     }
 }
