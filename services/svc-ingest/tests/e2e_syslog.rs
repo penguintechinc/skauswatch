@@ -28,65 +28,11 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::{
-    search_opensearch, send_syslog_tcp, send_syslog_udp, setup_test_db, spawn_receiver_with_env,
-    spawn_writer, start_nats, start_opensearch,
+    send_syslog_tcp, send_syslog_udp, setup_test_db, spawn_receiver_with_env, spawn_writer,
+    start_nats, start_opensearch, wait_for_message,
 };
 use uuid::Uuid;
-
-/// Upper bound on waiting for one specific syslog-originated message to
-/// become searchable in `skauswatch-logs-*`. `tests/common/mod.rs`'s own
-/// `DOCUMENT_INDEXED_TIMEOUT` is private to that module (and matched by
-/// `wait_for_document`'s tenant-only query, which this test can't reuse
-/// as-is -- see [`wait_for_message`]'s doc comment) so this test defines
-/// its own, same duration.
-const MESSAGE_INDEXED_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Polls `{tenant}`-scoped `skauswatch-logs-*` documents for one whose
-/// `message` field contains `marker`, bounded by
-/// [`MESSAGE_INDEXED_TIMEOUT`]. This test can't reuse
-/// `common::wait_for_document`'s tenant-only match: every syslog UDP/TCP
-/// packet sent in this test resolves to the *same* fixed
-/// `SYSLOG_UDP_TENANT_ID` tenant (Spec §6c -- trusted-CIDR UDP/TCP syslog
-/// has no per-message tenant of its own, unlike `/ingest`'s per-request JWT
-/// tenant that `tests/e2e_harness_smoke.rs`'s unique-tenant-per-run marker
-/// relies on), so a bare "does this tenant have any document yet" check
-/// would pass on the first of four messages and tell us nothing about the
-/// other three.
-async fn wait_for_message(
-    opensearch_url: &str,
-    tenant: &str,
-    marker: &str,
-) -> anyhow::Result<serde_json::Value> {
-    let query = serde_json::json!({
-        "query": {
-            "bool": {
-                "filter": [{ "term": { "tenant_id.keyword": tenant } }],
-                "must": [{ "match_phrase": { "message": marker } }]
-            }
-        }
-    });
-    tokio::time::timeout(MESSAGE_INDEXED_TIMEOUT, async {
-        loop {
-            if let Ok(body) = search_opensearch(opensearch_url, "skauswatch-logs-*", &query).await {
-                let hits = body["hits"]["total"]["value"].as_u64().unwrap_or(0);
-                if hits > 0 {
-                    return body;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    })
-    .await
-    .map_err(|_| {
-        anyhow::anyhow!(
-            "timed out after {MESSAGE_INDEXED_TIMEOUT:?} waiting for a document with \
-             tenant_id={tenant} message~={marker}"
-        )
-    })
-}
 
 /// Builds an RFC 3164 line (`<PRI>MMM DD HH:MM:SS HOSTNAME MESSAGE`) whose
 /// message body is exactly `marker` -- always parses (fixed, valid

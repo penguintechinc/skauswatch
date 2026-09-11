@@ -253,6 +253,18 @@ pub async fn start_opensearch() -> Result<OpenSearchHandle> {
     // active poll: OpenSearch's JSON log lines are too version/plugin-set
     // dependent to pattern-match reliably, whereas polling the cluster
     // health API is the documented readiness contract.
+    wait_for_opensearch_health(&url).await?;
+
+    Ok(OpenSearchHandle {
+        _container: container,
+        url,
+    })
+}
+
+/// Polls `{url}/_cluster/health` until it answers 2xx, bounded by
+/// [`CONTAINER_STARTUP_TIMEOUT`] — [`start_opensearch`]'s own first-boot
+/// readiness gate.
+async fn wait_for_opensearch_health(url: &str) -> Result<()> {
     let client = reqwest::Client::new();
     let health_url = format!("{url}/_cluster/health");
     bounded(
@@ -272,12 +284,7 @@ pub async fn start_opensearch() -> Result<OpenSearchHandle> {
             }
         },
     )
-    .await?;
-
-    Ok(OpenSearchHandle {
-        _container: container,
-        url,
-    })
+    .await
 }
 
 /// `POST {opensearch_url}/{index_pattern}/_search` with an arbitrary query
@@ -886,6 +893,33 @@ impl WriterProcess {
     pub async fn output(&self) -> String {
         self.output.snapshot().await
     }
+
+    /// SIGKILLs this writer process immediately (`Child::start_kill` — no
+    /// graceful SIGTERM/shutdown) and waits (bounded,
+    /// [`PROCESS_READY_TIMEOUT`]) for it to actually exit. Simulates an
+    /// ungraceful writer crash (Spec §14 durability) so a subsequently
+    /// [`spawn_writer`]ed process against the SAME NATS/JetStream +
+    /// OpenSearch can prove the durable-consumer-resume guarantee, rather
+    /// than merely a graceful restart.
+    ///
+    /// # Errors
+    /// Returns an error if the kill signal cannot be sent, or the process
+    /// does not exit within [`PROCESS_READY_TIMEOUT`].
+    pub async fn kill_and_wait(&mut self) -> Result<()> {
+        self.child.start_kill().context("SIGKILL writer process")?;
+        bounded(
+            PROCESS_READY_TIMEOUT,
+            "killed writer process to exit",
+            async {
+                self.child
+                    .wait()
+                    .await
+                    .context("wait for killed writer process to exit")?;
+                Ok(())
+            },
+        )
+        .await
+    }
 }
 
 impl Drop for WriterProcess {
@@ -907,6 +941,36 @@ pub async fn spawn_writer(
     nats: &NatsHandle,
     opensearch: &OpenSearchHandle,
 ) -> Result<WriterProcess> {
+    spawn_writer_with_opensearch_url(nats, &opensearch.url).await
+}
+
+/// Identical to [`spawn_writer`], except the writer's `OPENSEARCH_URL` is
+/// `opensearch_url` verbatim rather than a live [`OpenSearchHandle`]'s own
+/// URL — the seam `tests/e2e_durability.rs`'s DLQ scenario uses to point a
+/// writer at a deliberately unreachable OpenSearch endpoint (e.g.
+/// `"http://127.0.0.1:1"`, the same unreachable-address convention
+/// `src/opensearch/mod.rs`'s own `write_bulk_propagates_transport_failure`
+/// unit test uses) without ever needing to stop or restart a real
+/// container. Stopping/restarting the SAME `testcontainers`-managed
+/// OpenSearch container was evaluated and rejected for that scenario: in
+/// this sandbox's Docker networking setup, a container's published port
+/// forwarding does not reliably survive a `stop`+`start` cycle on the same
+/// container — the container itself becomes healthy again internally (its
+/// own logs report `cluster health status changed ... GREEN`), but the
+/// host-side published port then refuses connections, empirically verified
+/// against a real `opensearchproject/opensearch:2` container outside of
+/// this harness. A dead URL sidesteps that Docker/environment quirk
+/// entirely while exercising the exact same `opensearch::write_bulk`
+/// connection-failure code path.
+///
+/// # Errors
+/// Returns an error if the process cannot be spawned, or exits/times out
+/// before `/healthz` answers 2xx (captured stdout/stderr included in the
+/// message).
+pub async fn spawn_writer_with_opensearch_url(
+    nats: &NatsHandle,
+    opensearch_url: &str,
+) -> Result<WriterProcess> {
     let bin = env!("CARGO_BIN_EXE_skauswatch-svc-ingest");
     let ports = free_tcp_ports(2).context("allocate writer ports")?;
     let &[health_port, metrics_port] = ports.as_slice() else {
@@ -926,7 +990,7 @@ pub async fn spawn_writer(
         // metrics port so receiver + writer don't race to bind :9090 when
         // co-located on one host.
         .env("METRICS_PORT", metrics_port.to_string())
-        .env("OPENSEARCH_URL", &opensearch.url)
+        .env("OPENSEARCH_URL", opensearch_url)
         .env("NATS_URL", &nats.url)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1161,6 +1225,373 @@ pub async fn send_otlp_grpc(
             req.metadata_mut().insert("authorization", auth_value);
             client.export(req).await.context("LogsService.Export")?;
             Ok(())
+        },
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------
+// Durability test helpers: raw JetStream producer, DLQ inspection, and
+// exact-count OpenSearch polling (`tests/e2e_durability.rs`).
+// ---------------------------------------------------------------------
+
+/// Mirrors `crate::config::DEFAULT_NATS_JETSTREAM_SUBJECT_PREFIX` (private
+/// to the service binary; this harness runs as a separate crate/process and
+/// cannot reference it directly). Every [`spawn_receiver`]/[`spawn_writer`]
+/// call in this harness leaves `NATS_JETSTREAM_SUBJECT_PREFIX` unset, so both
+/// always resolve to this same default — a [`RawEventProducer`] publishing
+/// under it lands on the exact stream/subject the real receiver and writer
+/// use.
+const INGEST_SUBJECT_PREFIX: &str = "svc-ingest.logs";
+
+/// Header name carrying the server-validated tenant on a published message —
+/// mirrors `crate::buffer::jetstream::JetStreamBuffer`'s private
+/// `TENANT_HEADER` constant (`"Skauswatch-Tenant"`), duplicated here for the
+/// same reason [`hash_ingest_token`] duplicates `crate::auth::hash_token`
+/// above: this harness is a separate crate/process and cannot reference the
+/// service binary's private items directly.
+const RAW_TENANT_HEADER: &str = "Skauswatch-Tenant";
+
+/// Subject prefix for `skauswatch-svc-ingest`'s dead-letter sink — mirrors
+/// `crate::writer::DLQ_SUBJECT_PREFIX` (private to the service binary;
+/// duplicated here for the same reason as [`INGEST_SUBJECT_PREFIX`] above).
+/// Contains no `.`, so the derived JetStream stream name
+/// (`crate::buffer::jetstream::JetStreamBuffer::stream_name`'s
+/// dot-to-underscore substitution) is this exact string, unchanged.
+const DLQ_STREAM_NAME: &str = "svc-ingest-dlq";
+
+/// Publishes events directly onto `skauswatch-svc-ingest`'s durable
+/// JetStream buffer, bypassing every protocol listener (syslog/OTLP/HTTPS)
+/// entirely — the "direct buffer push" seeding path
+/// `tests/e2e_durability.rs` uses so it can control exactly which events
+/// land on the stream, and when, independent of any receiver process's
+/// lifecycle. Reproduces `crate::buffer::jetstream::JetStreamBuffer::push`'s
+/// exact wire contract (same subject scheme, header names, and an awaited
+/// `PublishAck`) rather than reusing that type directly: this service crate
+/// has no `[lib]` target (see `src/buffer/mod.rs`'s own doc comment), so
+/// nothing outside `main.rs`'s module tree can import it.
+pub struct RawEventProducer {
+    context: async_nats::jetstream::Context,
+}
+
+impl RawEventProducer {
+    /// Connects to `nats` and ensures the main ingest stream exists
+    /// (idempotent `get_or_create_stream`, the identical config
+    /// `JetStreamBuffer::stream_config` builds) — required before the first
+    /// publish, for exactly the reason `crate::writer::build_dlq_buffer`'s
+    /// doc comment documents for the push-only DLQ sink: a stream that has
+    /// never been bound by a consumer (i.e. no writer has ever run yet)
+    /// does not exist, and JetStream rejects a publish to a subject with no
+    /// backing stream ("no stream found for given subject") rather than
+    /// creating one on the fly.
+    ///
+    /// # Errors
+    /// Returns an error if the NATS connection or stream provisioning
+    /// fails, within [`CONTAINER_STARTUP_TIMEOUT`].
+    pub async fn connect(nats: &NatsHandle) -> Result<Self> {
+        bounded(
+            CONTAINER_STARTUP_TIMEOUT,
+            "raw event producer nats connect + ensure_stream",
+            async {
+                let client = async_nats::connect(&nats.url)
+                    .await
+                    .context("connect raw event producer to nats")?;
+                let context = async_nats::jetstream::new(client);
+                let stream_name = INGEST_SUBJECT_PREFIX.replace('.', "_");
+                context
+                    .get_or_create_stream(async_nats::jetstream::stream::Config {
+                        name: stream_name,
+                        subjects: vec![format!("{INGEST_SUBJECT_PREFIX}.>")],
+                        ..Default::default()
+                    })
+                    .await
+                    .context("ensure main ingest stream exists")?;
+                Ok(Self { context })
+            },
+        )
+        .await
+    }
+
+    /// Publishes one event under `tenant`, with `dedup_key` as the
+    /// `Nats-Msg-Id` header (JetStream's server-side dedup key — see
+    /// `crate::buffer::jetstream::JetStreamBuffer::push`'s doc comment) and
+    /// `doc` as the JSON body. Does not return until the `PublishAck`
+    /// resolves — mirrors the production durability contract documented on
+    /// `crate::buffer` (module-level doc comment): never fire-and-forget.
+    /// Bounded by [`HTTP_CALL_TIMEOUT`].
+    ///
+    /// # Errors
+    /// Returns an error if the publish or its ack fails, within
+    /// [`HTTP_CALL_TIMEOUT`].
+    pub async fn publish(
+        &self,
+        tenant: &str,
+        dedup_key: &str,
+        doc: &serde_json::Value,
+    ) -> Result<()> {
+        bounded(HTTP_CALL_TIMEOUT, "raw event producer publish", async {
+            let subject = format!("{INGEST_SUBJECT_PREFIX}.{tenant}");
+            let mut headers = async_nats::HeaderMap::new();
+            headers.insert("Nats-Msg-Id", dedup_key);
+            headers.insert(RAW_TENANT_HEADER, tenant);
+            let payload =
+                bytes::Bytes::from(serde_json::to_vec(doc).context("serialize event doc")?);
+            self.context
+                .publish_with_headers(subject, headers, payload)
+                .await
+                .context("publish event")?
+                .await
+                .context("await publish ack")?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+/// Reads the dead-letter sink's current message count directly from
+/// JetStream (`Stream::get_info`'s `state.messages`) — `None` when the
+/// stream does not exist yet (e.g. no writer process has ever started, or
+/// the production "no stream found for given subject" regression this
+/// durability suite guards against — see `crate::writer::build_dlq_buffer`'s
+/// doc comment). Bounded by [`HTTP_CALL_TIMEOUT`].
+///
+/// # Errors
+/// Returns an error if the NATS connection itself fails, within
+/// [`HTTP_CALL_TIMEOUT`].
+pub async fn count_dlq_messages(nats_url: &str) -> Result<Option<u64>> {
+    bounded(HTTP_CALL_TIMEOUT, "read dlq stream message count", async {
+        let client = async_nats::connect(nats_url)
+            .await
+            .context("connect to nats to read dlq stream")?;
+        let context = async_nats::jetstream::new(client);
+        match context.get_stream(DLQ_STREAM_NAME).await {
+            Ok(stream) => {
+                let info = stream.get_info().await.context("read dlq stream info")?;
+                Ok(Some(info.state.messages))
+            }
+            Err(_) => Ok(None),
+        }
+    })
+    .await
+}
+
+/// Polls [`count_dlq_messages`] (bounded by `timeout`) until it reports at
+/// least `expected` messages — the assertion `tests/e2e_durability.rs`'s
+/// OpenSearch-down scenario uses to prove permanently-failing events are
+/// routed to the dead-letter sink rather than silently dropped, and that
+/// the sink's stream genuinely exists (a `None` result the whole time, at
+/// timeout, is exactly the "no stream found for given subject" regression
+/// this suite guards against).
+///
+/// # Errors
+/// Returns an error (via [`bounded`]'s timeout message) if `expected` is
+/// not reached within `timeout`.
+pub async fn wait_for_dlq_count(nats_url: &str, expected: u64, timeout: Duration) -> Result<u64> {
+    bounded(
+        timeout,
+        &format!("dlq stream to report >= {expected} messages"),
+        async {
+            loop {
+                if let Ok(Some(n)) = count_dlq_messages(nats_url).await
+                    && n >= expected
+                {
+                    return Ok(n);
+                }
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        },
+    )
+    .await
+}
+
+/// Polls `{tenant}`-scoped `skauswatch-logs-*` documents until at least
+/// `expected` are searchable, bounded by `timeout`, then returns every
+/// matching hit's `_source` — the general-purpose "how many (and which)
+/// documents landed for this tenant" helper `tests/e2e_durability.rs`'s
+/// crash-recovery and dedup scenarios use instead of [`wait_for_message`]'s
+/// single-marker match. Unlike [`wait_for_document`] (first-hit-only), this
+/// returns the full matching set so a caller can assert exact counts (zero
+/// loss, zero duplicates) and inspect every document's content.
+///
+/// # Errors
+/// Returns an error if fewer than `expected` documents become searchable
+/// within `timeout`.
+pub async fn wait_for_tenant_hit_count(
+    opensearch_url: &str,
+    tenant: &str,
+    expected: usize,
+    timeout: Duration,
+) -> Result<Vec<serde_json::Value>> {
+    let query = serde_json::json!({
+        "size": (expected * 2).max(10),
+        "query": { "term": { "tenant_id.keyword": tenant } }
+    });
+    bounded(
+        timeout,
+        &format!("{expected} documents with tenant_id={tenant} to become searchable"),
+        async {
+            loop {
+                if let Ok(body) =
+                    search_opensearch(opensearch_url, "skauswatch-logs-*", &query).await
+                    && let Some(hits) = body["hits"]["hits"].as_array()
+                    && hits.len() >= expected
+                {
+                    return Ok(hits.iter().map(|h| h["_source"].clone()).collect());
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        },
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------
+// Deterministic mid-flight writer-crash simulation (fix round 1).
+//
+// A fixed sleep-then-kill delay is a race: on a fast local NATS +
+// OpenSearch, a small batch can fully drain (bulk write + every per-event
+// ack) well inside that delay, so the SIGKILL always lands on an already-
+// idle writer and the durable-consumer redelivery/resume path is never
+// exercised — a false green (`writer_crash_and_restart_causes_zero_loss`
+// would pass on writer1's own work alone). [`StallingOpenSearch`] removes
+// the race entirely: a writer pointed at it can never complete a
+// bulk-write call (it never receives a response), so the moment its
+// durable consumer shows a nonzero `num_ack_pending`, the ENTIRE fetched
+// batch is deterministically stuck in flight, unacked, for as long as the
+// test wants — no timing luck involved.
+// ---------------------------------------------------------------------
+
+/// A TCP listener that accepts connections and never responds to them —
+/// see this section's module comment. Any HTTP client (e.g. the writer's
+/// `reqwest::Client`, which carries no request timeout — see
+/// `bootstrap::run_writer`) that sends a request to [`Self::url`] blocks
+/// on `.send().await` forever. Dropping this stops the accept loop; a
+/// connection already accepted before the drop is only released when its
+/// peer (the writer process) itself exits or is killed.
+pub struct StallingOpenSearch {
+    /// `http://127.0.0.1:{port}` — pass to [`spawn_writer_with_opensearch_url`]
+    /// to guarantee that writer's bulk-write call blocks forever.
+    pub url: String,
+    _shutdown: tokio::sync::oneshot::Sender<()>,
+}
+
+/// Starts a [`StallingOpenSearch`] black hole on an ephemeral loopback
+/// port.
+///
+/// # Errors
+/// Returns an error if the listener cannot be bound.
+pub async fn start_stalling_opensearch() -> Result<StallingOpenSearch> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("bind stalling opensearch listener")?;
+    let port = listener
+        .local_addr()
+        .context("read stalling opensearch listener addr")?
+        .port();
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => break,
+                accepted = listener.accept() => {
+                    let Ok((mut socket, _)) = accepted else { break; };
+                    // Hold the connection open forever, never writing a
+                    // response back — the peer's HTTP client blocks
+                    // indefinitely waiting for one. Still drains incoming
+                    // bytes so the writer's own request write doesn't
+                    // itself stall on a full socket receive buffer.
+                    tokio::spawn(async move {
+                        use tokio::io::AsyncReadExt as _;
+                        let mut buf = [0_u8; 4096];
+                        loop {
+                            match socket.read(&mut buf).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(_) => {}
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    });
+    Ok(StallingOpenSearch {
+        url: format!("http://127.0.0.1:{port}"),
+        _shutdown: shutdown_tx,
+    })
+}
+
+/// Name of the main ingest durable, explicit-ack pull consumer
+/// `JetStreamBuffer::consumer` binds — deterministic
+/// (`{stream_name}-consumer`, `stream_name` being [`INGEST_SUBJECT_PREFIX`]
+/// with `.` replaced by `_`; see `JetStreamBuffer::stream_name`/
+/// `consumer`). Duplicated here for the same reason as
+/// [`INGEST_SUBJECT_PREFIX`] above.
+const INGEST_CONSUMER_NAME: &str = "svc-ingest_logs-consumer";
+
+/// Reads the main ingest durable consumer's current `num_ack_pending` —
+/// the count of messages JetStream has delivered to a puller but not yet
+/// received an ack/nack for (a **live** server-side read — `Consumer::
+/// get_info` — not a locally cached value). This is the anti-false-green
+/// guard `tests/e2e_durability.rs`'s crash-recovery scenario requires: if
+/// a just-killed writer left zero messages ack-pending, the kill did not
+/// land mid-flight and the durable-consumer redelivery/resume path this
+/// suite exists to prove was never exercised.
+///
+/// # Errors
+/// Returns an error if the NATS connection, or the stream/consumer lookup,
+/// fails (e.g. called before any writer has ever bound the consumer) —
+/// within [`HTTP_CALL_TIMEOUT`].
+pub async fn ingest_consumer_ack_pending(nats_url: &str) -> Result<usize> {
+    bounded(
+        HTTP_CALL_TIMEOUT,
+        "read ingest consumer ack-pending count",
+        async {
+            let client = async_nats::connect(nats_url)
+                .await
+                .context("connect to nats to read consumer info")?;
+            let context = async_nats::jetstream::new(client);
+            let stream_name = INGEST_SUBJECT_PREFIX.replace('.', "_");
+            let stream = context
+                .get_stream(&stream_name)
+                .await
+                .context("get main ingest stream")?;
+            let consumer: async_nats::jetstream::consumer::PullConsumer = stream
+                .get_consumer(INGEST_CONSUMER_NAME)
+                .await
+                .map_err(|e| anyhow::anyhow!("get main ingest durable consumer: {e}"))?;
+            let info = consumer.get_info().await.context("read consumer info")?;
+            Ok(info.num_ack_pending)
+        },
+    )
+    .await
+}
+
+/// Polls [`ingest_consumer_ack_pending`] (bounded by `timeout`) until it
+/// reports at least `min` — the wait `tests/e2e_durability.rs`'s
+/// crash-recovery scenario uses to confirm a writer has actually fetched a
+/// batch (and, against a [`StallingOpenSearch`], is now genuinely and
+/// permanently stuck on it) before killing that writer.
+///
+/// # Errors
+/// Returns an error (via [`bounded`]'s timeout message) if `min` is not
+/// reached within `timeout`.
+pub async fn wait_for_ack_pending_at_least(
+    nats_url: &str,
+    min: usize,
+    timeout: Duration,
+) -> Result<usize> {
+    bounded(
+        timeout,
+        &format!("ingest consumer to report >= {min} ack-pending messages"),
+        async {
+            loop {
+                if let Ok(n) = ingest_consumer_ack_pending(nats_url).await
+                    && n >= min
+                {
+                    return Ok(n);
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         },
     )
     .await
