@@ -9,6 +9,12 @@
 //! adds no live `/openapi.json` route — standing up an authenticated live-doc
 //! route is a separate piece of work once this service has an auth layer to
 //! gate it with (per `docs/v2-port/openapi-pattern.md` §5-6).
+//!
+//! Task 2.1 adds `crate::admin`'s `PUT /api/v1/admin/ingest/lifecycle` and
+//! `POST /api/v1/admin/ingest/restore` — both bearer-JWT + scope gated (see
+//! that module's doc comment), never the `skauswatch.log-ingest` flag
+//! (cluster lifecycle configuration is not the tenant-facing ingest data
+//! plane that flag gates).
 
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -62,9 +68,24 @@ pub(crate) struct ReadyResponse {
         crate::listeners::http::handle_ingest,
         crate::listeners::http::handle_health,
         crate::listeners::http::handle_ready,
+        crate::admin::handle_put_lifecycle,
+        crate::admin::handle_post_restore,
     ),
-    components(schemas(IngestAcceptedResponse, IngestErrorResponse, HealthResponse, ReadyResponse)),
-    tags((name = "svc-ingest", description = "OCSF/JSON ingest and liveness")),
+    components(schemas(
+        IngestAcceptedResponse,
+        IngestErrorResponse,
+        HealthResponse,
+        ReadyResponse,
+        crate::admin::LifecycleRequest,
+        crate::admin::LifecycleResponse,
+        crate::admin::RestoreRequest,
+        crate::admin::RestoreResponse,
+        crate::admin::AdminErrorResponse,
+    )),
+    tags(
+        (name = "svc-ingest", description = "OCSF/JSON ingest and liveness"),
+        (name = "svc-ingest-admin", description = "ISM hot/warm/cold lifecycle configuration and cold-tier restore"),
+    ),
     modifiers(&SecurityAddon),
 )]
 pub(crate) struct ApiDoc;
