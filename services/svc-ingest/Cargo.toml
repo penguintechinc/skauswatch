@@ -13,11 +13,33 @@ authors.workspace = true
 name = "skauswatch-svc-ingest"
 path = "src/main.rs"
 
+# `testutil` compiles `crate::buffer::InMemoryBuffer` (normally
+# test-only/`cfg(test)`-gated) outside of `cargo test` too — for local
+# dev/manual runs against the in-process fallback without a live NATS
+# broker. Never enabled in the shipped container image.
+[features]
+testutil = []
+
 [dependencies]
 anyhow = { workspace = true }
+# async-trait: `EventBuffer` and the `buffer::jetstream` internal
+# publish-ack seam are both `#[async_trait::async_trait]` traits — added
+# by Task 0.3, not in Task 0.2's original dependency list. Already pinned
+# in `[workspace.dependencies]` (`=0.1.89`).
+async-trait = { workspace = true }
 axum = { workspace = true }
+# bytes: `async_nats::jetstream::Context::publish_with_headers` takes a
+# `bytes::Bytes` payload; async-nats does not re-export `bytes` at its
+# crate root, so this is a direct dependency (Task 0.3). Already pinned in
+# `[workspace.dependencies]` (`=1.12.1`).
+bytes = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
+# futures: `JetStreamBuffer::consume` iterates the `futures_util::Stream`
+# JetStream's pull-consumer `fetch().messages()` returns; async-nats
+# re-exports neither `futures` nor `futures_util`. Already pinned in
+# `[workspace.dependencies]` (`=0.3.32`).
+futures = { workspace = true }
 jsonwebtoken = { workspace = true }
 metrics = { workspace = true }
 penguin-licensing = { workspace = true, features = ["axum"] }

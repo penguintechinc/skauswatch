@@ -6639,10 +6639,13 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "async-nats",
+ "async-trait",
  "axum",
  "axum-test",
+ "bytes",
  "chrono",
  "clap",
+ "futures",
  "jsonwebtoken",
  "metrics",
  "mockall",
