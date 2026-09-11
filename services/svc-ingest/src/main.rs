@@ -216,10 +216,11 @@ mod migrate_tests {
 
     /// Guards the embedded migrator against silent drift from
     /// `services/svc-ingest/migrations/*.sql` — see `Command::Migrate`.
-    /// Zero at scaffold time (Task 0.2); Task 1.4 adds the first migration
-    /// and must bump this count.
+    /// Zero at scaffold time (Task 0.2); Task 1.4 added the first
+    /// migration (`0001_ingest_identity.sql`) and bumps this count, per
+    /// this comment's own instruction.
     #[test]
     fn migrator_embeds_expected_migration_count() {
-        assert_eq!(MIGRATOR.iter().count(), 0);
+        assert_eq!(MIGRATOR.iter().count(), 1);
     }
 }

@@ -6657,6 +6657,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "skauswatch-auth",
  "skauswatch-db",
  "skauswatch-identity",
