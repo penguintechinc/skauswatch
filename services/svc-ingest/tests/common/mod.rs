@@ -41,6 +41,7 @@
 //! | [`spawn_receiver`] | Spawns `skauswatch-svc-ingest serve --mode receiver` wired to the above |
 //! | [`spawn_receiver_with_env`] | Same as `spawn_receiver`, plus caller-supplied extra env vars (e.g. `SYSLOG_UDP_ENABLED`) |
 //! | [`spawn_writer`] | Spawns `skauswatch-svc-ingest serve --mode writer` wired to NATS + OpenSearch |
+//! | [`spawn_writer_with_env`] | Same as `spawn_writer`, plus caller-supplied extra env vars (e.g. `OTEL_EXPORTER_OTLP_ENDPOINT`) |
 //! | [`post_ingest`] | `POST /ingest` against a running receiver |
 //! | [`send_syslog_udp`] / [`send_syslog_tcp`] | Send one raw syslog line to a receiver's `syslog_port` over UDP/TCP |
 //! | [`wait_for_document`] | Bounded poll of OpenSearch for a document matching a `tenant_id` term |
@@ -732,6 +733,10 @@ pub struct ReceiverProcess {
     pub otlp_grpc_port: u16,
     /// OTLP HTTP logs port (`OTLP_HTTP_PORT`).
     pub otlp_http_port: u16,
+    /// Prometheus exporter port (`METRICS_PORT`) — scrape
+    /// `http://127.0.0.1:{metrics_port}/metrics` to verify the six Spec
+    /// §11a metrics (`skauswatch_telemetry::install_metrics_exporter`).
+    pub metrics_port: u16,
     /// The JWT fixture this receiver was started with — mint bearer
     /// tokens against it via [`JwtFixture::mint`] to call `/ingest`.
     pub jwt: JwtFixture,
@@ -871,6 +876,7 @@ pub async fn spawn_receiver_with_env(
         syslog_tls_port,
         otlp_grpc_port,
         otlp_http_port,
+        metrics_port,
         jwt,
     })
 }
@@ -886,6 +892,10 @@ pub struct WriterProcess {
     output: OutputCapture,
     /// Bound minimal `/healthz`+`/readyz` surface port (`WRITER_HEALTH_PORT`).
     pub health_port: u16,
+    /// Prometheus exporter port (`METRICS_PORT`) — scrape
+    /// `http://127.0.0.1:{metrics_port}/metrics` to verify the six Spec
+    /// §11a metrics (`skauswatch_telemetry::install_metrics_exporter`).
+    pub metrics_port: u16,
 }
 
 impl WriterProcess {
@@ -944,6 +954,26 @@ pub async fn spawn_writer(
     spawn_writer_with_opensearch_url(nats, &opensearch.url).await
 }
 
+/// Identical to [`spawn_writer`], additionally applying every `(name,
+/// value)` pair in `extra_env` on top of the standard wiring — the writer
+/// counterpart of [`spawn_receiver_with_env`], introduced for
+/// `tests/e2e_smoke_14c.rs`'s `OTEL_EXPORTER_OTLP_ENDPOINT` opt-in (so the
+/// writer's own `buffer_consume`/`buffer_ack` spans and log records flow to
+/// an in-test OTLP sink alongside the receiver's), but generic over any env
+/// var for future callers.
+///
+/// # Errors
+/// Returns an error if the process cannot be spawned, or exits/times out
+/// before `/healthz` answers 2xx (captured stdout/stderr included in the
+/// message).
+pub async fn spawn_writer_with_env(
+    nats: &NatsHandle,
+    opensearch: &OpenSearchHandle,
+    extra_env: &[(&str, &str)],
+) -> Result<WriterProcess> {
+    spawn_writer_with_opensearch_url_and_env(nats, &opensearch.url, extra_env).await
+}
+
 /// Identical to [`spawn_writer`], except the writer's `OPENSEARCH_URL` is
 /// `opensearch_url` verbatim rather than a live [`OpenSearchHandle`]'s own
 /// URL — the seam `tests/e2e_durability.rs`'s DLQ scenario uses to point a
@@ -971,6 +1001,23 @@ pub async fn spawn_writer_with_opensearch_url(
     nats: &NatsHandle,
     opensearch_url: &str,
 ) -> Result<WriterProcess> {
+    spawn_writer_with_opensearch_url_and_env(nats, opensearch_url, &[]).await
+}
+
+/// Identical to [`spawn_writer_with_opensearch_url`], additionally applying
+/// every `(name, value)` pair in `extra_env` on top of the standard wiring
+/// — the shared implementation behind both [`spawn_writer_with_opensearch_url`]
+/// (via `&[]`) and [`spawn_writer_with_env`].
+///
+/// # Errors
+/// Returns an error if the process cannot be spawned, or exits/times out
+/// before `/healthz` answers 2xx (captured stdout/stderr included in the
+/// message).
+async fn spawn_writer_with_opensearch_url_and_env(
+    nats: &NatsHandle,
+    opensearch_url: &str,
+    extra_env: &[(&str, &str)],
+) -> Result<WriterProcess> {
     let bin = env!("CARGO_BIN_EXE_skauswatch-svc-ingest");
     let ports = free_tcp_ports(2).context("allocate writer ports")?;
     let &[health_port, metrics_port] = ports.as_slice() else {
@@ -992,6 +1039,7 @@ pub async fn spawn_writer_with_opensearch_url(
         .env("METRICS_PORT", metrics_port.to_string())
         .env("OPENSEARCH_URL", opensearch_url)
         .env("NATS_URL", &nats.url)
+        .envs(extra_env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -1014,6 +1062,7 @@ pub async fn spawn_writer_with_opensearch_url(
         child,
         output,
         health_port,
+        metrics_port,
     })
 }
 
