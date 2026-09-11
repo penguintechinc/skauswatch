@@ -29,12 +29,10 @@
 //! ism` — see [`ism`]'s own doc comment for exactly why (`opensearch/mod.rs`
 //! and `main.rs` are both out of this task's file scope).
 //!
-//! This router is not yet invoked from `main.rs`/`bootstrap.rs` — same
-//! interim, unwired state as every other Wave 1 module until the next
-//! integration gate wires every listener/writer/admin surface together (see
-//! `main.rs`'s own doc comment). `cargo build`'s reachability analysis
-//! therefore sees this whole module as dead code until then.
-#![allow(dead_code)]
+//! [`router`] is merged onto the receiver's HTTPS server alongside
+//! `crate::listeners::http::router` in `crate::bootstrap::run_receiver` (see
+//! that module's doc comment) — a distinct `/api/v1/admin/...` path prefix
+//! from `/ingest`, so the merge is unambiguous.
 
 #[path = "opensearch/ism.rs"]
 pub(crate) mod ism;

@@ -34,13 +34,6 @@
 //! already in this crate's `Cargo.toml` (`tonic`, `tokio-rustls`,
 //! `rustls`, `spiffe`).
 
-// Wave 1 (not this task) wires `run_grpc`/`run_http` into `main.rs`'s
-// `serve()` — until then, `cargo build`'s reachability analysis (this
-// crate has no `[lib]` target, only a `[[bin]]`) sees this whole module
-// tree as unused. Same pattern as `auth.rs`/`buffer/mod.rs`/
-// `identity_store.rs`'s own `#![allow(dead_code)]`.
-#![allow(dead_code)]
-
 mod convert;
 
 use std::pin::Pin;
@@ -1182,6 +1175,7 @@ mod tests {
             opensearch_url: String::new(),
             nats_url: String::new(),
             nats_jetstream_subject_prefix: "x".to_owned(),
+            snapshot_repo: "skauswatch-snapshots".to_owned(),
             syslog_udp_enabled: false,
             syslog_trusted_cidrs: Vec::new(),
             syslog_udp_tenant_id: None,

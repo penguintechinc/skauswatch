@@ -299,6 +299,7 @@ mod tests {
             opensearch_url,
             nats_url: "nats://localhost:4222".to_owned(),
             nats_jetstream_subject_prefix: "svc-ingest.logs".to_owned(),
+            snapshot_repo: "skauswatch-snapshots".to_owned(),
             syslog_udp_enabled: false,
             syslog_trusted_cidrs: Vec::new(),
             syslog_udp_tenant_id: None,

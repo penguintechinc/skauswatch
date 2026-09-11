@@ -6,9 +6,9 @@
 //! (the manager's liveness and readiness probes), both on the v1 `HTTP_PORT`
 //! (5010).
 //!
-//! This module is unwired until Task 1.3's Wave 1 integration gate merges
-//! this into `main.rs::serve()` — temporary dead-code warnings are suppressed
-//! until then.
+//! `crate::bootstrap::run_receiver` merges [`router`]'s result onto the
+//! same HTTPS server as `crate::admin`'s admin surface (see that module's
+//! doc comment).
 //!
 //! `POST /ingest` now requires a valid tenant-bearing bearer JWT
 //! (`skauswatch_auth::tenant_middleware`) and the `LOG_INGEST_FLAG` PostHog
@@ -27,8 +27,6 @@
 //! normalized document is now pushed through the same `EventBuffer` seam
 //! (see [`crate::buffer`]'s durability contract); the writer, never this
 //! listener, owns all OpenSearch writes.
-
-#![allow(dead_code)]
 
 use std::sync::Arc;
 

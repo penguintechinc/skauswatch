@@ -22,6 +22,11 @@ const DEFAULT_OPENSEARCH_URL: &str = "http://localhost:9200";
 const DEFAULT_NATS_URL: &str = "nats://localhost:4222";
 /// Default JetStream subject prefix (Spec §7a example config block).
 const DEFAULT_NATS_JETSTREAM_SUBJECT_PREFIX: &str = "svc-ingest.logs";
+/// Default OpenSearch snapshot repository name (Spec §8a1
+/// `SNAPSHOT_REPO_ENDPOINT` config note) — the WARM tier's searchable-snapshot
+/// mount and the COLD tier's archival `snapshot`/`_restore` calls
+/// (`crate::admin`, `crate::opensearch::ism`) all target this repository.
+const DEFAULT_SNAPSHOT_REPO: &str = "skauswatch-snapshots";
 
 /// Loaded configuration for `skauswatch-svc-ingest`.
 #[derive(Debug, Clone)]
@@ -42,6 +47,9 @@ pub struct Config {
     pub nats_url: String,
     /// JetStream subject prefix (`NATS_JETSTREAM_SUBJECT_PREFIX`).
     pub nats_jetstream_subject_prefix: String,
+    /// OpenSearch snapshot repository name (`SNAPSHOT_REPO`) — see
+    /// [`DEFAULT_SNAPSHOT_REPO`].
+    pub snapshot_repo: String,
     /// Whether the UDP syslog listener is enabled at all
     /// (`SYSLOG_UDP_ENABLED`) — OFF by default; UDP has no authentication,
     /// so enabling it is an explicit operator opt-in (Spec §6c).
@@ -134,6 +142,8 @@ pub struct RawConfig<'a> {
     pub nats_url: Option<&'a str>,
     /// Raw `NATS_JETSTREAM_SUBJECT_PREFIX` value.
     pub nats_jetstream_subject_prefix: Option<&'a str>,
+    /// Raw `SNAPSHOT_REPO` value.
+    pub snapshot_repo: Option<&'a str>,
     /// Raw `SYSLOG_UDP_ENABLED` value.
     pub syslog_udp_enabled: Option<&'a str>,
     /// Raw `SYSLOG_TRUSTED_CIDRS` value.
@@ -159,6 +169,7 @@ impl Config {
         let opensearch_url = std::env::var("OPENSEARCH_URL").ok();
         let nats_url = std::env::var("NATS_URL").ok();
         let nats_jetstream_subject_prefix = std::env::var("NATS_JETSTREAM_SUBJECT_PREFIX").ok();
+        let snapshot_repo = std::env::var("SNAPSHOT_REPO").ok();
         let syslog_udp_enabled = std::env::var("SYSLOG_UDP_ENABLED").ok();
         let syslog_trusted_cidrs = std::env::var("SYSLOG_TRUSTED_CIDRS").ok();
         let syslog_udp_tenant_id = std::env::var("SYSLOG_UDP_TENANT_ID").ok();
@@ -172,6 +183,7 @@ impl Config {
             opensearch_url: opensearch_url.as_deref(),
             nats_url: nats_url.as_deref(),
             nats_jetstream_subject_prefix: nats_jetstream_subject_prefix.as_deref(),
+            snapshot_repo: snapshot_repo.as_deref(),
             syslog_udp_enabled: syslog_udp_enabled.as_deref(),
             syslog_trusted_cidrs: syslog_trusted_cidrs.as_deref(),
             syslog_udp_tenant_id: syslog_udp_tenant_id.as_deref(),
@@ -206,6 +218,11 @@ impl Config {
             .filter(|s| !s.is_empty())
             .unwrap_or(DEFAULT_NATS_JETSTREAM_SUBJECT_PREFIX)
             .to_owned();
+        let snapshot_repo = raw
+            .snapshot_repo
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_SNAPSHOT_REPO)
+            .to_owned();
 
         let syslog_udp_enabled = match raw.syslog_udp_enabled.map(str::trim) {
             None | Some("") => false,
@@ -234,6 +251,7 @@ impl Config {
             opensearch_url,
             nats_url,
             nats_jetstream_subject_prefix,
+            snapshot_repo,
             syslog_udp_enabled,
             syslog_trusted_cidrs,
             syslog_udp_tenant_id,
@@ -280,6 +298,27 @@ mod tests {
         assert_eq!(cfg.opensearch_url, "http://localhost:9200");
         assert_eq!(cfg.nats_url, "nats://localhost:4222");
         assert_eq!(cfg.nats_jetstream_subject_prefix, "svc-ingest.logs");
+        assert_eq!(cfg.snapshot_repo, "skauswatch-snapshots");
+    }
+
+    #[test]
+    fn snapshot_repo_reads_from_raw_value() {
+        let cfg = Config::from_values(RawConfig {
+            snapshot_repo: Some("custom-repo"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.snapshot_repo, "custom-repo");
+    }
+
+    #[test]
+    fn snapshot_repo_empty_string_falls_back_to_default() {
+        let cfg = Config::from_values(RawConfig {
+            snapshot_repo: Some(""),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.snapshot_repo, "skauswatch-snapshots");
     }
 
     #[test]
