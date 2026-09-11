@@ -82,6 +82,12 @@ uuid = { workspace = true }
 # 1.x without explicit review and smoke test re-run." default-features off
 # — only the `jetstream` feature is needed, no core-NATS pub/sub surface.
 async-nats = { version = "=0.50.0", default-features = false, features = ["jetstream"] }
+# Task 1.4: SHA-256-hash ingest tokens before any DB lookup/storage (Spec
+# §6b) — already workspace-pinned (`[workspace.dependencies]`, `=0.10.9`),
+# used the same way by `crates/skauswatch-scan-core`. Coordinator-approved
+# Cargo.toml addition (Task-0.2 gap: this dependency edge was never wired
+# for svc-ingest even though the workspace pin already existed).
+sha2 = { workspace = true }
 
 [dev-dependencies]
 axum-test = { workspace = true }

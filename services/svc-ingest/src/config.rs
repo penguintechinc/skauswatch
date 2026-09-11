@@ -49,6 +49,13 @@ pub struct Config {
     /// CIDR blocks trusted to send UDP syslog when `syslog_udp_enabled` is
     /// set (`SYSLOG_TRUSTED_CIDRS`, comma-separated). Empty by default.
     pub syslog_trusted_cidrs: Vec<CidrBlock>,
+    /// The fixed tenant all trusted-CIDR UDP syslog packets are stamped
+    /// with (`SYSLOG_UDP_TENANT_ID`) -- Spec §6c: "the operator must
+    /// configure svc-ingest to assign a fixed tenant ID to all UDP packets
+    /// from a given CIDR." `None` (unset, the default) means
+    /// `crate::auth::resolve_via_udp_cidr` never stamps a tenant even from
+    /// a trusted CIDR -- fail safe, never a silent/guessed default.
+    pub syslog_udp_tenant_id: Option<String>,
 }
 
 /// A parsed CIDR block (`network/prefix_len`), used to validate
@@ -131,6 +138,8 @@ pub struct RawConfig<'a> {
     pub syslog_udp_enabled: Option<&'a str>,
     /// Raw `SYSLOG_TRUSTED_CIDRS` value.
     pub syslog_trusted_cidrs: Option<&'a str>,
+    /// Raw `SYSLOG_UDP_TENANT_ID` value.
+    pub syslog_udp_tenant_id: Option<&'a str>,
 }
 
 impl Config {
@@ -152,6 +161,7 @@ impl Config {
         let nats_jetstream_subject_prefix = std::env::var("NATS_JETSTREAM_SUBJECT_PREFIX").ok();
         let syslog_udp_enabled = std::env::var("SYSLOG_UDP_ENABLED").ok();
         let syslog_trusted_cidrs = std::env::var("SYSLOG_TRUSTED_CIDRS").ok();
+        let syslog_udp_tenant_id = std::env::var("SYSLOG_UDP_TENANT_ID").ok();
 
         Self::from_values(RawConfig {
             http_port: http_port.as_deref(),
@@ -164,6 +174,7 @@ impl Config {
             nats_jetstream_subject_prefix: nats_jetstream_subject_prefix.as_deref(),
             syslog_udp_enabled: syslog_udp_enabled.as_deref(),
             syslog_trusted_cidrs: syslog_trusted_cidrs.as_deref(),
+            syslog_udp_tenant_id: syslog_udp_tenant_id.as_deref(),
         })
     }
 
@@ -209,6 +220,10 @@ impl Config {
             None => Vec::new(),
             Some(s) => CidrBlock::parse_list(s)?,
         };
+        let syslog_udp_tenant_id = raw
+            .syslog_udp_tenant_id
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
 
         Ok(Self {
             http_port,
@@ -221,6 +236,7 @@ impl Config {
             nats_jetstream_subject_prefix,
             syslog_udp_enabled,
             syslog_trusted_cidrs,
+            syslog_udp_tenant_id,
         })
     }
 }
@@ -271,6 +287,32 @@ mod tests {
         let cfg = Config::from_values(RawConfig::default()).unwrap();
         assert!(!cfg.syslog_udp_enabled);
         assert!(cfg.syslog_trusted_cidrs.is_empty());
+    }
+
+    #[test]
+    fn syslog_udp_tenant_id_defaults_none() {
+        let cfg = Config::from_values(RawConfig::default()).unwrap();
+        assert_eq!(cfg.syslog_udp_tenant_id, None);
+    }
+
+    #[test]
+    fn syslog_udp_tenant_id_reads_from_raw_value() {
+        let cfg = Config::from_values(RawConfig {
+            syslog_udp_tenant_id: Some("tenant-udp"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.syslog_udp_tenant_id, Some("tenant-udp".to_owned()));
+    }
+
+    #[test]
+    fn syslog_udp_tenant_id_empty_string_is_none() {
+        let cfg = Config::from_values(RawConfig {
+            syslog_udp_tenant_id: Some(""),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.syslog_udp_tenant_id, None);
     }
 
     #[test]
