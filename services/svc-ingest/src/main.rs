@@ -10,15 +10,19 @@
 //! `serve` startup). See `docs/v2-port/ingest-module-spec.md` for the full
 //! design.
 //!
-//! This file is the Wave-0 scaffold: every module below is a compiling
-//! stub (see each module's doc comment for which task fills it in). Wave 1+
-//! tasks fill in the real listener/auth/writer bodies as leaf-file edits
-//! without ever touching this file or `Cargo.toml` again — the real
-//! per-mode wiring inside `serve()` lands at the Wave-1 integration gate,
-//! once every module it would reference actually exists.
+//! Every listener/writer/auth/buffer module was built and reviewed as an
+//! independently-testable, unwired stub across Wave 0/1's own tasks (see
+//! each module's doc comment). This file's `serve()` is the Wave-1
+//! integration gate those tasks anticipated: it no longer stands up a
+//! bare health surface — `crate::bootstrap::run_receiver`/`run_writer`
+//! assemble the shared dependencies (NATS JetStream buffer, Postgres
+//! identity store, SPIFFE workload identity, JWT/license config) and run
+//! every real listener/writer concurrently. See `crate::bootstrap`'s own
+//! doc comment for the wiring itself.
 
 mod admin;
 mod auth;
+mod bootstrap;
 mod buffer;
 mod config;
 mod identity_store;
@@ -26,8 +30,6 @@ mod listeners;
 mod openapi;
 mod opensearch;
 mod writer;
-
-use std::net::SocketAddr;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -126,11 +128,12 @@ async fn migrate() -> anyhow::Result<()> {
 }
 
 /// Runs the ingest service in the given [`RunMode`] until a shutdown
-/// signal. Wave-0 scaffold: stands up telemetry plus the health/readiness
-/// surface only — the real per-mode listener/writer wiring (dispatching
-/// into `listeners`/`writer`/`buffer`) lands at the Wave-1 integration gate
-/// once every module it references is filled in, per this file's own doc
-/// comment above.
+/// signal — dispatches to `crate::bootstrap::run_receiver`/`run_writer`,
+/// which own the real per-mode listener/writer wiring (see that module's
+/// doc comment). `RunMode::Writer` gets its own `skauswatch_telemetry::
+/// Readiness` flag (fed into its minimal health surface); `RunMode::
+/// Receiver` does not need one — see `crate::bootstrap`'s doc comment for
+/// why.
 async fn serve(mode: RunMode) -> anyhow::Result<()> {
     skauswatch_telemetry::init_tracing("skauswatch-svc-ingest");
     skauswatch_telemetry::install_metrics_exporter()
@@ -148,46 +151,17 @@ async fn serve(mode: RunMode) -> anyhow::Result<()> {
         nats_jetstream_subject_prefix = %cfg.nats_jetstream_subject_prefix,
         syslog_udp_enabled = cfg.syslog_udp_enabled,
         syslog_trusted_cidrs = cfg.syslog_trusted_cidrs.len(),
+        ?mode,
         "svc-ingest configuration loaded"
     );
-    let readiness = skauswatch_telemetry::Readiness::new();
 
-    let addr: SocketAddr = ([0, 0, 0, 0], cfg.http_port).into();
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, ?mode, "svc-ingest health surface listening");
-    readiness.set_ready();
-
-    axum::serve(listener, skauswatch_telemetry::health_router(readiness))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-    tracing::info!("svc-ingest stopped cleanly");
-    Ok(())
-}
-
-/// Resolves on SIGTERM/SIGINT (Ctrl-C), gating graceful shutdown.
-async fn shutdown_signal() {
-    let ctrl_c = tokio::signal::ctrl_c();
-    #[cfg(unix)]
-    {
-        let mut term =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to install SIGTERM handler");
-                    let _ = ctrl_c.await;
-                    return;
-                }
-            };
-        tokio::select! {
-            _ = ctrl_c => {},
-            _ = term.recv() => {},
+    match mode {
+        RunMode::Receiver => bootstrap::run_receiver(cfg).await,
+        RunMode::Writer => {
+            let readiness = skauswatch_telemetry::Readiness::new();
+            bootstrap::run_writer(cfg, readiness).await
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = ctrl_c.await;
-    }
-    tracing::info!("shutdown signal received");
 }
 
 /// Container-native health probe: GET the local /healthz and exit 0/1.
