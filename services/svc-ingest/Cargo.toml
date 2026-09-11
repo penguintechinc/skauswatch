@@ -92,7 +92,34 @@ sha2 = { workspace = true }
 [dev-dependencies]
 axum-test = { workspace = true }
 mockall = { workspace = true }
+# p256/pkcs8/rand_core: Task 3.0's `tests/common` harness mints its own
+# ES256 (P-256) fixture keypair (private PEM stays in-process to sign test
+# bearer tokens; public PEM is passed to the spawned receiver subprocess as
+# `JWT_VERIFY_KEY`) — the same technique `skauswatch_auth::
+# shared_dev_keypair`/`skauswatch_testkit::jwt` use, but generated
+# independently here because the harness spawns svc-ingest as a *separate
+# OS process*: that process's own `ephemeral_dev_keypair()` `OnceLock` is
+# never shared with (and can't be read back from) this test binary, so the
+# usual in-process fixture-keypair sharing this workspace otherwise relies
+# on doesn't apply across a process boundary. Already workspace-pinned
+# (`[workspace.dependencies]`), same versions `skauswatch-auth` builds
+# against.
+p256 = { workspace = true }
+pkcs8 = { workspace = true }
+rand_core = { workspace = true }
 skauswatch-testkit = { workspace = true }
+# testcontainers: Task 3.0's shared e2e harness (`tests/common`) — starts
+# real NATS (JetStream) and OpenSearch containers so receiver/writer
+# subprocesses exercise the genuine wire protocols instead of an in-process
+# mock. Exact-pinned per house policy (`critical-rules.md` Dependency
+# Pinning); MIT OR Apache-2.0, `testcontainers/testcontainers-rs` (Western,
+# non-PRC). `testcontainers-modules`'s bundled `nats` feature was evaluated
+# and rejected: it defaults to NATS 2.10.14 (below this task's NATS 2.14+
+# requirement) and its `NatsServerCmd` builder has no `sync_always`/custom
+# store-dir knobs, and it ships no `opensearch` module at all — so both
+# containers are built directly on `testcontainers::GenericImage` instead,
+# one dependency covering both rather than a partial-fit second one.
+testcontainers = "=0.28.0"
 wiremock = { workspace = true }
 
 [lints]
