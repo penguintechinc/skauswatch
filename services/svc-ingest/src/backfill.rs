@@ -284,6 +284,45 @@ mod tests {
         assert_eq!(cfg.end_date, end);
     }
 
+    /// Builds a [`Config`] pointed at a wiremock server for tests that drive
+    /// the real [`run_backfill`]/[`scroll_and_write_index`] code path. All
+    /// [`Config`] fields are `pub`, so this constructs the struct literal
+    /// directly rather than going through `Config::from_values` (private to
+    /// `config.rs`).
+    fn test_config(opensearch_url: String) -> Config {
+        Config {
+            http_port: 8443,
+            syslog_port: 5140,
+            syslog_tls_port: 6514,
+            otlp_grpc_port: 4317,
+            otlp_http_port: 4318,
+            opensearch_url,
+            nats_url: "nats://localhost:4222".to_owned(),
+            nats_jetstream_subject_prefix: "svc-ingest.logs".to_owned(),
+            syslog_udp_enabled: false,
+            syslog_trusted_cidrs: Vec::new(),
+            syslog_udp_tenant_id: None,
+        }
+    }
+
+    /// One `_source` hit document for a mocked scroll response.
+    fn hit(id: &str, severity: i64) -> serde_json::Value {
+        serde_json::json!({
+            "_id": id,
+            "_source": {
+                "severity": severity,
+                "facility": 4,
+                "message": format!("Event {id}")
+            }
+        })
+    }
+
+    /// Drives the real [`run_backfill`] over a 3-day range against a
+    /// wiremock OpenSearch and asserts the number of *distinct* per-day
+    /// `aaa-events-*` search requests it issues, plus that `batch_size`
+    /// controls how many `_bulk` flushes happen per day — replacing the
+    /// prior version of this test, which only asserted local string
+    /// arithmetic on index names and never called [`run_backfill`] at all.
     #[tokio::test]
     async fn backfill_batches_by_start_end_date_and_batch_size() {
         use wiremock::matchers::{method, path};
@@ -291,117 +330,180 @@ mod tests {
 
         let mock_server = MockServer::start().await;
 
-        // Mock initial scroll request for 2025-01-01 (one document).
+        // Each day's initial search returns 4 hits. With batch_size=2 this
+        // must flush _bulk exactly twice per day (2 docs each).
+        for day in ["2025.01.01", "2025.01.02", "2025.01.03"] {
+            Mock::given(method("POST"))
+                .and(path(format!("/aaa-events-{day}/_search")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "_scroll_id": format!("scroll_{day}"),
+                    "hits": {
+                        "hits": [hit("1", 3), hit("2", 4), hit("3", 5), hit("4", 6)]
+                    }
+                })))
+                .expect(1)
+                .named(format!("initial search for {day}"))
+                .mount(&mock_server)
+                .await;
+        }
+
+        // Scroll continuation always ends the loop for whichever day called
+        // it — same endpoint is reused across all three days.
+        Mock::given(method("POST"))
+            .and(path("/_search/scroll"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "_scroll_id": "scroll_done",
+                "hits": { "hits": [] }
+            })))
+            .expect(3)
+            .named("scroll continuation")
+            .mount(&mock_server)
+            .await;
+
+        // 3 days * 2 flushes/day (4 hits, batch_size=2) = 6 _bulk POSTs.
+        Mock::given(method("POST"))
+            .and(path("/_bulk"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"errors": false})),
+            )
+            .expect(6)
+            .named("_bulk flush")
+            .mount(&mock_server)
+            .await;
+
+        let cfg = test_config(mock_server.uri());
+        let backfill_cfg = BackfillConfig {
+            start_date: NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
+            end_date: NaiveDate::from_ymd_opt(2025, 1, 3).unwrap(),
+            batch_size: 2,
+            dry_run: false,
+        };
+
+        let result = run_backfill(&cfg, backfill_cfg)
+            .await
+            .expect("backfill against mocked OpenSearch must succeed");
+
+        assert_eq!(result.total_mapped, 12, "4 docs/day * 3 days");
+        assert_eq!(
+            result.total_written, 12,
+            "batch_size=2 flushes must cover every doc"
+        );
+        assert_eq!(result.total_failed, 0);
+
+        // Assert on the ACTUAL request count the mock received, not local
+        // index-name string arithmetic: exactly one search per day against
+        // aaa-events-*, driven by the start/end date range.
+        let received = mock_server.received_requests().await.unwrap();
+        let aaa_events_requests = received
+            .iter()
+            .filter(|r| r.url.path().starts_with("/aaa-events-"))
+            .count();
+        assert_eq!(
+            aaa_events_requests, 3,
+            "one initial search per day in the start..=end date range"
+        );
+
+        // Confirm batch_size was actually sent as the page size on each
+        // initial per-day search, tying the assertion to batch_size (not
+        // just the date range).
+        for r in received
+            .iter()
+            .filter(|r| r.url.path().starts_with("/aaa-events-"))
+        {
+            let body: serde_json::Value = r.body_json().unwrap();
+            assert_eq!(body["size"], 2, "initial search size must equal batch_size");
+        }
+
+        let bulk_requests = received.iter().filter(|r| r.url.path() == "/_bulk").count();
+        assert_eq!(
+            bulk_requests, 6,
+            "batch_size=2 over 4 docs/day must flush twice/day"
+        );
+
+        // expect(1)/expect(3)/expect(6) above are the primary gate — this
+        // additionally fails loudly with the actual request set if it ever
+        // regresses back to not calling run_backfill at all.
+        mock_server.verify().await;
+    }
+
+    /// Drives the real [`run_backfill`] with `dry_run=true` against a
+    /// wiremock OpenSearch and asserts it never POSTs to `_bulk` while still
+    /// reporting a non-zero mapped/would-write count — replacing the prior
+    /// version of this test, which only asserted [`BackfillConfig`] field
+    /// values locally and never called [`run_backfill`] at all.
+    #[tokio::test]
+    async fn backfill_dry_run_maps_without_writing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
         Mock::given(method("POST"))
             .and(path("/aaa-events-2025.01.01/_search"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "_scroll_id": "scroll_1",
-                "hits": {
-                    "hits": [
-                        {
-                            "_id": "1",
-                            "_source": {
-                                "severity": 3,
-                                "facility": 4,
-                                "message": "Event 1"
-                            }
-                        }
-                    ]
-                }
+                "hits": { "hits": [hit("1", 3), hit("2", 4)] }
             })))
+            .expect(1)
             .mount(&mock_server)
             .await;
 
-        // Mock scroll continuation (empty).
         Mock::given(method("POST"))
             .and(path("/_search/scroll"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "_scroll_id": "scroll_next",
+                "_scroll_id": "scroll_done",
                 "hits": { "hits": [] }
             })))
+            .expect(1)
             .mount(&mock_server)
             .await;
 
-        // Mock search for 2025-01-02 (another document).
+        // The critical assertion: dry_run must NEVER issue a _bulk POST.
+        // expect(0) fails the test the moment this mock is asked to match
+        // a request that shouldn't exist.
         Mock::given(method("POST"))
-            .and(path("/aaa-events-2025.01.02/_search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "_scroll_id": "scroll_2",
-                "hits": {
-                    "hits": [
-                        {
-                            "_id": "2",
-                            "_source": {
-                                "severity": 4,
-                                "facility": 5,
-                                "message": "Event 2"
-                            }
-                        }
-                    ]
-                }
-            })))
+            .and(path("/_bulk"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"errors": false})),
+            )
+            .expect(0)
+            .named("_bulk (must never be called in dry_run)")
             .mount(&mock_server)
             .await;
 
-        // Mock search for 2025-01-03.
-        Mock::given(method("POST"))
-            .and(path("/aaa-events-2025.01.03/_search"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "_scroll_id": "scroll_3",
-                "hits": {
-                    "hits": [
-                        {
-                            "_id": "3",
-                            "_source": {
-                                "severity": 5,
-                                "facility": 6,
-                                "message": "Event 3"
-                            }
-                        }
-                    ]
-                }
-            })))
-            .mount(&mock_server)
-            .await;
-
-        // Verify: 3 days = 3 initial scroll requests are issued to aaa-events-*/_search.
-        // We don't construct a real Config (from_values is private); instead verify
-        // the logic by asserting date range generates correct index names.
+        let cfg = test_config(mock_server.uri());
         let start = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
-        let end = NaiveDate::from_ymd_opt(2025, 1, 3).unwrap();
-
-        let mut current = start;
-        let mut indices = Vec::new();
-        while current <= end {
-            indices.push(format!("aaa-events-{}", current.format("%Y.%m.%d")));
-            current += Duration::days(1);
-        }
-
-        assert_eq!(indices.len(), 3);
-        assert_eq!(indices[0], "aaa-events-2025.01.01");
-        assert_eq!(indices[1], "aaa-events-2025.01.02");
-        assert_eq!(indices[2], "aaa-events-2025.01.03");
-    }
-
-    #[tokio::test]
-    async fn backfill_dry_run_maps_without_writing() {
-        // Verify configuration structure and dry_run semantics.
-        let start = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
-        let end = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
-        let cfg = BackfillConfig {
+        let backfill_cfg = BackfillConfig {
             start_date: start,
-            end_date: end,
+            end_date: start,
             batch_size: 100,
             dry_run: true,
         };
 
-        // Assert dry_run is true and batch settings are correct.
-        assert!(cfg.dry_run, "dry_run should be true");
-        assert_eq!(cfg.batch_size, 100, "batch_size should be 100");
+        let result = run_backfill(&cfg, backfill_cfg)
+            .await
+            .expect("dry_run backfill against mocked OpenSearch must succeed");
 
-        // Note: full wiremock integration test requires Config with public from_values.
-        // This unit test verifies the config structure; integration testing occurs
-        // via acceptance tests with live OpenSearch.
+        assert!(result.total_mapped > 0, "dry_run must still map documents");
+        assert_eq!(result.total_mapped, 2);
+        assert_eq!(
+            result.total_written, 2,
+            "dry_run reports would-write count without POSTing"
+        );
+        assert_eq!(result.total_failed, 0);
+
+        let bulk_requests = mock_server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.url.path() == "/_bulk")
+            .count();
+        assert_eq!(bulk_requests, 0, "dry_run must never POST to _bulk");
+
+        // expect(0) above is the primary gate; verify() makes the failure
+        // explicit rather than relying on Drop's implicit panic.
+        mock_server.verify().await;
     }
 
     #[test]
