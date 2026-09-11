@@ -1,0 +1,360 @@
+# Default (prod-safe baseline) values for skauswatch-svc-ingest.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+#
+# Dual-Deployment chart, one shared image, one binary, two `serve --mode`
+# args (services/svc-ingest/src/main.rs, src/bootstrap.rs):
+#   - receiver: terminates syslog UDP/TCP/TLS, OTLP gRPC/HTTP, and HTTPS
+#     OCSF/JSON listeners, normalizes to OCSF, enqueues onto NATS
+#     JetStream. Has a multi-port Service (templates/service-receiver.yaml).
+#   - writer: drains the JetStream consumer and bulk-writes to OpenSearch.
+#     No inbound service port at all -- reads JetStream only, so this chart
+#     intentionally creates NO Service for it (Spec's own port table: "None
+#     (internal, reads JetStream only)"). Exposes a private /healthz+/readyz
+#     surface on WRITER_HEALTH_PORT purely for kubelet probes.
+# They scale independently -- separate replicaCount/resources/autoscaling/
+# HPA per component below.
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/svc-ingest
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Name of a pre-provisioned Secret (or ExternalSecret target, e.g. synced
+# from svc-vault) to use instead of the chart-managed one below. When set,
+# templates/secret.yaml is not rendered and the receiver Deployment's env
+# vars read from this Secret instead. MUST supply at minimum: db-user,
+# db-pass, jwt-verify-key, license-key -- plus the ingest mTLS cert/key and
+# bearer-token material svc-vault issues once the syslog-TLS/HTTPS-token
+# auth paths are wired to consume secretKeyRef entries from this same
+# Secret (not yet wired as of Task 2.4 -- receiver's TLS listeners
+# currently source certs via the SPIFFE Workload API, not this Secret).
+existingSecret: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  # Matches services/svc-ingest/Dockerfile's `useradd -u 1000 appuser`.
+  runAsUser: 1000
+  fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and good
+  # practice under "baseline") -- see k8s/helm/README.md "Cluster security
+  # baseline".
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
+
+# services/svc-ingest/src/config.rs / src/bootstrap.rs port defaults
+# (docs/v2-port/ingest-module-spec.md Spec §3b, §7a).
+ports:
+  # Syslog UDP + TCP -- unprivileged default. See privilegedSyslogPort
+  # below before ever pointing this at the real privileged :514.
+  syslogPort: 5140
+  syslogTlsPort: 6514
+  otlpGrpcPort: 4317
+  otlpHttpPort: 4318
+  # HTTPS OCSF/JSON ingest -- also carries receiver's /healthz + /readyz.
+  httpPort: 8443
+  metricsPort: 9090
+  # Writer-only private health surface (WRITER_HEALTH_PORT) -- not a public
+  # protocol listener, see services/svc-ingest/src/bootstrap.rs.
+  writerHealthPort: 9091
+
+# UDP :514 is the real privileged syslog port referenced in Spec §9c.
+# `enabled: false` here is load-bearing: default ports.syslogPort (5140) is
+# unprivileged and needs no extra capability. Flipping this to true AND
+# pointing ports.syslogPort at a port <1024 requires an explicit
+# NET_BIND_SERVICE capability grant plus a documented
+# `# ROOT EXCEPTION (approved): <reason>` comment and separate user
+# approval per devops-containers.md -- NEVER add NET_BIND_SERVICE/NET_ADMIN
+# to securityContext.capabilities.add without that approval first.
+privilegedSyslogPort:
+  enabled: false
+
+receiver:
+  replicaCount: 3
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 2
+
+  # CONFIRMED against services/svc-ingest/src/config.rs (RawConfig::from_env)
+  # and src/bootstrap.rs::run_receiver (DB/JWT/license wiring). NATS
+  # production-hardening env (NATS_JETSTREAM_SYNC_ALWAYS) is baked directly
+  # into templates/deployment-receiver.yaml, NOT listed here -- see that
+  # template's comment for why it must be non-overridable.
+  env:
+    - name: SYSLOG_PORT
+      value: "5140"
+    - name: SYSLOG_TLS_PORT
+      value: "6514"
+    - name: OTLP_GRPC_PORT
+      value: "4317"
+    - name: OTLP_HTTP_PORT
+      value: "4318"
+    - name: HTTP_PORT
+      value: "8443"
+    # UDP syslog has no authentication -- OFF by default, explicit
+    # operator opt-in only (Spec §6c).
+    - name: SYSLOG_UDP_ENABLED
+      value: "false"
+    - name: SYSLOG_UDP_TENANT_ID
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: syslog-udp-tenant-id
+          optional: true
+    - name: OPENSEARCH_URL
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: opensearch-url
+    - name: NATS_URL
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: nats-url
+    - name: NATS_JETSTREAM_SUBJECT_PREFIX
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: nats-jetstream-subject-prefix
+    - name: DB_TYPE
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: db-type
+    - name: DB_HOST
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: db-host
+    - name: DB_PORT
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: db-port
+    - name: DB_NAME
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: db-name
+    - name: DB_POOL_SIZE
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: db-pool-size
+    - name: DB_USER
+      valueFrom:
+        secretKeyRef:
+          name: '{{ include "skauswatch-svc-ingest.secretName" . }}'
+          key: db-user
+    - name: DB_PASS
+      valueFrom:
+        secretKeyRef:
+          name: '{{ include "skauswatch-svc-ingest.secretName" . }}'
+          key: db-pass
+    # PEM EC P-256 public key (SPKI) verifying ES256 tokens minted by
+    # manager (the sole issuer) -- see k8s/helm/manager/values.yaml
+    # secretData for keypair generation commands.
+    - name: JWT_VERIFY_KEY
+      valueFrom:
+        secretKeyRef:
+          name: '{{ include "skauswatch-svc-ingest.secretName" . }}'
+          key: jwt-verify-key
+    - name: LICENSE_KEY
+      valueFrom:
+        secretKeyRef:
+          name: '{{ include "skauswatch-svc-ingest.secretName" . }}'
+          key: license-key
+    - name: LICENSE_SERVER_URL
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: license-server-url
+    - name: RELEASE_MODE
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: release-mode
+
+writer:
+  replicaCount: 3
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: health
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 2
+
+  # CONFIRMED against src/bootstrap.rs::run_writer -- writer touches NATS
+  # + OpenSearch only (no DB, no JWT, no license client in that path).
+  env:
+    - name: WRITER_HEALTH_PORT
+      value: "9091"
+    - name: OPENSEARCH_URL
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: opensearch-url
+    - name: NATS_URL
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: nats-url
+    - name: NATS_JETSTREAM_SUBJECT_PREFIX
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: nats-jetstream-subject-prefix
+
+service:
+  type: ClusterIP
+  annotations: {}
+  # Set per-port nodePort overrides only in alpha.yml (NodePort type) --
+  # see that file for the assigned values.
+  nodePorts: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+
+volumeMounts: []
+volumes: []
+
+# --- SPIFFE Workload API socket (SPIRE) --------------------------------
+# receiver's OTLP gRPC listener uses skauswatch_identity::IdentityProvider
+# for mTLS termination (src/bootstrap.rs::run_receiver) -- same pattern as
+# k8s/helm/manager/values.yaml. writer never touches SPIFFE identity, so
+# this only wires into deployment-receiver.yaml. MUST be enabled wherever
+# RELEASE_MODE=true -- beta/gamma/production all set spire.enabled: true;
+# alpha stays off.
+spire:
+  enabled: false
+  socketDir: /run/spire/sockets
+  csiDriver:
+    enabled: false
+
+configMapData:
+  opensearch-url: "http://opensearch:9200"
+  # Assumed in-cluster Service name for the NATS JetStream dependency --
+  # NOT owned by this chart (no k8s/helm/nats-jetstream chart exists yet).
+  # Requires NATS server >=2.14 with the JetStream file store's
+  # `sync_always: true` set at the NATS server config level (Spec §7a
+  # production-hardening requirement #1/#2) -- that is cluster-ops config
+  # for whatever chart/manifest deploys nats-jetstream, not something this
+  # chart can enforce from the client side.
+  nats-url: "nats://nats-jetstream:4222"
+  nats-jetstream-subject-prefix: "svc-ingest.logs"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "20"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+  # Fixed tenant stamped onto trusted-CIDR UDP syslog packets (Spec §6c).
+  # Blank means "no CIDR trusted" -- UDP is also OFF by default
+  # (receiver.env SYSLOG_UDP_ENABLED), so this is a deliberate no-op until
+  # both are explicitly opted into together by an operator.
+  syslog-udp-tenant-id: ""
+
+# MUST be set via --set/values or existingSecret; services fail closed on a
+# blank/known-default secret (never ship a real credential here).
+secretData:
+  db-user: ""
+  db-pass: ""
+  # PEM EC P-256 public key (SPKI) -- see receiver.env JWT_VERIFY_KEY above.
+  jwt-verify-key: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
+
+# One-time aaa-events -> unified OCSF/OpenSearch index reindex Job
+# (`skauswatch-svc-ingest backfill`). Command::Backfill does not exist in
+# the built binary as of Task 2.4 (Wave 1 only ships serve/healthcheck/
+# openapi/migrate, see src/main.rs) -- this Job is forward-declared per the
+# Task 2.4 brief and MUST stay disabled until a later task lands the
+# `backfill` subcommand; `helm template` still renders cleanly with it off.
+backfill:
+  enabled: false
+  args:
+    - backfill
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+  restartPolicy: OnFailure
+  backoffLimit: 3
