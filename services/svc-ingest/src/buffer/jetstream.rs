@@ -72,9 +72,19 @@ impl PublishAcker for async_nats::jetstream::Context {
 /// publish subject (`{subject_prefix}.{tenant}`), so the stream stays
 /// filterable per tenant even though today a single wildcard durable
 /// consumer drains all tenants.
+///
+/// `push` is routed through `acker` (the [`PublishAcker`] seam) rather
+/// than a concrete `Context` field directly, so tests can exercise the
+/// real `push()` method end to end (subject/header construction, body
+/// encoding, and the ack-blocking behavior) against a fake broker —
+/// see `with_acker` and the `push_*` tests below. `context` backs
+/// `consume`'s pull-consumer binding only; it is `None` for buffers built
+/// via `with_acker`, which never call `consume`/`ack`/`nack` in tests
+/// (that path needs a live broker — deferred to Task 1.5).
 pub struct JetStreamBuffer {
-    context: async_nats::jetstream::Context,
+    acker: Box<dyn PublishAcker>,
     subject_prefix: String,
+    context: Option<async_nats::jetstream::Context>,
     consumer: OnceCell<async_nats::jetstream::consumer::PullConsumer>,
 }
 
@@ -89,10 +99,29 @@ impl JetStreamBuffer {
     ) -> Result<Self, BufferError> {
         validate_subject_prefix(subject_prefix)?;
         Ok(Self {
-            context: client,
+            acker: Box::new(client.clone()),
             subject_prefix: subject_prefix.to_owned(),
+            context: Some(client),
             consumer: OnceCell::new(),
         })
+    }
+
+    /// Test-only constructor: builds a buffer whose `push` is routed
+    /// through `acker` (a fake) instead of a real JetStream `Context` —
+    /// lets `push_awaits_publish_ack_before_returning` and
+    /// `push_sets_nats_msg_id_header_deterministically` drive the real
+    /// `EventBuffer::push` implementation without a live NATS broker.
+    /// `consume`/`ack`/`nack` on a buffer built this way always fail
+    /// (`context` is `None`) — those paths need a live/dockerized broker
+    /// and are exercised in Task 1.5 instead.
+    #[cfg(test)]
+    fn with_acker(acker: impl PublishAcker + 'static, subject_prefix: &str) -> Self {
+        Self {
+            acker: Box::new(acker),
+            subject_prefix: subject_prefix.to_owned(),
+            context: None,
+            consumer: OnceCell::new(),
+        }
     }
 
     /// Stream name derived from `subject_prefix` — JetStream stream names
@@ -106,11 +135,17 @@ impl JetStreamBuffer {
     async fn consumer(
         &self,
     ) -> Result<&async_nats::jetstream::consumer::PullConsumer, BufferError> {
+        let context = self.context.as_ref().ok_or_else(|| {
+            BufferError::Transport(
+                "JetStreamBuffer has no bound JetStream context (test-only instance built via \
+                 with_acker) — consume/ack/nack require a real broker connection"
+                    .to_owned(),
+            )
+        })?;
         self.consumer
             .get_or_try_init(|| async {
                 let stream_name = self.stream_name();
-                let stream = self
-                    .context
+                let stream = context
                     .get_or_create_stream(async_nats::jetstream::stream::Config {
                         name: stream_name.clone(),
                         subjects: vec![format!("{}.>", self.subject_prefix)],
@@ -147,7 +182,7 @@ impl EventBuffer for JetStreamBuffer {
         headers.insert(TENANT_HEADER, event.tenant.as_str());
         let mut body = String::new();
         event.doc.write_compact(&mut body);
-        self.context
+        self.acker
             .publish_and_ack(subject, headers, Bytes::from(body.into_bytes()))
             .await
     }
@@ -211,10 +246,15 @@ fn validate_subject_prefix(subject_prefix: &str) -> Result<(), BufferError> {
     Ok(())
 }
 
-/// Rebuilds a [`NormalizedEvent`] from a delivered JetStream message —
-/// the inverse of `push`'s header + `write_compact` body encoding.
+/// Rebuilds a [`NormalizedEvent`] from a delivered message's headers and
+/// payload — the inverse of `push`'s header + `write_compact` body
+/// encoding. Takes the core `async_nats::Message` (all fields public,
+/// constructable without a live broker) rather than the JetStream wrapper
+/// so this decode step is independently testable; a
+/// `&async_nats::jetstream::Message` deref-coerces to this at the
+/// `consume()` call site.
 fn normalized_event_from_message(
-    msg: &async_nats::jetstream::Message,
+    msg: &async_nats::Message,
 ) -> Result<NormalizedEvent, BufferError> {
     let headers = msg
         .headers
@@ -244,30 +284,56 @@ fn normalized_event_from_message(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
 
-    /// A fake [`PublishAcker`] whose ack resolution is delayed by
-    /// `ack_delay`, so tests can prove the caller genuinely waits for it
-    /// (as opposed to spawning it in the background and returning early —
-    /// the fire-and-forget bug Global Constraint #3 forbids).
-    struct DelayedAckPublisher {
+    /// A fake [`PublishAcker`] that records every `(subject, headers,
+    /// payload)` it's called with (so tests can inspect exactly what the
+    /// REAL `JetStreamBuffer::push` sent) and can optionally delay its ack
+    /// resolution (so tests can prove `push` genuinely waits for it,
+    /// rather than spawning it in the background and returning early —
+    /// the fire-and-forget bug Global Constraint #3 forbids). Cloning
+    /// shares the same underlying state, so a test can hand one clone to
+    /// `JetStreamBuffer::with_acker` and keep another to inspect.
+    #[derive(Clone)]
+    struct FakeAcker {
         ack_delay: Duration,
-        ack_completed: std::sync::Arc<AtomicBool>,
-        captured: Mutex<Option<(String, async_nats::HeaderMap, Bytes)>>,
+        ack_completed: Arc<AtomicBool>,
+        calls: Arc<Mutex<Vec<(String, async_nats::HeaderMap, Bytes)>>>,
+    }
+
+    impl FakeAcker {
+        fn new(ack_delay: Duration) -> Self {
+            Self {
+                ack_delay,
+                ack_completed: Arc::new(AtomicBool::new(false)),
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        /// Headers from the most recent `publish_and_ack` call.
+        fn last_headers(&self) -> async_nats::HeaderMap {
+            self.calls
+                .lock()
+                .unwrap()
+                .last()
+                .expect("publish_and_ack was never called")
+                .1
+                .clone()
+        }
     }
 
     #[async_trait::async_trait]
-    impl PublishAcker for DelayedAckPublisher {
+    impl PublishAcker for FakeAcker {
         async fn publish_and_ack(
             &self,
             subject: String,
             headers: async_nats::HeaderMap,
             payload: Bytes,
         ) -> Result<(), BufferError> {
-            *self.captured.lock().unwrap() = Some((subject, headers, payload));
+            self.calls.lock().unwrap().push((subject, headers, payload));
             tokio::time::sleep(self.ack_delay).await;
             self.ack_completed.store(true, Ordering::SeqCst);
             Ok(())
@@ -286,106 +352,49 @@ mod tests {
     }
 
     /// Regression test for Spec §14b's "PublishAck synchronous blocking"
-    /// durability test (Global Constraint #3): `push` must not return
-    /// until the publish ack future has actually resolved, never merely
-    /// after the publish call is issued.
+    /// durability test (Global Constraint #3): the REAL
+    /// `JetStreamBuffer::push` (not the fake acker directly) must not
+    /// return until the publish ack future has actually resolved. Fails
+    /// if `push` were ever changed to `tokio::spawn` the ack await and
+    /// return early, or to drop the second future without awaiting it.
     #[tokio::test]
     async fn push_awaits_publish_ack_before_returning() {
-        let ack_completed = std::sync::Arc::new(AtomicBool::new(false));
-        let publisher = DelayedAckPublisher {
-            ack_delay: Duration::from_millis(50),
-            ack_completed: ack_completed.clone(),
-            captured: Mutex::new(None),
-        };
+        let acker = FakeAcker::new(Duration::from_millis(50));
+        let ack_completed = acker.ack_completed.clone();
+        let buffer = JetStreamBuffer::with_acker(acker, "logs");
 
-        let result = publisher
-            .publish_and_ack(
-                "subj".to_owned(),
-                async_nats::HeaderMap::new(),
-                Bytes::new(),
-            )
-            .await;
+        let result = buffer.push(sample_event("dedup-key-a")).await;
 
         assert!(result.is_ok());
         assert!(
             ack_completed.load(Ordering::SeqCst),
-            "publish_and_ack returned before the delayed ack resolved — fire-and-forget regression"
+            "JetStreamBuffer::push returned before the delayed ack resolved — fire-and-forget regression"
         );
     }
 
     /// Same content (dedup key) twice must yield an identical
     /// `Nats-Msg-Id`; different content must yield a different one —
     /// Global Constraint #4's server-side dedup only works if the header
-    /// is a deterministic function of the event.
+    /// is a deterministic function of the event. Drives the REAL `push`
+    /// and inspects what it actually sent via the recording fake, rather
+    /// than re-implementing the header-derivation logic in the test.
     #[tokio::test]
     async fn push_sets_nats_msg_id_header_deterministically() {
-        let ack_completed = std::sync::Arc::new(AtomicBool::new(false));
-        let publisher = DelayedAckPublisher {
-            ack_delay: Duration::from_millis(0),
-            ack_completed,
-            captured: Mutex::new(None),
-        };
+        let acker = FakeAcker::new(Duration::from_millis(0));
+        let buffer = JetStreamBuffer::with_acker(acker.clone(), "logs");
 
-        let event_a1 = sample_event("dedup-key-a");
-        let subject_a1 = format!("logs.{}", event_a1.tenant.as_str());
-        let mut headers_a1 = async_nats::HeaderMap::new();
-        headers_a1.insert("Nats-Msg-Id", event_a1.dedup_key.as_str());
-        publisher
-            .publish_and_ack(subject_a1.clone(), headers_a1, Bytes::new())
-            .await
-            .unwrap();
-        let msg_id_a1 = publisher
-            .captured
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .1
-            .get("Nats-Msg-Id")
-            .unwrap()
-            .to_string();
+        buffer.push(sample_event("dedup-key-a")).await.unwrap();
+        let msg_id_a1 = acker.last_headers().get("Nats-Msg-Id").unwrap().to_string();
 
-        let event_a2 = sample_event("dedup-key-a");
-        let mut headers_a2 = async_nats::HeaderMap::new();
-        headers_a2.insert("Nats-Msg-Id", event_a2.dedup_key.as_str());
-        publisher
-            .publish_and_ack(subject_a1, headers_a2, Bytes::new())
-            .await
-            .unwrap();
-        let msg_id_a2 = publisher
-            .captured
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .1
-            .get("Nats-Msg-Id")
-            .unwrap()
-            .to_string();
-
+        buffer.push(sample_event("dedup-key-a")).await.unwrap();
+        let msg_id_a2 = acker.last_headers().get("Nats-Msg-Id").unwrap().to_string();
         assert_eq!(
             msg_id_a1, msg_id_a2,
             "same dedup_key must yield the same Nats-Msg-Id"
         );
 
-        let event_b = sample_event("dedup-key-b");
-        let mut headers_b = async_nats::HeaderMap::new();
-        headers_b.insert("Nats-Msg-Id", event_b.dedup_key.as_str());
-        publisher
-            .publish_and_ack("logs.tenant-a".to_owned(), headers_b, Bytes::new())
-            .await
-            .unwrap();
-        let msg_id_b = publisher
-            .captured
-            .lock()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .1
-            .get("Nats-Msg-Id")
-            .unwrap()
-            .to_string();
-
+        buffer.push(sample_event("dedup-key-b")).await.unwrap();
+        let msg_id_b = acker.last_headers().get("Nats-Msg-Id").unwrap().to_string();
         assert_ne!(
             msg_id_a1, msg_id_b,
             "different dedup_key must yield a different Nats-Msg-Id"
@@ -402,5 +411,129 @@ mod tests {
             Err(BufferError::Transport(_))
         ));
         assert!(validate_subject_prefix("svc-ingest.logs").is_ok());
+    }
+
+    /// Pure, I/O-free: JetStream stream names may not contain `.`, so
+    /// `stream_name` derives one from `subject_prefix` by substitution.
+    #[test]
+    fn stream_name_replaces_dots_with_underscores() {
+        let buffer = JetStreamBuffer::with_acker(FakeAcker::new(Duration::ZERO), "svc-ingest.logs");
+        assert_eq!(buffer.stream_name(), "svc-ingest_logs");
+    }
+
+    /// `ack`/`nack` reject a handle minted by the *other* `EventBuffer`
+    /// implementation cleanly — no I/O, so this doesn't need a broker
+    /// (unlike the `AckHandleInner::JetStream` arm, which does and is
+    /// deferred to Task 1.5).
+    #[tokio::test]
+    async fn ack_rejects_inmemory_handle() {
+        let buffer = JetStreamBuffer::with_acker(FakeAcker::new(Duration::ZERO), "logs");
+        let result = buffer.ack(AckHandle(AckHandleInner::InMemory(0))).await;
+        assert!(matches!(result, Err(BufferError::Transport(_))));
+    }
+
+    /// See `ack_rejects_inmemory_handle` — same mismatch guard on `nack`.
+    #[tokio::test]
+    async fn nack_rejects_inmemory_handle() {
+        let buffer = JetStreamBuffer::with_acker(FakeAcker::new(Duration::ZERO), "logs");
+        let result = buffer.nack(AckHandle(AckHandleInner::InMemory(0))).await;
+        assert!(matches!(result, Err(BufferError::Transport(_))));
+    }
+
+    /// A buffer built via `with_acker` (test-only, no bound broker
+    /// context) must fail `consume` cleanly rather than panicking —
+    /// `consume`/`ack`/`nack` against a real broker are covered in Task
+    /// 1.5, not here.
+    #[tokio::test]
+    async fn consume_without_bound_context_errors_cleanly() {
+        let buffer = JetStreamBuffer::with_acker(FakeAcker::new(Duration::ZERO), "logs");
+        let result = buffer.consume(10).await;
+        assert!(matches!(result, Err(BufferError::Transport(_))));
+    }
+
+    /// Builds the exact wire body/headers `push` would produce for
+    /// `event`, without going through a live broker — `async_nats::
+    /// Message`'s fields are all public, so a real message can be
+    /// constructed directly for the decode-side test below.
+    fn encode_as_wire_message(event: &NormalizedEvent, subject: &str) -> async_nats::Message {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("Nats-Msg-Id", event.dedup_key.as_str());
+        headers.insert(TENANT_HEADER, event.tenant.as_str());
+        let mut body = String::new();
+        event.doc.write_compact(&mut body);
+        async_nats::Message {
+            subject: subject.into(),
+            reply: None,
+            payload: Bytes::from(body.into_bytes()),
+            headers: Some(headers),
+            status: None,
+            description: None,
+            length: 0,
+        }
+    }
+
+    /// Proves the push -> consume serialization boundary is symmetric: an
+    /// event encoded the same way `push` encodes it decodes back via
+    /// `normalized_event_from_message` into an equal event.
+    #[test]
+    fn push_encoding_round_trips_through_consume_decoding() {
+        let event = sample_event("dedup-key-roundtrip");
+        let message = encode_as_wire_message(&event, "logs.tenant-a");
+
+        let rebuilt = normalized_event_from_message(&message).unwrap();
+
+        assert_eq!(rebuilt.tenant, event.tenant);
+        assert_eq!(rebuilt.dedup_key, event.dedup_key);
+        assert_eq!(rebuilt.doc, event.doc);
+    }
+
+    /// Builds a wire message with exactly the given headers (no `Nats-
+    /// Msg-Id`/tenant defaults), for tests exercising a message missing
+    /// one of them — `HeaderMap` has no `remove`, so the negative cases
+    /// build their headers directly instead of stripping one out.
+    fn wire_message_with_headers(headers: async_nats::HeaderMap) -> async_nats::Message {
+        async_nats::Message {
+            subject: "logs.tenant-a".into(),
+            reply: None,
+            payload: Bytes::from_static(b"{}"),
+            headers: Some(headers),
+            status: None,
+            description: None,
+            length: 0,
+        }
+    }
+
+    /// A delivered message missing the tenant header must error cleanly
+    /// — never silently produce a `NormalizedEvent` with a fabricated or
+    /// empty tenant (that would be an un-tenanted event slipping past the
+    /// tenant-isolation boundary).
+    #[test]
+    fn normalized_event_from_message_missing_tenant_header_errors_cleanly() {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert("Nats-Msg-Id", "dedup-key-no-tenant");
+        // Deliberately no TENANT_HEADER.
+        let message = wire_message_with_headers(headers);
+
+        let result = normalized_event_from_message(&message);
+
+        assert!(
+            matches!(result, Err(BufferError::Serialize(_))),
+            "missing tenant header must be a clean Serialize error, never a silently-untenanted event"
+        );
+    }
+
+    /// Same as above, for the `Nats-Msg-Id` header — a message JetStream
+    /// somehow delivered without it must not decode into an event with a
+    /// fabricated dedup key.
+    #[test]
+    fn normalized_event_from_message_missing_dedup_key_header_errors_cleanly() {
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(TENANT_HEADER, "tenant-a");
+        // Deliberately no Nats-Msg-Id.
+        let message = wire_message_with_headers(headers);
+
+        let result = normalized_event_from_message(&message);
+
+        assert!(matches!(result, Err(BufferError::Serialize(_))));
     }
 }
