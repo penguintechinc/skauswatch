@@ -71,6 +71,18 @@ pub struct DeliveredEvent {
     /// The handle to `ack`/`nack` once downstream processing of `event`
     /// has succeeded or failed.
     pub handle: AckHandle,
+    /// The OpenTelemetry trace context extracted from this message's W3C
+    /// `traceparent` header, if the receiver-side push had an active span
+    /// to inject (`crate::buffer::jetstream::inject_trace_context`) — lets
+    /// the writer reparent its own processing span to the producer's
+    /// trace, propagating trace context across the receiver -> NATS ->
+    /// writer queue hop (`critical-rules.md` Observability: "propagate
+    /// trace context across every service boundary ... queue hops").
+    /// `None` for the in-memory fallback (no header transport) or when no
+    /// span was active at push time — never treated as an error either
+    /// way (extraction is infallible; see
+    /// `crate::buffer::jetstream::extract_trace_context`'s doc comment).
+    pub trace_context: Option<opentelemetry::Context>,
 }
 
 /// Opaque redelivery handle — either a JetStream message (explicit-ack

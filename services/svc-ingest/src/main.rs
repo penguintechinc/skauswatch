@@ -30,6 +30,7 @@ mod identity_store;
 mod listeners;
 mod openapi;
 mod opensearch;
+mod otel;
 mod writer;
 
 use chrono::NaiveDate;
@@ -139,7 +140,7 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 /// returns a non-zero exit rather than leaving the schema partially
 /// applied and reporting success.
 async fn migrate() -> anyhow::Result<()> {
-    skauswatch_telemetry::init_tracing("skauswatch-svc-ingest");
+    let _otel = crate::otel::init("skauswatch-svc-ingest");
     let db_cfg =
         skauswatch_db::DbConfig::from_env().map_err(|e| anyhow::anyhow!("db config: {e}"))?;
     let pool = skauswatch_db::connect_postgres(&db_cfg)
@@ -161,7 +162,7 @@ async fn backfill_command(
     batch_size: usize,
     dry_run: bool,
 ) -> anyhow::Result<()> {
-    skauswatch_telemetry::init_tracing("skauswatch-svc-ingest");
+    let _otel = crate::otel::init("skauswatch-svc-ingest");
 
     // Parse dates.
     let start_date = NaiveDate::parse_from_str(start_date_str, "%Y-%m-%d")
@@ -205,7 +206,7 @@ async fn backfill_command(
 /// Receiver` does not need one — see `crate::bootstrap`'s doc comment for
 /// why.
 async fn serve(mode: RunMode) -> anyhow::Result<()> {
-    skauswatch_telemetry::init_tracing("skauswatch-svc-ingest");
+    let _otel = crate::otel::init("skauswatch-svc-ingest");
     skauswatch_telemetry::install_metrics_exporter()
         .map_err(|e| anyhow::anyhow!("metrics exporter: {e}"))?;
 

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt as _;
+use opentelemetry::propagation::{Extractor, Injector};
 use tokio::sync::OnceCell;
 
 use super::{AckHandle, AckHandleInner, BufferError, DeliveredEvent, EventBuffer, NormalizedEvent};
@@ -23,6 +24,64 @@ const TENANT_HEADER: &str = "Skauswatch-Tenant";
 /// before returning empty-handed. Keeps the writer loop responsive
 /// without hot-looping the pull request when the stream is idle.
 const FETCH_EXPIRES: Duration = Duration::from_secs(5);
+
+// ---------------------------------------------------------------------
+// Trace context propagation (`critical-rules.md` Observability:
+// "propagate trace context across every service boundary ... queue
+// hops"). Bridges `async_nats::HeaderMap` to OpenTelemetry's
+// `Injector`/`Extractor` traits so the active span's W3C `traceparent`
+// (+ `tracestate`, if any) travels alongside the existing `Nats-Msg-Id`/
+// `Skauswatch-Tenant` headers. Both directions are infallible by the
+// propagator API's own design (`Injector::set`/`Extractor::get` return no
+// `Result`) — a missing/malformed header can never fail a `push` or
+// `consume`, only degrade to "no parent linkage".
+// ---------------------------------------------------------------------
+
+struct HeaderInjector<'a>(&'a mut async_nats::HeaderMap);
+
+impl Injector for HeaderInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.insert(key, value.as_str());
+    }
+}
+
+struct HeaderExtractor<'a>(&'a async_nats::HeaderMap);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).map(async_nats::HeaderValue::as_str)
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.iter().map(|(name, _)| name.as_ref()).collect()
+    }
+}
+
+/// Injects the currently active `tracing` span's OpenTelemetry context
+/// into `headers` as a W3C `traceparent` (+ `tracestate`) header pair —
+/// called from [`JetStreamBuffer::push`]. A silent no-op when no
+/// OTel-bridged span is active (e.g. OTLP export disabled — see
+/// `crate::otel::init`) or the global propagator has nothing to inject;
+/// never panics, never errors.
+fn inject_trace_context(headers: &mut async_nats::HeaderMap) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let cx = tracing::Span::current().context();
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&cx, &mut HeaderInjector(headers));
+    });
+}
+
+/// Extracts a W3C `traceparent`/`tracestate` pair from `headers` (the
+/// inverse of [`inject_trace_context`]) into an OpenTelemetry
+/// [`opentelemetry::Context`] — called from [`JetStreamBuffer::consume`].
+/// Returns an empty (non-remote) context when `headers` carries no valid
+/// `traceparent`, never an error — a malformed/absent header degrades to
+/// "no parent linkage" rather than failing the consume.
+pub(super) fn extract_trace_context(headers: &async_nats::HeaderMap) -> opentelemetry::Context {
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(headers))
+    })
+}
 
 /// The seam [`JetStreamBuffer::push`] calls through. The only production
 /// implementor is `async_nats::jetstream::Context` below — an ordinary
@@ -216,6 +275,11 @@ impl JetStreamBuffer {
 
 #[async_trait::async_trait]
 impl EventBuffer for JetStreamBuffer {
+    #[tracing::instrument(
+        name = "buffer_push",
+        skip(self, event),
+        fields(tenant = %event.tenant.as_str())
+    )]
     async fn push(&self, event: NormalizedEvent) -> Result<(), BufferError> {
         let subject = format!("{}.{}", self.subject_prefix, event.tenant.as_str());
         let mut headers = async_nats::HeaderMap::new();
@@ -224,6 +288,7 @@ impl EventBuffer for JetStreamBuffer {
         // of a duplicate document.
         headers.insert("Nats-Msg-Id", event.dedup_key.as_str());
         headers.insert(TENANT_HEADER, event.tenant.as_str());
+        inject_trace_context(&mut headers);
         let mut body = String::new();
         event.doc.write_compact(&mut body);
         self.acker
@@ -231,6 +296,7 @@ impl EventBuffer for JetStreamBuffer {
             .await
     }
 
+    #[tracing::instrument(name = "buffer_consume", skip(self), fields(batch_size))]
     async fn consume(&self, batch_size: usize) -> Result<Vec<DeliveredEvent>, BufferError> {
         let consumer = self.consumer().await?;
         let mut messages = consumer
@@ -245,14 +311,30 @@ impl EventBuffer for JetStreamBuffer {
         while let Some(msg) = messages.next().await {
             let msg = msg.map_err(|e| BufferError::Transport(e.to_string()))?;
             let event = normalized_event_from_message(&msg)?;
+            // Propagate the producer's trace context across the queue hop
+            // (see `extract_trace_context`'s doc comment) -- infallible,
+            // `None` only when the message genuinely carries no headers.
+            let trace_context = msg.headers.as_ref().map(extract_trace_context);
             delivered.push(DeliveredEvent {
                 event,
                 handle: AckHandle(AckHandleInner::JetStream(Box::new(msg))),
+                trace_context,
             });
         }
+        // Proxy for "current buffer depth" (Spec §11a
+        // `svc_ingest_receiver_queue_depth`): the size of the batch this
+        // call just pulled off the stream. A literal server-side stream
+        // byte/message count (`Stream::info()`) would need an extra
+        // JetStream round trip on every `consume()` call -- this is
+        // real, already-available data (no added I/O) that still tracks
+        // ingest backlog/throughput for an operator watching the gauge,
+        // documented here rather than silently approximated.
+        metrics::gauge!(crate::otel::metric_names::RECEIVER_QUEUE_DEPTH)
+            .set(delivered.len() as f64);
         Ok(delivered)
     }
 
+    #[tracing::instrument(name = "buffer_ack", skip(self, handle))]
     async fn ack(&self, handle: AckHandle) -> Result<(), BufferError> {
         match handle.0 {
             AckHandleInner::JetStream(msg) => msg
@@ -265,6 +347,7 @@ impl EventBuffer for JetStreamBuffer {
         }
     }
 
+    #[tracing::instrument(name = "buffer_nack", skip(self, handle))]
     async fn nack(&self, handle: AckHandle) -> Result<(), BufferError> {
         match handle.0 {
             AckHandleInner::JetStream(msg) => msg
@@ -330,6 +413,9 @@ fn normalized_event_from_message(
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+
+    use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
 
@@ -442,6 +528,132 @@ mod tests {
         assert_ne!(
             msg_id_a1, msg_id_b,
             "different dedup_key must yield a different Nats-Msg-Id"
+        );
+    }
+
+    /// Installs a real (in-memory-exported) OTel tracer as the process's
+    /// tracing subscriber for the duration of the test, via
+    /// `tracing::subscriber::set_default` (thread-scoped, not the global
+    /// default `tracing_subscriber::registry().init()` uses elsewhere in
+    /// this crate -- safe to call from more than one test without
+    /// conflicting). Returns the guard the caller must keep alive.
+    fn install_test_otel_subscriber() -> tracing::subscriber::DefaultGuard {
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let exporter =
+            opentelemetry_sdk::trace::in_memory_exporter::InMemorySpanExporter::default();
+        let tracer_provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter)
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("test")));
+        tracing::subscriber::set_default(subscriber)
+    }
+
+    /// Spec fix-round finding: `push` must inject the active span's W3C
+    /// trace context as a `traceparent` header alongside the existing
+    /// `Nats-Msg-Id`/`Skauswatch-Tenant` headers (`critical-rules.md`
+    /// Observability: propagate trace context across every service
+    /// boundary, including queue hops). Drives the REAL `push` (via
+    /// `#[tracing::instrument]`'s own `buffer_push` span, not a
+    /// hand-rolled injection) and asserts the resulting header is present
+    /// and W3C-shaped (`{version}-{trace-id:32hex}-{span-id:16hex}-{flags}`).
+    #[tokio::test]
+    async fn push_injects_well_formed_traceparent_header_when_span_is_active() {
+        let _guard = install_test_otel_subscriber();
+
+        let acker = FakeAcker::new(Duration::ZERO);
+        let buffer = JetStreamBuffer::with_acker(acker.clone(), "logs");
+        buffer.push(sample_event("dedup-key-trace")).await.unwrap();
+
+        let headers = acker.last_headers();
+        let traceparent = headers
+            .get("traceparent")
+            .expect("push must inject a traceparent header when a span is active")
+            .to_string();
+        let parts: Vec<&str> = traceparent.split('-').collect();
+        assert_eq!(
+            parts.len(),
+            4,
+            "traceparent must be 4 dash-separated fields (version-traceid-spanid-flags): \
+             {traceparent:?}"
+        );
+        assert_eq!(parts[0].len(), 2, "version field must be 2 hex chars");
+        assert_eq!(parts[1].len(), 32, "trace-id field must be 32 hex chars");
+        assert_eq!(parts[2].len(), 16, "span-id field must be 16 hex chars");
+        assert_eq!(parts[3].len(), 2, "flags field must be 2 hex chars");
+        assert!(
+            parts[1].chars().all(|c| c.is_ascii_hexdigit()) && parts[1] != "0".repeat(32),
+            "trace-id must be non-zero hex: {traceparent:?}"
+        );
+    }
+
+    /// Spec fix-round finding: `consume` must extract a delivered
+    /// message's `traceparent` header back into an OpenTelemetry
+    /// `Context`, and that context must be usable to parent a writer-side
+    /// span -- the exact mechanism `writer::process_batch` uses to link
+    /// its `writer_consume_and_bulk_write` span to the producer's trace
+    /// across the NATS queue hop. Round-trips a known, fabricated
+    /// `SpanContext` (never a live broker -- `extract_trace_context` is a
+    /// pure function of a `HeaderMap`) through inject -> extract -> parent
+    /// a fresh span, and asserts the trace_id survives every step.
+    #[test]
+    fn extract_trace_context_round_trips_and_can_parent_a_writer_span() {
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+
+        let known_trace_id =
+            opentelemetry::trace::TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736")
+                .expect("valid fixture trace id");
+        let known_span_id = opentelemetry::trace::SpanId::from_hex("00f067aa0ba902b7")
+            .expect("valid fixture span id");
+        let span_context = opentelemetry::trace::SpanContext::new(
+            known_trace_id,
+            known_span_id,
+            opentelemetry::trace::TraceFlags::SAMPLED,
+            true, // remote -- W3C propagation always yields a remote span context
+            opentelemetry::trace::TraceState::default(),
+        );
+        let known_cx = opentelemetry::Context::new().with_remote_span_context(span_context);
+
+        // Inject the known context (mirrors `push`'s own
+        // `inject_trace_context`, driven directly against a known Context
+        // rather than a live span).
+        let mut headers = async_nats::HeaderMap::new();
+        opentelemetry::global::get_text_map_propagator(|propagator| {
+            propagator.inject_context(&known_cx, &mut HeaderInjector(&mut headers));
+        });
+
+        // Extract it back -- the exact function `consume()` calls.
+        let extracted_cx = extract_trace_context(&headers);
+        let extracted_trace_id = opentelemetry::trace::TraceContextExt::span(&extracted_cx)
+            .span_context()
+            .trace_id();
+        assert_eq!(
+            extracted_trace_id, known_trace_id,
+            "round-tripped context must carry the same trace_id"
+        );
+
+        // Parent a fresh tracing span from the extracted context -- the
+        // same `OpenTelemetrySpanExt::set_parent` call
+        // `writer::process_batch` makes for its `writer_consume_and_bulk_write`
+        // span -- and confirm the RESULTING span reports the identical
+        // trace_id, proving the receiver's trace genuinely links to the
+        // writer-side span rather than just the raw `Context` value
+        // round-tripping in isolation.
+        let _guard = install_test_otel_subscriber();
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+        let span = tracing::info_span!("writer_consume_and_bulk_write_test");
+        span.set_parent(extracted_cx)
+            .expect("set_parent must succeed on a freshly created span");
+        let span_trace_id = opentelemetry::trace::TraceContextExt::span(&span.context())
+            .span_context()
+            .trace_id();
+        assert_eq!(
+            span_trace_id, known_trace_id,
+            "the writer span's parent trace_id must match the injected context's trace_id"
         );
     }
 

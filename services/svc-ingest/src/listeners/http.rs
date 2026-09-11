@@ -195,6 +195,30 @@ fn dedup_key_for(tenant: &str, doc: &JsonVal) -> String {
         .collect()
 }
 
+/// Records [`crate::otel::metric_names::RECEIVER_EVENTS_TOTAL`] on success,
+/// or [`crate::otel::metric_names::BUFFER_FULL_REJECTIONS_TOTAL`] on
+/// backpressure, both labeled `transport = "http"` — mirrors
+/// `listeners::syslog`/`listeners::otlp`'s identically-named helper.
+fn record_enqueue_metrics(result: &Result<(), BufferError>, transport: &str) {
+    match result {
+        Ok(()) => {
+            metrics::counter!(
+                crate::otel::metric_names::RECEIVER_EVENTS_TOTAL,
+                "transport" => transport.to_owned()
+            )
+            .increment(1);
+        }
+        Err(BufferError::Full) => {
+            metrics::counter!(
+                crate::otel::metric_names::BUFFER_FULL_REJECTIONS_TOTAL,
+                "transport" => transport.to_owned()
+            )
+            .increment(1);
+        }
+        Err(_) => {}
+    }
+}
+
 /// Maps a buffer-push failure onto the ingest HTTP contract: `Full` is 429
 /// Too Many Requests (retryable backpressure — matches the OTLP HTTP
 /// listener's same convention, Spec §7c); `Transport`/`Serialize` are a
@@ -243,6 +267,7 @@ fn buffer_error_to_response(err: BufferError) -> Response {
         (status = 500, description = "OCSF normalization failed or the event buffer push errored", body = crate::openapi::IngestErrorResponse),
     ),
 )]
+#[tracing::instrument(name = "receiver_enqueue", skip(state, tenant_ctx, headers, body))]
 pub(crate) async fn handle_ingest(
     State(state): State<AppState>,
     tenant_ctx: TenantContext,
@@ -314,6 +339,7 @@ pub(crate) async fn handle_ingest(
                 dedup_key,
             })
             .await;
+        record_enqueue_metrics(&push_result, "http");
         if let Err(err) = push_result {
             return buffer_error_to_response(err);
         }

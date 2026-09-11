@@ -105,6 +105,15 @@ impl LogsGrpc {
     }
 
     /// Resolves the request's tenant, then pushes every decoded record.
+    /// Span name: `receiver_enqueue` (Spec §11a "per-event processing:
+    /// parse, normalize, enqueue, ack" — [`convert::decode_proto_request`]/
+    /// [`convert::decode_json_request`] cover "parse"; this covers
+    /// normalize+enqueue+ack, mirroring `listeners::syslog::enqueue`'s
+    /// identical span name/coverage for the syslog transports).
+    #[tracing::instrument(
+        name = "receiver_enqueue",
+        skip(self, decoded, peer_spiffe_id, bearer_token)
+    )]
     async fn ingest(
         &self,
         decoded: Vec<DecodedRecord>,
@@ -117,14 +126,16 @@ impl LogsGrpc {
         for record in decoded {
             let doc = normalize_and_log_collision(&record);
             let dedup_key = dedup_key_for(&doc);
-            self.buffer
+            let result = self
+                .buffer
                 .push(NormalizedEvent {
                     tenant: tenant.clone(),
                     doc,
                     dedup_key,
                 })
-                .await
-                .map_err(buffer_error_to_status)?;
+                .await;
+            record_enqueue_metrics(&result, "otlp");
+            result.map_err(buffer_error_to_status)?;
         }
         Ok(())
     }
@@ -204,6 +215,31 @@ fn auth_error_to_status(err: AuthError) -> Status {
         AuthError::InvalidCert | AuthError::UnknownIdentity => {
             Status::permission_denied(err.to_string())
         }
+    }
+}
+
+/// Records [`crate::otel::metric_names::RECEIVER_EVENTS_TOTAL`] on success,
+/// or [`crate::otel::metric_names::BUFFER_FULL_REJECTIONS_TOTAL`] on
+/// backpressure, both labeled `transport = "otlp"` regardless of whether
+/// the request arrived over gRPC (`:4317`) or HTTP (`:4318`) — mirrors
+/// `listeners::syslog`'s identical helper of the same name.
+fn record_enqueue_metrics(result: &Result<(), BufferError>, transport: &str) {
+    match result {
+        Ok(()) => {
+            metrics::counter!(
+                crate::otel::metric_names::RECEIVER_EVENTS_TOTAL,
+                "transport" => transport.to_owned()
+            )
+            .increment(1);
+        }
+        Err(BufferError::Full) => {
+            metrics::counter!(
+                crate::otel::metric_names::BUFFER_FULL_REJECTIONS_TOTAL,
+                "transport" => transport.to_owned()
+            )
+            .increment(1);
+        }
+        Err(_) => {}
     }
 }
 
@@ -481,6 +517,7 @@ fn http_router(state: HttpState) -> axum::Router {
 /// retry-with-backoff backpressure signal as a permanent auth failure
 /// (Spec §7c: every non-gRPC transport answers 429 on backpressure, mirrored
 /// by the gRPC side's `RESOURCE_EXHAUSTED`).
+#[tracing::instrument(name = "receiver_enqueue", skip(state, headers, body))]
 async fn export_http(
     axum::extract::State(state): axum::extract::State<HttpState>,
     headers: axum::http::HeaderMap,
@@ -509,6 +546,7 @@ async fn export_http(
                 dedup_key,
             })
             .await;
+        record_enqueue_metrics(&push_result, "otlp");
         if let Err(err) = push_result {
             return buffer_error_to_http_response(err);
         }

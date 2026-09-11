@@ -72,6 +72,15 @@ tonic-prost = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
+# tracing-subscriber: `crate::otel`'s own `Registry` + `EnvFilter` + JSON
+# `fmt` layer composition (Task 3.2, Spec §11) -- svc-ingest was previously
+# a `skauswatch_telemetry::init_tracing` consumer only and never depended
+# on this crate directly; `crate::otel` builds its own equivalent registry
+# so `tracing-opentelemetry`'s OTel span layer and the
+# `opentelemetry-appender-tracing` log bridge can be composed into the same
+# subscriber (`tracing_subscriber::registry().init()` can only be called
+# once per process, so a second registry can't be layered on afterward).
+tracing-subscriber = { workspace = true }
 # "yaml" adds serde_yaml so `skauswatch-svc-ingest openapi` can emit true
 # YAML for openapi/v1.yaml (workspace default features are json-only) — see
 # docs/v2-port/openapi-pattern.md.
@@ -88,10 +97,16 @@ async-nats = { version = "=0.50.0", default-features = false, features = ["jetst
 # Cargo.toml addition (Task-0.2 gap: this dependency edge was never wired
 # for svc-ingest even though the workspace pin already existed).
 sha2 = { workspace = true }
+opentelemetry = "=0.32.0"
+opentelemetry_sdk = { version = "=0.32.1", features = ["trace", "logs", "rt-tokio"] }
+opentelemetry-otlp = { version = "=0.32.0", features = ["grpc-tonic", "trace", "logs", "metrics"] }
+tracing-opentelemetry = "=0.33.0"
+opentelemetry-appender-tracing = "=0.32.0"
 
 [dev-dependencies]
 axum-test = { workspace = true }
 mockall = { workspace = true }
+opentelemetry_sdk = { version = "=0.32.1", features = ["testing"] }
 # p256/pkcs8/rand_core: Task 3.0's `tests/common` harness mints its own
 # ES256 (P-256) fixture keypair (private PEM stays in-process to sign test
 # bearer tokens; public PEM is passed to the spawned receiver subprocess as

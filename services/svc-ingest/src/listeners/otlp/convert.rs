@@ -41,6 +41,17 @@ pub(super) struct DecodedRecord {
 /// Flattens every `ResourceLogs` -> `ScopeLogs` -> `LogRecord` in `req`
 /// into a flat list of [`DecodedRecord`]s, in wire order.
 pub(super) fn decode_proto_request(req: &ExportLogsServiceRequest) -> Vec<DecodedRecord> {
+    let started = std::time::Instant::now();
+    let out = decode_proto_request_inner(req);
+    metrics::histogram!(
+        crate::otel::metric_names::RECEIVER_PARSE_DURATION_MS,
+        "parser" => "otlp"
+    )
+    .record(started.elapsed().as_secs_f64() * 1000.0);
+    out
+}
+
+fn decode_proto_request_inner(req: &ExportLogsServiceRequest) -> Vec<DecodedRecord> {
     let mut out = Vec::new();
     for resource_logs in &req.resource_logs {
         let resource_attrs = resource_logs
@@ -136,6 +147,17 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// on a shape it doesn't fully understand (Spec's general fail-open
 /// posture for best-effort normalization paths).
 pub(super) fn decode_json_request(root: &serde_json::Value) -> Vec<DecodedRecord> {
+    let started = std::time::Instant::now();
+    let out = decode_json_request_inner(root);
+    metrics::histogram!(
+        crate::otel::metric_names::RECEIVER_PARSE_DURATION_MS,
+        "parser" => "otlp"
+    )
+    .record(started.elapsed().as_secs_f64() * 1000.0);
+    out
+}
+
+fn decode_json_request_inner(root: &serde_json::Value) -> Vec<DecodedRecord> {
     let mut out = Vec::new();
     let Some(resource_logs) = root
         .get("resourceLogs")

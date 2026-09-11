@@ -61,7 +61,17 @@ fn dedup_key(tenant: &skauswatch_auth::Tenant, doc: &skauswatch_ocsf::JsonVal) -
 
 /// Normalizes `parsed` to OCSF, stamps it with the server-resolved
 /// `tenant` (never a payload-derived one — Spec §6d), and durably buffers
-/// it. Shared by all three transports below.
+/// it. Shared by all three transports below. Span name: `receiver_enqueue`
+/// (Spec §11a "per-event processing: parse, normalize, enqueue, ack" — the
+/// normalize+enqueue+ack leg; [`parser::detect_and_parse`] covers "parse").
+/// `push` (below) does not return until the buffer's own durability/ack
+/// contract resolves (see `crate::buffer`'s module doc comment), so this
+/// span's duration genuinely covers "enqueue, ack" end to end.
+#[tracing::instrument(
+    name = "receiver_enqueue",
+    skip(parsed, buffer),
+    fields(tenant = %tenant.as_str())
+)]
 async fn enqueue(
     tenant: skauswatch_auth::Tenant,
     parsed: &ParsedSyslog,
@@ -78,6 +88,31 @@ async fn enqueue(
             dedup_key,
         })
         .await
+}
+
+/// Records [`crate::otel::metric_names::RECEIVER_EVENTS_TOTAL`] on success,
+/// or [`crate::otel::metric_names::BUFFER_FULL_REJECTIONS_TOTAL`] on
+/// backpressure, both labeled by `transport` — shared by every
+/// `enqueue()` call site below so the three syslog transports (UDP/TCP/TLS)
+/// record identically.
+fn record_enqueue_metrics(result: &Result<(), BufferError>, transport: &str) {
+    match result {
+        Ok(()) => {
+            metrics::counter!(
+                crate::otel::metric_names::RECEIVER_EVENTS_TOTAL,
+                "transport" => transport.to_owned()
+            )
+            .increment(1);
+        }
+        Err(BufferError::Full) => {
+            metrics::counter!(
+                crate::otel::metric_names::BUFFER_FULL_REJECTIONS_TOTAL,
+                "transport" => transport.to_owned()
+            )
+            .increment(1);
+        }
+        Err(_) => {}
+    }
 }
 
 // -- UDP ---------------------------------------------------------------
@@ -131,7 +166,9 @@ pub(crate) async fn consume_udp(socket: &UdpSocket, cfg: &Config, buffer: &Arc<d
             // (Spec §14a).
             continue;
         };
-        if let Err(e) = enqueue(tenant, &parsed, buffer.as_ref()).await {
+        let result = enqueue(tenant, &parsed, buffer.as_ref()).await;
+        record_enqueue_metrics(&result, "udp");
+        if let Err(e) = result {
             tracing::error!(error = %e, "syslog UDP event buffer push failed");
         }
     }
@@ -238,7 +275,9 @@ async fn read_and_enqueue_lines<R>(
         let Some(parsed) = detect_and_parse(&line) else {
             continue;
         };
-        match enqueue(tenant.clone(), &parsed, buffer.as_ref()).await {
+        let result = enqueue(tenant.clone(), &parsed, buffer.as_ref()).await;
+        record_enqueue_metrics(&result, transport);
+        match result {
             Ok(()) => {}
             Err(BufferError::Full) => {
                 tracing::warn!(
