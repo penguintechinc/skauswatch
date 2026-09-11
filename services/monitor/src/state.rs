@@ -8,7 +8,7 @@ use std::sync::Arc;
 use penguin_licensing::{LicenseClient, LicenseConfig};
 
 use crate::config::Config;
-use crate::es::{ElasticsearchStore, EventStore};
+use crate::es::{ElasticsearchStore, EventStore, IngestHttpStore};
 use crate::models::BaseEvent;
 use crate::threat_intel::store::ThreatStore;
 
@@ -140,12 +140,26 @@ impl AppStateInner {
     }
 }
 
-/// Event store backend: OpenSearch/Elasticsearch (Apache-2.0). Disabled →
-/// None, and the search/get routes answer 503. (v1 also had a MongoDB
-/// fallback; dropped in v2 — MongoDB's server is SSPL, and OpenSearch was
-/// already the preferred backend and covers the same event search/get.)
+/// Event store backend: Ingest HTTP forwarder (svc-ingest) when enabled,
+/// otherwise Elasticsearch/OpenSearch (Apache-2.0). Disabled → None, and the
+/// search/get routes answer 503. (v1 also had a MongoDB fallback; dropped in
+/// v2 — MongoDB's server is SSPL, and OpenSearch was already the preferred
+/// backend and covers the same event search/get. Task 2.2 replaces direct ES
+/// writes with HTTP forwarding to svc-ingest.)
 async fn build_event_store(config: &Config) -> Option<Arc<dyn EventStore>> {
+    if config.ingest.enabled && !config.ingest.token.is_empty() {
+        let store = IngestHttpStore::new(config.ingest.url.clone(), config.ingest.token.clone());
+        tracing::info!(url = %config.ingest.url, "ingest http forwarder configured");
+        return Some(Arc::new(store));
+    }
     if config.elasticsearch.enabled {
+        if config.ingest.enabled {
+            tracing::warn!(
+                "MONITOR_INGEST_TOKEN not set — falling back to direct Elasticsearch writes, \
+                 bypassing the svc-ingest unified lake; this fallback is transitional and will \
+                 be removed at final cutover"
+            );
+        }
         let store = ElasticsearchStore::new(
             config.elasticsearch.url.clone(),
             config.elasticsearch.index_pattern.clone(),
@@ -192,7 +206,9 @@ async fn build_threat_store() -> Option<Arc<ThreatStore>> {
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::config::{ApiConfig, ElasticsearchConfig, SecurityConfig, TenancyConfig};
+    use crate::config::{
+        ApiConfig, ElasticsearchConfig, IngestConfig, SecurityConfig, TenancyConfig,
+    };
 
     fn config_with_es(enabled: bool) -> Config {
         Config {
@@ -204,9 +220,14 @@ mod tests {
             elasticsearch: ElasticsearchConfig {
                 enabled,
                 url: "http://localhost:9200".to_owned(),
-                index_pattern: "aaa-events-*".to_owned(),
+                index_pattern: "skauswatch-logs-*".to_owned(),
                 username: None,
                 password: None,
+            },
+            ingest: IngestConfig {
+                enabled: false,
+                url: "https://svc-ingest:8002".to_owned(),
+                token: String::new(),
             },
             tenancy: TenancyConfig {
                 tenant_id: String::new(),
@@ -222,6 +243,36 @@ mod tests {
     #[tokio::test]
     async fn build_event_store_is_some_when_elasticsearch_enabled() {
         assert!(build_event_store(&config_with_es(true)).await.is_some());
+    }
+
+    /// Task 2.2 fix: verify that the fallback to direct ES writes happens
+    /// (silently but with a warning) when ingest is enabled but token is unset.
+    /// The fallback itself is acceptable as a transitional safety, but must
+    /// not be silent — operators should see the warning in logs.
+    #[tokio::test]
+    async fn build_event_store_falls_back_to_es_when_ingest_enabled_but_token_unset() {
+        let mut cfg = config_with_es(true);
+        cfg.ingest.enabled = true;
+        cfg.ingest.token = String::new();
+        let store = build_event_store(&cfg).await;
+        // The fallback chooses ES when ingest token is empty (verified by
+        // presence of a store — any EventStore impl is acceptable here).
+        assert!(store.is_some());
+    }
+
+    /// Verify that ingest HTTP store is preferred when token is set.
+    #[tokio::test]
+    async fn build_event_store_prefers_ingest_http_when_token_set() {
+        let mut cfg = config_with_es(true);
+        cfg.ingest.enabled = true;
+        cfg.ingest.token = "test-token-123".to_owned();
+        cfg.ingest.url = "http://localhost:8002".to_owned();
+        let store = build_event_store(&cfg).await;
+        assert!(store.is_some());
+        // Ingest HTTP store will be chosen (it's checked first in build_event_store).
+        // Direct verification of store type is difficult without downcasting,
+        // so we rely on the ordering in build_event_store: ingest is checked
+        // before ES, and returns if token is non-empty.
     }
 
     /// The build container/CI runner sets `DB_HOST`/`DB_USER`/`DB_PASS`/

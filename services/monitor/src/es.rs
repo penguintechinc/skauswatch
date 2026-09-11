@@ -173,7 +173,7 @@ pub struct ElasticsearchStore {
 
 impl ElasticsearchStore {
     /// Builds a store against `base_url` (e.g. `http://elasticsearch:9200`)
-    /// searching over `index_pattern` (v1 default `aaa-events-*`).
+    /// searching over `index_pattern` (v1 default `skauswatch-logs-*`).
     pub fn new(
         base_url: impl Into<String>,
         index_pattern: impl Into<String>,
@@ -195,11 +195,14 @@ impl ElasticsearchStore {
         }
     }
 
-    /// Date-rotated index name for a write, matching v1's
-    /// `aaa-events-{YYYY-MM}` scheme.
-    #[allow(dead_code)] // only called from index_event, itself unreached — see trait doc comment
+    /// Date-rotated index name for a write (task 2.2: unused; collectors
+    /// forward to svc-ingest instead). Historical: v1 used `aaa-events-{YYYY-MM}`;
+    /// unified lake uses `skauswatch-logs-{YYYY-MM}`. Kept for source compatibility
+    /// with the trait definition — index_event is unreached in practice since
+    /// events are forwarded to svc-ingest, never written directly to ES.
+    #[allow(dead_code)]
     fn write_index_for(event: &BaseEvent) -> String {
-        format!("aaa-events-{}", event.timestamp.format("%Y-%m"))
+        format!("skauswatch-logs-{}", event.timestamp.format("%Y-%m"))
     }
 }
 
@@ -277,6 +280,63 @@ impl EventStore for ElasticsearchStore {
         .map_err(|e| ApiError::internal("elasticsearch request", e))?
         .error_for_status()
         .map_err(|e| ApiError::internal("elasticsearch status", e))?;
+        Ok(())
+    }
+}
+
+/// HTTP-based ingest store that forwards events to svc-ingest's `/ingest`
+/// endpoint, implementing the [`EventStore`] trait. This store only supports
+/// write operations (`index_event`) — search and get operations return
+/// not-supported errors since this is a one-way forwarder, not a real store.
+pub struct IngestHttpStore {
+    client: reqwest::Client,
+    url: String,
+    token: String,
+}
+
+impl IngestHttpStore {
+    /// Builds a store that POSTs events to `url` (e.g.
+    /// `https://svc-ingest:8002`) with bearer token `token`.
+    pub fn new(url: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            url: url.into(),
+            token: token.into(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EventStore for IngestHttpStore {
+    async fn search(
+        &self,
+        _req: &EventSearchRequest,
+        _tenant: &str,
+    ) -> Result<EventSearchResponse, ApiError> {
+        Err(ApiError::internal(
+            "ingest http store",
+            "search not supported on http ingest forwarder",
+        ))
+    }
+
+    async fn get_by_id(&self, _id: &str, _tenant: &str) -> Result<Option<BaseEvent>, ApiError> {
+        Err(ApiError::internal(
+            "ingest http store",
+            "get_by_id not supported on http ingest forwarder",
+        ))
+    }
+
+    async fn index_event(&self, event: &BaseEvent) -> Result<(), ApiError> {
+        let ingest_url = format!("{}/ingest", self.url);
+        self.client
+            .post(&ingest_url)
+            .bearer_auth(&self.token)
+            .json(event)
+            .send()
+            .await
+            .map_err(|e| ApiError::internal("ingest http request", e))?
+            .error_for_status()
+            .map_err(|e| ApiError::internal("ingest http status", e))?;
         Ok(())
     }
 }
@@ -396,7 +456,7 @@ mod tests {
     async fn store_search_sends_body_to_search_endpoint_and_parses_hits() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/aaa-events-*/_search"))
+            .and(path("/skauswatch-logs-*/_search"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "hits": {"total": {"value": 1}, "hits": [
                     {"_source": {"id": "e1", "source": "system", "event_type": "process", "severity": "info", "message": "hi", "tenant_id": "tenant-a"}}
@@ -405,7 +465,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let store = ElasticsearchStore::new(server.uri(), "aaa-events-*", None, None);
+        let store = ElasticsearchStore::new(server.uri(), "skauswatch-logs-*", None, None);
         let req = EventSearchRequest {
             limit: 50,
             ..Default::default()
@@ -428,7 +488,7 @@ mod tests {
         let server = MockServer::start().await;
         let req = EventSearchRequest::default();
         Mock::given(method("POST"))
-            .and(path("/aaa-events-*/_search"))
+            .and(path("/skauswatch-logs-*/_search"))
             .and(body_json(build_search_body(&req, "tenant-a")))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "hits": {"total": {"value": 0}, "hits": []},
@@ -436,7 +496,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let store = ElasticsearchStore::new(server.uri(), "aaa-events-*", None, None);
+        let store = ElasticsearchStore::new(server.uri(), "skauswatch-logs-*", None, None);
         // Wiremock rejects with a 404 (no matching mock) if the sent body
         // doesn't equal the `tenant-a`-scoped body above, so a passing
         // `Ok` here already proves the tenant filter went out on the wire;
@@ -453,12 +513,12 @@ mod tests {
     async fn store_get_by_id_returns_none_on_404() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/aaa-events-*/_doc/missing"))
+            .and(path("/skauswatch-logs-*/_doc/missing"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
 
-        let store = ElasticsearchStore::new(server.uri(), "aaa-events-*", None, None);
+        let store = ElasticsearchStore::new(server.uri(), "skauswatch-logs-*", None, None);
         let found = match store.get_by_id("missing", "tenant-a").await {
             Ok(f) => f,
             Err(e) => panic!("expected ok, got {e:?}"),
@@ -473,14 +533,14 @@ mod tests {
     async fn store_get_by_id_hides_a_document_owned_by_another_tenant() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/aaa-events-*/_doc/e1"))
+            .and(path("/skauswatch-logs-*/_doc/e1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "_source": {"id": "e1", "source": "system", "event_type": "process", "severity": "info", "message": "hi", "tenant_id": "tenant-b"},
             })))
             .mount(&server)
             .await;
 
-        let store = ElasticsearchStore::new(server.uri(), "aaa-events-*", None, None);
+        let store = ElasticsearchStore::new(server.uri(), "skauswatch-logs-*", None, None);
         let found = match store.get_by_id("e1", "tenant-a").await {
             Ok(f) => f,
             Err(e) => panic!("expected ok, got {e:?}"),
@@ -492,14 +552,14 @@ mod tests {
     async fn store_get_by_id_returns_a_document_owned_by_the_caller() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/aaa-events-*/_doc/e1"))
+            .and(path("/skauswatch-logs-*/_doc/e1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "_source": {"id": "e1", "source": "system", "event_type": "process", "severity": "info", "message": "hi", "tenant_id": "tenant-a"},
             })))
             .mount(&server)
             .await;
 
-        let store = ElasticsearchStore::new(server.uri(), "aaa-events-*", None, None);
+        let store = ElasticsearchStore::new(server.uri(), "skauswatch-logs-*", None, None);
         let found = match store.get_by_id("e1", "tenant-a").await {
             Ok(f) => f,
             Err(e) => panic!("expected ok, got {e:?}"),
@@ -511,12 +571,12 @@ mod tests {
     async fn store_index_event_puts_to_date_rotated_index() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
-            .and(path("/aaa-events-2026-07/_doc/e1"))
+            .and(path("/skauswatch-logs-2026-07/_doc/e1"))
             .respond_with(ResponseTemplate::new(201))
             .mount(&server)
             .await;
 
-        let store = ElasticsearchStore::new(server.uri(), "aaa-events-*", None, None);
+        let store = ElasticsearchStore::new(server.uri(), "skauswatch-logs-*", None, None);
         let event = BaseEvent {
             id: "e1".to_owned(),
             source: LogSource::System,
@@ -539,6 +599,79 @@ mod tests {
         };
         if let Err(e) = store.index_event(&event).await {
             panic!("expected ok, got {e:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_http_store_posts_event_to_ingest_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ingest"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+
+        let store = IngestHttpStore::new(server.uri(), "token-123");
+        let event = BaseEvent {
+            id: "e1".to_owned(),
+            source: LogSource::System,
+            event_type: EventType::Process,
+            severity: Severity::Info,
+            message: "hi".to_owned(),
+            timestamp: Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap(),
+            raw_data: Value::Null,
+            tags: vec![],
+            host: String::new(),
+            user: None,
+            process: None,
+            pid: None,
+            enrichments: Value::Null,
+            threat_matches: vec![],
+            ai_analysis: None,
+            processed_data: Value::Null,
+            tenant_id: "tenant-a".to_owned(),
+            extra: Default::default(),
+        };
+        if let Err(e) = store.index_event(&event).await {
+            panic!("expected ok, got {e:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ingest_http_store_includes_bearer_token() {
+        use wiremock::matchers::header;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ingest"))
+            .and(header("authorization", "Bearer token-123"))
+            .respond_with(ResponseTemplate::new(202))
+            .mount(&server)
+            .await;
+
+        let store = IngestHttpStore::new(server.uri(), "token-123");
+        let event = BaseEvent {
+            id: "e1".to_owned(),
+            source: LogSource::System,
+            event_type: EventType::Process,
+            severity: Severity::Info,
+            message: "hi".to_owned(),
+            timestamp: Utc.with_ymd_and_hms(2026, 7, 15, 0, 0, 0).unwrap(),
+            raw_data: Value::Null,
+            tags: vec![],
+            host: String::new(),
+            user: None,
+            process: None,
+            pid: None,
+            enrichments: Value::Null,
+            threat_matches: vec![],
+            ai_analysis: None,
+            processed_data: Value::Null,
+            tenant_id: "tenant-a".to_owned(),
+            extra: Default::default(),
+        };
+        if let Err(e) = store.index_event(&event).await {
+            panic!("expected ok (bearer token must be present), got {e:?}");
         }
     }
 }
