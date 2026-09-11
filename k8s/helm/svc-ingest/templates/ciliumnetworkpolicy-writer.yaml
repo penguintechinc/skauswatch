@@ -1,0 +1,78 @@
+# Cilium default-deny + explicit allow for the writer Deployment. Writer
+# has NO inbound protocol/service port at all (Spec's port table: "None
+# (internal, reads JetStream only)") -- only kubelet probes on its private
+# health surface and same-namespace Prometheus scraping are allowed in.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "skauswatch-svc-ingest.writer.fullname" . }}
+  labels:
+    {{- include "skauswatch-svc-ingest.writer.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "skauswatch-svc-ingest.writer.selectorLabels" . | nindent 6 }}
+  ingress:
+    # kubelet liveness/readiness probes against WRITER_HEALTH_PORT
+    # originate from the node, not a pod identity.
+    - fromEntities:
+        - host
+        - remote-node
+    # Prometheus scrape (same-namespace collector -- adjust label if the
+    # cluster's Prometheus/Alloy runs in a dedicated monitoring namespace).
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "{{ .Values.ports.metricsPort }}"
+              protocol: TCP
+  egress:
+    # DNS resolution (kube-dns) -- required for any Service/FQDN egress below.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # CONFIRMED (services/svc-ingest/src/bootstrap.rs::build_event_buffer,
+    # run_writer): NATS JetStream consumer, same-namespace dependency; NOT
+    # owned by this chart.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: nats-jetstream
+      toPorts:
+        - ports:
+            - port: "4222"
+              protocol: TCP
+    # CONFIRMED (services/svc-ingest/src/writer.rs bulk-write path via
+    # cfg.opensearch_url): same-namespace dependency; NOT owned by this
+    # chart.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: opensearch
+      toPorts:
+        - ports:
+            - port: "9200"
+              protocol: TCP
+    # Task 2.4 brief specifies "svc-vault:8200" egress for the writer too.
+    # NOT YET CONFIRMED against source (no runtime vault API client call
+    # site found in services/svc-ingest/src for writer mode). Port
+    # corrected to match the ACTUAL deployed k8s/helm/vault chart's
+    # Service (values.yaml httpPort: 8080) -- see
+    # ciliumnetworkpolicy-receiver.yaml's identical note.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: skauswatch-vault
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP

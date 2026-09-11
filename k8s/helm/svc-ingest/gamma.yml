@@ -1,0 +1,51 @@
+# Gamma overrides — dal2-gamma cluster, namespace: skauswatch.
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/svc-ingest
+  tag: "gamma-0000000000"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+service:
+  type: ClusterIP
+
+receiver:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+writer:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+configMapData:
+  opensearch-url: "http://opensearch:9200"
+  nats-url: "nats://nats-jetstream:4222"
+  nats-jetstream-subject-prefix: "svc-ingest.logs"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "5"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"
+  syslog-udp-tenant-id: ""
+
+spire:
+  enabled: true

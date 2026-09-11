@@ -1,0 +1,33 @@
+{{- if .Values.receiver.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "skauswatch-svc-ingest.receiver.fullname" . }}
+  labels:
+    {{- include "skauswatch-svc-ingest.receiver.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "skauswatch-svc-ingest.receiver.fullname" . }}
+  minReplicas: {{ .Values.receiver.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.receiver.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.receiver.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.receiver.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.receiver.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.receiver.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+{{- end }}
