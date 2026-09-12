@@ -22,6 +22,11 @@ const DEFAULT_OPENSEARCH_URL: &str = "http://localhost:9200";
 const DEFAULT_NATS_URL: &str = "nats://localhost:4222";
 /// Default JetStream subject prefix (Spec §7a example config block).
 const DEFAULT_NATS_JETSTREAM_SUBJECT_PREFIX: &str = "svc-ingest.logs";
+/// Default OpenSearch snapshot repository name (Spec §8a1
+/// `SNAPSHOT_REPO_ENDPOINT` config note) — the WARM tier's searchable-snapshot
+/// mount and the COLD tier's archival `snapshot`/`_restore` calls
+/// (`crate::admin`, `crate::opensearch::ism`) all target this repository.
+const DEFAULT_SNAPSHOT_REPO: &str = "skauswatch-snapshots";
 
 /// Loaded configuration for `skauswatch-svc-ingest`.
 #[derive(Debug, Clone)]
@@ -42,6 +47,9 @@ pub struct Config {
     pub nats_url: String,
     /// JetStream subject prefix (`NATS_JETSTREAM_SUBJECT_PREFIX`).
     pub nats_jetstream_subject_prefix: String,
+    /// OpenSearch snapshot repository name (`SNAPSHOT_REPO`) — see
+    /// [`DEFAULT_SNAPSHOT_REPO`].
+    pub snapshot_repo: String,
     /// Whether the UDP syslog listener is enabled at all
     /// (`SYSLOG_UDP_ENABLED`) — OFF by default; UDP has no authentication,
     /// so enabling it is an explicit operator opt-in (Spec §6c).
@@ -134,6 +142,8 @@ pub struct RawConfig<'a> {
     pub nats_url: Option<&'a str>,
     /// Raw `NATS_JETSTREAM_SUBJECT_PREFIX` value.
     pub nats_jetstream_subject_prefix: Option<&'a str>,
+    /// Raw `SNAPSHOT_REPO` value.
+    pub snapshot_repo: Option<&'a str>,
     /// Raw `SYSLOG_UDP_ENABLED` value.
     pub syslog_udp_enabled: Option<&'a str>,
     /// Raw `SYSLOG_TRUSTED_CIDRS` value.
@@ -159,6 +169,7 @@ impl Config {
         let opensearch_url = std::env::var("OPENSEARCH_URL").ok();
         let nats_url = std::env::var("NATS_URL").ok();
         let nats_jetstream_subject_prefix = std::env::var("NATS_JETSTREAM_SUBJECT_PREFIX").ok();
+        let snapshot_repo = std::env::var("SNAPSHOT_REPO").ok();
         let syslog_udp_enabled = std::env::var("SYSLOG_UDP_ENABLED").ok();
         let syslog_trusted_cidrs = std::env::var("SYSLOG_TRUSTED_CIDRS").ok();
         let syslog_udp_tenant_id = std::env::var("SYSLOG_UDP_TENANT_ID").ok();
@@ -172,6 +183,7 @@ impl Config {
             opensearch_url: opensearch_url.as_deref(),
             nats_url: nats_url.as_deref(),
             nats_jetstream_subject_prefix: nats_jetstream_subject_prefix.as_deref(),
+            snapshot_repo: snapshot_repo.as_deref(),
             syslog_udp_enabled: syslog_udp_enabled.as_deref(),
             syslog_trusted_cidrs: syslog_trusted_cidrs.as_deref(),
             syslog_udp_tenant_id: syslog_udp_tenant_id.as_deref(),
@@ -206,6 +218,11 @@ impl Config {
             .filter(|s| !s.is_empty())
             .unwrap_or(DEFAULT_NATS_JETSTREAM_SUBJECT_PREFIX)
             .to_owned();
+        let snapshot_repo = raw
+            .snapshot_repo
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_SNAPSHOT_REPO)
+            .to_owned();
 
         let syslog_udp_enabled = match raw.syslog_udp_enabled.map(str::trim) {
             None | Some("") => false,
@@ -234,6 +251,7 @@ impl Config {
             opensearch_url,
             nats_url,
             nats_jetstream_subject_prefix,
+            snapshot_repo,
             syslog_udp_enabled,
             syslog_trusted_cidrs,
             syslog_udp_tenant_id,
@@ -280,6 +298,27 @@ mod tests {
         assert_eq!(cfg.opensearch_url, "http://localhost:9200");
         assert_eq!(cfg.nats_url, "nats://localhost:4222");
         assert_eq!(cfg.nats_jetstream_subject_prefix, "svc-ingest.logs");
+        assert_eq!(cfg.snapshot_repo, "skauswatch-snapshots");
+    }
+
+    #[test]
+    fn snapshot_repo_reads_from_raw_value() {
+        let cfg = Config::from_values(RawConfig {
+            snapshot_repo: Some("custom-repo"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.snapshot_repo, "custom-repo");
+    }
+
+    #[test]
+    fn snapshot_repo_empty_string_falls_back_to_default() {
+        let cfg = Config::from_values(RawConfig {
+            snapshot_repo: Some(""),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.snapshot_repo, "skauswatch-snapshots");
     }
 
     #[test]
@@ -368,6 +407,37 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_cidr_is_accepted_up_to_a_128_bit_prefix() {
+        let cfg = Config::from_values(RawConfig {
+            syslog_trusted_cidrs: Some("::1/128"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.syslog_trusted_cidrs.len(), 1);
+        assert_eq!(cfg.syslog_trusted_cidrs[0].prefix_len, 128);
+    }
+
+    #[test]
+    fn ipv6_cidr_prefix_len_exceeding_128_is_config_error() {
+        let err = Config::from_values(RawConfig {
+            syslog_trusted_cidrs: Some("::1/129"),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Cidr(_)));
+    }
+
+    #[test]
+    fn blank_entries_in_a_cidr_list_are_skipped_not_errors() {
+        let cfg = Config::from_values(RawConfig {
+            syslog_trusted_cidrs: Some("10.0.0.0/8,,172.16.0.0/12,"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.syslog_trusted_cidrs.len(), 2);
+    }
+
+    #[test]
     fn invalid_port_is_config_error_not_panic() {
         let err = Config::from_values(RawConfig {
             http_port: Some("not-a-port"),
@@ -375,5 +445,61 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(err, ConfigError::Int("HTTP_PORT"));
+    }
+
+    #[test]
+    fn port_empty_string_falls_back_to_default() {
+        let cfg = Config::from_values(RawConfig {
+            http_port: Some("  "),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.http_port, 8443);
+    }
+
+    // -- from_env ---------------------------------------------------------
+    //
+    // `Config::from_env` is thin glue (read each env var, delegate to the
+    // already-thoroughly-tested `from_values`) but it's a real production
+    // code path (`main.rs::serve`/`backfill_command`) with its own line
+    // coverage. This workspace denies `unsafe_code` (`Cargo.toml`
+    // `[workspace.lints.rust]`), so `std::env::set_var`/`remove_var` (both
+    // `unsafe fn` as of this edition) are not an option here, even scoped
+    // to a test -- unlike `from_values`, this function can only honestly be
+    // exercised against whatever the ambient process environment already
+    // is. Same defensive-assumption pattern `listeners::otlp::mod`'s own
+    // tests use for `DB_TYPE`: assert the vars are unset rather than
+    // silently skip, so a dev's shell accidentally exporting one of these
+    // fails loudly instead of quietly weakening this test.
+    #[test]
+    fn from_env_uses_defaults_against_an_unset_environment() {
+        for var in [
+            "HTTP_PORT",
+            "SYSLOG_PORT",
+            "SYSLOG_TLS_PORT",
+            "OTLP_GRPC_PORT",
+            "OTLP_HTTP_PORT",
+            "OPENSEARCH_URL",
+            "NATS_URL",
+            "NATS_JETSTREAM_SUBJECT_PREFIX",
+            "SNAPSHOT_REPO",
+            "SYSLOG_UDP_ENABLED",
+            "SYSLOG_TRUSTED_CIDRS",
+            "SYSLOG_UDP_TENANT_ID",
+        ] {
+            assert!(
+                std::env::var(var).is_err(),
+                "test assumes {var} is unset in the ambient test environment"
+            );
+        }
+
+        let cfg = Config::from_env().expect("an unset environment is always valid");
+
+        assert_eq!(cfg.http_port, 8443);
+        assert_eq!(cfg.opensearch_url, "http://localhost:9200");
+        assert_eq!(cfg.snapshot_repo, "skauswatch-snapshots");
+        assert!(!cfg.syslog_udp_enabled);
+        assert!(cfg.syslog_trusted_cidrs.is_empty());
+        assert_eq!(cfg.syslog_udp_tenant_id, None);
     }
 }

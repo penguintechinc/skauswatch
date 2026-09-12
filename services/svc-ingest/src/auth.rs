@@ -7,32 +7,10 @@
 //! trusted-CIDR config) and stamped onto the document by the caller before
 //! enqueueing (§6d, the house tenant-isolation rule).
 //!
-//! # Blocked (see task-1.4 report)
-//!
-//! Two pieces of this module reference symbols that do not exist yet in
-//! files outside this task's file scope (`services/svc-ingest/Cargo.toml`,
-//! `services/svc-ingest/src/config.rs`) and are therefore left as the
-//! *intended, correct* implementation rather than routed around:
-//!
-//! - [`hash_token`] requires the `sha2` crate, which is workspace-pinned
-//!   (`Cargo.toml`'s `[workspace.dependencies]`, `sha2 = "=0.10.9"`) but not
-//!   yet added to `services/svc-ingest/Cargo.toml`'s own `[dependencies]`.
-//! - [`resolve_via_udp_cidr`] requires a per-deployment "which tenant do
-//!   trusted-CIDR UDP packets belong to" value, which
-//!   `services/svc-ingest/src/config.rs::Config` does not yet expose as a
-//!   field (its `SYSLOG_TRUSTED_CIDRS`/`syslog_trusted_cidrs` only encodes
-//!   *which* source IPs are trusted, never *which tenant* they map to).
-//!
-//! Both gaps, and the exact minimal patch for each, are documented in
-//! `.superpowers/sdd/svc-ingest/reports/task-1.4-report.md`.
-
-// Wave 1 (Task 1.1/1.2/1.3, not this task) wires these functions into the
-// syslog/OTLP/HTTPS listeners and `main.rs`'s `serve()` -- until then,
-// `cargo build`'s reachability analysis (this crate has no `[lib]` target,
-// only a `[[bin]]`) sees this whole module as unused from production code.
-// Same pattern as the other Task-0.2/1.x stub modules'
-// `#[allow(dead_code)]` (see `buffer/mod.rs`, `writer.rs`).
-#![allow(dead_code)]
+//! [`hash_token`] uses the workspace-pinned `sha2` crate
+//! (`services/svc-ingest/Cargo.toml`'s own `[dependencies]`); [`resolve_via_udp_cidr`]
+//! reads its "which tenant do trusted-CIDR UDP packets belong to" value from
+//! `Config::syslog_udp_tenant_id` (`SYSLOG_UDP_TENANT_ID`).
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -42,12 +20,6 @@ use std::time::{Duration, Instant};
 use sha2::{Digest, Sha256};
 
 use crate::identity_store::IdentityStore;
-
-/// PostHog flag gating the entire service (Professional tier, default
-/// OFF) -- see `services/manager/src/flags.rs`'s module flag list. Same
-/// constant name/value as `services/logs/src/ingest.rs::LOG_INGEST_FLAG`;
-/// it is the same flag.
-pub const LOG_INGEST_FLAG: &str = "skauswatch.log-ingest";
 
 /// Ingest-token cache TTL (Spec §9b: "5 min cache, validate on every
 /// request") -- a [`TokenCache`] hit within this window skips the
@@ -588,6 +560,7 @@ mod tests {
             opensearch_url: "http://localhost:9200".to_owned(),
             nats_url: "nats://localhost:4222".to_owned(),
             nats_jetstream_subject_prefix: "svc-ingest.logs".to_owned(),
+            snapshot_repo: "skauswatch-snapshots".to_owned(),
             syslog_udp_enabled: enabled,
             syslog_trusted_cidrs: cidrs,
             syslog_udp_tenant_id: tenant.map(str::to_owned),

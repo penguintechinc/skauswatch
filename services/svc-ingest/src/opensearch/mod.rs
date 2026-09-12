@@ -11,14 +11,6 @@
 //! adds a sibling `ism.rs` for hot/warm/cold tiering; that lifecycle policy
 //! is out of scope here.
 //!
-//! Dead-code note: every item below is exercised by `crate::writer`, but
-//! `writer::run` itself is not yet called from `main.rs::serve()` — that
-//! wiring lands at the Wave-1 integration gate once every module it
-//! references exists (see `writer.rs`'s own doc comment). Until then a
-//! plain (non-test) `cargo build`/`clippy` sees this whole module as
-//! unreachable, matching `buffer/mod.rs`'s same interim `#![allow(dead_code)]`.
-#![allow(dead_code)]
-
 use chrono::{DateTime, Utc};
 use skauswatch_ocsf::JsonVal;
 

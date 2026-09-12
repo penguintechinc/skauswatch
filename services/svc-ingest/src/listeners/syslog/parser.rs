@@ -11,14 +11,6 @@
 //! a direct port of `services/monitor/src/collectors/syslog.rs`'s
 //! `RFC3164_RE`/`parse_rfc3164_timestamp`.
 
-// `crate::listeners::syslog` (this file's sibling `mod.rs`) is the only
-// caller of `detect_and_parse`, and its own `run_udp`/`run_tcp`/`run_tls`
-// aren't wired into `main.rs`'s `serve()` until the Wave-1 integration
-// gate — until then, `cargo build`'s reachability analysis (this crate has
-// no `[lib]` target, only a `[[bin]]`) sees this whole file as unused.
-// Same pattern as `crate::auth`/`crate::buffer`.
-#![allow(dead_code)]
-
 use std::sync::LazyLock;
 
 use chrono::{DateTime, Datelike, TimeZone, Utc};

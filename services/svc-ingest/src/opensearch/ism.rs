@@ -48,14 +48,6 @@
 //! (deleting `admin.rs`'s `#[path]` shim) with no change to this file's
 //! contents.
 //!
-//! # Dead-code note
-//!
-//! `crate::admin::router` (this module's sole caller) is not yet invoked
-//! from `main.rs`/`bootstrap.rs` -- same interim, unwired state as every
-//! other Wave 1/2 module until the next integration gate (see
-//! `admin.rs`'s own doc comment).
-#![allow(dead_code)]
-
 use serde_json::{Value, json};
 
 /// Fixed ISM policy id this service manages. Replaces v1/`services/logs`'s
@@ -63,11 +55,27 @@ use serde_json::{Value, json};
 /// §8a: "replaces the existing `skauswatch-logs-policy`").
 pub const ISM_POLICY_ID: &str = "skauswatch-logs-lifecycle-policy";
 
-/// Default HOT -> WARM transition age in days (Spec §8a1 table).
+/// Default HOT -> WARM transition age in days (Spec §8a1 table). Not
+/// consumed by any production default-policy path — `PUT /lifecycle`
+/// always takes explicit values from the caller (Spec §8a1: admin-configurable,
+/// never a service-applied default); kept as the named Spec-table constants
+/// this module's own tests assert `validate_monotonic_ages` accepts.
+#[allow(
+    dead_code,
+    reason = "documents Spec §8a1's suggested defaults; exercised only by this module's own tests"
+)]
 pub const DEFAULT_HOT_TO_WARM_DAYS: i64 = 30;
 /// Default WARM -> COLD transition age in days.
+#[allow(
+    dead_code,
+    reason = "documents Spec §8a1's suggested defaults; exercised only by this module's own tests"
+)]
 pub const DEFAULT_WARM_TO_COLD_DAYS: i64 = 90;
 /// Default COLD -> DELETE transition age in days (~1 year).
+#[allow(
+    dead_code,
+    reason = "documents Spec §8a1's suggested defaults; exercised only by this module's own tests"
+)]
 pub const DEFAULT_COLD_TO_DELETE_DAYS: i64 = 370;
 
 /// A rejected lifecycle-age configuration -- carries the offending values so
@@ -230,6 +238,10 @@ pub async fn apply_ism_policy(
 }
 
 /// Failures from [`query_hit_count`].
+#[allow(
+    dead_code,
+    reason = "query_hit_count's own doc comment: not yet wired into any HTTP handler, only this module's/crate::admin's tests"
+)]
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
     /// Transport failure or non-2xx response.
@@ -258,6 +270,10 @@ pub enum QueryError {
 /// Returns [`QueryError::Transport`] on transport failure or a non-2xx
 /// response, or [`QueryError::UnexpectedShape`] if the response body
 /// doesn't parse as JSON with a numeric `hits.total.value`.
+#[allow(
+    dead_code,
+    reason = "not yet wired into any HTTP handler response (see doc comment above); exercised only by this module's/crate::admin's tests"
+)]
 pub async fn query_hit_count(
     client: &reqwest::Client,
     base_url: &str,

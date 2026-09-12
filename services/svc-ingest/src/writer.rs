@@ -4,14 +4,6 @@
 //! point `main.rs::serve()` calls for `RunMode::Writer` — see this module's
 //! items for the consume → bulk-write → ack/nack/DLQ loop itself.
 //!
-//! Dead-code note: nothing here is reachable from `main.rs::serve()` yet
-//! (the per-mode dispatch lands at the Wave-1 integration gate once every
-//! module it references exists — see `main.rs`'s own doc comment); a plain
-//! (non-test) `cargo build`/`clippy` therefore sees this whole module as
-//! unused, matching `buffer/mod.rs`'s identical interim
-//! `#![allow(dead_code)]`.
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -548,6 +540,7 @@ mod tests {
             opensearch_url: opensearch_url.to_owned(),
             nats_url: "nats://127.0.0.1:1".to_owned(),
             nats_jetstream_subject_prefix: "svc-ingest.logs".to_owned(),
+            snapshot_repo: "skauswatch-snapshots".to_owned(),
             syslog_udp_enabled: false,
             syslog_trusted_cidrs: Vec::new(),
             syslog_udp_tenant_id: None,

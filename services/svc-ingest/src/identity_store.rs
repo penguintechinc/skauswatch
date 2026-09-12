@@ -4,13 +4,6 @@
 //! place an authenticated ingest identity resolves to a tenant --
 //! `crate::auth` never trusts anything else (see that module's docs).
 
-// `crate::auth` is the only consumer of this module, and `crate::auth`
-// itself isn't wired into `main.rs`'s `serve()` until the Wave-1
-// integration gate (Task 1.1/1.2/1.3 land the listeners that call it) --
-// until then, `cargo build`'s reachability analysis sees this whole
-// module as unused too. Same pattern as `buffer/mod.rs`/`writer.rs`.
-#![allow(dead_code)]
-
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 

@@ -12,14 +12,6 @@
 //! | Plain TCP | Same trusted-CIDR config as UDP — plain TCP is equally unauthenticated and Spec §6c/Config expose no separate TCP-specific trust knob (documented reuse, not a bug); also gated by `SYSLOG_UDP_ENABLED` the same way UDP is, so the flag is a real "unauthenticated plain syslog off" switch rather than leaving a discoverable TCP port open | Close the connection; source reconnects and retries |
 //! | TLS | mTLS peer certificate's SPIFFE ID (`crate::auth::resolve_via_mtls`) | Close the connection |
 
-// `crate::listeners::syslog`'s `run_udp`/`run_tcp`/`run_tls` aren't wired
-// into `main.rs`'s `serve()` until the Wave-1 integration gate (once Tasks
-// 1.2/1.3's sibling listeners also land) — until then, `cargo build`'s
-// reachability analysis (this crate has no `[lib]` target, only a
-// `[[bin]]`) sees this whole module as unused. Same pattern as
-// `crate::auth`/`crate::buffer`.
-#![allow(dead_code)]
-
 mod parser;
 
 use std::sync::Arc;
@@ -492,6 +484,7 @@ mod tests {
             opensearch_url: "http://localhost:9200".to_owned(),
             nats_url: "nats://localhost:4222".to_owned(),
             nats_jetstream_subject_prefix: "svc-ingest.logs".to_owned(),
+            snapshot_repo: "skauswatch-snapshots".to_owned(),
             syslog_udp_enabled: udp_enabled,
             syslog_trusted_cidrs: cidrs,
             syslog_udp_tenant_id: tenant.map(str::to_owned),

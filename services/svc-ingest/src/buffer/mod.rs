@@ -18,17 +18,6 @@
 //! a stuck publish. See [`jetstream::JetStreamBuffer::push`] and its
 //! `push_awaits_publish_ack_before_returning` regression test.
 
-// Wave 1 (not this task) wires `Arc<dyn EventBuffer>` into `main.rs`'s
-// `serve()` and every listener/writer — until then, `cargo build`'s
-// reachability analysis (this crate has no `[lib]` target, only a
-// `[[bin]]`, so nothing outside `buffer` can be an external consumer)
-// sees this whole module tree as unused. Same pattern as the other
-// Task-0.2 stub modules' per-item `#[allow(dead_code)]` (see
-// `admin.rs`/`writer.rs`/etc.), broadened here to the module level
-// because this task lands the full trait + two implementations, not one
-// placeholder struct.
-#![allow(dead_code, unused_imports)]
-
 // Test-only (or `testutil`-feature-gated) in-process fallback — never
 // compiled into a production `serve` build. `cfg(test)` is crate-wide
 // during `cargo test`, so any other module's own `#[cfg(test)] mod
@@ -96,6 +85,10 @@ pub struct AckHandle(AckHandleInner);
 #[derive(Debug)]
 enum AckHandleInner {
     JetStream(Box<async_nats::jetstream::Message>),
+    #[allow(
+        dead_code,
+        reason = "only ever constructed by InMemoryBuffer (buffer/inmemory.rs), which is cfg(test)/testutil-only and absent from a production build — see this module's own doc comment"
+    )]
     InMemory(usize),
 }
 
@@ -128,6 +121,10 @@ pub enum BufferError {
     /// only — JetStream applies its own configured stream limits/discard
     /// policy server-side instead of surfacing this variant).
     #[error("event buffer is full")]
+    #[allow(
+        dead_code,
+        reason = "only ever returned by InMemoryBuffer (buffer/inmemory.rs), which is cfg(test)/testutil-only and absent from a production build"
+    )]
     Full,
     /// The underlying transport (NATS JetStream) rejected or failed to
     /// complete the operation.
@@ -162,4 +159,23 @@ pub trait EventBuffer: Send + Sync {
     /// Signals that processing failed — the buffer redelivers the event
     /// (at-least-once semantics).
     async fn nack(&self, handle: AckHandle) -> Result<(), BufferError>;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// [`AckHandle::delivery_count`] has no server-side delivery tracking
+    /// for the in-memory fallback (see its own doc comment) — proves the
+    /// `InMemory` arm actually returns `None` rather than panicking or
+    /// falling through to the `JetStream` arm's parsing logic. Constructs
+    /// the handle directly via the private tuple field, the same access
+    /// pattern `buffer::jetstream`'s own tests already use (both are
+    /// descendants of this module).
+    #[test]
+    fn delivery_count_is_none_for_an_in_memory_handle() {
+        let handle = AckHandle(AckHandleInner::InMemory(0));
+        assert_eq!(handle.delivery_count(), None);
+    }
 }

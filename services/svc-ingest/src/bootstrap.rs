@@ -11,7 +11,13 @@
 //! concurrently in a [`JoinSet`]: syslog UDP/TCP/TLS, OTLP gRPC/HTTP, and
 //! the HTTPS OCSF/JSON listener (which already carries its own
 //! `/healthz`+`/readyz` — see `listeners::http`, `docs/v2-port/
-//! ingest-module-spec.md` §3b). A shared shutdown signal (SIGTERM/SIGINT)
+//! ingest-module-spec.md` §3b). The same HTTPS server also carries
+//! `crate::admin`'s ISM hot/warm/cold admin surface (`PUT /api/v1/admin/
+//! ingest/lifecycle`, `POST /api/v1/admin/ingest/restore`), merged onto the
+//! ingest router — a distinct `/api/v1/admin/...` path prefix from
+//! `/ingest`, so `.merge()` is unambiguous and the admin routes keep their
+//! own super-admin/SIEM-admin bearer-token auth untouched. A shared
+//! shutdown signal (SIGTERM/SIGINT)
 //! is raced against every listener; if any one of them exits with an error
 //! before shutdown was ever requested, it is logged and every other
 //! listener is torn down too rather than leaving the process serving a
@@ -38,6 +44,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
+use crate::admin;
 use crate::buffer::{EventBuffer, JetStreamBuffer};
 use crate::config::Config;
 use crate::identity_store::IdentityStore;
@@ -107,6 +114,35 @@ fn build_ingest_state(
         jwt_verify_key,
         license,
     }
+}
+
+/// Builds `crate::admin`'s shared [`admin::AppState`] for the ISM
+/// hot/warm/cold admin surface — factored out of [`run_receiver`] mirroring
+/// [`build_ingest_state`], so it is unit-testable (see this module's own
+/// tests) without a live OpenSearch cluster: building a [`reqwest::Client`]
+/// and wrapping already-loaded config/key values never makes network calls.
+/// `audit` always uses [`admin::TracingAuditSink`] — see that type's own
+/// doc comment for why this is a `tracing`-backed sink rather than a
+/// database table for now.
+///
+/// # Errors
+/// Returns an error only if the underlying `reqwest::Client` cannot be
+/// built (e.g. the platform's TLS backend fails to initialize).
+fn build_admin_state(
+    opensearch_url: Arc<str>,
+    snapshot_repo: Arc<str>,
+    jwt_verify_key: jsonwebtoken::DecodingKey,
+) -> anyhow::Result<admin::AppState> {
+    let http = reqwest::Client::builder()
+        .build()
+        .map_err(|e| anyhow::anyhow!("admin http client: {e}"))?;
+    Ok(admin::AppState {
+        http,
+        opensearch_url,
+        snapshot_repo,
+        jwt_verify_key,
+        audit: Arc::new(admin::TracingAuditSink),
+    })
 }
 
 /// Resolves on SIGTERM/SIGINT (Ctrl-C) — the trigger [`run_receiver`]/
@@ -230,10 +266,23 @@ pub(crate) async fn run_receiver(cfg: Config) -> anyhow::Result<()> {
     // License/flag refresh loop — fail-safe by design; startup never blocks
     // on the license server (mirrors `services/logs/src/main.rs`).
     let _license_bg = license.spawn_refresh();
+    // `admin::AppState` needs its own copy of the verify key — `AppState`
+    // below takes ownership of `jwt_verify_key` itself; `DecodingKey` is
+    // cheaply `Clone` (wraps parsed key material, no I/O).
+    let admin_state = build_admin_state(
+        cfg.opensearch_url.as_str().into(),
+        cfg.snapshot_repo.as_str().into(),
+        jwt_verify_key.clone(),
+    )?;
     // Shares the same `EventBuffer` every other receiver-mode listener
     // publishes through — the writer, never this listener, owns all
     // OpenSearch writes (Task 3.0b).
     let ingest_state = build_ingest_state(Arc::clone(&buffer), jwt_verify_key, license);
+    // Merged, not nested: `crate::admin`'s `/api/v1/admin/...` paths are
+    // disjoint from `crate::listeners::http`'s `/ingest`+`/healthz`+
+    // `/readyz`, so `.merge()` is unambiguous and each router keeps its own
+    // auth extractor untouched (see this module's top-level doc comment).
+    let http_router = http::router(ingest_state).merge(admin::router(admin_state));
 
     let addr: SocketAddr = ([0, 0, 0, 0], cfg.http_port).into();
     let listener = tokio::net::TcpListener::bind(addr)
@@ -316,7 +365,7 @@ pub(crate) async fn run_receiver(cfg: Config) -> anyhow::Result<()> {
     tasks.spawn({
         let rx = shutdown_rx.clone();
         async move {
-            let result: anyhow::Result<()> = axum::serve(listener, http::router(ingest_state))
+            let result: anyhow::Result<()> = axum::serve(listener, http_router)
                 .with_graceful_shutdown(wait_for_shutdown(rx))
                 .await
                 .map_err(|e| anyhow::anyhow!("http ingest server: {e}"));
@@ -396,6 +445,100 @@ pub(crate) async fn run_writer(
 mod tests {
     use super::*;
 
+    // -- wait_for_shutdown --------------------------------------------------
+
+    /// `wait_for_shutdown` is the cancellation future every listener/server
+    /// task in [`run_receiver`]/[`run_writer`] races its own work against —
+    /// proves it actually resolves once the shared channel reports `true`,
+    /// with no live listener/server involved.
+    #[tokio::test]
+    async fn wait_for_shutdown_resolves_once_the_channel_reports_true() {
+        let (tx, rx) = watch::channel(false);
+        tx.send(true).expect("send on an open channel");
+        wait_for_shutdown(rx).await;
+    }
+
+    // -- drain_listeners ------------------------------------------------------
+
+    /// The clean-shutdown path: every listener task exits `Ok(())` (the
+    /// normal SIGTERM/SIGINT path, per this function's own doc comment) —
+    /// `drain_listeners` must return `Ok(())` too, and must NOT itself
+    /// broadcast a shutdown signal (that's reserved for the error path).
+    #[tokio::test]
+    async fn drain_listeners_returns_ok_when_every_task_succeeds() {
+        let mut tasks: JoinSet<ListenerOutcome> = JoinSet::new();
+        tasks.spawn(async { ("test_listener_ok", Ok(())) });
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        let result = drain_listeners(tasks, &shutdown_tx).await;
+
+        assert!(result.is_ok());
+        assert!(
+            !*shutdown_tx.borrow(),
+            "a clean stop must not itself trigger a shutdown broadcast"
+        );
+    }
+
+    /// A listener task that exits with an `Err` before shutdown was ever
+    /// requested must (a) surface as `drain_listeners`'s own `Err` and (b)
+    /// broadcast shutdown so every other still-running listener is torn
+    /// down too — never leave the process serving a half-degraded protocol
+    /// surface (this function's own doc comment).
+    #[tokio::test]
+    async fn drain_listeners_propagates_the_first_error_and_signals_shutdown() {
+        let mut tasks: JoinSet<ListenerOutcome> = JoinSet::new();
+        tasks.spawn(async { ("test_listener_err", Err(anyhow::anyhow!("boom"))) });
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        let result = drain_listeners(tasks, &shutdown_tx).await;
+
+        assert!(result.is_err());
+        assert!(
+            *shutdown_tx.borrow(),
+            "an error exit must broadcast shutdown to the rest of the set"
+        );
+    }
+
+    /// A panicking listener task surfaces to `tasks.join_next()` as
+    /// `Err(JoinError)`, not the task's own `Result` — `drain_listeners`
+    /// must treat that the same as an explicit `Err` exit: propagate it and
+    /// broadcast shutdown, never silently swallow a panicked listener.
+    #[tokio::test]
+    async fn drain_listeners_treats_a_panicked_task_as_an_error_and_signals_shutdown() {
+        let mut tasks: JoinSet<ListenerOutcome> = JoinSet::new();
+        tasks.spawn(async {
+            panic!("simulated listener panic");
+        });
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        let result = drain_listeners(tasks, &shutdown_tx).await;
+
+        assert!(result.is_err());
+        assert!(*shutdown_tx.borrow());
+    }
+
+    /// Once one task has already failed (broadcasting shutdown), a second,
+    /// still-draining task's own later `Err` must not replace the
+    /// already-recorded first error — `drain_listeners` reports the FIRST
+    /// failure, matching its own doc comment ("Returns the first such
+    /// error, if any").
+    #[tokio::test]
+    async fn drain_listeners_keeps_the_first_error_when_a_second_task_also_fails() {
+        let mut tasks: JoinSet<ListenerOutcome> = JoinSet::new();
+        tasks.spawn(async { ("first", Err(anyhow::anyhow!("first failure"))) });
+        tasks.spawn(async { ("second", Err(anyhow::anyhow!("second failure"))) });
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        let result = drain_listeners(tasks, &shutdown_tx).await;
+
+        let err = result.expect_err("both tasks failed");
+        assert!(
+            err.to_string().contains("first failure"),
+            "expected the FIRST failing task's error to be retained, got: {err}"
+        );
+        assert!(*shutdown_tx.borrow());
+    }
+
     #[test]
     fn writer_health_port_defaults_when_unset() {
         assert_eq!(writer_health_port(None), DEFAULT_WRITER_HEALTH_PORT);
@@ -436,5 +579,55 @@ mod tests {
             license,
         );
         let _router = http::router(state);
+    }
+
+    /// Regression guard for the whole-branch review finding: `crate::admin`'s
+    /// router was built but never merged into the receiver's HTTP server, so
+    /// `PUT /api/v1/admin/ingest/lifecycle`/`POST /api/v1/admin/ingest/
+    /// restore` were unreachable in the running binary despite passing their
+    /// own unit tests in isolation. Assembles the exact same merged router
+    /// [`run_receiver`] serves (a lazy, never-dialed OpenSearch URL — this
+    /// only proves route *resolution*, not a live OpenSearch round-trip,
+    /// which stays this module's Wave 3 e2e responsibility) and drives it
+    /// with `tower::ServiceExt::oneshot`: a 404 here means "still unmounted",
+    /// full stop, regardless of the 401 an unauthenticated request also
+    /// deserves.
+    #[tokio::test]
+    async fn admin_routes_are_mounted_on_the_receiver_http_router() {
+        use tower::ServiceExt;
+
+        let license = skauswatch_testkit::license::dev_license("skauswatch");
+        let buffer: Arc<dyn EventBuffer> = Arc::new(crate::buffer::InMemoryBuffer::new(10));
+        let jwt_verify_key = skauswatch_testkit::jwt::verify_key().clone();
+        let ingest_state = build_ingest_state(buffer, jwt_verify_key.clone(), license);
+        let admin_state = build_admin_state(
+            "http://opensearch.invalid:9200".into(),
+            "skauswatch-snapshots".into(),
+            jwt_verify_key,
+        )
+        .expect("admin state builds with no live OpenSearch cluster required");
+        let router = http::router(ingest_state).merge(admin::router(admin_state));
+
+        for (method, uri) in [
+            (axum::http::Method::PUT, "/api/v1/admin/ingest/lifecycle"),
+            (axum::http::Method::POST, "/api/v1/admin/ingest/restore"),
+        ] {
+            let request = axum::http::Request::builder()
+                .method(method.clone())
+                .uri(uri)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from("{}"))
+                .expect("build request");
+            let response = router
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("router invocation");
+            assert_ne!(
+                response.status(),
+                axum::http::StatusCode::NOT_FOUND,
+                "{method} {uri} returned 404 -- route is not mounted"
+            );
+        }
     }
 }
