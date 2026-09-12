@@ -531,7 +531,11 @@ mod tests {
 
         let result = drain_listeners(tasks, &shutdown_tx).await;
 
-        assert!(result.is_err());
+        let err = result.expect_err("both tasks failed");
+        assert!(
+            err.to_string().contains("first failure"),
+            "expected the FIRST failing task's error to be retained, got: {err}"
+        );
         assert!(*shutdown_tx.borrow());
     }
 
