@@ -1,0 +1,24 @@
+[package]
+publish = false
+name = "skauswatch-ocsf"
+description = "OCSF (Open Cybersecurity Schema Framework) event normalization — shared by services/logs and svc-ingest's syslog/OTLP/generic sources"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+# `jsonord`'s hand-rolled `Deserialize` impl (order-preserving JSON) needs
+# serde's `de` module directly — not listed in the Task 0.1 brief's dependency
+# line, but required for the crate to compile; added here rather than left
+# missing (see task-0.1-report.md).
+serde = { workspace = true }
+serde_json = { workspace = true }
+skauswatch-streams = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

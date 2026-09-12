@@ -1,16 +1,24 @@
 //! OCSF normalization — a byte-for-byte port of v1 `ocsf/normalizer.py` +
-//! `ocsf/schema.py`. Maps an arbitrary log record to the OCSF event document
-//! the v1 service indexed into OpenSearch, preserving field names, key order,
-//! class/severity/status detection, and `datetime.isoformat()` timestamp
-//! rendering. The emitted document is an order-preserving [`JsonVal`] so its
-//! compact serialization matches v1's opensearch-py output exactly.
+//! `ocsf/schema.py` (see [`schema`]). Maps an arbitrary log record to the
+//! OCSF event document the v1 service indexed into OpenSearch, preserving
+//! field names, key order, class/severity/status detection, and
+//! `datetime.isoformat()` timestamp rendering. The emitted document is an
+//! order-preserving [`JsonVal`] so its compact serialization matches v1's
+//! opensearch-py output exactly.
+//!
+//! Extracted from `services/logs` (Task 0.1) so future ingest sources
+//! (syslog, OTLP, generic webhook — see [`mappings`]) share one normalizer
+//! instead of re-deriving it.
+
+pub mod jsonord;
+pub mod mappings;
+pub mod schema;
 
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone as _, Timelike as _, Utc};
 
-use crate::jsonord::{JsonVal, truncate_chars};
-
-/// OCSF metadata schema version stamped on every event (v1 `"1.3.0"`).
-const OCSF_VERSION: &str = "1.3.0";
+pub use jsonord::JsonVal;
+use jsonord::truncate_chars;
+use schema::{OCSF_VERSION, class_name};
 
 /// A record that could not be normalized — v1 raised an uncaught exception
 /// (`AttributeError` on a non-dict record; `OverflowError`/`OSError` on an
@@ -18,19 +26,6 @@ const OCSF_VERSION: &str = "1.3.0";
 #[derive(Debug, thiserror::Error)]
 #[error("record cannot be normalized (v1 raised → HTTP 500)")]
 pub struct NormalizeError;
-
-/// Maps `class_uid` to the OCSF class name (v1 `OCSF_CLASSES`, default
-/// `"unknown"`).
-fn class_name(class_uid: i64) -> &'static str {
-    match class_uid {
-        2001 => "security_finding",
-        3002 => "authentication",
-        4001 => "network_activity",
-        4003 => "file_activity",
-        6003 => "api_activity",
-        _ => "unknown",
-    }
-}
 
 /// v1 `_detect_class`: source-substring and field-presence heuristics, checked
 /// in the exact same order so ties resolve identically.
@@ -283,11 +278,6 @@ mod tests {
             Ok(t) => t.render(),
             Err(e) => panic!("detect_time: {e}"),
         }
-    }
-
-    #[test]
-    fn class_name_defaults_to_unknown_for_unmapped_uid() {
-        assert_eq!(class_name(9999), "unknown");
     }
 
     #[test]

@@ -232,3 +232,4 @@ services/*/dist/
 
 # Stray per-agent CARGO_TARGET_DIRs occasionally created at repo root
 target-*/
+.superpowers/

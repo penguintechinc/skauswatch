@@ -37,7 +37,6 @@ mod file;
 mod journald;
 mod kubernetes;
 mod lxc;
-mod syslog;
 
 use std::process::Stdio;
 
@@ -74,10 +73,6 @@ pub fn spawn_enabled(config: &Config, sink: IngestHandle) {
     let journald_cfg = journald::JournaldConfig::from_env();
     if journald_cfg.enabled {
         tokio::spawn(journald::run(journald_cfg, tenant_id.clone(), sink.clone()));
-    }
-    let syslog_cfg = syslog::SyslogConfig::from_env();
-    if syslog_cfg.enabled {
-        tokio::spawn(syslog::run(syslog_cfg, tenant_id.clone(), sink.clone()));
     }
     let k8s_cfg = kubernetes::KubernetesConfig::from_env();
     if k8s_cfg.enabled {

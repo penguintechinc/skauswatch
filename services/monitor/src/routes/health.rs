@@ -153,8 +153,12 @@ mod tests {
 
     #[tokio::test]
     async fn health_check_is_healthy_with_a_configured_store() {
-        let store =
-            crate::es::ElasticsearchStore::new("http://127.0.0.1:1", "aaa-events-*", None, None);
+        let store = crate::es::ElasticsearchStore::new(
+            "http://127.0.0.1:1",
+            "skauswatch-logs-*",
+            None,
+            None,
+        );
         let (code, Json(body)) = health_check(State(state_with_store(store))).await;
         assert_eq!(code, StatusCode::OK);
         assert_eq!(body["status"], "healthy");

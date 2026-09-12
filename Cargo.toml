@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/manager", "services/s3scan", "services/sshca", "services/logs", "services/pki", "services/worker-codescan", "services/scanner", "services/vault", "services/worker-vault-sync", "services/endpoint-agent", "services/monitor", "services/codescan-backend", "services/depgate"]
+members = ["crates/*", "services/manager", "services/s3scan", "services/sshca", "services/logs", "services/pki", "services/worker-codescan", "services/scanner", "services/vault", "services/worker-vault-sync", "services/endpoint-agent", "services/monitor", "services/codescan-backend", "services/depgate", "services/svc-ingest"]
 
 [workspace.package]
 version = "2.0.0"
@@ -34,6 +34,10 @@ skauswatch-testkit = { path = "crates/skauswatch-testkit" }
 # SPIFFE Workload API integration (SVID-based mTLS, AWS federation) shared
 # by every service — see crates/skauswatch-identity.
 skauswatch-identity = { path = "crates/skauswatch-identity" }
+# OCSF event normalization, extracted from services/logs (Task 0.1) so
+# svc-ingest's syslog/OTLP/generic sources share one normalizer — see
+# crates/skauswatch-ocsf.
+skauswatch-ocsf = { path = "crates/skauswatch-ocsf" }
 
 # Async runtime
 tokio = { version = "=1.52.3", features = ["full"] }

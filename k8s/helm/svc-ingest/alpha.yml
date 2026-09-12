@@ -1,0 +1,60 @@
+# Alpha overrides — local MicroK8s (local-alpha context), namespace: skauswatch.
+image:
+  repository: localhost:32000/skauswatch/svc-ingest
+  tag: "alpha-latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# svc-ingest's protocol ports (syslog/OTLP/HTTPS) are external-facing log
+# sources, not just in-cluster callers -- expose via fixed NodePorts in
+# alpha instead of Ingress/HTTPRoute (this chart has neither). Numbers
+# chosen to avoid collision with existing alpha NodePort assignments
+# (webui 30080, manager 30081, depgate 30505) -- increment by 100 on any
+# future collision.
+service:
+  type: NodePort
+  nodePorts:
+    syslogUdp: 30514
+    syslogTcp: 30514
+    syslogTls: 30651
+    otlpGrpc: 30431
+    otlpHttp: 30432
+    http: 30843
+
+receiver:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+writer:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+  resources:
+    limits:
+      cpu: 250m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+configMapData:
+  opensearch-url: "http://opensearch:9200"
+  nats-url: "nats://nats-jetstream:4222"
+  nats-jetstream-subject-prefix: "svc-ingest.logs"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "2"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"
+  syslog-udp-tenant-id: ""

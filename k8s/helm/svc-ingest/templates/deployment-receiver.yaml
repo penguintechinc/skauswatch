@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "skauswatch-svc-ingest.receiver.fullname" . }}
+  labels:
+    {{- include "skauswatch-svc-ingest.receiver.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  {{- if not .Values.receiver.autoscaling.enabled }}
+  replicas: {{ .Values.receiver.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "skauswatch-svc-ingest.receiver.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "skauswatch-svc-ingest.receiver.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: receiver
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: {{ include "skauswatch-svc-ingest.image" . | quote }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args: ["serve", "--mode", "receiver"]
+        ports:
+        - name: syslog-udp
+          containerPort: {{ .Values.ports.syslogPort }}
+          protocol: UDP
+        - name: syslog-tcp
+          containerPort: {{ .Values.ports.syslogPort }}
+          protocol: TCP
+        - name: syslog-tls
+          containerPort: {{ .Values.ports.syslogTlsPort }}
+          protocol: TCP
+        - name: otlp-grpc
+          containerPort: {{ .Values.ports.otlpGrpcPort }}
+          protocol: TCP
+        - name: otlp-http
+          containerPort: {{ .Values.ports.otlpHttpPort }}
+          protocol: TCP
+        - name: http
+          containerPort: {{ .Values.ports.httpPort }}
+          protocol: TCP
+        - name: metrics
+          containerPort: {{ .Values.ports.metricsPort }}
+          protocol: TCP
+        {{- with .Values.receiver.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.receiver.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.receiver.resources }}
+        resources:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        env:
+        {{- tpl (toYaml .Values.receiver.env) . | nindent 12 }}
+            # NATS production-hardening (Spec §7a, "sync_always: true on the
+            # JetStream file store" + PublishAck-synchronous requirement) --
+            # baked in directly here, NOT sourced from values.yaml, so no
+            # per-environment override can silently disable synchronous
+            # JetStream durability. Not yet read by config.rs as of Task 2.4
+            # (Wave 1) -- forward-declared ahead of the JetStream
+            # stream-creation task; the NATS server itself must ALSO run
+            # with the file store's sync_always: true (cluster-ops config
+            # for whatever deploys nats-jetstream, out of this chart's
+            # scope -- see values.yaml configMapData.nats-url comment).
+            - name: NATS_JETSTREAM_SYNC_ALWAYS
+              value: "true"
+        {{- if .Values.spire.enabled }}
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix://{{ .Values.spire.socketDir }}/agent.sock"
+        {{- end }}
+        {{- if or .Values.volumeMounts .Values.spire.enabled }}
+        volumeMounts:
+          {{- with .Values.volumeMounts }}
+          {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if .Values.spire.enabled }}
+          - name: spiffe-workload-api
+            mountPath: {{ .Values.spire.socketDir }}
+            {{- if not .Values.spire.csiDriver.enabled }}
+            readOnly: true
+            {{- end }}
+          {{- end }}
+        {{- end }}
+      {{- if or .Values.volumes .Values.spire.enabled }}
+      volumes:
+        {{- with .Values.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.spire.enabled }}
+        - name: spiffe-workload-api
+          {{- if .Values.spire.csiDriver.enabled }}
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+          {{- else }}
+          hostPath:
+            path: {{ .Values.spire.socketDir }}
+            type: DirectoryOrCreate
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

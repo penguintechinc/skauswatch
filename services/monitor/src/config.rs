@@ -57,13 +57,25 @@ pub struct ElasticsearchConfig {
     pub enabled: bool,
     /// Base URL, e.g. `http://elasticsearch:9200` (`MONITOR_ES_URL`).
     pub url: String,
-    /// Index pattern used for search (`MONITOR_ES_INDEX_PATTERN`), v1 default
-    /// `aaa-events-*`.
+    /// Index pattern used for search and read-only TAXII queries
+    /// (`MONITOR_ES_INDEX_PATTERN`), default `skauswatch-logs-*`.
     pub index_pattern: String,
     /// Optional basic-auth username (`MONITOR_ES_USERNAME`).
     pub username: Option<String>,
     /// Optional basic-auth password (`MONITOR_ES_PASSWORD`).
     pub password: Option<String>,
+}
+
+/// Ingest service connection settings (svc-ingest HTTPS `/ingest` endpoint).
+#[derive(Debug, Clone)]
+pub struct IngestConfig {
+    /// Whether to forward events to svc-ingest (`MONITOR_INGEST_ENABLED`).
+    pub enabled: bool,
+    /// Base URL of svc-ingest, e.g. `https://svc-ingest:8002`
+    /// (`MONITOR_INGEST_URL`).
+    pub url: String,
+    /// Bearer token for authentication (`MONITOR_INGEST_TOKEN`).
+    pub token: String,
 }
 
 /// Owning tenant for every event this deployment's log collectors produce
@@ -96,8 +108,10 @@ pub struct Config {
     pub api: ApiConfig,
     /// Auth settings.
     pub security: SecurityConfig,
-    /// Elasticsearch/OpenSearch settings.
+    /// Elasticsearch/OpenSearch settings (read-only for TAXII IOC matching).
     pub elasticsearch: ElasticsearchConfig,
+    /// Ingest service (svc-ingest) forwarding settings.
+    pub ingest: IngestConfig,
     /// This deployment's tenant, stamped onto every collector-produced event.
     pub tenancy: TenancyConfig,
 }
@@ -124,6 +138,9 @@ impl Config {
         es_index_pattern: Option<&str>,
         es_username: Option<&str>,
         es_password: Option<&str>,
+        ingest_enabled: Option<&str>,
+        ingest_url: Option<&str>,
+        ingest_token: Option<&str>,
         tenant_id: Option<&str>,
     ) -> Self {
         Self {
@@ -137,9 +154,14 @@ impl Config {
             elasticsearch: ElasticsearchConfig {
                 enabled: parse_bool(es_enabled, false),
                 url: es_url.unwrap_or("http://localhost:9200").to_owned(),
-                index_pattern: es_index_pattern.unwrap_or("aaa-events-*").to_owned(),
+                index_pattern: es_index_pattern.unwrap_or("skauswatch-logs-*").to_owned(),
                 username: es_username.map(str::to_owned),
                 password: es_password.map(str::to_owned),
+            },
+            ingest: IngestConfig {
+                enabled: parse_bool(ingest_enabled, true),
+                url: ingest_url.unwrap_or("https://svc-ingest:8002").to_owned(),
+                token: ingest_token.unwrap_or("").to_owned(),
             },
             tenancy: TenancyConfig {
                 tenant_id: tenant_id.unwrap_or("").to_owned(),
@@ -161,6 +183,9 @@ impl Config {
             env::var("MONITOR_ES_INDEX_PATTERN").ok().as_deref(),
             env::var("MONITOR_ES_USERNAME").ok().as_deref(),
             env::var("MONITOR_ES_PASSWORD").ok().as_deref(),
+            env::var("MONITOR_INGEST_ENABLED").ok().as_deref(),
+            env::var("MONITOR_INGEST_URL").ok().as_deref(),
+            env::var("MONITOR_INGEST_TOKEN").ok().as_deref(),
             env::var("MONITOR_TENANT_ID").ok().as_deref(),
         )
     }
@@ -183,12 +208,16 @@ mod tests {
 
     #[test]
     fn defaults_match_v1_when_unset() {
-        let cfg = Config::from_values(None, None, None, None, None, None, None, None, None);
+        let cfg = Config::from_values(
+            None, None, None, None, None, None, None, None, None, None, None, None,
+        );
         assert_eq!(cfg.api.host, "0.0.0.0");
         assert_eq!(cfg.api.port, 8003);
         assert!(!cfg.elasticsearch.enabled);
-        assert_eq!(cfg.elasticsearch.index_pattern, "aaa-events-*");
+        assert_eq!(cfg.elasticsearch.index_pattern, "skauswatch-logs-*");
         assert!(cfg.security.auth_enabled);
+        assert!(cfg.ingest.enabled);
+        assert_eq!(cfg.ingest.token, "");
         assert_eq!(cfg.tenancy.tenant_id, "");
     }
 
@@ -203,6 +232,9 @@ mod tests {
             Some("custom-*"),
             Some("user"),
             Some("pass"),
+            Some("true"),
+            Some("https://ingest:8002"),
+            Some("token-123"),
             Some("tenant-a"),
         );
         assert_eq!(cfg.api.host, "127.0.0.1");
@@ -211,6 +243,8 @@ mod tests {
         assert!(cfg.elasticsearch.enabled);
         assert_eq!(cfg.elasticsearch.url, "http://es:9200");
         assert_eq!(cfg.elasticsearch.index_pattern, "custom-*");
+        assert!(cfg.ingest.enabled);
+        assert_eq!(cfg.ingest.token, "token-123");
         assert_eq!(cfg.tenancy.tenant_id, "tenant-a");
     }
 }

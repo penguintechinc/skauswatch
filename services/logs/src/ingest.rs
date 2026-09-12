@@ -27,8 +27,8 @@ use penguin_licensing::LicenseClient;
 use penguin_licensing::axum::{FlagGate, flag_gate};
 use skauswatch_auth::TenantContext;
 
-use crate::jsonord::{self, JsonVal};
-use crate::ocsf::normalize;
+use skauswatch_ocsf::{JsonVal, jsonord, normalize};
+
 use crate::opensearch::{build_bulk_body, daily_index, write_bulk};
 
 /// v1 batch cap: a single `/ingest` request may carry at most 10,000 records.
@@ -289,12 +289,16 @@ mod tests {
     use super::*;
 
     /// The authoritative `_bulk` body captured from v1 source + opensearch-py
-    /// 2.7.1 (see tests/fixtures + docs/v2-port/logs-contract.md). Predates
-    /// tenancy — `stamp_bulk_reference` layers the expected `tenant_id` stamp
-    /// on top for tests that exercise the now-authenticated handler.
-    const BULK_REFERENCE: &[u8] = include_bytes!("../tests/fixtures/bulk_reference.ndjson");
+    /// 2.7.1 (see `crates/skauswatch-ocsf/tests/fixtures` +
+    /// docs/v2-port/logs-contract.md — the fixture moved there in Task 0.1
+    /// alongside the `normalize`/`JsonVal` extraction). Predates tenancy —
+    /// `stamp_bulk_reference` layers the expected `tenant_id` stamp on top
+    /// for tests that exercise the now-authenticated handler.
+    const BULK_REFERENCE: &[u8] =
+        include_bytes!("../../../crates/skauswatch-ocsf/tests/fixtures/bulk_reference.ndjson");
     /// The exact batch bytes fed to v1 to produce `BULK_REFERENCE`.
-    const BATCH_JSON: &[u8] = include_bytes!("../tests/fixtures/batch.json");
+    const BATCH_JSON: &[u8] =
+        include_bytes!("../../../crates/skauswatch-ocsf/tests/fixtures/batch.json");
 
     /// The tenant used by tests that aren't specifically exercising
     /// cross-tenant behavior.

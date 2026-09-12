@@ -3,10 +3,12 @@
 //! construction with retry. Schema authority is `sqlx migrate` run via K8s
 //! Job — services never migrate at startup.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use serde::Deserialize;
 use sqlx::PgPool;
+use sqlx::migrate::Migrator;
 use sqlx::postgres::PgPoolOptions;
 
 /// Supported database backends, selected via the `DB_TYPE` env var.
@@ -79,6 +81,14 @@ pub enum DbError {
     /// The requested backend is not valid for this entry point.
     #[error("unsupported DB_TYPE for this operation: {0}")]
     Unsupported(String),
+    /// The pre-migration baseline query (`SELECT version FROM
+    /// _sqlx_migrations`) failed for a reason other than a fresh,
+    /// not-yet-migrated database — see [`run_migrations`].
+    #[error("migration baseline query failed: {0}")]
+    Query(#[from] sqlx::Error),
+    /// The embedded migration set failed to apply.
+    #[error("migration failed: {0}")]
+    Migrate(#[from] sqlx::migrate::MigrateError),
 }
 
 impl DbConfig {
@@ -126,6 +136,46 @@ pub async fn connect_postgres(cfg: &DbConfig) -> Result<PgPool, DbError> {
         attempts: cfg.max_retries,
         source: last_err.unwrap_or(sqlx::Error::PoolClosed),
     })
+}
+
+/// Applies every pending migration in `migrator` against `pool`, logging
+/// each newly-applied migration's version and description via `tracing`.
+/// Called only from each service's `migrate` subcommand — the K8s Job
+/// migration target — never from `serve` startup (see this module's
+/// schema-authority policy above).
+///
+/// `migrator` is normally a `static` built with `sqlx::migrate!()` in the
+/// calling service's own `main.rs`, so the migration set is embedded at
+/// compile time (no DB needed to build) and always matches that service's
+/// `migrations/` directory.
+pub async fn run_migrations(pool: &PgPool, migrator: &Migrator) -> Result<(), DbError> {
+    let already_applied: HashSet<i64> =
+        match sqlx::query_scalar::<_, i64>("SELECT version FROM _sqlx_migrations")
+            .fetch_all(pool)
+            .await
+        {
+            Ok(versions) => versions.into_iter().collect(),
+            // Fresh database: the migrations table doesn't exist yet
+            // (Postgres `undefined_table`, SQLSTATE 42P01) — every
+            // embedded migration is legitimately "newly applied" below.
+            Err(sqlx::Error::Database(ref db_err)) if db_err.code().as_deref() == Some("42P01") => {
+                HashSet::new()
+            }
+            Err(e) => return Err(DbError::Query(e)),
+        };
+
+    migrator.run(pool).await?;
+
+    for migration in migrator.iter() {
+        if !already_applied.contains(&migration.version) {
+            tracing::info!(
+                version = migration.version,
+                description = %migration.description,
+                "applied migration"
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

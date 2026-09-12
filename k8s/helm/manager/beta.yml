@@ -45,6 +45,14 @@ configMapData:
   db-pool-size: "5"
   license-server-url: "https://license.penguintech.io"
   release-mode: "false"
+  # svc-ingest cutover (Task 3.3): repoints the SIEM-ingest proxy off the
+  # deprecated services/logs at the svc-ingest receiver's ClusterIP
+  # Service. Hostname verified via `helm template skauswatch-svc-ingest
+  # k8s/helm/svc-ingest --values beta.yml` (release name = chart name,
+  # matching this chart's own skauswatch-manager convention -- see
+  # k8s/helm/manager/templates/httproute.yaml's backendRefs.name and
+  # templates/configmap.yaml, both hardcoded to that same convention).
+  logs-url: "http://skauswatch-svc-ingest-receiver:8443"
 
 # Enabled here even though release-mode is currently "false" so beta
 # stays SPIRE-parity with production ahead of any release-mode flip.

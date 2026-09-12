@@ -1,0 +1,19 @@
+# buf configuration for the VENDORED upstream OTLP protos in this directory.
+#
+# Vendored verbatim from open-telemetry/opentelemetry-proto (Apache-2.0),
+# mirroring that repo's own layout so this directory's root IS
+# `opentelemetry/proto/...` — see `crates/skauswatch-proto/build.rs` for the
+# pinned upstream commit and the second-include-root rationale, and
+# `crates/skauswatch-proto/src/lib.rs` for the sole consumer
+# (svc-ingest's OTLP gRPC/HTTP listeners).
+#
+# This MUST be its own standalone buf module, excluded from `proto/buf.yaml`
+# (see that file's header comment): the vendored files' own
+# `import "opentelemetry/proto/...";` statements only resolve against THIS
+# directory as the module root, not against `proto/`'s root.
+#
+# DO NOT hand-edit the .proto files in this directory — they are a vendored
+# snapshot, not a live skauswatch contract.
+version: v2
+modules:
+  - path: .
