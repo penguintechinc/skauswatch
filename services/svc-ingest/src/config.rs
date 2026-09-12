@@ -407,6 +407,37 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_cidr_is_accepted_up_to_a_128_bit_prefix() {
+        let cfg = Config::from_values(RawConfig {
+            syslog_trusted_cidrs: Some("::1/128"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.syslog_trusted_cidrs.len(), 1);
+        assert_eq!(cfg.syslog_trusted_cidrs[0].prefix_len, 128);
+    }
+
+    #[test]
+    fn ipv6_cidr_prefix_len_exceeding_128_is_config_error() {
+        let err = Config::from_values(RawConfig {
+            syslog_trusted_cidrs: Some("::1/129"),
+            ..Default::default()
+        })
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Cidr(_)));
+    }
+
+    #[test]
+    fn blank_entries_in_a_cidr_list_are_skipped_not_errors() {
+        let cfg = Config::from_values(RawConfig {
+            syslog_trusted_cidrs: Some("10.0.0.0/8,,172.16.0.0/12,"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.syslog_trusted_cidrs.len(), 2);
+    }
+
+    #[test]
     fn invalid_port_is_config_error_not_panic() {
         let err = Config::from_values(RawConfig {
             http_port: Some("not-a-port"),
@@ -414,5 +445,61 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(err, ConfigError::Int("HTTP_PORT"));
+    }
+
+    #[test]
+    fn port_empty_string_falls_back_to_default() {
+        let cfg = Config::from_values(RawConfig {
+            http_port: Some("  "),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(cfg.http_port, 8443);
+    }
+
+    // -- from_env ---------------------------------------------------------
+    //
+    // `Config::from_env` is thin glue (read each env var, delegate to the
+    // already-thoroughly-tested `from_values`) but it's a real production
+    // code path (`main.rs::serve`/`backfill_command`) with its own line
+    // coverage. This workspace denies `unsafe_code` (`Cargo.toml`
+    // `[workspace.lints.rust]`), so `std::env::set_var`/`remove_var` (both
+    // `unsafe fn` as of this edition) are not an option here, even scoped
+    // to a test -- unlike `from_values`, this function can only honestly be
+    // exercised against whatever the ambient process environment already
+    // is. Same defensive-assumption pattern `listeners::otlp::mod`'s own
+    // tests use for `DB_TYPE`: assert the vars are unset rather than
+    // silently skip, so a dev's shell accidentally exporting one of these
+    // fails loudly instead of quietly weakening this test.
+    #[test]
+    fn from_env_uses_defaults_against_an_unset_environment() {
+        for var in [
+            "HTTP_PORT",
+            "SYSLOG_PORT",
+            "SYSLOG_TLS_PORT",
+            "OTLP_GRPC_PORT",
+            "OTLP_HTTP_PORT",
+            "OPENSEARCH_URL",
+            "NATS_URL",
+            "NATS_JETSTREAM_SUBJECT_PREFIX",
+            "SNAPSHOT_REPO",
+            "SYSLOG_UDP_ENABLED",
+            "SYSLOG_TRUSTED_CIDRS",
+            "SYSLOG_UDP_TENANT_ID",
+        ] {
+            assert!(
+                std::env::var(var).is_err(),
+                "test assumes {var} is unset in the ambient test environment"
+            );
+        }
+
+        let cfg = Config::from_env().expect("an unset environment is always valid");
+
+        assert_eq!(cfg.http_port, 8443);
+        assert_eq!(cfg.opensearch_url, "http://localhost:9200");
+        assert_eq!(cfg.snapshot_repo, "skauswatch-snapshots");
+        assert!(!cfg.syslog_udp_enabled);
+        assert!(cfg.syslog_trusted_cidrs.is_empty());
+        assert_eq!(cfg.syslog_udp_tenant_id, None);
     }
 }

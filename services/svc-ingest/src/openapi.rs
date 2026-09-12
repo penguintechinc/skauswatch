@@ -110,3 +110,82 @@ impl utoipa::Modify for SecurityAddon {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use utoipa::OpenApi as _;
+
+    use super::*;
+
+    /// `main.rs::print_openapi` (the `skauswatch-svc-ingest openapi`
+    /// subcommand that regenerates `openapi/v1.yaml`) is this struct's only
+    /// caller — this test proves [`ApiDoc::openapi`] actually builds a spec
+    /// declaring every route this service serves, both the ingest listener
+    /// (`crate::listeners::http`) and the admin surface
+    /// (`crate::admin`, mounted onto the same server per
+    /// `crate::bootstrap::run_receiver`), not just that the annotations
+    /// compile.
+    #[test]
+    fn generated_spec_declares_every_ingest_and_admin_path() {
+        let spec = ApiDoc::openapi();
+        for path in [
+            "/ingest",
+            "/healthz",
+            "/readyz",
+            "/api/v1/admin/ingest/lifecycle",
+            "/api/v1/admin/ingest/restore",
+        ] {
+            assert!(
+                spec.paths.paths.contains_key(path),
+                "openapi spec is missing path: {path}"
+            );
+        }
+    }
+
+    /// Every `components(schemas(...))` entry in [`ApiDoc`]'s `#[openapi]`
+    /// attribute must actually register a schema (a typo'd/renamed struct
+    /// silently drops from the spec rather than failing the derive), and
+    /// [`SecurityAddon::modify`] must register the `bearer_jwt` scheme every
+    /// `#[utoipa::path(security(("bearer_jwt" = [])))]` annotation
+    /// references.
+    #[test]
+    fn generated_spec_registers_every_documented_schema_and_the_bearer_scheme() {
+        let spec = ApiDoc::openapi();
+        let components = spec
+            .components
+            .expect("modifiers(&SecurityAddon) requires components to be present");
+        for schema in [
+            "IngestAcceptedResponse",
+            "IngestErrorResponse",
+            "HealthResponse",
+            "ReadyResponse",
+            "LifecycleRequest",
+            "LifecycleResponse",
+            "RestoreRequest",
+            "RestoreResponse",
+            "AdminErrorResponse",
+        ] {
+            assert!(
+                components.schemas.contains_key(schema),
+                "openapi spec is missing schema: {schema}"
+            );
+        }
+        assert!(
+            components.security_schemes.contains_key("bearer_jwt"),
+            "SecurityAddon must register the bearer_jwt scheme"
+        );
+    }
+
+    /// `main.rs::print_openapi` calls `.to_yaml()` on the same spec this
+    /// module builds — proves the whole document (not just individual
+    /// fields) round-trips through utoipa's YAML serializer without error,
+    /// the same path `skauswatch-svc-ingest openapi > openapi/v1.yaml` uses.
+    #[test]
+    fn generated_spec_serializes_to_yaml() {
+        let spec = ApiDoc::openapi();
+        let yaml = spec.to_yaml().expect("spec must serialize to YAML");
+        assert!(yaml.contains("SkausWatch svc-ingest API"));
+        assert!(yaml.contains("svc-ingest-admin"));
+    }
+}

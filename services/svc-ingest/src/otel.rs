@@ -325,6 +325,70 @@ mod tests {
         assert!(!warn_if_self_ingesting("skauswatch-svc-ingest", None));
     }
 
+    /// An endpoint that strips down to an empty host (e.g. the scheme with
+    /// nothing after it) must never be flagged self-ingesting -- there is no
+    /// host to compare against `self_names`, and treating an empty string as
+    /// a match would be a false positive on a malformed-but-harmless value.
+    #[test]
+    fn endpoint_with_empty_host_after_stripping_is_not_flagged() {
+        assert!(!warn_if_self_ingesting(
+            "skauswatch-svc-ingest",
+            Some("http://")
+        ));
+        assert!(!warn_if_self_ingesting("skauswatch-svc-ingest", Some("")));
+    }
+
+    // -- build_providers ------------------------------------------------------
+
+    /// [`build_providers`] is [`init`]'s fallible construction step, kept
+    /// separate specifically so it's testable on its own (see its doc
+    /// comment) -- proves it actually builds both providers for a
+    /// syntactically valid endpoint without making any network call (the
+    /// OTLP gRPC/tonic exporters connect lazily on first export, not at
+    /// `.build()` time). Both providers are explicitly shut down so this
+    /// test doesn't leak their background batch-export threads. Needs a
+    /// live Tokio runtime (`#[tokio::test]`, not `#[test]`) — the OTLP
+    /// gRPC/tonic channel builder requires a reactor to be running even
+    /// though it never actually connects at construction time.
+    #[tokio::test]
+    async fn build_providers_builds_both_providers_for_a_valid_endpoint() {
+        let (tracer_provider, logger_provider) =
+            build_providers("test-service", "http://127.0.0.1:4317")
+                .expect("build_providers must succeed for a syntactically valid endpoint");
+        tracer_provider
+            .shutdown()
+            .expect("tracer provider shutdown");
+        logger_provider
+            .shutdown()
+            .expect("logger provider shutdown");
+    }
+
+    // -- init -------------------------------------------------------------
+
+    /// Exercises [`init`]'s "OTLP export disabled" path end to end (the
+    /// [`OTLP_ENDPOINT_ENV`]-unset branch) -- the only branch of `init` safe
+    /// to call from a shared test binary: `install_subscriber`'s `.init()`
+    /// installs the process-global `tracing` default exactly once ever (a
+    /// second call anywhere in this binary panics), so this MUST remain the
+    /// sole call to `otel::init`/`install_subscriber` in this test suite.
+    /// Asserts the env var really is unset first (same defensive pattern as
+    /// `listeners::otlp::mod`'s own `DB_TYPE`-unset assumption) so a
+    /// developer's local shell exporting it doesn't silently skip the
+    /// intended branch.
+    #[test]
+    fn init_with_no_otlp_endpoint_returns_a_guard_with_no_providers() {
+        assert!(
+            std::env::var(OTLP_ENDPOINT_ENV).is_err(),
+            "test assumes {OTLP_ENDPOINT_ENV} is unset"
+        );
+        let guard = init("otel-init-test");
+        assert!(guard.tracer_provider.is_none());
+        assert!(guard.logger_provider.is_none());
+        // Dropping `guard` here exercises `OtelGuard::drop`'s both-`None`
+        // path (no provider to shut down, so neither `tracing::warn!` arm
+        // fires).
+    }
+
     // -- telemetry_gate_smoke_test -------------------------------------------
 
     /// Per `testing.md` Telemetry Validation / Spec §11c: proves the real
@@ -438,6 +502,23 @@ mod tests {
             6,
             "expected exactly 6 distinct metric names"
         );
+    }
+
+    /// `TestMetricsSink`'s `describe_counter`/`describe_gauge`/
+    /// `describe_histogram` are no-ops (this sink only needs
+    /// presence/count, not descriptions), but they're still real
+    /// `metrics::Recorder` trait methods a production recorder (e.g. the
+    /// Prometheus exporter `skauswatch_telemetry::install_metrics_exporter`
+    /// installs) implements meaningfully -- calling the `describe_*!`
+    /// macros here proves the trait impl is wired correctly end to end
+    /// (macro -> global recorder -> this method), the same way
+    /// `every_metric_in_spec_11a_is_registered` does for `register_*`.
+    #[test]
+    fn describe_macros_reach_the_recorder_without_panicking() {
+        install_test_metrics_recorder();
+        metrics::describe_counter!(metric_names::RECEIVER_EVENTS_TOTAL, "test description");
+        metrics::describe_gauge!(metric_names::RECEIVER_QUEUE_DEPTH, "test description");
+        metrics::describe_histogram!(metric_names::RECEIVER_PARSE_DURATION_MS, "test description");
     }
 
     // -- minimal test metrics::Recorder --------------------------------------

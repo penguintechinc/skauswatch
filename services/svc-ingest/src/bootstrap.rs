@@ -445,6 +445,96 @@ pub(crate) async fn run_writer(
 mod tests {
     use super::*;
 
+    // -- wait_for_shutdown --------------------------------------------------
+
+    /// `wait_for_shutdown` is the cancellation future every listener/server
+    /// task in [`run_receiver`]/[`run_writer`] races its own work against —
+    /// proves it actually resolves once the shared channel reports `true`,
+    /// with no live listener/server involved.
+    #[tokio::test]
+    async fn wait_for_shutdown_resolves_once_the_channel_reports_true() {
+        let (tx, rx) = watch::channel(false);
+        tx.send(true).expect("send on an open channel");
+        wait_for_shutdown(rx).await;
+    }
+
+    // -- drain_listeners ------------------------------------------------------
+
+    /// The clean-shutdown path: every listener task exits `Ok(())` (the
+    /// normal SIGTERM/SIGINT path, per this function's own doc comment) —
+    /// `drain_listeners` must return `Ok(())` too, and must NOT itself
+    /// broadcast a shutdown signal (that's reserved for the error path).
+    #[tokio::test]
+    async fn drain_listeners_returns_ok_when_every_task_succeeds() {
+        let mut tasks: JoinSet<ListenerOutcome> = JoinSet::new();
+        tasks.spawn(async { ("test_listener_ok", Ok(())) });
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        let result = drain_listeners(tasks, &shutdown_tx).await;
+
+        assert!(result.is_ok());
+        assert!(
+            !*shutdown_tx.borrow(),
+            "a clean stop must not itself trigger a shutdown broadcast"
+        );
+    }
+
+    /// A listener task that exits with an `Err` before shutdown was ever
+    /// requested must (a) surface as `drain_listeners`'s own `Err` and (b)
+    /// broadcast shutdown so every other still-running listener is torn
+    /// down too — never leave the process serving a half-degraded protocol
+    /// surface (this function's own doc comment).
+    #[tokio::test]
+    async fn drain_listeners_propagates_the_first_error_and_signals_shutdown() {
+        let mut tasks: JoinSet<ListenerOutcome> = JoinSet::new();
+        tasks.spawn(async { ("test_listener_err", Err(anyhow::anyhow!("boom"))) });
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        let result = drain_listeners(tasks, &shutdown_tx).await;
+
+        assert!(result.is_err());
+        assert!(
+            *shutdown_tx.borrow(),
+            "an error exit must broadcast shutdown to the rest of the set"
+        );
+    }
+
+    /// A panicking listener task surfaces to `tasks.join_next()` as
+    /// `Err(JoinError)`, not the task's own `Result` — `drain_listeners`
+    /// must treat that the same as an explicit `Err` exit: propagate it and
+    /// broadcast shutdown, never silently swallow a panicked listener.
+    #[tokio::test]
+    async fn drain_listeners_treats_a_panicked_task_as_an_error_and_signals_shutdown() {
+        let mut tasks: JoinSet<ListenerOutcome> = JoinSet::new();
+        tasks.spawn(async {
+            panic!("simulated listener panic");
+        });
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        let result = drain_listeners(tasks, &shutdown_tx).await;
+
+        assert!(result.is_err());
+        assert!(*shutdown_tx.borrow());
+    }
+
+    /// Once one task has already failed (broadcasting shutdown), a second,
+    /// still-draining task's own later `Err` must not replace the
+    /// already-recorded first error — `drain_listeners` reports the FIRST
+    /// failure, matching its own doc comment ("Returns the first such
+    /// error, if any").
+    #[tokio::test]
+    async fn drain_listeners_keeps_the_first_error_when_a_second_task_also_fails() {
+        let mut tasks: JoinSet<ListenerOutcome> = JoinSet::new();
+        tasks.spawn(async { ("first", Err(anyhow::anyhow!("first failure"))) });
+        tasks.spawn(async { ("second", Err(anyhow::anyhow!("second failure"))) });
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+
+        let result = drain_listeners(tasks, &shutdown_tx).await;
+
+        assert!(result.is_err());
+        assert!(*shutdown_tx.borrow());
+    }
+
     #[test]
     fn writer_health_port_defaults_when_unset() {
         assert_eq!(writer_health_port(None), DEFAULT_WRITER_HEALTH_PORT);
