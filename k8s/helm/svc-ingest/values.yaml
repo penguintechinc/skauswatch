@@ -85,6 +85,15 @@ ports:
 privilegedSyslogPort:
   enabled: false
 
+# OpenSearch snapshot repository name (SNAPSHOT_REPO in
+# services/svc-ingest/src/config.rs) used by cold-tier ISM
+# searchable-snapshot restore. Optional in the app -- an unset/blank value
+# falls back to the same default here. NOTE: this chart does not provision
+# the snapshot repository itself -- it MUST be registered in OpenSearch
+# out-of-band (e.g. via the `_snapshot` API) before cold-tier ISM restore
+# will function.
+snapshotRepo: "skauswatch-snapshots"
+
 receiver:
   replicaCount: 3
 
@@ -220,6 +229,8 @@ receiver:
         configMapKeyRef:
           name: skauswatch-svc-ingest-config
           key: release-mode
+    - name: SNAPSHOT_REPO
+      value: '{{ .Values.snapshotRepo }}'
 
 writer:
   replicaCount: 3
