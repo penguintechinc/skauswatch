@@ -1,0 +1,26 @@
+# hadolint configuration for this repo.
+#
+# The pre-commit `hadolint-docker` hook gates every Dockerfile touch. Without
+# this config all 15 service Dockerfiles fail on the same two rules, which
+# would block any Dockerfile edit indefinitely. Both are ignored deliberately,
+# with the reasoning recorded here rather than as scattered inline pragmas.
+
+ignored:
+  # DL3008 — "pin versions in apt-get install".
+  # Every builder/runtime base image in this repo is already pinned by SHA256
+  # digest (see critical-rules.md Dependency Pinning), which fixes the apt
+  # snapshot those layers resolve against. Pinning individual Debian package
+  # versions on top of a digest-pinned base breaks the build on every Debian
+  # point-release rotation while adding little: the supply-chain guarantee
+  # comes from the digest-pinned base plus trivy/grype image scanning in CI.
+  - DL3008
+
+  # DL3066 — "non-numeric user-id may not be resolvable by host system".
+  # False positive for this repo's pattern: each image explicitly creates the
+  # account with a fixed numeric id in the same Dockerfile
+  # (`groupadd --gid 10001 appuser && useradd --uid 10001 ... appuser`) before
+  # `USER appuser`, so the symbolic name always resolves inside the image, and
+  # the Helm charts independently set `runAsUser: 10001` numerically.
+  - DL3066
+
+failure-threshold: warning

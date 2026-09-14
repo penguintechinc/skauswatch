@@ -1,0 +1,32 @@
+# Alpha overrides — local MicroK8s (local-alpha context), namespace: skauswatch.
+replicaCount: 1
+
+image:
+  repository: localhost:32000/skauswatch/s3scan
+  tag: "alpha-latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+configMapData:
+  log-level: "debug"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "2"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"

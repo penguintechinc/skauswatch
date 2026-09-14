@@ -1,0 +1,54 @@
+[package]
+name = "skauswatch-codescan-backend"
+description = "SkausWatch CodeScan AI-code-review backend — REST /api/v1/codescan + credentials (Rust port of darwin/services/flask-backend)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "codescan-backend"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+jsonwebtoken = { workspace = true }
+penguin-licensing = { workspace = true, features = ["axum"] }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+skauswatch-auth = { workspace = true }
+skauswatch-db = { workspace = true }
+skauswatch-streams = { workspace = true }
+skauswatch-telemetry = { workspace = true }
+skauswatch-vault = { workspace = true }
+sqlx = { workspace = true }
+# Per-client-IP rate limiting on the /api/v1 router — see routes/mod.rs
+# module docs for the config (HIGH security-hardening fix).
+tower_governor = { workspace = true }
+# Decompresses `codescan_sbom_artifacts.doc_gzip` for
+# GET /codescan/findings/sbom/{scan_run_id} (routes/findings.rs) — same
+# already-locked version worker-codescan compresses with.
+flate2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+# "yaml" adds serde_yaml so `codescan-backend openapi` can emit true YAML for
+# openapi/v1.yaml (workspace default features are json-only) — see
+# docs/v2-port/openapi-pattern.md.
+utoipa = { workspace = true, features = ["yaml"] }
+
+[dev-dependencies]
+axum-test = { workspace = true }
+skauswatch-testkit = { workspace = true }
+
+[lints]
+workspace = true

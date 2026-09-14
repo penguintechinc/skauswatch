@@ -1,9 +1,11 @@
-replicaCount: 1
+# Default (prod-safe baseline) values for skauswatch-webui.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
 
 image:
-  repository: ghcr.io/penguintechinc/skauswatch-webui
+  repository: ghcr.io/penguintechinc/skauswatch/webui
   pullPolicy: IfNotPresent
-  tag: latest
+  tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -20,13 +22,24 @@ podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1000
   fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and
+  # good practice under "baseline") -- see k8s/helm/README.md "Cluster
+  # security baseline".
+  seccompProfile:
+    type: RuntimeDefault
 
 securityContext:
   allowPrivilegeEscalation: false
   capabilities:
     drop:
       - ALL
-  readOnlyRootFilesystem: false
+  readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
 
 service:
   enabled: true
@@ -34,31 +47,44 @@ service:
   port: 3000
   targetPort: 3000
 
+# The public entrypoint — served via HTTPRoute (Gateway API) in
+# beta/gamma/prod, NodePort in alpha (see devops-kubernetes.md Alpha
+# NodePort Exposure).
 ingress:
-  enabled: true
+  enabled: false
   className: nginx
   annotations:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
   hosts:
-    - host: skauswatch.penguintech.cloud
+    - host: skauswatch.app
       paths:
         - path: /
           pathType: Prefix
   tls: []
 
+httproute:
+  enabled: false
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.app
+  rules:
+    - path: /
+      service: skauswatch-webui
+      port: 3000
+
 resources:
   limits:
-    cpu: "1"
-    memory: 512Mi
+    cpu: 1000m
+    memory: 1Gi
   requests:
-    cpu: 100m
-    memory: 128Mi
+    cpu: 500m
+    memory: 512Mi
 
 autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 3
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
   targetCPUUtilizationPercentage: 70
   targetMemoryUtilizationPercentage: 80
 
@@ -68,32 +94,54 @@ tolerations: []
 
 affinity: {}
 
+# services/webui/src/server/index.ts: Express BFF — PORT, NODE_ENV, plus
+# backend service URLs it proxies to (manager, vault, codescan-backend,
+# monitor). Hostnames use the skauswatch-<service> Service names created by
+# each chart (same skauswatch namespace).
 env:
   - name: PORT
     value: "3000"
   - name: NODE_ENV
-    value: "production"
-  - name: API_URL
     valueFrom:
       configMapKeyRef:
         name: skauswatch-webui-config
-        key: api-url
+        key: node-env
+  - name: MANAGER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-webui-config
+        key: manager-url
+  - name: VAULT_BACKEND_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-webui-config
+        key: vault-backend-url
+  - name: CODESCAN_BACKEND_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-webui-config
+        key: codescan-backend-url
+  - name: MONITOR_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-webui-config
+        key: monitor-url
 
 livenessProbe:
   httpGet:
-    path: /
-    port: 3000
-  initialDelaySeconds: 30
-  periodSeconds: 30
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
   timeoutSeconds: 5
   failureThreshold: 3
 
 readinessProbe:
   httpGet:
-    path: /
-    port: 3000
-  initialDelaySeconds: 10
-  periodSeconds: 10
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
   timeoutSeconds: 3
   failureThreshold: 2
 
@@ -102,4 +150,8 @@ volumeMounts: []
 volumes: []
 
 configMapData:
-  api-url: "http://skauswatch-manager:5000"
+  node-env: "production"
+  manager-url: "http://skauswatch-manager:5000"
+  vault-backend-url: "http://skauswatch-vault:8080"
+  codescan-backend-url: "http://skauswatch-codescan-backend:5005"
+  monitor-url: "http://skauswatch-monitor:8003"

@@ -1,5 +1,6 @@
 import { useNavigate, useLocation } from 'react-router-dom';
 import { LoginPageBuilder } from '@penguintechinc/react-libs';
+import type { LoginResponse } from '@penguintechinc/react-libs';
 import { useAuth } from '../hooks/useAuth';
 
 interface LocationState {
@@ -7,49 +8,35 @@ interface LocationState {
 }
 
 export default function Login() {
-  const { login } = useAuth();
+  const { checkAuth } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
   const from = (location.state as LocationState)?.from?.pathname || '/';
 
-  const handleLoginSuccess = async (token: string) => {
-    // Token is already set by LoginPageBuilder, just need to navigate
-    // But we need to update our auth store
-    // The LoginPageBuilder returns the access_token, but we need to fetch user data
-    try {
-      // Login function will handle setting tokens and fetching user
-      // Since LoginPageBuilder already authenticated, we just need to sync state
-      navigate(from, { replace: true });
-    } catch (err) {
-      console.error('Login success handler error:', err);
-    }
+  const handleSuccess = async (_response: LoginResponse) => {
+    // LoginPageBuilder POSTs to api.loginUrl itself; the manager's response
+    // already set the HttpOnly sw_access/sw_refresh + sw_csrf cookies, so
+    // there is nothing to store here. Hydrate auth state from the new
+    // cookie session via /auth/me rather than trusting response body
+    // fields (which never carry the token client-side, H2 audit fix).
+    console.log('[Login] Login succeeded');
+    await checkAuth();
+    navigate(from, { replace: true });
   };
 
-  const handleLoginSubmit = async (credentials: { email: string; password: string }) => {
-    // Use our custom login function which updates Zustand store
-    await login(credentials);
-    navigate(from, { replace: true });
+  const handleError = (error: Error) => {
+    console.error('[Login] Login failed', error.message);
   };
 
   return (
     <LoginPageBuilder
-      apiBaseUrl={import.meta.env.VITE_API_URL || '/api/v1'}
-      onLoginSuccess={handleLoginSuccess}
-      onLoginSubmit={handleLoginSubmit}
-      appName="SkausWatch"
-      appLogo="/logo.png"
-      enableMFA={false}  // Can be enabled when backend supports it
-      enableOAuth2={false}  // Can be enabled when backend supports it
-      enableCaptcha={false}
-      showCookieConsent={false}
-      theme={{
-        primaryColor: '#D4AF37',  // Gold color
-        backgroundColor: '#0A0A0B',  // Dark background
-        cardBackground: '#1A1A1F',
-        textColor: '#E5E7EB',
-        accentColor: '#D4AF37',
-      }}
+      api={{ loginUrl: '/api/v1/auth/login' }}
+      branding={{ appName: 'SkausWatch' }}
+      onSuccess={handleSuccess}
+      onError={handleError}
+      showForgotPassword={false}
+      showSignUp={false}
     />
   );
 }

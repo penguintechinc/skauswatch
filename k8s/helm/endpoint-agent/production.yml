@@ -1,0 +1,25 @@
+# Production overrides — pinned by SHA256 digest.
+# DaemonSet: one pod per node by design — no replicaCount/HPA concept
+# applies (see devops-kubernetes.md resource tiers, which assume
+# Deployments); resources still scale to the production tier.
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/endpoint-agent
+  # Pin to the released digest before deploying — see pinning-dependency-digests skill.
+  tag: "sha256:<digest>"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 500m
+    memory: 256Mi
+
+configMapData:
+  manager-url: "https://skauswatch.app/api"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"

@@ -114,7 +114,7 @@ rate_limiting:
     
   # Service-specific rate limits
   services:
-    pki_server:
+    pki:
       certificate_requests:
         requests: 100
         window_seconds: 60.0
@@ -124,7 +124,7 @@ rate_limiting:
         window_seconds: 60.0
         algorithm: "token_bucket"
         
-    ssh_ca:
+    sshca:
       certificate_requests:
         requests: 200
         window_seconds: 60.0
@@ -159,11 +159,11 @@ message_queue:
   services:
     - name: "manager"
       queues: ["database", "user_management", "system"]
-    - name: "pki_server"
+    - name: "pki"
       queues: ["certificates", "revocation", "ocsp"]
-    - name: "ssh_ca"
+    - name: "sshca"
       queues: ["ssh_certs", "krl", "config"]
-    - name: "aaa_monitor"
+    - name: "monitor"
       queues: ["logs", "alerts", "analysis"]
 
 # Performance Monitoring Configuration
@@ -251,7 +251,7 @@ services:
       backup_interval: 86400  # 24 hours
       
   # PKI Server
-  pki_server:
+  pki:
     certificate_processing:
       batch_size: 10
       signing_timeout: 60.0
@@ -264,7 +264,7 @@ services:
       certificate_cleanup_interval: 86400  # 24 hours
       
   # SSH CA Server
-  ssh_ca:
+  sshca:
     certificate_processing:
       batch_size: 20
       signing_timeout: 30.0
@@ -274,8 +274,8 @@ services:
       krl_update_interval: 1800        # 30 minutes
       key_rotation_interval: 604800    # 7 days
       
-  # AAA Monitor
-  aaa_monitor:
+  # Monitor
+  monitor:
     log_collection:
       batch_size: 100
       processing_workers: 5

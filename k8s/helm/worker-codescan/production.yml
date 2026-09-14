@@ -1,0 +1,35 @@
+# Production overrides — pinned by SHA256 digest, HA replicas + HPA.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/worker-codescan
+  # Pin to the released digest before deploying — see pinning-dependency-digests skill.
+  tag: "sha256:<digest>"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+configMapData:
+  log-level: "warn"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+  ai-provider: "anthropic"
+  ai-model: "claude-opus-4-5"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"

@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "skauswatch-svc-ingest.writer.fullname" . }}
+  labels:
+    {{- include "skauswatch-svc-ingest.writer.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  {{- if not .Values.writer.autoscaling.enabled }}
+  replicas: {{ .Values.writer.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "skauswatch-svc-ingest.writer.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "skauswatch-svc-ingest.writer.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: writer
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 12 }}
+        image: {{ include "skauswatch-svc-ingest.image" . | quote }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args: ["serve", "--mode", "writer"]
+        # No inbound protocol ports -- writer only consumes JetStream and
+        # bulk-writes to OpenSearch (src/bootstrap.rs::run_writer). Only
+        # its private health surface + metrics are exposed, and neither is
+        # backed by a k8s Service (see templates/service-receiver.yaml's
+        # header comment and k8s/helm/README.md "Cluster security
+        # baseline" for how CiliumNetworkPolicy + Prometheus scrape by pod
+        # IP without one).
+        ports:
+        - name: health
+          containerPort: {{ .Values.ports.writerHealthPort }}
+          protocol: TCP
+        - name: metrics
+          containerPort: {{ .Values.ports.metricsPort }}
+          protocol: TCP
+        {{- with .Values.writer.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.writer.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        {{- with .Values.writer.resources }}
+        resources:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        env:
+        {{- tpl (toYaml .Values.writer.env) . | nindent 12 }}
+            # NATS production-hardening (Spec §7a) -- see
+            # deployment-receiver.yaml's identical block for the full
+            # rationale; baked in directly so it can't be overridden away.
+            - name: NATS_JETSTREAM_SYNC_ALWAYS
+              value: "true"
+        {{- with .Values.volumeMounts }}
+        volumeMounts:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+      {{- with .Values.volumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

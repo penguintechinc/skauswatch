@@ -20,9 +20,9 @@ Four containerized services: Manager, PKI Server, SSH CA Server, and AAA Log Ana
   ├── docs/              # Comprehensive documentation
   ├── services/
   │   ├── manager/
-  │   ├── pki-server/
-  │   ├── ssh-ca/
-  │   └── aaa-monitor/
+  │   ├── pki/
+  │   ├── sshca/
+  │   └── monitor/
   ├── shared/
   │   ├── models/
   │   ├── utils/
@@ -332,7 +332,7 @@ Four containerized services: Manager, PKI Server, SSH CA Server, and AAA Log Ana
   - Manager console capabilities
   - PKI server features
   - SSH CA functionality
-  - AAA monitoring details
+  - monitoring details
 - [ ] Pricing page
   - Tier comparison table
   - Enterprise custom pricing
@@ -549,13 +549,13 @@ Four containerized services: Manager, PKI Server, SSH CA Server, and AAA Log Ana
   - OCSP configuration
   - CRL management
   - HSM integration
-- [ ] SSH CA Docs (docs/services/ssh-ca/)
+- [ ] SSH CA Docs (docs/services/sshca/)
   - SSH certificate formats
   - Principal management
   - Key rotation policies
   - Emergency access procedures
   - Integration with SSH servers
-- [ ] AAA Monitor Docs (docs/services/aaa-monitor/)
+- [ ] Monitor Docs (docs/services/monitor/)
   - Log source configuration
   - STIX/TAXII setup
   - AI provider configuration
@@ -771,7 +771,7 @@ Four containerized services: Manager, PKI Server, SSH CA Server, and AAA Log Ana
 
 - Phase 1-2: 4 weeks (Foundation & Manager)
 - Phase 3-4: 6 weeks (PKI & SSH CA)
-- Phase 5: 4 weeks (AAA Monitor)
+- Phase 5: 4 weeks (Monitor)
 - Phase 6-7: 3 weeks (Optimization & Security)
 - Phase 8-9: 3 weeks (Testing & Deployment)
 - Phase 10: 3 weeks (Marketing Website)

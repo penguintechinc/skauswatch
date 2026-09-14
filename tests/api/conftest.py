@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Make manager service importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../services/manager-new"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../services/manager"))
 
 # These tests require manager service dependencies (quart, quart_cors, etc.)
 # Skip the entire module if they aren't installed
@@ -39,7 +39,7 @@ def manager_app():
             siem=SIEMConfig(
                 enabled=True,
                 opensearch_url="http://localhost:9200",
-                log_receiver_url="http://localhost:5010",
+                logs_url="http://localhost:5010",
                 retention_days=90,
             ),
         )

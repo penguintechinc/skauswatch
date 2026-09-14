@@ -1,0 +1,29 @@
+{{- if and .Values.spire.enabled .Values.spire.oidcProvider.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-oidc-config
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: oidc-provider
+  namespace: {{ .Release.Namespace }}
+data:
+  oidc-provider.conf: |
+    server {
+      bind_address = "0.0.0.0"
+      bind_port = "{{ .Values.spire.oidcProvider.port }}"
+      log_level = "INFO"
+    }
+
+    spire_server {
+      address = "{{ include "skauswatch-spire.fullname" . }}-server:{{ .Values.spire.server.ports.grpc }}"
+    }
+
+    {{- if .Values.spire.oidcProvider.domains }}
+    authorization_endpoint {
+      {{- range .Values.spire.oidcProvider.domains }}
+      domain = "{{ . }}"
+      {{- end }}
+    }
+    {{- end }}
+{{- end }}

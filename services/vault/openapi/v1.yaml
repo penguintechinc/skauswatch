@@ -1,0 +1,1623 @@
+openapi: 3.1.0
+info:
+  title: SkausWatch Vault API
+  description: Envelope-encrypted secrets storage, just-in-time access grants, self-destructing one-time secrets, cloud vault sync integrations, MEK rotation, and audit log.
+  contact:
+    name: Penguin Tech Inc
+    email: support@penguintech.io
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+  version: '1'
+paths:
+  /api/v1/admin/license:
+    get:
+      tags:
+      - admin
+      operationId: get_license_status
+      responses:
+        '200':
+          description: Current license/flag state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LicenseStatusResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires secrets:admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/admin/mek/rotate:
+    post:
+      tags:
+      - admin
+      summary: |-
+        Intentionally **not** tenant-filtered: this is the deployment-wide MEK
+        rotation operation — there is exactly one MEK (and one active version) per
+        deployment, shared across every tenant's envelope-encrypted rows, so
+        rotation must re-wrap DEKs on every rotatable row regardless of tenant.
+        It never returns secret plaintext or metadata to the caller, only a row
+        count, so this is not a tenant-isolation gap — analogous to pki's
+        `ca/info` cross-tenant exception in `docs/v2-port/tenancy-model.md` §6.
+      operationId: rotate_mek
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateMekBody'
+        required: true
+      responses:
+        '200':
+          description: DEKs re-wrapped under the new MEK version across every rotatable table
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RotateMekResponse'
+        '400':
+          description: Missing new_mek_version or the requested version is not loaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires secrets:admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/audit/log:
+    get:
+      tags:
+      - audit
+      operationId: get_audit_log
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: per_page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: actor_id
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: resource_type
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: resource_id
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: action
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      responses:
+        '200':
+          description: Paginated, filterable audit trail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires audit:read)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/jit/requests:
+    get:
+      tags:
+      - jit
+      operationId: list_jit_requests
+      parameters:
+      - name: status
+        in: query
+        description: Filter by request status; repeatable (?status=pending&status=approved). Manually declared (not an IntoParams struct) because the handler extracts raw query pairs — see the comment on the `raw_query` parameter below.
+        required: false
+        schema:
+          type: array
+          items:
+            type: string
+      - name: page
+        in: query
+        description: Page number (1-indexed, default 1)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      - name: per_page
+        in: query
+        description: Items per page (default 20, max 100)
+        required: false
+        schema:
+          type: integer
+          format: int64
+      responses:
+        '200':
+          description: 'Paginated: requestor''s own requests, plus (for jit:approve callers) requests against secrets they own'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JitRequestListResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Missing both jit:request and jit:approve scopes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - jit
+      operationId: create_jit_request
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateJitRequestBody'
+        required: true
+      responses:
+        '201':
+          description: 'JIT request created (status: pending)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JitRequestResponse'
+        '400':
+          description: Missing secret_id/reason or duration exceeds the configured maximum
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires jit:request)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+        '404':
+          description: Secret not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/jit/requests/{id}/approve:
+    patch:
+      tags:
+      - jit
+      operationId: approve_jit_request
+      parameters:
+      - name: id
+        in: path
+        description: JIT request id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApproveBody'
+        required: true
+      responses:
+        '200':
+          description: Request approved; a JIT access token is minted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JitApproveResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires jit:approve, richer {required,missing} body) or not an owner of the target secret (bare body, shown here — simplified rather than modeled as oneOf)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Request not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Request is no longer pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/jit/requests/{id}/reject:
+    patch:
+      tags:
+      - jit
+      operationId: reject_jit_request
+      parameters:
+      - name: id
+        in: path
+        description: JIT request id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Request rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JitRejectResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires jit:approve) or not an owner of the target secret
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Request not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Request is no longer pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/one-time-secrets:
+    post:
+      tags:
+      - one-time-secrets
+      operationId: create_one_time_secret
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBody'
+        required: true
+      responses:
+        '201':
+          description: One-time secret created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OneTimeCreateResponse'
+        '400':
+          description: Missing value or ttl_seconds out of the 60..=604800 range
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires secrets:write)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/one-time-secrets/{token}:
+    get:
+      tags:
+      - one-time-secrets
+      summary: |-
+        Deliberately **no** `security(...)` clause — unlike every other route in
+        this service, this endpoint has no bearer-token auth at all by design:
+        the URL-embedded, single-use token *is* the credential (v1 parity). Not
+        an oversight; see `docs/v2-port/openapi-pattern.md` step 2.
+        Deliberately **not** filtered by `tenant_id`: this route has no
+        `CurrentUser` (see the doc comment above) so there is no validated
+        tenant claim to filter on. This is a documented exception to "every
+        query filters on tenant_id, no exceptions" — the URL-embedded token
+        (32 cryptographically random bytes, SHA-256-hashed, globally unique by
+        construction) is already the *complete* credential; a tenant filter
+        would add no isolation value on top of it, since possessing the token
+        already proves authorization regardless of tenant. `tenant_id` is still
+        stamped on the row at creation (`create_one_time_secret`) for audit/
+        listing purposes, just never consulted on this read path.
+      operationId: retrieve_one_time_secret
+      parameters:
+      - name: token
+        in: path
+        description: URL-safe single-use retrieval token
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Decrypted value; the token is now consumed and cannot be reused
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OneTimeValueResponse'
+        '404':
+          description: Unknown token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: Secret already viewed or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/secrets:
+    get:
+      tags:
+      - secrets
+      operationId: list_secrets
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: per_page
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          format: int64
+      - name: type
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      responses:
+        '200':
+          description: Paginated list of secrets (metadata only, never encrypted fields)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecretListResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires secrets:read)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - secrets
+      operationId: create_secret
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSecretBody'
+        required: true
+      responses:
+        '201':
+          description: Secret created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecretResponse'
+        '400':
+          description: Missing name/value or invalid secret type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires secrets:write)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/secrets/{id}:
+    get:
+      tags:
+      - secrets
+      operationId: get_secret
+      parameters:
+      - name: id
+        in: path
+        description: Secret id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Secret metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecretResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires secrets:read)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+        '404':
+          description: Secret not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    put:
+      tags:
+      - secrets
+      operationId: update_secret
+      parameters:
+      - name: id
+        in: path
+        description: Secret id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSecretBody'
+        required: true
+      responses:
+        '200':
+          description: Updated secret metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecretResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires secrets:write)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+        '404':
+          description: Secret not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    delete:
+      tags:
+      - secrets
+      operationId: delete_secret
+      parameters:
+      - name: id
+        in: path
+        description: Secret id
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Secret deleted
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires secrets:delete)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+        '404':
+          description: Secret not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/secrets/{id}/rotate:
+    post:
+      tags:
+      - secrets
+      operationId: rotate_secret
+      parameters:
+      - name: id
+        in: path
+        description: Secret id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateBody'
+        required: true
+      responses:
+        '200':
+          description: New version created and set as current
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RotateSecretResponse'
+        '400':
+          description: Missing rotation value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires secrets:write)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+        '404':
+          description: Secret not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/secrets/{id}/value:
+    get:
+      tags:
+      - secrets
+      summary: |-
+        GET /secrets/{id}/value — accepts a JIT token OR a standard bearer JWT
+        with `secrets:read` (v1 does not use the `CurrentUser` extractor here
+        because it must try the JIT-token path first). Documented with the
+        standard `bearer_jwt` scheme even though a JIT token satisfies the same
+        `Authorization: Bearer` header shape.
+      operationId: get_secret_value
+      parameters:
+      - name: id
+        in: path
+        description: Secret id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Decrypted secret value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecretValueResponse'
+        '401':
+          description: Missing/invalid authorization header or token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires secrets:read)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+        '404':
+          description: Secret not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/secrets/{id}/versions:
+    get:
+      tags:
+      - secrets
+      operationId: list_secret_versions
+      parameters:
+      - name: id
+        in: path
+        description: Secret id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Version history (newest first)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecretVersionsResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires secrets:read)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+        '404':
+          description: Secret not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/sync/integrations:
+    get:
+      tags:
+      - sync
+      operationId: list_integrations
+      responses:
+        '200':
+          description: Configured cloud vault integrations (credentials never included)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncIntegrationListResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires sync:read)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - sync
+      operationId: create_integration
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateIntegrationBody'
+        required: true
+      responses:
+        '201':
+          description: Integration created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncIntegrationResponse'
+        '400':
+          description: Invalid provider, missing name, or invalid sync_direction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires sync:admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/sync/integrations/{id}:
+    put:
+      tags:
+      - sync
+      operationId: update_integration
+      parameters:
+      - name: id
+        in: path
+        description: Integration id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateIntegrationBody'
+        required: true
+      responses:
+        '200':
+          description: Updated integration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncIntegrationResponse'
+        '400':
+          description: Invalid sync_direction
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires sync:admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+        '404':
+          description: Integration not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    delete:
+      tags:
+      - sync
+      operationId: delete_integration
+      parameters:
+      - name: id
+        in: path
+        description: Integration id
+        required: true
+        schema:
+          type: string
+      responses:
+        '204':
+          description: Integration deleted
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires sync:admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+        '404':
+          description: Integration not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/sync/integrations/{id}/trigger:
+    post:
+      tags:
+      - sync
+      operationId: trigger_sync
+      parameters:
+      - name: id
+        in: path
+        description: Integration id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Sync event(s) published to worker-vault-sync, one per in-scope secret
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TriggerSyncResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Insufficient scope (requires sync:admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InsufficientScopeResponse'
+        '404':
+          description: Integration not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Integration is disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+components:
+  schemas:
+    ApproveBody:
+      type: object
+      properties:
+        approved_duration_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int32
+    AuditEntryResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of one entry in `get_audit_log`'s `entries`
+        array.
+      required:
+      - id
+      - actor_id
+      - action
+      - resource_type
+      - created_at
+      properties:
+        action:
+          type: string
+        actor_id:
+          type: string
+        created_at:
+          type: string
+        id:
+          type: string
+        ip_address:
+          type:
+          - string
+          - 'null'
+        resource_id:
+          type:
+          - string
+          - 'null'
+        resource_type:
+          type: string
+    AuditLogResponse:
+      type: object
+      description: Documentation-only mirror of `get_audit_log`'s response envelope.
+      required:
+      - entries
+      - total
+      - page
+      - per_page
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEntryResponse'
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int64
+    CreateBody:
+      type: object
+      properties:
+        ttl_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Time-to-live in seconds; must be between 60 and 604800 (7 days).
+            Defaults to 86400 (24h).
+        value:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Plaintext value to share — encrypted at rest immediately, never
+            persisted or logged unencrypted.
+    CreateIntegrationBody:
+      type: object
+      properties:
+        config: {}
+        credentials:
+          description: |-
+            Provider credentials — encrypted at rest immediately, never
+            returned by any response.
+        description:
+          type:
+          - string
+          - 'null'
+        enabled:
+          type:
+          - boolean
+          - 'null'
+        name:
+          type:
+          - string
+          - 'null'
+        provider:
+          type:
+          - string
+          - 'null'
+        sync_direction:
+          type:
+          - string
+          - 'null'
+        sync_scopes: {}
+    CreateJitRequestBody:
+      type: object
+      properties:
+        reason:
+          type:
+          - string
+          - 'null'
+        requested_duration_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        secret_id:
+          type:
+          - string
+          - 'null'
+    CreateSecretBody:
+      type: object
+      properties:
+        description:
+          type:
+          - string
+          - 'null'
+        expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        metadata: {}
+        name:
+          type:
+          - string
+          - 'null'
+        tags: {}
+        type:
+          type:
+          - string
+          - 'null'
+        value:
+          type:
+          - string
+          - 'null'
+          description: |-
+            Plaintext secret value — encrypted at rest immediately, never
+            persisted or logged unencrypted.
+    ErrorResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `ApiError`'s bare `{"error": msg}` wire
+        shape (`BadRequest`/`Unauthorized`/`Forbidden`/`NotFound`/`Conflict`/
+        `Gone` all use it) — `ApiError` itself builds its body with
+        `serde_json::json!` rather than a typed struct, so this type exists
+        solely to give `utoipa` something to reference in `#[utoipa::path]`
+        `responses(...)` clauses.
+      required:
+      - error
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+    InsufficientScopeResponse:
+      type: object
+      description: Documentation-only mirror of `ApiError::InsufficientScope`'s wire shape.
+      required:
+      - error
+      - required
+      - missing
+      properties:
+        error:
+          type: string
+          description: Always `"Insufficient scope"`.
+        missing:
+          type: array
+          items:
+            type: string
+          description: Subset of `required` the caller's token was missing.
+        required:
+          type: array
+          items:
+            type: string
+          description: Scopes the endpoint required.
+    JitApproveResponse:
+      type: object
+      description: Documentation-only mirror of `approve_jit_request`'s response envelope.
+      required:
+      - request_id
+      - grant_id
+      - access_token
+      - expires_at
+      - secret_id
+      properties:
+        access_token:
+          type: string
+          description: |-
+            The bearer-style JIT access token (`jit:{grant_id}:{grantee_id}:
+            {expires_epoch}`) granted to the requestor — sensitive, never
+            populated with example data in the generated schema.
+        expires_at:
+          type: string
+        grant_id:
+          type: string
+        request_id:
+          type: string
+        secret_id:
+          type: string
+    JitRejectResponse:
+      type: object
+      description: Documentation-only mirror of `reject_jit_request`'s response envelope.
+      required:
+      - request_id
+      - status
+      properties:
+        request_id:
+          type: string
+        status:
+          type: string
+    JitRequestListResponse:
+      type: object
+      description: Documentation-only mirror of `list_jit_requests`'s response envelope.
+      required:
+      - requests
+      - total
+      - page
+      - per_page
+      properties:
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        requests:
+          type: array
+          items:
+            $ref: '#/components/schemas/JitRequestResponse'
+        total:
+          type: integer
+          format: int64
+    JitRequestResponse:
+      type: object
+      description: Documentation-only mirror of `RequestRow::to_json`'s wire shape.
+      required:
+      - id
+      - secret_id
+      - requestor_id
+      - reason
+      - requested_duration_seconds
+      - status
+      - created_at
+      properties:
+        access_expires_at:
+          type:
+          - string
+          - 'null'
+        approved_at:
+          type:
+          - string
+          - 'null'
+        approved_by:
+          type:
+          - string
+          - 'null'
+        approved_duration_seconds:
+          type:
+          - integer
+          - 'null'
+          format: int32
+        created_at:
+          type: string
+        id:
+          type: string
+        reason:
+          type: string
+        requested_duration_seconds:
+          type: integer
+          format: int32
+        requestor_id:
+          type: string
+        secret_id:
+          type: string
+        status:
+          type: string
+    LicenseRequiredResponse:
+      type: object
+      description: Documentation-only mirror of `ApiError::LicenseRequired`'s wire shape.
+      required:
+      - error
+      - detail
+      - license_server
+      properties:
+        detail:
+          type: string
+          description: Operator-facing remediation hint.
+        error:
+          type: string
+          description: Always `"Vault license required"`.
+        license_server:
+          type: string
+          description: License server URL, echoed for operator convenience.
+    LicenseStatusResponse:
+      type: object
+      description: Documentation-only mirror of `get_license_status`'s response envelope.
+      required:
+      - licensed
+      - bypassed
+      - tier
+      - license_server_url
+      properties:
+        bypassed:
+          type: boolean
+        license_server_url:
+          type: string
+        licensed:
+          type: boolean
+        tier:
+          type: string
+          description: One of `free`, `professional`, `enterprise`.
+        validated_at:
+          type:
+          - string
+          - 'null'
+    OneTimeCreateResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `create_one_time_secret`'s response
+        envelope.
+      required:
+      - id
+      - view_url
+      - expires_at
+      - ttl_seconds
+      properties:
+        expires_at:
+          type: string
+        id:
+          type: string
+        ttl_seconds:
+          type: integer
+          format: int64
+        view_url:
+          type: string
+          description: |-
+            Path to retrieve the secret exactly once — the webui/ingress owns
+            the scheme and host it's reachable at.
+    OneTimeValueResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `retrieve_one_time_secret`'s response
+        envelope.
+      required:
+      - value
+      - retrieved_at
+      properties:
+        retrieved_at:
+          type: string
+        value:
+          type: string
+          description: |-
+            The decrypted one-time value — never populated with example data in
+            the generated schema.
+    RotateBody:
+      type: object
+      properties:
+        value:
+          type:
+          - string
+          - 'null'
+          description: New plaintext secret value — encrypted at rest immediately.
+    RotateMekBody:
+      type: object
+      properties:
+        new_mek_version:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: |-
+            Target MEK version — must already be loaded via
+            `VAULT_MEK_V{new_mek_version}`.
+          minimum: 0
+    RotateMekResponse:
+      type: object
+      description: Documentation-only mirror of `rotate_mek`'s response envelope.
+      required:
+      - rows_updated
+      - new_version
+      - rotated_at
+      properties:
+        new_version:
+          type: integer
+          format: int32
+          minimum: 0
+        rotated_at:
+          type: string
+        rows_updated:
+          type: integer
+          minimum: 0
+    RotateSecretResponse:
+      type: object
+      description: Documentation-only mirror of `rotate_secret`'s response envelope.
+      required:
+      - id
+      - version
+      - rotated_at
+      properties:
+        id:
+          type: string
+        rotated_at:
+          type: string
+        version:
+          type: integer
+          format: int32
+    SecretListResponse:
+      type: object
+      description: Documentation-only mirror of `list_secrets`'s response envelope.
+      required:
+      - secrets
+      - total
+      - page
+      - per_page
+      properties:
+        page:
+          type: integer
+          format: int64
+        per_page:
+          type: integer
+          format: int64
+        secrets:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecretResponse'
+        total:
+          type: integer
+          format: int64
+    SecretResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `SecretRow::to_json`'s wire shape — never
+        includes the encrypted fields.
+      required:
+      - id
+      - name
+      - secret_type
+      - created_at
+      - updated_at
+      properties:
+        created_at:
+          type: string
+        created_by:
+          type:
+          - string
+          - 'null'
+        description:
+          type:
+          - string
+          - 'null'
+        expires_at:
+          type:
+          - string
+          - 'null'
+        id:
+          type: string
+        name:
+          type: string
+        secret_type:
+          type: string
+        tags: {}
+        updated_at:
+          type: string
+    SecretValueResponse:
+      type: object
+      description: Documentation-only mirror of `get_secret_value`'s response envelope.
+      required:
+      - id
+      - name
+      - value
+      - retrieved_at
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        retrieved_at:
+          type: string
+        value:
+          type: string
+          description: |-
+            Decrypted secret value — never populated with example data in the
+            generated schema.
+    SecretVersionEntry:
+      type: object
+      description: |-
+        Documentation-only mirror of one entry in `list_secret_versions`'s
+        `versions` array.
+      required:
+      - id
+      - version_number
+      - created_at
+      properties:
+        created_at:
+          type: string
+        created_by:
+          type:
+          - string
+          - 'null'
+        deprecated_at:
+          type:
+          - string
+          - 'null'
+        id:
+          type: string
+        version_number:
+          type: integer
+          format: int32
+    SecretVersionsResponse:
+      type: object
+      description: Documentation-only mirror of `list_secret_versions`'s response envelope.
+      required:
+      - secret_id
+      - versions
+      properties:
+        secret_id:
+          type: string
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecretVersionEntry'
+    SyncIntegrationListResponse:
+      type: object
+      description: Documentation-only mirror of `list_integrations`'s response envelope.
+      required:
+      - integrations
+      properties:
+        integrations:
+          type: array
+          items:
+            $ref: '#/components/schemas/SyncIntegrationResponse'
+    SyncIntegrationResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `IntegrationRow::to_json`'s wire shape —
+        never includes `encrypted_credentials`.
+      required:
+      - id
+      - provider
+      - name
+      - sync_direction
+      - enabled
+      - created_at
+      properties:
+        config: {}
+        created_at:
+          type: string
+        description:
+          type:
+          - string
+          - 'null'
+        enabled:
+          type: boolean
+        id:
+          type: string
+        last_sync_at:
+          type:
+          - string
+          - 'null'
+        name:
+          type: string
+        provider:
+          type: string
+        sync_direction:
+          type: string
+        sync_scopes: {}
+    TriggerSyncResponse:
+      type: object
+      description: Documentation-only mirror of `trigger_sync`'s response envelope.
+      required:
+      - integration_id
+      - provider
+      - status
+      - secrets_queued
+      - queued_at
+      properties:
+        integration_id:
+          type: string
+        provider:
+          type: string
+        queued_at:
+          type: string
+        secrets_queued:
+          type: integer
+          format: int64
+          description: |-
+            Number of `action=push` messages actually published — one per
+            matched secret. `0` for a `cloud_to_vault`-only integration (no push
+            leg exists) or when the tenant has no secrets in scope.
+        status:
+          type: string
+          description: Always `"sync_queued"`.
+    UpdateIntegrationBody:
+      type: object
+      properties:
+        config: {}
+        description:
+          type:
+          - string
+          - 'null'
+        enabled:
+          type:
+          - boolean
+          - 'null'
+        name:
+          type:
+          - string
+          - 'null'
+        sync_direction:
+          type:
+          - string
+          - 'null'
+        sync_scopes: {}
+    UpdateSecretBody:
+      type: object
+      properties:
+        description:
+          type:
+          - string
+          - 'null'
+        expires_at:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        metadata: {}
+        name:
+          type:
+          - string
+          - 'null'
+        tags: {}
+  securitySchemes:
+    bearer_jwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+tags:
+- name: secrets
+  description: CRUD, versioning, and plaintext retrieval for envelope-encrypted secrets
+- name: jit
+  description: Just-in-Time access requests and approvals
+- name: one-time-secrets
+  description: Self-destructing shared secrets
+- name: sync
+  description: Cloud vault integration management
+- name: admin
+  description: License status and Master Encryption Key rotation
+- name: audit
+  description: Read-only audit trail

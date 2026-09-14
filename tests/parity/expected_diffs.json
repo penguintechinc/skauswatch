@@ -1,0 +1,665 @@
+[
+  {
+    "id": "defect7-alerts-status-role-gate",
+    "case": "alerts.status.viewer-defect7",
+    "expect_status": [
+      200,
+      403
+    ],
+    "ref": "manager-contract.md defect #7",
+    "reason": "v1 PUT /alerts/{id}/status had no role gate; v2 intentionally gates with role(admin,maintainer). Viewer tokens: v1 200 (mutates), v2 403. Corpus sets the status to its current value so v1's mutation does not drift shared state."
+  },
+  {
+    "id": "defect1-trigger-scan",
+    "case": "s3.scan.trigger-happy-defect1",
+    "ref": "manager-contract.md defect #1 + #4",
+    "reason": "v1 inserts unknown columns (prefix_filter/force_rescan, no job_id) and job_type 'manual' \u2014 runtime-broken (500). v2 ports against the real schema (maps manual->full_scan) and succeeds."
+  },
+  {
+    "id": "defect1-jobs-list",
+    "case": "s3.jobs.list-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "v1 serializes nonexistent columns (files_scanned etc.) \u2014 500 whenever rows exist. v2 uses schema-authoritative columns."
+  },
+  {
+    "id": "defect1-jobs-get",
+    "case": "s3.jobs.get-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "Same drift as jobs list: v1 500 on any existing row."
+  },
+  {
+    "id": "defect1-results-list",
+    "case": "s3.results.list-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "v1 serializes file_key/file_type/scan_engine/... which do not exist (object_key/detected_file_type/...). 500 with rows present."
+  },
+  {
+    "id": "defect1-results-list-malware-filter",
+    "case": "s3.results.list.filter-malware-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "Non-empty filtered result set hits the same serialization drift in v1."
+  },
+  {
+    "id": "defect1-results-get",
+    "case": "s3.results.get-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "Single-result detail references the same nonexistent columns in v1."
+  },
+  {
+    "id": "defect1-statistics",
+    "case": "s3.statistics-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "v1 groups by s3_scan_results.file_type which does not exist \u2014 500 unconditionally."
+  },
+  {
+    "id": "defect1-schedule-get",
+    "case": "s3.schedule.get-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "v1 reads last_triggered_at/next_trigger_at/error_count which do not exist (last_run_at/next_run_at). 500 whenever a schedule exists."
+  },
+  {
+    "id": "defect1-upload-post",
+    "case": "s3.upload.post-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "v1 writes db.adhoc_scans which does not exist (adhoc_scan_results) \u2014 caught in-handler, 500 {'error': 'File upload failed', ...}."
+  },
+  {
+    "id": "defect1-upload-get",
+    "case": "s3.upload.get-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "db.adhoc_scans AttributeError before any permission logic \u2014 v1 500."
+  },
+  {
+    "id": "defect1-upload-get-not-owner",
+    "case": "s3.upload.get-not-owner-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "v1 crashes (500) before its owner check; v2 enforces owner-or-admin (403)."
+  },
+  {
+    "id": "defect1-upload-history",
+    "case": "s3.upload.history-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "db.adhoc_scans AttributeError \u2014 v1 500."
+  },
+  {
+    "id": "defect1-upload-delete",
+    "case": "s3.upload.delete-defect1",
+    "ref": "manager-contract.md defect #1",
+    "reason": "db.adhoc_scans AttributeError \u2014 v1 500. v2 deletes the row (owner); per-side row divergence is bounded: no later case touches adhoc row 2."
+  },
+  {
+    "id": "defect1-create-indicator",
+    "case": "s3.ti.create-indicator.threat-defect1",
+    "ref": "manager-contract.md defect #1 + #3",
+    "reason": "v1 reads result.metadata (nonexistent column) \u2014 500. v2 reads the real file_sha256 and uses IOC type 'hash' (decision #3); the seeded IOC already covers that hash so v2 answers 200 'already exists' without inserting (keeps ID sequences aligned across sides)."
+  },
+  {
+    "id": "defect1-ti-enrichment",
+    "case": "s3.ti.enrichment-defect1",
+    "ref": "manager-contract.md defect #1 + #3",
+    "reason": "v1 reads result.metadata (nonexistent) \u2014 500. v2 enriches from file_sha256 against IOC type 'hash'."
+  },
+  {
+    "id": "defect3-hash-lookup-hit",
+    "case": "s3.hash-lookup.hit-defect3",
+    "expect_status": [
+      200,
+      200
+    ],
+    "ref": "manager-contract.md defect #3",
+    "reason": "v1 looks up IOC type 'file_hash' (not in the allowed set, so never present) \u2014 found:false. v2 uses type 'hash' per the port decision and finds the seeded indicator."
+  },
+  {
+    "id": "decision2-research-lookup",
+    "case": "research.lookup.decision2",
+    "ref": "manager-contract.md defect #2",
+    "reason": "v1 research routes read the nonexistent config.research.* \u2014 AttributeError, 500. v2 implements a proper ResearchConfig."
+  },
+  {
+    "id": "decision2-research-whois",
+    "case": "research.whois.decision2",
+    "ref": "manager-contract.md defect #2",
+    "reason": "Same v1 AttributeError-500; v2 implements the route."
+  },
+  {
+    "id": "decision2-research-dns",
+    "case": "research.dns.decision2",
+    "ref": "manager-contract.md defect #2",
+    "reason": "Same v1 AttributeError-500; v2 implements the route."
+  },
+  {
+    "id": "decision2-research-asn",
+    "case": "research.asn.decision2",
+    "ref": "manager-contract.md defect #2",
+    "reason": "Same v1 AttributeError-500; v2 implements the route."
+  },
+  {
+    "id": "decision2-research-shodan",
+    "case": "research.shodan.disabled",
+    "ref": "manager-contract.md defect #2",
+    "reason": "v1 crashes (500) before its own 503-disabled check; v2 returns the documented 503."
+  },
+  {
+    "id": "decision2-research-maltego",
+    "case": "research.maltego.disabled",
+    "ref": "manager-contract.md defect #2",
+    "reason": "v1 crashes (500) before its own 503-disabled check; v2 returns the documented 503."
+  },
+  {
+    "id": "decision2-research-config",
+    "case": "research.config.decision2",
+    "ref": "manager-contract.md defect #2",
+    "reason": "v1 config route reads config.research.* \u2014 500. v2 serves ResearchConfig."
+  },
+  {
+    "id": "defect8-alerts.list.filter-severity",
+    "case": "alerts.list.filter-severity",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-alerts.list.filter-status-source",
+    "case": "alerts.list.filter-status-source",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-alerts.list.filter-empty",
+    "case": "alerts.list.filter-empty",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-alerts.search.by-text",
+    "case": "alerts.search.by-text",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-alerts.search.filters",
+    "case": "alerts.search.filters",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-ti.iocs.list",
+    "case": "ti.iocs.list",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-ti.iocs.list-filters",
+    "case": "ti.iocs.list-filters",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-ti.iocs.list-source-filter",
+    "case": "ti.iocs.list-source-filter",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-ti.iocs.list-per-page-capped",
+    "case": "ti.iocs.list-per-page-capped",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-ti.iocs.search.value-substring",
+    "case": "ti.iocs.search.value-substring",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-ti.iocs.search.filters",
+    "case": "ti.iocs.search.filters",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-approvals.list.filters",
+    "case": "approvals.list.filters",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-approvals.list.requester-filter",
+    "case": "approvals.list.requester-filter",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-edr.agents.list.filter-status",
+    "case": "edr.agents.list.filter-status",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-edr.agents.list.filter-os",
+    "case": "edr.agents.list.filter-os",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-s3.jobs.list.filter-empty",
+    "case": "s3.jobs.list.filter-empty",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect8-s3.results.list.filter-empty",
+    "case": "s3.results.list.filter-empty",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #8",
+    "reason": "v1 filtered list/search queries render invalid SQL (WHERE <table> AND ...) \u2014 500; v2 implements the documented filter semantics."
+  },
+  {
+    "id": "defect10-ti.iocs.create.val-bad-ip",
+    "case": "ti.iocs.create.val-bad-ip",
+    "expect_status": [
+      500,
+      400
+    ],
+    "ref": "manager-contract.md defect #10",
+    "reason": "v1 custom-validator ValueError is unserializable in e.errors() \u2192 jsonify TypeError \u2192 500 instead of 400; v2 returns the 400 validation envelope."
+  },
+  {
+    "id": "defect10-ti.iocs.bulk.val-invalid-item",
+    "case": "ti.iocs.bulk.val-invalid-item",
+    "expect_status": [
+      500,
+      400
+    ],
+    "ref": "manager-contract.md defect #10",
+    "reason": "v1 custom-validator ValueError is unserializable in e.errors() \u2192 jsonify TypeError \u2192 500 instead of 400; v2 returns the 400 validation envelope."
+  },
+  {
+    "id": "defect10-s3.buckets.create.val-bad-endpoint",
+    "case": "s3.buckets.create.val-bad-endpoint",
+    "expect_status": [
+      500,
+      400
+    ],
+    "ref": "manager-contract.md defect #10",
+    "reason": "v1 custom-validator ValueError is unserializable in e.errors() \u2192 jsonify TypeError \u2192 500 instead of 400; v2 returns the 400 validation envelope."
+  },
+  {
+    "id": "defect10-s3.schedule.put.val-bad-cron",
+    "case": "s3.schedule.put.val-bad-cron",
+    "expect_status": [
+      500,
+      400
+    ],
+    "ref": "manager-contract.md defect #10",
+    "reason": "v1 custom-validator ValueError is unserializable in e.errors() \u2192 jsonify TypeError \u2192 500 instead of 400; v2 returns the 400 validation envelope."
+  },
+  {
+    "id": "defect10-s3.hash-lookup.val-bad-hex",
+    "case": "s3.hash-lookup.val-bad-hex",
+    "expect_status": [
+      500,
+      400
+    ],
+    "ref": "manager-contract.md defect #10",
+    "reason": "v1 custom-validator ValueError is unserializable in e.errors() \u2192 jsonify TypeError \u2192 500 instead of 400; v2 returns the 400 validation envelope."
+  },
+  {
+    "id": "defect11-s3.buckets.create.happy",
+    "case": "s3.buckets.create.happy",
+    "expect_status": [
+      500,
+      201
+    ],
+    "ref": "manager-contract.md defect #11",
+    "reason": "v1 bucket create omits NOT NULL created_by \u2192 500; the created bucket exists only on v2, so follow-on update/get/delete 404 on v1."
+  },
+  {
+    "id": "defect11-s3.buckets.update.happy",
+    "case": "s3.buckets.update.happy",
+    "expect_status": [
+      404,
+      200
+    ],
+    "ref": "manager-contract.md defect #11",
+    "reason": "v1 bucket create omits NOT NULL created_by \u2192 500; the created bucket exists only on v2, so follow-on update/get/delete 404 on v1."
+  },
+  {
+    "id": "defect11-s3.buckets.get-after-update",
+    "case": "s3.buckets.get-after-update",
+    "expect_status": [
+      404,
+      200
+    ],
+    "ref": "manager-contract.md defect #11",
+    "reason": "v1 bucket create omits NOT NULL created_by \u2192 500; the created bucket exists only on v2, so follow-on update/get/delete 404 on v1."
+  },
+  {
+    "id": "defect11-s3.buckets.delete.v2-only-defect11",
+    "case": "s3.buckets.delete.v2-only-defect11",
+    "expect_status": [
+      404,
+      200
+    ],
+    "ref": "manager-contract.md defect #11",
+    "reason": "v1 bucket create omits NOT NULL created_by \u2192 500; the created bucket exists only on v2, so follow-on update/get/delete 404 on v1."
+  },
+  {
+    "id": "defect12-bucket-test",
+    "case": "s3.buckets.test.happy",
+    "expect_status": [
+      500,
+      200
+    ],
+    "ref": "manager-contract.md defect #12",
+    "reason": "v1 bucket test imports boto3 (absent from requirements) and its except clause raises UnboundLocalError \u2192 500 always; v2 probes via aws-sdk-s3."
+  },
+  {
+    "id": "decision-validation-details",
+    "case_glob": "*",
+    "require_error": "Validation error",
+    "paths": [
+      "details"
+    ],
+    "ref": "manager-contract.md \u2014 Error body shapes (validation details decision)",
+    "reason": "v1 emits raw pydantic-v2 e.errors() dicts (input/url/ctx internals); v2 emits simplified {loc,msg,type} entries under the identical 400 envelope. Only the details payload is excused \u2014 status and envelope must match."
+  },
+  {
+    "id": "decision-validation-details-edr-batch",
+    "case": "edr.events.batch-mixed",
+    "expect_status": [
+      202,
+      202
+    ],
+    "paths": [
+      "errors"
+    ],
+    "ref": "manager-contract.md \u2014 Error body shapes (validation details decision)",
+    "reason": "Per-item errors[].error strings: v1 embeds str(ValidationError) multi-line pydantic dumps; v2 renders 'field: message'. Counts and statuses must still match."
+  },
+  {
+    "id": "decision-darwin-codescan-rename",
+    "case_glob": "darwin.*",
+    "paths": [
+      "path"
+    ],
+    "ref": "docs/MIGRATION.md \u2014 module rename map (darwin -> codescan)",
+    "reason": "v1's \"darwin\" module and its /api/v1/darwin/* REST base were renamed to \"codescan\"/\"/api/v1/codescan/*\" as part of the v2 module rename (docs/MIGRATION.md \u00a7Module rename map) -- both sides are still a pure proxy to the same stub upstream (manager-contract.md \u00a7codescan), so the only byte-for-byte difference is the forwarded/echoed request path itself."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.create",
+    "case": "asm.scans.create",
+    "expect_status": [
+      200,
+      201
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.create-empty-body",
+    "case": "asm.scans.create-empty-body",
+    "expect_status": [
+      200,
+      400
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.list",
+    "case": "asm.scans.list",
+    "expect_status": [
+      200,
+      200
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.get",
+    "case": "asm.scans.get",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.hosts",
+    "case": "asm.scans.hosts",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.screenshots",
+    "case": "asm.scans.screenshots",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.certs",
+    "case": "asm.scans.certs",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.diff",
+    "case": "asm.scans.diff",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.scans.report",
+    "case": "asm.scans.report",
+    "expect_status": [
+      200,
+      404
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.settings.ports.get",
+    "case": "asm.settings.ports.get",
+    "expect_status": [
+      200,
+      200
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-asm-real-impl-asm.settings.ports.put.admin",
+    "case": "asm.settings.ports.put.admin",
+    "expect_status": [
+      200,
+      200
+    ],
+    "ref": "docs/v2-port/phase12-scope-scan-monitor.md \u00a71 Scanner ASM subsystem",
+    "reason": "v1's asm router was a pure proxy to SCANNER_URL (scanner:5001), an HTTP server that never actually existed at runtime -- every real v1 call 503'd. The golden harness instead proxies both sides to the same deterministic echo stub, so v1's \"response\" here is just the stub's echoed method/path/query/body, not a real ASM result. v2 DECISION (phase12-scope-scan-monitor.md): re-architect ASM as a real DB-backed manager router (asm_scans + 6 supporting tables, migration 0006) publishing to a scanner:tasks stream, instead of porting the broken proxy. Every field in the response is therefore intentionally different in shape, not just value."
+  },
+  {
+    "id": "decision-siem-config-logs-rename",
+    "case": "siem.config.get",
+    "expect_status": [
+      200,
+      200
+    ],
+    "paths": [
+      "log_receiver_url",
+      "logs_url"
+    ],
+    "ref": "docs/MIGRATION.md \u2014 module rename map (log-receiver -> logs)",
+    "reason": "v1's SIEMConfig.log_receiver_url field name predates the log-receiver -> logs service rename (docs/MIGRATION.md); v2 renames the config field to logs_url for consistency with LOGS_URL/the renamed service. Same value, renamed key only."
+  },
+  {
+    "id": "decision-siem-health-logs-rename",
+    "case": "siem.health",
+    "expect_status": [
+      200,
+      200
+    ],
+    "paths": [
+      "log_receiver",
+      "logs"
+    ],
+    "ref": "docs/MIGRATION.md \u2014 module rename map (log-receiver -> logs)",
+    "reason": "Same log-receiver -> logs rename as siem.config.get, applied to the health payload's key instead of the config field: v1 GET /siem/health returns {log_receiver, status}, v2 returns {logs, status}. Only surfaced once routes/mod.rs wiring was fixed to route this handler into the public (unauthenticated) tier matching its own doc/test -- previously masked by an unrelated 401."
+  },
+  {
+    "id": "decision-s3-hash-lookup-case-normalization",
+    "case": "s3.hash-lookup.miss",
+    "expect_status": [
+      200,
+      200
+    ],
+    "paths": [
+      "hash"
+    ],
+    "ref": "manager-contract.md \u00a7threat-intel (IndicatorType hash) / s3-scan hash-lookup",
+    "reason": "v2's HashLookupRequest lowercases the hash before comparing/echoing it back (case-insensitive hex lookup); v1 echoes the caller's casing verbatim. Same hash, normalized case only -- a miss on both sides either way."
+  },
+  {
+    "id": "decision-auth-me-refresh-as-access-wording",
+    "case": "auth.me.refresh-as-access",
+    "expect_status": [
+      401,
+      401
+    ],
+    "paths": [
+      "error"
+    ],
+    "ref": "manager-contract.md \u00a7Auth (auth_required)",
+    "reason": "Both sides correctly reject a refresh token presented as an access token token with 401, but v1's error string is the generic \"Invalid token type\" while v2 uses a more specific message (\"Invalid token\"). Cosmetic wording only -- status and envelope shape match."
+  },
+  {
+    "id": "decision-auth-refresh-access-as-refresh-wording",
+    "case": "auth.refresh.access-as-refresh",
+    "expect_status": [
+      401,
+      401
+    ],
+    "paths": [
+      "error"
+    ],
+    "ref": "manager-contract.md \u00a7Auth (auth_required)",
+    "reason": "Both sides correctly reject a access token presented as a refresh token token with 401, but v1's error string is the generic \"Invalid token type\" while v2 uses a more specific message (\"Invalid refresh token\"). Cosmetic wording only -- status and envelope shape match."
+  },
+  {
+    "id": "decision-s3-buckets-new-credential-fields",
+    "paths": [
+      "items[0].credential_mode",
+      "items[0].role_arn",
+      "items[1].credential_mode",
+      "items[1].role_arn",
+      "items[2].credential_mode",
+      "items[2].role_arn"
+    ],
+    "ref": "docs/v2-port/aws-identity-runbook.md \u00a7hybrid credential model (security finding #2)",
+    "reason": "v1 predates the hybrid static/assume_role credential model (services/s3scan/migrations/0002_s3scan_tenancy.sql) entirely, so it never had credential_mode/role_arn fields at all. v2 adds credential_mode (always present) and role_arn (present, null for static-mode buckets) to the bucket list/get response -- new, intentional fields, not a behavior mismatch. external_id is deliberately NOT among them: it is the AssumeRole confused-deputy shared secret and is stripped from the response DTO entirely (write-only), so it is never a source of diff on either side.",
+    "case": "s3.buckets.list",
+    "expect_status": [
+      200,
+      200
+    ]
+  },
+  {
+    "id": "decision-s3-buckets-get-new-credential-fields",
+    "case": "s3.buckets.get",
+    "expect_status": [
+      200,
+      200
+    ],
+    "paths": [
+      "credential_mode",
+      "role_arn"
+    ],
+    "ref": "docs/v2-port/aws-identity-runbook.md \u00a7hybrid credential model (security finding #2)",
+    "reason": "Same as decision-s3-buckets-new-credential-fields, for the single-bucket GET response: v2 adds credential_mode/role_arn (new, intentional fields absent from v1's pre-hybrid-credential schema). external_id is stripped from the response entirely on the v2 side, so it never appears here as a diff at all."
+  }
+]

@@ -1,0 +1,14 @@
+{"index":{"_index":"skauswatch-logs-2026.07.25"}}
+{"class_uid":3002,"class_name":"authentication","time":"2025-01-15T12:30:00+00:00","severity_id":1,"status_id":1,"message":"user login","metadata":{"version":"1.3.0","product":{"name":"SkausWatch","vendor_name":"PenguinTech"}},"raw_data":{"event_type":"auth","message":"user login","level":"info","status":"success","timestamp":"2025-01-15T12:30:00Z"}}
+{"index":{"_index":"skauswatch-logs-2026.07.25"}}
+{"class_uid":4001,"class_name":"network_activity","time":"2025-01-15T12:30:00.250000+05:00","severity_id":2,"status_id":99,"message":"conn","metadata":{"version":"1.3.0","product":{"name":"SkausWatch","vendor_name":"PenguinTech"}},"raw_data":{"src_ip":"10.0.0.1","dst_port":443,"level":"warning","message":"conn","timestamp":"2025-01-15T12:30:00.250+05:00"}}
+{"index":{"_index":"skauswatch-logs-2026.07.25"}}
+{"class_uid":4003,"class_name":"file_activity","time":"2025-01-15T12:30:00","severity_id":0,"status_id":2,"message":"file accessed","metadata":{"version":"1.3.0","product":{"name":"SkausWatch","vendor_name":"PenguinTech"}},"raw_data":{"file_path":"/etc/passwd","message":"file accessed","status":"denied","timestamp":"2025-01-15T12:30:00"}}
+{"index":{"_index":"skauswatch-logs-2026.07.25"}}
+{"class_uid":6003,"class_name":"api_activity","time":"2024-01-15T09:50:00+00:00","severity_id":0,"status_id":99,"message":"{'endpoint': '/api/v1/users', 'method': 'GET', 'time': 1705312200}","metadata":{"version":"1.3.0","product":{"name":"SkausWatch","vendor_name":"PenguinTech"}},"raw_data":{"endpoint":"/api/v1/users","method":"GET","time":1705312200}}
+{"index":{"_index":"skauswatch-logs-2026.07.25"}}
+{"class_uid":2001,"class_name":"security_finding","time":"2024-01-15T09:50:00.500000+00:00","severity_id":5,"status_id":2,"message":"generic critical","metadata":{"version":"1.3.0","product":{"name":"SkausWatch","vendor_name":"PenguinTech"}},"raw_data":{"message":"generic critical","severity":"critical","result":"error","time":1705312200.5}}
+{"index":{"_index":"skauswatch-logs-2026.07.25"}}
+{"class_uid":2001,"class_name":"security_finding","time":"2026-07-25T00:00:00+00:00","severity_id":3,"status_id":1,"message":"weird sev","metadata":{"version":"1.3.0","product":{"name":"SkausWatch","vendor_name":"PenguinTech"}},"raw_data":{"message":"weird sev","level":"","severity":"medium","status":"ok","timestamp":"2026-07-25T00:00:00+00:00"}}
+{"index":{"_index":"skauswatch-logs-2026.07.25"}}
+{"class_uid":2001,"class_name":"security_finding","time":"2026-07-25T01:02:03.000001+00:00","severity_id":4,"status_id":2,"message":"from msg field","metadata":{"version":"1.3.0","product":{"name":"SkausWatch","vendor_name":"PenguinTech"}},"raw_data":{"msg":"from msg field","severity":"HIGH","status":"FAILURE","timestamp":"2026-07-25T01:02:03.000001+00:00"}}

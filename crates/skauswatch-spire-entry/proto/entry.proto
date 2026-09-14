@@ -1,0 +1,116 @@
+// Minimal, hand-trimmed vendor of the upstream SPIRE Server Entry API —
+// `spire.api.server.entry.v1.Entry` (service name and RPC method names
+// preserved exactly for gRPC wire compatibility, since those form the
+// `/package.Service/Method` path a real SPIRE server routes on). Field
+// numbers on every message are preserved exactly from upstream too, so
+// values this client sets/reads round-trip correctly even though most
+// upstream fields are omitted here.
+//
+// Vendored from `github.com/spiffe/spire-api-sdk`
+// (proto/spire/api/server/entry/v1/entry.proto +
+// proto/spire/api/types/entry.proto), Apache-2.0, SPIFFE project / CNCF —
+// pinned to commit ab1179db00175ae5c343bc4c90ddb875fc99d28e (the exact
+// snapshot bundled inside the `spire-api` crate 0.8.0 on crates.io, used
+// only to source this file — see the crate-level doc comment in
+// `crates/skauswatch-spire-entry/src/lib.rs` for why the published
+// `spire-api` crate itself isn't used directly: it only implements the
+// Agent Delegated Identity API, not the Server Entry API this crate needs).
+//
+// Deliberately NOT the full upstream file — only what skauswatch's
+// SVID-TTL apply path uses (paginated `ListEntries` + `BatchUpdateEntry`
+// TTL update). Trimming a proto to the fields/RPCs actually consumed is
+// standard, forward/backward-compatible protobuf practice: fields present
+// on the wire but not declared here are silently ignored on receipt, and
+// fields declared here but never set are simply absent on the wire, which
+// proto3 already treats as "default value".
+//
+// See docs/v2-port/service-auth-model.md and
+// k8s/helm/spire/README.md#admin-adjustable-svid-ttl for the operational
+// context this client serves.
+syntax = "proto3";
+
+package spire.api.server.entry.v1;
+
+// Manages registration entries stored by the SPIRE Server. Full upstream
+// service also exposes CountEntries/GetEntry/BatchCreateEntry/
+// BatchDeleteEntry/GetAuthorizedEntries/SyncAuthorizedEntries — skauswatch's
+// SVID-TTL apply path only needs these two.
+service Entry {
+    // Lists entries. The caller must be local or present an admin X509-SVID.
+    rpc ListEntries(ListEntriesRequest) returns (ListEntriesResponse);
+
+    // Batch updates one or more entries. The caller must be local or
+    // present an admin X509-SVID.
+    rpc BatchUpdateEntry(BatchUpdateEntryRequest) returns (BatchUpdateEntryResponse);
+}
+
+message ListEntriesRequest {
+    // The maximum number of results to return. The server may further
+    // constrain this value, or if zero, choose its own.
+    int32 page_size = 3;
+
+    // The next_page_token value returned from a previous request, if any.
+    string page_token = 4;
+}
+
+message ListEntriesResponse {
+    // The list of entries.
+    repeated RegistrationEntry entries = 1;
+
+    // The page token for the next request. Empty if there are no more
+    // results.
+    string next_page_token = 2;
+}
+
+message BatchUpdateEntryRequest {
+    // The entries to be updated.
+    repeated RegistrationEntry entries = 1;
+
+    // An input mask indicating what entry fields should be updated.
+    EntryMask input_mask = 2;
+}
+
+message BatchUpdateEntryResponse {
+    message Result {
+        // The status of updating the entry.
+        Status status = 1;
+
+        // The entry that was updated (if status code is OK).
+        RegistrationEntry entry = 2;
+    }
+
+    // Result for each entry in the request (order is maintained).
+    repeated Result results = 1;
+}
+
+// Trimmed mirror of upstream `spire.api.types.Entry` — only the fields this
+// client reads/writes (id, x509_svid_ttl, jwt_svid_ttl). Field numbers
+// match upstream exactly.
+message RegistrationEntry {
+    // Globally unique ID for the entry.
+    string id = 1;
+
+    // The time to live for X509-SVID identities issued for this entry (in
+    // seconds).
+    int32 x509_svid_ttl = 5;
+
+    // The time to live for JWT-SVID identities issued for this entry (in
+    // seconds), overrides x509_svid_ttl if set.
+    int32 jwt_svid_ttl = 13;
+}
+
+// Trimmed mirror of upstream `spire.api.types.EntryMask`.
+message EntryMask {
+    // x509_svid_ttl field mask
+    bool x509_svid_ttl = 5;
+
+    // jwt_svid_ttl field mask
+    bool jwt_svid_ttl = 13;
+}
+
+// Trimmed mirror of upstream `spire.api.types.Status` (a `google.rpc.Status`
+// shape: gRPC status code + message).
+message Status {
+    int32 code = 1;
+    string message = 2;
+}

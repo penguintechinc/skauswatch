@@ -1,0 +1,84 @@
+# Cilium default-deny + explicit allow for {{ include "skauswatch-webui.fullname" . }}.
+# Selecting this pod with ANY CiliumNetworkPolicy makes Cilium deny every
+# ingress/egress path not explicitly listed below (Cilium per-endpoint
+# default-deny model) -- there is no separate blanket "default-deny" object
+# needed alongside this one. See k8s/helm/README.md "Cluster security
+# baseline" for the full policy.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "skauswatch-webui.fullname" . }}
+  labels:
+    {{- include "skauswatch-webui.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "skauswatch-webui.selectorLabels" . | nindent 6 }}
+  ingress:
+    # kubelet liveness/readiness probes originate from the node, not a pod
+    # identity -- must be explicitly allowed or probes fail closed once this
+    # pod is selected by any CiliumNetworkPolicy.
+    - fromEntities:
+        - host
+        - remote-node
+    {{- if or .Values.ingress.enabled .Values.httproute.enabled }}
+    # Cross-namespace: Cilium Gateway / ingress controller in the shared
+    # "gateway" namespace -- only active when this chart's own
+    # ingress/httproute is enabled for the target environment.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.httproute.gatewayNamespace | default "gateway" }}
+      toPorts:
+        - ports:
+            - port: "3000"
+              protocol: TCP
+    {{- end }}
+  egress:
+    # DNS resolution (kube-dns) -- required for any Service/FQDN egress below.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # CONFIRMED (values.yaml manager-url): manager REST API
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: skauswatch-manager
+      toPorts:
+        - ports:
+            - port: "5000"
+              protocol: TCP
+    # CONFIRMED (values.yaml vault-backend-url): vault backend (cross-namespace)
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: vault
+            app.kubernetes.io/name: skauswatch-vault
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # CONFIRMED (values.yaml codescan-backend-url): codescan-backend REST API
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: skauswatch-codescan-backend
+      toPorts:
+        - ports:
+            - port: "5005"
+              protocol: TCP
+    # CONFIRMED (values.yaml monitor-url): monitor REST API
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: skauswatch-monitor
+      toPorts:
+        - ports:
+            - port: "8003"
+              protocol: TCP

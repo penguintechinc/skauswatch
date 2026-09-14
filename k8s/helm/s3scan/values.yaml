@@ -1,0 +1,269 @@
+# Default (prod-safe baseline) values for skauswatch-s3scan.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/s3scan
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# AWS identity mechanism backing services/s3scan's aws-sdk credential chain
+# (skauswatch-s3::credentials -> resolve_client). Neither mode uses static
+# AWS keys — see docs/v2-port/aws-identity-runbook.md.
+#   - "spire" (default): SPIRE-issued JWT-SVID federated into AWS via OIDC
+#     (sts:AssumeRoleWithWebIdentity) — renders no ServiceAccount
+#     annotation. Requires SPIFFE_ENDPOINT_SOCKET wired into this pod,
+#     which is a separate, not-yet-done pass
+#     (k8s/helm/spire/README.md "deliberately deferred" #5). Matches
+#     skauswatch's on-prem dal2 clusters (alpha/beta/gamma).
+#   - "irsa": EKS Pod Identity / IRSA — annotates the ServiceAccount with
+#     eks.amazonaws.com/role-arn; the aws-sdk default credential provider
+#     chain picks it up automatically, no code change needed. Set
+#     awsIdentity.irsa.roleArn and override awsIdentity.mode: "irsa" in
+#     the target environment's values file only if that environment's
+#     cluster is EKS.
+#   - "static": legacy S3-compatible-only path (MinIO/Wasabi/B2) — no AWS
+#     role assumption; envelope-encrypted static credentials at rest.
+awsIdentity:
+  mode: "spire"
+  irsa:
+    roleArn: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and
+  # good practice under "baseline") -- see k8s/helm/README.md "Cluster
+  # security baseline".
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
+
+healthPort: 8080
+metricsPort: 9090
+
+# Worker consuming the Redis Streams s3-scan-tasks queue — no client-facing
+# API. Service exists only so Prometheus can scrape /metrics.
+service:
+  enabled: true
+
+ingress:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# services/s3scan/src/config.rs: CONSUMER_NAME must be unique per pod (wired
+# from the pod name via the downward API); CLAMD_SOCKET expects a clamd
+# UNIX-socket sidecar — scanning degrades to "clean" when it's unreachable
+# (services/s3scan/src/handler.rs), so this is not a hard startup
+# dependency, but a clamd sidecar/DaemonSet must be provisioned separately
+# for malware scanning to actually run. No such sidecar ships in this chart
+# yet — flagged as follow-up (see chart NOTES).
+env:
+  - name: CONSUMER_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: HEALTH_PORT
+    value: "8080"
+  - name: RUST_LOG
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: log-level
+  - name: DB_TYPE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: db-type
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: db-host
+  - name: DB_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: db-port
+  - name: DB_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: db-name
+  - name: DB_POOL_SIZE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: db-pool-size
+  - name: DB_USER
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
+        key: db-user
+  - name: DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
+        key: db-pass
+  - name: REDIS_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: redis-url
+  - name: REDIS_KEY_PREFIX
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: redis-key-prefix
+  - name: REDIS_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
+        key: redis-password
+        optional: true
+  - name: CONSUMER_GROUP
+    value: "s3scan-workers"
+  - name: CLAMD_SOCKET
+    value: "/var/run/clamav/clamd.sock"
+  - name: VIRUSTOTAL_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
+        key: virustotal-api-key
+        optional: true
+  - name: OTX_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
+        key: otx-api-key
+        optional: true
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-s3scan.secretName" . }}'
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-s3scan-config
+        key: release-mode
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts: []
+
+volumes: []
+
+# --- SPIFFE Workload API socket (SPIRE) --------------------------------
+# Wires SPIFFE_ENDPOINT_SOCKET + the agent Workload API socket into this
+# pod so skauswatch-identity::IdentityProvider can fetch an SVID at
+# runtime (see k8s/helm/spire/README.md "Service-pod SVID pattern") — the
+# mechanism awsIdentity.mode: "spire" above depends on. NECESSARY BUT NOT
+# SUFFICIENT: the socket is only populated once a spire-agent DaemonSet
+# is actually running on the node — enabling this toggle without a live
+# agent still leaves the mount empty/absent (agent rollout is cutover
+# ops, not this chart). MUST be enabled wherever RELEASE_MODE=true:
+# identity-consuming services hard-fail without a live SVID in release
+# mode — beta/gamma/production all set spire.enabled: true; alpha stays
+# off (no release-mode, no SPIRE agent in local MicroK8s by default).
+spire:
+  enabled: false
+  socketDir: /run/spire/sockets
+  # CSI driver variant — DISABLED BY DEFAULT, matches k8s/helm/spire's own
+  # csiDriver.enabled default. The SPIFFE CSI Driver DaemonSet runs
+  # privileged: true (ROOT EXCEPTION per devops-containers.md) — do not
+  # set true in any env file without explicit user approval first.
+  csiDriver:
+    enabled: false
+
+configMapData:
+  log-level: "info"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "20"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
+secretData:
+  db-user: ""
+  db-pass: ""
+  redis-password: ""
+  virustotal-api-key: ""
+  otx-api-key: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"

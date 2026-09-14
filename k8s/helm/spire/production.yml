@@ -1,0 +1,77 @@
+spire:
+  enabled: true
+  environment: "prod"
+
+  topology:
+    role: child
+    upstreamRoot:
+      # Live-ops flips this to true once root is live and a join token
+      # has been minted for skauswatch-prod (see chart README "Live-Ops").
+      # Until then this server runs self-signed, same as standalone.
+      enabled: false
+      serverAddress: ""
+      serverPort: 8081
+      downstreamSpiffeID: "spiffe://penguintech.io/spire/server/skauswatch-prod"
+      nodeAttestor: join_token
+
+  server:
+    replicaCount: 3
+    image:
+      repository: ghcr.io/spiffe/spire-server@sha256:6936324dacd7dcd800dec0641db8f0e48c75204b2dfbb21201b111ef2e2490a8
+      tag: "1.9.4"  # Reference only
+      pullPolicy: IfNotPresent
+    dataStore:
+      type: postgresql
+      postgresql:
+        # In-cluster PostgreSQL, the same convention as beta.yml / gamma.yml
+        # and every other chart in this repo (the `postgres` Service in the
+        # skauswatch namespace). This replaces the original chart's
+        # `marchproxy.nest.svc` default, which named a now-retired product and
+        # would not resolve. If prod instead uses a managed/external database
+        # (e.g. a DigitalOcean Managed PostgreSQL), override `host` here with
+        # that endpoint — it is the single value to change. The `spire`
+        # database and `spire-db-credentials` secret must exist before cutover.
+        host: "postgres"
+        port: 5432
+        dbName: spire
+        # Production keeps verify-full (do NOT downgrade). verify-full requires
+        # the server cert to chain to a trusted CA and match `host`; for an
+        # in-cluster or private-CA database, mount the CA bundle and set
+        # sslRootCert to its path (e.g. /run/spire/tls/ca.crt).
+        sslMode: "verify-full"
+        sslRootCert: ""
+        secretName: spire-db-credentials
+    nodeAttestation:
+      k8sPsat:
+        enabled: true
+        cluster: "skauswatch-prod"
+        serviceAccountAllowList:
+          - "skauswatch:spire-agent"
+      # dal2 prod is on-prem bare metal today — leave disabled. Flip only
+      # if/when a prod node pool moves to AWS-resident nodes (EKS/EC2),
+      # and only for that node pool's own cluster identity.
+      awsIid:
+        enabled: false
+
+  agent:
+    image:
+      repository: ghcr.io/spiffe/spire-agent@sha256:66d73a745b3875f7e68f0dd48de9924231aab9a79a632f98f5c9479f95688110
+      tag: "1.9.4"  # Reference only
+      pullPolicy: IfNotPresent
+
+  imagePullSecrets:
+    - name: ghcr-pull-secret
+
+  federation:
+    enabled: true
+
+  # OIDC discovery runs on ROOT only in a nested topology — prod is a
+  # CHILD, not root. See root.example.yml.
+  oidcProvider:
+    enabled: false
+
+  csiDriver:
+    enabled: false
+
+  autoEnroll:
+    enabled: true

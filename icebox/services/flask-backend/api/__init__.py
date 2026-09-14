@@ -1,1 +1,0 @@
-"""IceBox REST API package."""

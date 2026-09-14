@@ -1,0 +1,37 @@
+# Alpha overrides — local MicroK8s (local-alpha context), namespace: skauswatch.
+# Internal service — no ingress. Ephemeral CA key fallback is acceptable for dev/test.
+replicaCount: 1
+
+image:
+  repository: localhost:32000/skauswatch/sshca
+  tag: "alpha-latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+ingress:
+  enabled: false
+
+httproute:
+  enabled: false
+
+configMapData:
+  log-level: "debug"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "2"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"

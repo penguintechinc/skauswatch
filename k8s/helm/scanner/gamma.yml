@@ -1,0 +1,33 @@
+# Gamma overrides — dal2-gamma cluster, namespace: skauswatch.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/scanner
+  tag: "gamma-0000000000"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+configMapData:
+  log-level: "info"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+  clamav-host: "clamav"
+  clamav-port: "3310"
+  clamav-enabled: "true"
+  yara-enabled: "true"
+  asm-enabled: "true"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"

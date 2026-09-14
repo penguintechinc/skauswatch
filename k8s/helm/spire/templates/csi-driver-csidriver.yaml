@@ -1,0 +1,13 @@
+{{- if and .Values.spire.enabled .Values.spire.csiDriver.enabled }}
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: {{ .Values.spire.csiDriver.pluginName }}
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: csi-driver
+spec:
+  podInfoOnMount: true
+  volumeLifecycleModes:
+    - Ephemeral
+{{- end }}

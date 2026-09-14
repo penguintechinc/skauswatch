@@ -1,0 +1,29 @@
+spire:
+  enabled: true
+  environment: "alpha"
+
+  topology:
+    role: standalone
+
+  server:
+    replicaCount: 1
+    dataStore:
+      type: sqlite
+    nodeAttestation:
+      k8sPsat:
+        enabled: true
+        cluster: "local-alpha"
+        serviceAccountAllowList:
+          - "skauswatch:spire-agent"
+
+  federation:
+    enabled: false
+
+  oidcProvider:
+    enabled: false
+
+  csiDriver:
+    enabled: false
+
+  autoEnroll:
+    enabled: true

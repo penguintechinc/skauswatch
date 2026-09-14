@@ -1,0 +1,453 @@
+# Default (prod-safe baseline) values for skauswatch-depgate.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/depgate
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Name of a pre-provisioned Secret (or ExternalSecret target) to use
+# instead of the chart-managed one below. When set, templates/secret.yaml
+# is not rendered and Deployment/DaemonSet env vars read from this Secret.
+existingSecret: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# AWS identity mechanism backing the cache-bucket S3 client
+# (skauswatch_s3::client -> default AWS credential-provider chain). Simpler
+# than s3scan's hybrid per-bucket model (skauswatch_s3::credentials) since
+# DepGate only ever talks to the one dedicated cache bucket it owns, not
+# arbitrary customer-configured buckets — see src/state.rs.
+#   - "irsa" (default): EKS Pod Identity / IRSA — annotates the
+#     ServiceAccount with eks.amazonaws.com/role-arn; the aws-sdk default
+#     credential chain picks it up automatically. Set awsIdentity.irsa.roleArn
+#     and use this mode only when the target cluster is EKS.
+#   - "static": S3-compatible-only path (MinIO, alpha/beta) — static
+#     AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY from secretData, paired with
+#     s3.endpointUrl below.
+awsIdentity:
+  mode: "static"
+  irsa:
+    roleArn: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and
+  # good practice under "baseline") -- see k8s/helm/README.md "Cluster
+  # security baseline".
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
+
+httpPort: 5050
+metricsPort: 9090
+# Mesh-only mTLS admin listener (src/mesh_admin.rs) — SPIFFE-readiness for
+# the admin/report API, additive alongside the JWT-gated /api/v1/depgate/*
+# on httpPort above. Only reachable once spire.enabled: true and a live SVID
+# is held; degrades to "disabled" on its own otherwise (see that module's
+# fail-safe docs) -- exposing the port unconditionally is safe.
+meshAdminPort: 5051
+
+# Client-facing: OCI/docker pull-through proxy (/v2/*) + admin API
+# (/api/v1/depgate/*) — both behind tenant_middleware + the
+# skauswatch.depgate flag gate (default OFF). meshAdminPort is NOT
+# client-facing -- mesh peers only, gated by mTLS/SVID, never through
+# ingress/httproute.
+service:
+  type: ClusterIP
+  port: 5050
+  metricsPort: 9090
+  meshAdminPort: 5051
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts: []
+  tls: []
+
+httproute:
+  enabled: false
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.app
+  rules: []
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+env:
+  - name: API_PORT
+    value: "5050"
+  - name: RUST_LOG
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: log-level
+  - name: DB_TYPE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: db-type
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: db-host
+  - name: DB_PORT
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: db-port
+  - name: DB_NAME
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: db-name
+  - name: DB_POOL_SIZE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: db-pool-size
+  - name: DB_USER
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-depgate.secretName" . }}'
+        key: db-user
+  - name: DB_PASS
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-depgate.secretName" . }}'
+        key: db-pass
+  - name: S3_ENDPOINT_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: s3-endpoint-url
+        optional: true
+  - name: S3_REGION
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: s3-region
+  - name: S3_FORCE_PATH_STYLE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: s3-force-path-style
+  - name: DEPGATE_CACHE_BUCKET
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: cache-bucket
+  - name: DEPGATE_CACHE_PREFIX
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: cache-prefix
+  - name: DEPGATE_QUARANTINE_PREFIX
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: quarantine-prefix
+  - name: DEPGATE_MAX_ARTIFACT_BYTES
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: max-artifact-bytes
+  - name: DEPGATE_UPSTREAM_BASE_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: upstream-base-url
+  - name: DEPGATE_UPSTREAM_AUTH_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: upstream-auth-url
+  - name: DEPGATE_UPSTREAM_SERVICE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: upstream-service
+  - name: DEPGATE_UPSTREAM_USERNAME
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-depgate.secretName" . }}'
+        key: upstream-username
+        optional: true
+  - name: DEPGATE_UPSTREAM_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-depgate.secretName" . }}'
+        key: upstream-password
+        optional: true
+  - name: DEPGATE_OFFLINE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: offline-mode
+  - name: DEPGATE_FAIL_POSTURE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: fail-posture
+  - name: DEPGATE_BUNDLE_SIGNING_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-depgate.secretName" . }}'
+        key: bundle-signing-key
+        optional: true
+  # P4 (docs/v2-port/v2.1-depgate.md §9/§11): asymmetric bundle signing.
+  # The exporting/connected side holds the private key; the air-gapped
+  # importer needs only the public key — never both on the same deployment
+  # in a genuine air-gap topology, but both wired here (each optional) so
+  # one chart install can play either role.
+  - name: DEPGATE_BUNDLE_SIGNING_PRIVATE_KEY_PEM
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-depgate.secretName" . }}'
+        key: bundle-signing-private-key-pem
+        optional: true
+  - name: DEPGATE_BUNDLE_VERIFY_PUBLIC_KEY_PEM
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: bundle-verify-public-key-pem
+        optional: true
+  # cosign RSA image-signature verification (P4 §5/§9/§10, src/provenance.rs)
+  # — a public key, not sensitive, but scoped to its own key for clarity.
+  - name: DEPGATE_COSIGN_PUBLIC_KEY_PEM
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: cosign-public-key-pem
+        optional: true
+  # Socket.dev optional threat-intel tie-in (P4 §5/§10) — unset (default)
+  # means the integration never sends a request; see src/socket.rs.
+  - name: DEPGATE_SOCKET_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-depgate.secretName" . }}'
+        key: socket-api-key
+        optional: true
+  - name: DEPGATE_SOCKET_BASE_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: socket-base-url
+  # crates.io + Go module proxy upstreams (P4 §4/§9).
+  - name: DEPGATE_CRATESIO_INDEX_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: cratesio-index-url
+  - name: DEPGATE_CRATESIO_API_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: cratesio-api-url
+  - name: DEPGATE_GOPROXY_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: goproxy-url
+  # ClamAV reached via a sidecar/DaemonSet UNIX socket — same posture as
+  # s3scan (see that chart's values.yaml note); no such sidecar ships in
+  # this chart yet, scanning degrades to YARA-only until one is provisioned.
+  - name: CLAMD_SOCKET
+    value: "/var/run/clamav/clamd.sock"
+  - name: JWT_VERIFY_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-depgate.secretName" . }}'
+        key: jwt-verify-key
+  - name: LICENSE_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-depgate.secretName" . }}'
+        key: license-key
+  - name: LICENSE_SERVER_URL
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: license-server-url
+  - name: RELEASE_MODE
+    valueFrom:
+      configMapKeyRef:
+        name: skauswatch-depgate-config
+        key: release-mode
+  - name: AWS_ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-depgate.secretName" . }}'
+        key: aws-access-key-id
+        optional: true
+  - name: AWS_SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: '{{ include "skauswatch-depgate.secretName" . }}'
+        key: aws-secret-access-key
+        optional: true
+
+# --- SPIFFE Workload API socket (SPIRE) --------------------------------
+# Wires SPIFFE_ENDPOINT_SOCKET + the agent Workload API socket into this
+# pod so skauswatch-identity::IdentityProvider can fetch an SVID at
+# runtime (see k8s/helm/spire/README.md "Service-pod SVID pattern"). depgate
+# hard-requires a live SVID whenever RELEASE_MODE=true (release-mode
+# constructs IdentityProvider unconditionally) — without this mount depgate
+# crash-loops in production. NECESSARY BUT NOT SUFFICIENT: the socket is
+# only populated once a spire-agent DaemonSet is actually running on the
+# node — enabling this toggle without a live agent still leaves the mount
+# empty/absent (agent rollout is cutover ops, not this chart). Without a
+# held identity, the mesh admin listener (meshAdminPort) degrades to
+# "disabled" rather than crash-looping (see src/mesh_admin.rs fail-safe
+# docs) — only the required-everywhere primary identity construction
+# hard-fails.
+# beta/gamma/production all set spire.enabled: true; alpha stays off
+# (release-mode: "false", no SPIRE agent in local MicroK8s by default).
+spire:
+  enabled: false
+  socketDir: /run/spire/sockets
+  # CSI driver variant — DISABLED BY DEFAULT, matches k8s/helm/spire's own
+  # csiDriver.enabled default. The SPIFFE CSI Driver DaemonSet runs
+  # privileged: true (ROOT EXCEPTION per devops-containers.md) — do not
+  # set true in any env file without explicit user approval first.
+  csiDriver:
+    enabled: false
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 2
+
+volumeMounts: []
+
+volumes: []
+
+configMapData:
+  log-level: "info"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "20"
+  s3-endpoint-url: ""
+  s3-region: "us-east-1"
+  s3-force-path-style: "true"
+  cache-bucket: "depgate-cache"
+  cache-prefix: "sha256/"
+  quarantine-prefix: "quarantine/"
+  max-artifact-bytes: "536870912"
+  upstream-base-url: "https://registry-1.docker.io"
+  upstream-auth-url: "https://auth.docker.io/token"
+  upstream-service: "registry.docker.io"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+  # Air-gap serve mode (docs/v2-port/v2.1-depgate.md §6b) — "false" means
+  # normal pull-through proxy behavior; set "true" only in a genuinely
+  # air-gapped deployment (zero upstream egress, serve-from-vetted-cache-only).
+  offline-mode: "false"
+  # Scan-engine-failure posture (§6) — "closed" (hardened default) refuses
+  # an artifact the scan engine itself failed to evaluate; "open" is a dev-
+  # convenience posture that serves it best-effort without ever caching it.
+  fail-posture: "closed"
+  # P4 asymmetric bundle-signature verification (import side) — empty
+  # disables RSA-signed-bundle verification (HMAC-signed bundles are
+  # unaffected, see secretData.bundle-signing-key).
+  bundle-verify-public-key-pem: ""
+  # P4 cosign RSA image-signature verification — empty disables it (every
+  # OCI artifact then reports `unsigned`, never `invalid`; see
+  # src/provenance.rs).
+  cosign-public-key-pem: ""
+  # P4 Socket.dev tie-in — empty disables it entirely (see
+  # secretData.socket-api-key; the base URL alone with no key is inert).
+  socket-base-url: "https://api.socket.dev"
+  # P4 crates.io + Go module proxy upstreams.
+  cratesio-index-url: "https://index.crates.io"
+  cratesio-api-url: "https://crates.io/api/v1/crates"
+  goproxy-url: "https://proxy.golang.org"
+
+# MUST be set via --set/values or existingSecret; services fail closed
+# on a blank/known-default secret (never ship a real credential here).
+secretData:
+  db-user: ""
+  db-pass: ""
+  # PEM EC P-256 public key (SPKI) verifying ES256 tokens minted by
+  # manager (the sole issuer) -- see k8s/helm/manager/values.yaml
+  # secretData for keypair generation commands.
+  jwt-verify-key: ""
+  upstream-username: ""
+  upstream-password: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
+  aws-access-key-id: ""
+  aws-secret-access-key: ""
+  # HMAC-SHA256 key verifying LEGACY (pre-P4) air-gap bundle manifests
+  # (§6b) — empty disables verification of an HMAC-signed bundle (checksum/
+  # per-artifact hash verification still always applies). P4 exports sign
+  # asymmetrically instead — see bundle-signing-private-key-pem.
+  bundle-signing-key: ""
+  # P4 asymmetric bundle signing (export side, §9/§11) — PEM-encoded RSA
+  # private key (PKCS#8 or PKCS#1); empty disables signing on export
+  # entirely (an unsigned bundle is still checksum-verified on import).
+  bundle-signing-private-key-pem: ""
+  # P4 Socket.dev tie-in (§5/§10) — customer's API key belongs in IceBox,
+  # never committed; empty means the integration is fully disabled (zero
+  # requests ever sent, see src/socket.rs).
+  socket-api-key: ""

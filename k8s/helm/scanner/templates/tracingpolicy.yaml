@@ -1,0 +1,54 @@
+# Tetragon exec-allowlist for {{ include "skauswatch-scanner.fullname" . }}.
+# ENFORCE: any sys_execve NOT matching one of the listed binaries is
+# SIGKILLed -- blocks a dropped shell/reverse-shell/living-off-the-land
+# binary (bash, sh, curl, nc, wget, python3, perl, ...) in a pod whose only
+# legitimate process is the binaries below. Requires the Tetragon agent
+# DaemonSet running in the cluster (cluster add-on, not part of this chart
+# -- see k8s/helm/README.md "Tetragon prerequisite").
+# masscan is the ASM port-discovery subprocess (services/scanner/src/
+# asm.rs) -- requires CAP_NET_RAW, see the NET CAPABILITY EXCEPTION in
+# values.yaml. Scan-target egress (the raw SYN/TCP traffic masscan itself
+# sends) is operator-configured and NOT restricted by the CiliumNetworkPolicy
+# egress list above -- that traffic is the tool's function, not a service
+# dependency call, and cannot be known ahead of time. Only this pod's own
+# control-plane egress (Valkey, license server) is policy-scoped.
+#
+# /usr/lib/chromium/chromium is the ASM screenshot-capture subprocess
+# (services/scanner/src/asm.rs capture_screenshot) -- the real chromium ELF
+# binary, not Debian's /usr/bin/chromium shell-script launcher (values.yaml
+# sets CHROMIUM_BIN to this exact path so the launcher, and everything it
+# would itself exec -- /bin/sh, grep, uname, find -- never runs, keeping this
+# to one added entry). Headless rendering's zygote/GPU/renderer child
+# processes re-exec or fork from this same binary path, never a different
+# one, so this single path entry covers them too -- matchArgs below compares
+# only argv[0] (the binary path), not the --type=renderer/zygote/gpu-process
+# flags those children pass.
+{{- if .Values.tetragon.enabled | default true }}
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: {{ include "skauswatch-scanner.fullname" . }}-exec-allowlist
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "skauswatch-scanner.selectorLabels" . | nindent 6 }}
+  kprobes:
+    - call: "sys_execve"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+        - index: 1
+          type: "string_arr"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "NotEqual"
+              values:
+                - "/usr/local/bin/skauswatch-scanner"
+                - "/usr/bin/masscan"
+                - "/usr/lib/chromium/chromium"
+          matchActions:
+            - action: Sigkill
+{{- end }}

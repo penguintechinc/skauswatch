@@ -1,0 +1,40 @@
+name: OpenAPI Spec Lint
+
+# Lints every service's committed, utoipa-generated OpenAPI spec
+# (services/<svc>/openapi/v1.yaml) with Spectral against the OpenAPI ruleset in
+# .spectral.yaml. Per backend.md, every REST service publishes an OpenAPI 3.x
+# spec that is validated in CI.
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+    paths:
+      - 'services/**/openapi/v1.yaml'
+      - '.spectral.yaml'
+      - '.github/workflows/openapi.yml'
+  pull_request:
+    paths:
+      - 'services/**/openapi/v1.yaml'
+      - '.spectral.yaml'
+      - '.github/workflows/openapi.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  spectral:
+    name: Spectral lint (OpenAPI specs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+        with:
+          node-version: '24'
+      - name: Lint OpenAPI specs
+        run: |
+          npx --yes @stoplight/spectral-cli@6.15.0 lint \
+            --ruleset .spectral.yaml \
+            --fail-severity=error \
+            services/*/openapi/v1.yaml

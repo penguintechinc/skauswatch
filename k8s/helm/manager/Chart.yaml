@@ -7,8 +7,8 @@ appVersion: "1.0.0"
 keywords:
   - skauswatch
   - manager
-  - flask
-  - python
+  - rust
+  - grpc
   - api
 maintainers:
   - name: Penguin Tech Inc

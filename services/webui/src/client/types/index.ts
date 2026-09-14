@@ -1,5 +1,9 @@
 // User types
-export type UserRole = 'admin' | 'maintainer' | 'viewer';
+// `super_admin` is a manager-internal, DB-only provisioned role (never
+// settable via the public users API — see services/manager/src/routes/
+// tenants.rs) used to gate tenant provisioning and other super-admin-only
+// controls such as the SVID TTL settings panel.
+export type UserRole = 'admin' | 'maintainer' | 'viewer' | 'super_admin';
 
 export interface User {
   id: number;
@@ -40,8 +44,8 @@ export interface AuthTokens {
 
 export interface AuthState {
   user: User | null;
-  accessToken: string | null;
-  refreshToken: string | null;
+  // H2 audit fix: access/refresh tokens are HttpOnly cookies set by the
+  // backend, never exposed to or stored by JS — no token fields here.
   isAuthenticated: boolean;
   isLoading: boolean;
 }

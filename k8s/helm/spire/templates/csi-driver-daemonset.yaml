@@ -1,0 +1,99 @@
+{{- /*
+SPIFFE CSI Driver — recommended Workload API socket delivery mechanism
+(replaces per-service hostPath volumes with a CSI ephemeral volume). See
+values.yaml spire.csiDriver and chart README "CSI driver (recommended,
+requires approval)".
+
+ROOT EXCEPTION (requires approval before enabling in any live
+environment — see devops-containers.md "Rootless Containers"). This
+DaemonSet is disabled by default in every values file in this chart
+(values.yaml + alpha/beta/gamma/production all set csiDriver.enabled:
+false). Do not flip it to true without the user's explicit sign-off
+first — the privileged container below is real, not a placeholder.
+*/}}
+{{- if and .Values.spire.enabled .Values.spire.csiDriver.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-csi-driver
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: csi-driver
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "skauswatch-spire.selectorLabels" . | nindent 6 }}
+      component: csi-driver
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "skauswatch-spire.selectorLabels" . | nindent 8 }}
+        component: csi-driver
+    spec:
+      {{- with .Values.spire.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "skauswatch-spire.csiDriverServiceAccountName" . }}
+      containers:
+      - name: spiffe-csi-driver
+        # repository already carries @sha256:<digest> (see values.yaml) — do
+        # not append :tag, that produces an invalid "name@sha256:x:tag" ref.
+        image: "{{ .Values.spire.csiDriver.image.repository }}"
+        imagePullPolicy: {{ .Values.spire.csiDriver.image.pullPolicy }}
+        args:
+          - "-workload-api-socket-dir={{ .Values.spire.agent.socketDir }}"
+          - "-plugin-name={{ .Values.spire.csiDriver.pluginName }}"
+          - "-csi-socket-path=/spiffe-csi/csi.sock"
+        # ROOT EXCEPTION (requires approval): the driver must bind-mount
+        # the agent's Workload API socket directory into arbitrary
+        # workload pods' mount namespaces via the kubelet plugin
+        # registry — this is upstream spiffe-csi-driver's standard
+        # posture, not a PenguinTech-specific relaxation, but it is still
+        # a privileged container and needs explicit sign-off before any
+        # live environment enables it.
+        securityContext:
+          privileged: true
+        {{- with .Values.spire.csiDriver.resources }}
+        resources:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        volumeMounts:
+        - name: plugins-registry-dir
+          mountPath: /spiffe-csi/registration
+        - name: kubelet-plugin-dir
+          mountPath: /spiffe-csi
+        - name: agent-socket-dir
+          mountPath: {{ .Values.spire.agent.socketDir }}
+        - name: pods-mount-dir
+          mountPath: /var/lib/kubelet/pods
+          mountPropagation: Bidirectional
+      volumes:
+      - name: plugins-registry-dir
+        hostPath:
+          path: {{ .Values.spire.csiDriver.kubeletPath }}/plugins_registry
+      - name: kubelet-plugin-dir
+        hostPath:
+          path: {{ .Values.spire.csiDriver.kubeletPath }}/plugins/{{ .Values.spire.csiDriver.pluginName }}
+          type: DirectoryOrCreate
+      - name: agent-socket-dir
+        hostPath:
+          path: {{ .Values.spire.agent.socketDir }}
+          type: DirectoryOrCreate
+      - name: pods-mount-dir
+        hostPath:
+          path: {{ .Values.spire.csiDriver.kubeletPath }}/pods
+      {{- with .Values.spire.agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.spire.agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

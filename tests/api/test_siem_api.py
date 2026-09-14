@@ -14,7 +14,7 @@ class TestSIEMHealth:
             resp = await siem_client.get("/api/v1/siem/health")
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["log_receiver"] == "ok"
+        assert data["logs"] == "ok"
         assert data["status"] == "ok"
 
     async def test_health_receiver_down(self, siem_client):
@@ -22,7 +22,7 @@ class TestSIEMHealth:
             resp = await siem_client.get("/api/v1/siem/health")
         assert resp.status_code == 200
         data = resp.get_json()
-        assert data["log_receiver"] == "unavailable"
+        assert data["logs"] == "unavailable"
         assert data["status"] == "degraded"
 
 

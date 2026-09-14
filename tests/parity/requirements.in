@@ -1,0 +1,3 @@
+# Runtime deps for the golden parity harness (runner.py, stub_upstream.py).
+# stub_upstream.py is stdlib-only; runner.py additionally needs `requests`.
+requests

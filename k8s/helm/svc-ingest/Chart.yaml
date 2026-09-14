@@ -1,0 +1,17 @@
+apiVersion: v2
+name: skauswatch-svc-ingest
+description: SkausWatch multi-protocol SIEM log ingest (syslog/OTLP/HTTPS -> NATS JetStream -> OpenSearch)
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skauswatch
+  - svc-ingest
+  - rust
+  - nats
+  - jetstream
+  - opensearch
+  - siem
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io

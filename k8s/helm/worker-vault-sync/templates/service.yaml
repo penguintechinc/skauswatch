@@ -1,0 +1,25 @@
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "skauswatch-worker-vault-sync.fullname" . }}
+  labels:
+    {{- include "skauswatch-worker-vault-sync.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  # Worker — no client-facing API. Headless ClusterIP only exists so
+  # Prometheus can scrape /metrics; probes hit the pod IP directly.
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - port: {{ .Values.healthPort }}
+      targetPort: health
+      protocol: TCP
+      name: health
+    - port: {{ .Values.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "skauswatch-worker-vault-sync.selectorLabels" . | nindent 4 }}
+{{- end }}

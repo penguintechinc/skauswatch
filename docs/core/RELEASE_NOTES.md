@@ -6,18 +6,18 @@ Version history, deprecations, known issues, and migration guides.
 
 ## v1.0.0 (2026-03-10) — Initial Release
 
-**Initial release of SkausWatch core platform with eight services, IceBox and Darwin sub-modules, Helm and Kustomize deployment.**
+**Initial release of SkausWatch core platform with eight services, Vault and CodeScan sub-modules, Helm and Kustomize deployment.**
 
 ### ✨ Features
 
 #### Core Services
 - **Manager** (Port 5000): Orchestration, S3 credential mgmt, scan scheduling
-- **PKI Server** (Port 5001): Shim proxy to IceBox PKI (v1.x compat)
-- **SSH CA** (Port 5002): Shim proxy to IceBox SSH CA (v1.x compat)
-- **AAA Monitor** (Port 5003): Audit logging, K8s log collection, threat analysis
-- **Worker-S3**: ClamAV + YARA + threat intelligence scanning
-- **Worker-Scanner**: Nuclei, ZAP, OpenVAS vulnerability scanning
-- **EDR Agent**: Endpoint detection & response (K8s DaemonSet)
+- **PKI Server** (Port 5001): Shim proxy to Vault PKI (v1.x compat)
+- **SSH CA** (Port 5002): Shim proxy to Vault SSH CA (v1.x compat)
+- **Monitor** (Port 5003): Audit logging, K8s log collection, threat analysis
+- **S3scan**: ClamAV + YARA + threat intelligence scanning
+- **Scanner**: Nuclei, ZAP, OpenVAS vulnerability scanning
+- **ENDPOINT Agent**: Endpoint detection & response (K8s DaemonSet)
 - **WebUI** (Port 3000): React frontend with role-based access (Admin, Maintainer, Viewer)
 
 #### Infrastructure
@@ -28,11 +28,11 @@ Version history, deprecations, known issues, and migration guides.
 - Prometheus + Grafana for monitoring
 
 #### Sub-Modules (Licensed)
-- **IceBox**: Secrets vault with envelope encryption (AES-256-GCM), JIT access, one-time secrets, cloud sync
-- **Darwin**: AI-powered code review and ASM surface analysis
+- **Vault**: Secrets vault with envelope encryption (AES-256-GCM), JIT access, one-time secrets, cloud sync
+- **CodeScan**: AI-powered code review and ASM surface analysis
 
 #### Deployment
-- Kubernetes Helm charts (5 charts: Manager, PKI, SSH CA, AAA Monitor, WebUI)
+- Kubernetes Helm charts (5 charts: Manager, PKI, SSH CA, Monitor, WebUI)
 - Kustomize overlays for alpha/beta/prod environments
 - Multi-architecture support (amd64/arm64)
 - Docker Compose for local development
@@ -42,19 +42,19 @@ Version history, deprecations, known issues, and migration guides.
 - S3 credentials encrypted at rest (AES-256-GCM)
 - JWT Bearer token authentication on all API endpoints
 - OIDC scopes for fine-grained RBAC
-- mTLS support via IceBox PKI (when IceBox installed)
-- SSH certificate-based authentication via IceBox SSH CA
+- mTLS support via Vault PKI (when Vault installed)
+- SSH certificate-based authentication via Vault SSH CA
 - Scan workspace cleaned after each job
 - Worker resource limits (2GB memory, 2 CPU cores)
-- EDR Agent as read-only DaemonSet with minimal K8s RBAC
+- ENDPOINT Agent as read-only DaemonSet with minimal K8s RBAC
 
 ### 🛠️ Technical Stack
 
-- **Python 3.13** (Manager, PKI Server, SSH CA, AAA Monitor, Workers)
-- **Go 1.24** (EDR Agent)
+- **Python 3.13** (Manager, PKI Server, SSH CA, Monitor, Workers)
+- **Go 1.24** (ENDPOINT Agent)
 - **Node.js 18 + React** (WebUI)
 - **Quart** (async Flask alternative for Manager, PKI/SSH CA shims)
-- **FastAPI** (async for AAA Monitor)
+- **FastAPI** (async for Monitor)
 - **PyDAL + SQLAlchemy** (database abstraction)
 - **Redis Streams** (job queue distribution)
 - **gRPC** (internal service communication)
@@ -87,20 +87,20 @@ Version history, deprecations, known issues, and migration guides.
 
 ### PKI Server & SSH CA Shim Proxies (v1.x → v2.0)
 
-**Status (v1.x):** Both services are thin Quart shim proxies that forward requests to IceBox PKI and SSH CA backends when `$ICEBOX_PKI_URL` and `$ICEBOX_SSH_CA_URL` are configured.
+**Status (v1.x):** Both services are thin Quart shim proxies that forward requests to Vault PKI and SSH CA backends when `$VAULT_PKI_URL` and `$VAULT_SSHCA_URL` are configured.
 
-**Deprecation:** Shims will be removed in v2.0. Clients should migrate to IceBox endpoints before v2.0 release.
+**Deprecation:** Shims will be removed in v2.0. Clients should migrate to Vault endpoints before v2.0 release.
 
 **Migration Guide:**
 ```
 Old (v1.x):
   POST http://manager:5000/api/v1/certificates
   └─ Proxies through PKI Server shim (Port 5001)
-  └─ Forwards to IceBox PKI (Port 5101)
+  └─ Forwards to Vault PKI (Port 5101)
 
 New (v2.0):
-  POST http://icebox:5100/api/v1/pki/certificates
-  └─ Use IceBox PKI directly
+  POST http://vault:5100/api/v1/pki/certificates
+  └─ Use Vault PKI directly
 ```
 
 **Timeline:**
@@ -127,13 +127,13 @@ cd services/webui && npm install
 
 **Status:** Fixed in v1.1 (auto-detection of GITHUB_TOKEN)
 
-### Issue #2: Worker-S3 memory leak after 500+ scans
+### Issue #2: S3scan memory leak after 500+ scans
 
 **Symptom:** Memory grows from 512MB to 2GB+ over 24 hours
 
 **Cause:** Python garbage collection not releasing large scan buffers
 
-**Workaround:** Restart worker-s3 daily via cron job or K8s restart policy
+**Workaround:** Restart s3scan daily via cron job or K8s restart policy
 
 **Status:** Under investigation, fix targeted for v1.1
 
@@ -143,17 +143,17 @@ cd services/webui && npm install
 
 **Cause:** `freshclam` not running automatically in Docker container
 
-**Workaround:** Manual `docker-compose exec worker-s3 freshclam`
+**Workaround:** Manual `docker-compose exec s3scan freshclam`
 
 **Status:** Fixed in v1.1 (added cron job in Dockerfile)
 
-### Issue #4: EDR Agent DaemonSet logs not aggregated to AAA Monitor
+### Issue #4: ENDPOINT Agent DaemonSet logs not aggregated to Monitor
 
-**Symptom:** Host-level events not appearing in AAA Monitor audit logs
+**Symptom:** Host-level events not appearing in Monitor audit logs
 
-**Cause:** EDR Agent K8s API queries incomplete, missing event filters
+**Cause:** ENDPOINT Agent K8s API queries incomplete, missing event filters
 
-**Workaround:** Manually configure K8s API reader RBAC for EDR Agent namespace
+**Workaround:** Manually configure K8s API reader RBAC for ENDPOINT Agent namespace
 
 **Status:** Fixed in v1.1 (improved K8s RBAC template)
 
@@ -200,9 +200,9 @@ curl http://localhost:3000/health
 ## 🎯 Roadmap
 
 ### v1.1.0 (May 2026)
-- Fix memory leak in Worker-S3
+- Fix memory leak in S3scan
 - Auto-update ClamAV definitions via cron
-- Improve EDR Agent K8s integration
+- Improve ENDPOINT Agent K8s integration
 - Add Prometheus metrics for all services
 - Grafana dashboard templates
 
@@ -213,11 +213,11 @@ curl http://localhost:3000/health
 - Performance optimizations for large-scale scanning
 
 ### v2.0.0 (September 2026)
-- Remove PKI Server and SSH CA shims (clients use IceBox directly)
+- Remove PKI Server and SSH CA shims (clients use Vault directly)
 - Horizontal scaling for PostgreSQL (read replicas)
 - Service mesh integration (Istio for mTLS)
 - Multi-tenant support (organizational isolation)
-- Advanced AI threat analysis (Darwin integration tighter)
+- Advanced AI threat analysis (CodeScan integration tighter)
 
 ---
 

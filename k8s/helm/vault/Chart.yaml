@@ -1,0 +1,14 @@
+apiVersion: v2
+name: skauswatch-vault
+description: SkausWatch secrets vault (envelope-encrypted credential store)
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skauswatch
+  - vault
+  - rust
+  - secrets
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io

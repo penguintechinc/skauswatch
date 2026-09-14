@@ -1,0 +1,41 @@
+# Tetragon exec-allowlist for skauswatch-svc-ingest. ENFORCE: any
+# sys_execve NOT matching the listed binary is SIGKILLed -- blocks a
+# dropped shell/reverse-shell/living-off-the-land binary (bash, sh, curl,
+# nc, wget, python3, perl, ...) in a pod whose only legitimate process is
+# the binary below. Requires the Tetragon agent DaemonSet running in the
+# cluster (cluster add-on, not part of this chart -- see
+# k8s/helm/README.md "Tetragon prerequisite").
+#
+# One policy covers BOTH the receiver and writer Deployments (no
+# app.kubernetes.io/component in its podSelector) -- both modes are the
+# exact same binary (services/svc-ingest/Dockerfile ENTRYPOINT
+# /app/skauswatch-svc-ingest), invoked with a different `serve --mode`
+# arg. Tetragon's sys_execve match is on argv[0]/the executed path only,
+# not process arguments, so a single allowlist entry is correct for both.
+{{- if .Values.tetragon.enabled | default true }}
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: {{ include "skauswatch-svc-ingest.fullname" . }}-exec-allowlist
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "skauswatch-svc-ingest.selectorLabels" . | nindent 6 }}
+  kprobes:
+    - call: "sys_execve"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+        - index: 1
+          type: "string_arr"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "NotEqual"
+              values:
+                - "/app/skauswatch-svc-ingest"
+          matchActions:
+            - action: Sigkill
+{{- end }}

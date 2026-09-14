@@ -1,0 +1,77 @@
+{{- if and .Values.spire.enabled .Values.spire.oidcProvider.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-oidc-provider
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: oidc-provider
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "skauswatch-spire.selectorLabels" . | nindent 6 }}
+      component: oidc-provider
+  template:
+    metadata:
+      labels:
+        {{- include "skauswatch-spire.selectorLabels" . | nindent 8 }}
+        component: oidc-provider
+    spec:
+      {{- with .Values.spire.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: oidc-provider
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+        # repository already carries @sha256:<digest> (see values.yaml) — do
+        # not append :tag, that produces an invalid "name@sha256:x:tag" ref.
+        image: "{{ .Values.spire.oidcProvider.image.repository }}"
+        imagePullPolicy: {{ .Values.spire.oidcProvider.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: {{ .Values.spire.oidcProvider.port }}
+          protocol: TCP
+        args:
+        - "-config"
+        - "/etc/spire/oidc-provider.conf"
+        {{- with .Values.spire.oidcProvider.resources }}
+        resources:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /.well-known/openid-configuration
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /.well-known/openid-configuration
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: oidc-config
+          mountPath: /etc/spire
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      - name: oidc-config
+        configMap:
+          name: {{ include "skauswatch-spire.fullname" . }}-oidc-config
+      - name: tmp
+        emptyDir: {}
+{{- end }}

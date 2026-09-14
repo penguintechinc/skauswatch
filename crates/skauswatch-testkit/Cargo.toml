@@ -1,0 +1,27 @@
+[package]
+publish = false
+name = "skauswatch-testkit"
+description = "Shared test harness: isolated-schema Postgres pools, manager-shaped JWT minting, and dev/gated LicenseClient builders for handler/DB tests across services"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+jsonwebtoken = { workspace = true }
+p256 = { workspace = true }
+penguin-licensing = { workspace = true }
+pkcs8 = { workspace = true }
+rand_core = { workspace = true }
+skauswatch-auth = { workspace = true }
+sqlx = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

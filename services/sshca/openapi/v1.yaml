@@ -1,0 +1,564 @@
+openapi: 3.1.0
+info:
+  title: SkausWatch SSH Certificate Authority API
+  description: OpenSSH user/host certificate issuance, lookup, revocation, and Key Revocation List retrieval.
+  contact:
+    name: Penguin Tech Inc
+    email: support@penguintech.io
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+  version: '1'
+paths:
+  /api/v1/ssh/ca/public-key:
+    get:
+      tags:
+      - sshca
+      summary: |-
+        `GET /api/v1/ssh/ca/public-key` — CA public key (JSON, or text/plain when
+        requested via `Accept`).
+      operationId: get_ca_public_key
+      responses:
+        '200':
+          description: 'CA public key and fingerprint (JSON by default; plain OpenSSH key line when the caller sends `Accept: text/plain`)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaPublicKeyResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/certificates:
+    get:
+      tags:
+      - sshca
+      summary: '`GET /api/v1/ssh/certificates` — list certificates with filters.'
+      operationId: list_certificates
+      parameters:
+      - name: type
+        in: query
+        description: |-
+          Filter by certificate type (`user`/`host`) — utoipa derives the
+          `type` query param name from the `#[serde(rename)]` below.
+        required: false
+        schema:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CertificateType'
+      - name: status
+        in: query
+        description: Filter by status (`active`/`revoked`/`expired`).
+        required: false
+        schema:
+          type:
+          - string
+          - 'null'
+      - name: limit
+        in: query
+        description: Maximum results to return (clamped to 1..=1000, default 100).
+        required: false
+        schema:
+          type:
+          - integer
+          - 'null'
+          minimum: 0
+      responses:
+        '200':
+          description: Matching certificates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateListResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+    post:
+      tags:
+      - sshca
+      summary: '`POST /api/v1/ssh/certificates` — issue and store a certificate.'
+      operationId: issue_certificate
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IssueCertificateRequest'
+        required: true
+      responses:
+        '201':
+          description: Certificate issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssueCertificateResponse'
+        '400':
+          description: Empty public key, non-positive validity_duration, or an unparseable subject key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/certificates/{id}:
+    get:
+      tags:
+      - sshca
+      summary: '`GET /api/v1/ssh/certificates/{id}` — fetch one certificate.'
+      operationId: get_certificate
+      parameters:
+      - name: id
+        in: path
+        description: Certificate id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Certificate record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CertificateRecord'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/certificates/{id}/revoke:
+    post:
+      tags:
+      - sshca
+      summary: '`POST /api/v1/ssh/certificates/{id}/revoke` — revoke a certificate.'
+      operationId: revoke_certificate
+      parameters:
+      - name: id
+        in: path
+        description: Certificate id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevokeCertificateRequest'
+        required: true
+      responses:
+        '200':
+          description: Certificate revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokeCertificateResponse'
+        '400':
+          description: Malformed request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationErrorResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/ssh/krl:
+    get:
+      tags:
+      - sshca
+      summary: '`GET /api/v1/ssh/krl` — current Key Revocation List (v1 `_generate_krl_sync`).'
+      operationId: get_krl
+      responses:
+        '200':
+          description: Current Key Revocation List
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KrlResponse'
+        '401':
+          description: Missing or invalid authorization header
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+      - bearer_jwt: []
+components:
+  schemas:
+    CaPublicKeyResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `get_ca_public_key`'s JSON response body
+        (the `Accept: text/plain` variant returns the bare OpenSSH key line
+        instead — see the handler doc comment).
+      required:
+      - ca_public_key
+      - ca_fingerprint
+      properties:
+        ca_fingerprint:
+          type: string
+          description: CA key OpenSSH SHA256 fingerprint.
+        ca_public_key:
+          type: string
+          description: CA public key, OpenSSH line format.
+    CertificateListResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `list_certificates`'s `serde_json::json!`
+        body.
+      required:
+      - certificates
+      - total
+      properties:
+        certificates:
+          type: array
+          items:
+            $ref: '#/components/schemas/CertificateRecord'
+          description: Matching certificates (capped at the request's `limit`).
+        total:
+          type: integer
+          description: Number of certificates returned.
+          minimum: 0
+    CertificateRecord:
+      type: object
+      description: |-
+        Documentation-only mirror of `routes::stored_to_json`'s wire shape,
+        returned by `GET /api/v1/ssh/certificates/{id}` and nested inside
+        [`CertificateListResponse`]. See `docs/v2-port/openapi-pattern.md`.
+      required:
+      - certificate_id
+      - certificate_type
+      - serial_number
+      - key_id
+      - principals
+      - status
+      - signed_certificate
+      - public_key_fingerprint
+      - ca_fingerprint
+      - valid_after
+      - valid_before
+      - metadata
+      properties:
+        ca_fingerprint:
+          type: string
+          description: CA key OpenSSH SHA256 fingerprint.
+        certificate_id:
+          type: string
+          description: Certificate id.
+        certificate_type:
+          $ref: '#/components/schemas/CertificateType'
+          description: '`user` or `host`.'
+        key_id:
+          type: string
+          description: Certificate key id.
+        metadata:
+          description: Echoed request metadata.
+        principals:
+          type: array
+          items:
+            type: string
+          description: Effective principals.
+        public_key_fingerprint:
+          type: string
+          description: Subject key OpenSSH SHA256 fingerprint.
+        revocation_reason:
+          type:
+          - string
+          - 'null'
+          description: Revocation reason, if revoked.
+        revoked_at:
+          type:
+          - string
+          - 'null'
+          description: Revocation timestamp, if revoked.
+        serial_number:
+          type: integer
+          format: int64
+          description: Certificate serial number.
+          minimum: 0
+        signed_certificate:
+          type: string
+          description: Signed OpenSSH certificate line.
+        status:
+          type: string
+          description: '`active` / `revoked` / `expired`.'
+        valid_after:
+          type: string
+          description: Valid-after timestamp (Python-isoformat, second precision).
+        valid_before:
+          type: string
+          description: Valid-before timestamp (Python-isoformat, second precision).
+    CertificateType:
+      type: string
+      description: SSH certificate type — user (login) or host certificate.
+      enum:
+      - user
+      - host
+    ErrorResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `ApiError`'s bare `{"error": msg}` wire shape
+        (`BadRequest`/`NotFound` both use it) — `ApiError` builds its body with
+        `serde_json::json!` rather than a typed struct, so this type exists
+        solely to give `utoipa` something to reference in `#[utoipa::path]`
+        `responses(...)` clauses. See `docs/v2-port/openapi-pattern.md`.
+      required:
+      - error
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+    IssueCertificateRequest:
+      type: object
+      description: Body for `POST /api/v1/ssh/certificates`.
+      required:
+      - certificate_type
+      - public_key
+      properties:
+        certificate_type:
+          $ref: '#/components/schemas/CertificateType'
+          description: '`user` or `host`.'
+        critical_options:
+          type:
+          - object
+          - 'null'
+          description: Critical options (e.g. `force-command`, `source-address`).
+          additionalProperties:
+            type: string
+          propertyNames:
+            type: string
+        extensions:
+          type:
+          - object
+          - 'null'
+          description: Certificate extensions (flag values are empty strings, e.g. `permit-pty`).
+          additionalProperties:
+            type: string
+          propertyNames:
+            type: string
+        force_command:
+          type:
+          - string
+          - 'null'
+          description: Optional `force-command` critical option shorthand.
+        key_id:
+          type:
+          - string
+          - 'null'
+          description: Optional explicit key id; defaults to `{type}-{request_id}` (v1 format).
+        metadata:
+          description: Opaque metadata echoed back on the response (v1 parity).
+        principals:
+          type: array
+          items:
+            type: string
+          description: Certificate principals (usernames for user certs, hostnames for host).
+        public_key:
+          type: string
+          description: Subject public key as an OpenSSH line (`ssh-ed25519 AAAA... comment`).
+        request_id:
+          type:
+          - string
+          - 'null'
+          description: Optional caller-supplied request id; a UUID is generated when absent.
+        requester_id:
+          type:
+          - string
+          - 'null'
+          description: Optional requester identity (audit only).
+        source_address:
+          type:
+          - string
+          - 'null'
+          description: Optional `source-address` critical option shorthand.
+        validity_duration:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: |-
+            Validity window in seconds (v1 `validity_duration`; `validity_seconds`
+            accepted as an alias for the pki request shape).
+          minimum: 0
+    IssueCertificateResponse:
+      type: object
+      description: Response for a successful certificate issuance (201).
+      required:
+      - certificate_id
+      - certificate_type
+      - signed_certificate
+      - serial_number
+      - principals
+      - key_id
+      - valid_after
+      - valid_before
+      - public_key_fingerprint
+      - ca_fingerprint
+      - metadata
+      properties:
+        ca_fingerprint:
+          type: string
+          description: CA key OpenSSH SHA256 fingerprint (`SHA256:…`).
+        certificate_id:
+          type: string
+          description: Certificate id (equals the request id).
+        certificate_type:
+          $ref: '#/components/schemas/CertificateType'
+          description: '`user` or `host`.'
+        key_id:
+          type: string
+          description: Certificate key id.
+        metadata:
+          description: Echoed request metadata.
+        principals:
+          type: array
+          items:
+            type: string
+          description: Effective principals.
+        public_key_fingerprint:
+          type: string
+          description: Subject key OpenSSH SHA256 fingerprint (`SHA256:…`).
+        serial_number:
+          type: integer
+          format: int64
+          description: Certificate serial number.
+          minimum: 0
+        signed_certificate:
+          type: string
+          description: Signed OpenSSH certificate line (`ssh-…-cert-v01@openssh.com AAAA…`).
+        valid_after:
+          type: string
+          description: Valid-after timestamp (Python-isoformat, second precision).
+        valid_before:
+          type: string
+          description: Valid-before timestamp (Python-isoformat, second precision).
+    KrlEntryResponse:
+      type: object
+      description: Documentation-only mirror of one `get_krl` revocation entry.
+      required:
+      - serial_number
+      - revocation_time
+      - reason
+      properties:
+        fingerprint:
+          type:
+          - string
+          - 'null'
+          description: Revoked certificate's subject fingerprint, if recorded.
+        reason:
+          type: string
+          description: Revocation reason.
+        revocation_time:
+          type: string
+          description: Revocation timestamp (Python-isoformat, second precision).
+        serial_number:
+          type: integer
+          format: int64
+          description: Revoked serial number.
+          minimum: 0
+    KrlResponse:
+      type: object
+      description: Documentation-only mirror of `get_krl`'s `serde_json::json!` body.
+      required:
+      - version
+      - generated_at
+      - ca_fingerprint
+      - revoked_certificates
+      properties:
+        ca_fingerprint:
+          type: string
+          description: CA key OpenSSH SHA256 fingerprint.
+        generated_at:
+          type: string
+          description: KRL generation timestamp (Python-isoformat, second precision).
+        revoked_certificates:
+          type: array
+          items:
+            $ref: '#/components/schemas/KrlEntryResponse'
+          description: Revoked certificate entries.
+        version:
+          type: integer
+          format: int32
+          description: KRL format version (always `1`).
+          minimum: 0
+    RevokeCertificateRequest:
+      type: object
+      description: Body for `POST /api/v1/ssh/certificates/{id}/revoke`.
+      properties:
+        reason:
+          type:
+          - string
+          - 'null'
+          description: Human-readable revocation reason (defaults to `unspecified`).
+    RevokeCertificateResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `revoke_certificate`'s `serde_json::json!`
+        body.
+      required:
+      - message
+      - certificate_id
+      properties:
+        certificate_id:
+          type: string
+          description: The revoked certificate's id.
+        message:
+          type: string
+          description: Always `"Certificate revoked"`.
+    ValidationErrorResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `ApiError::Validation`'s wire shape — a
+        bare error message plus a list of per-field validation failure objects
+        (`{loc, msg, type}`, matching `ApiJson`'s rejection shape below).
+      required:
+      - error
+      - details
+      properties:
+        details:
+          type: array
+          items: {}
+          description: 'Per-field failure details, each `{loc: [...], msg: ..., type: ...}`.'
+        error:
+          type: string
+          description: Always `"Validation error"`.
+  securitySchemes:
+    bearer_jwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+tags:
+- name: sshca
+  description: OpenSSH user/host certificate signing, lookup, revocation, and KRL
