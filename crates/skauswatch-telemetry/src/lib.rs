@@ -39,10 +39,18 @@ pub fn init_tracing(service: &str) {
     tracing::info!(service, "telemetry initialized");
 }
 
-/// Installs the Prometheus exporter listening on `0.0.0.0:9090`.
+/// Installs the Prometheus exporter listening on `0.0.0.0:<port>`, where
+/// `<port>` is read from the `METRICS_PORT` env var (defaulting to
+/// [`METRICS_PORT`]). The env override exists for test harnesses that
+/// co-locate multiple services on one host; production deployments run one
+/// service per pod and never need to set it.
 /// Returns an error instead of panicking so callers can fail startup cleanly.
 pub fn install_metrics_exporter() -> Result<(), TelemetryError> {
-    let addr: SocketAddr = ([0, 0, 0, 0], METRICS_PORT).into();
+    let port = std::env::var("METRICS_PORT")
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(METRICS_PORT);
+    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
     metrics_exporter_prometheus::PrometheusBuilder::new()
         .with_http_listener(addr)
         .install()

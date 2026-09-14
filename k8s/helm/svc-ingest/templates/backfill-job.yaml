@@ -1,0 +1,82 @@
+# One-time aaa-events -> unified OCSF/OpenSearch index reindex Job. Gated
+# OFF by default (values.yaml backfill.enabled) -- Command::Backfill does
+# not exist in the built binary as of Task 2.4 (Wave 1 ships only serve/
+# healthcheck/openapi/migrate, see services/svc-ingest/src/main.rs). This
+# manifest is forward-declared per the Task 2.4 brief so the chart already
+# has a home for it the moment that subcommand lands; `helm install`/
+# `helm template` render cleanly with it disabled (no object emitted).
+{{- if .Values.backfill.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "skauswatch-svc-ingest.fullname" . }}-backfill
+  labels:
+    {{- include "skauswatch-svc-ingest.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  backoffLimit: {{ .Values.backfill.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "skauswatch-svc-ingest.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: backfill
+    spec:
+      restartPolicy: {{ .Values.backfill.restartPolicy }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: backfill
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: {{ include "skauswatch-svc-ingest.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            {{- toYaml .Values.backfill.args | nindent 12 }}
+          env:
+            - name: OPENSEARCH_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "skauswatch-svc-ingest.fullname" . }}-config
+                  key: opensearch-url
+            - name: DB_TYPE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "skauswatch-svc-ingest.fullname" . }}-config
+                  key: db-type
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "skauswatch-svc-ingest.fullname" . }}-config
+                  key: db-host
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "skauswatch-svc-ingest.fullname" . }}-config
+                  key: db-port
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "skauswatch-svc-ingest.fullname" . }}-config
+                  key: db-name
+            - name: DB_POOL_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "skauswatch-svc-ingest.fullname" . }}-config
+                  key: db-pool-size
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "skauswatch-svc-ingest.secretName" . }}
+                  key: db-user
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "skauswatch-svc-ingest.secretName" . }}
+                  key: db-pass
+          resources:
+            {{- toYaml .Values.backfill.resources | nindent 12 }}
+{{- end }}

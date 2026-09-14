@@ -1,6 +1,13 @@
 # Default (prod-safe baseline) values for skauswatch-logs.
 # Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
-replicaCount: 3
+#
+# DEPRECATED (svc-ingest cutover, Task 3.3): services/logs is superseded by
+# svc-ingest (k8s/helm/svc-ingest) -- the manager's SIEM-ingest proxy
+# (LOGS_URL) now points at the svc-ingest receiver in every environment.
+# Scaled to zero rather than removed so this chart stays a one-release
+# rollback path; every per-env values file below has been zeroed the same
+# way. Do not delete this chart until the rollback window has passed.
+replicaCount: 0
 
 image:
   repository: ghcr.io/penguintechinc/skauswatch/logs
@@ -84,8 +91,10 @@ resources:
     cpu: 500m
     memory: 512Mi
 
+# Disabled alongside replicaCount: 0 above (svc-ingest cutover, Task 3.3)
+# -- an enabled HPA would fight the zeroed replica count.
 autoscaling:
-  enabled: true
+  enabled: false
   minReplicas: 3
   maxReplicas: 10
   targetCPUUtilizationPercentage: 70

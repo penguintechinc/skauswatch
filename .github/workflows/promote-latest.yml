@@ -28,6 +28,7 @@ jobs:
           - worker-codescan
           - worker-vault-sync
           - endpoint-agent
+          - svc-ingest
           - webui
     steps:
       - name: Set up Docker Buildx

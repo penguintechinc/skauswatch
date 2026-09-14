@@ -57,6 +57,8 @@ configMapData:
   db-pool-size: "20"
   license-server-url: "https://license.penguintech.io"
   release-mode: "true"
+  # svc-ingest cutover (Task 3.3): see beta.yml's comment on this same key.
+  logs-url: "http://skauswatch-svc-ingest-receiver:8443"
 
 # MUST be enabled: identity-consuming services hard-require a live SVID
 # whenever RELEASE_MODE is "true". See k8s/helm/spire/README.md

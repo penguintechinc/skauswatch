@@ -346,7 +346,7 @@ mod tests {
     async fn search_events_returns_hits_from_the_configured_store() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/aaa-events-*/_search"))
+            .and(path("/skauswatch-logs-*/_search"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "hits": {"total": {"value": 1}, "hits": [
                     {"_source": {"id": "e1", "source": "kubernetes", "event_type": "authentication", "severity": "high", "message": "login failed", "tenant_id": "tenant-a"}}
@@ -355,7 +355,7 @@ mod tests {
             .mount(&mock_server)
             .await;
         let store =
-            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "skauswatch-logs-*", None, None);
         let state = state_with_store(store);
         let token = sign_token(&state, TENANT_A, READ_SCOPE);
         let server = test_server(state);
@@ -380,7 +380,7 @@ mod tests {
         let mock_server = MockServer::start().await;
         let expected_body = crate::es::build_search_body(&EventSearchRequest::default(), TENANT_A);
         Mock::given(method("POST"))
-            .and(path("/aaa-events-*/_search"))
+            .and(path("/skauswatch-logs-*/_search"))
             .and(body_json(expected_body))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "hits": {"total": {"value": 0}, "hits": []},
@@ -388,7 +388,7 @@ mod tests {
             .mount(&mock_server)
             .await;
         let store =
-            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "skauswatch-logs-*", None, None);
         let state = state_with_store(store);
         let token = sign_token(&state, TENANT_A, READ_SCOPE);
         let server = test_server(state);
@@ -410,12 +410,12 @@ mod tests {
     async fn search_events_backend_error_is_internal_server_error() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/aaa-events-*/_search"))
+            .and(path("/skauswatch-logs-*/_search"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&mock_server)
             .await;
         let store =
-            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "skauswatch-logs-*", None, None);
         let state = state_with_store(store);
         let token = sign_token(&state, TENANT_A, READ_SCOPE);
         let server = test_server(state);
@@ -432,14 +432,14 @@ mod tests {
     async fn get_event_returns_the_stored_event() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/aaa-events-*/_doc/e1"))
+            .and(path("/skauswatch-logs-*/_doc/e1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "_source": {"id": "e1", "source": "system", "event_type": "process", "severity": "low", "message": "hi", "tenant_id": "tenant-a"},
             })))
             .mount(&mock_server)
             .await;
         let store =
-            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "skauswatch-logs-*", None, None);
         let state = state_with_store(store);
         let token = sign_token(&state, TENANT_A, READ_SCOPE);
         let server = test_server(state);
@@ -457,14 +457,14 @@ mod tests {
     async fn get_event_hides_a_different_tenants_event() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/aaa-events-*/_doc/e1"))
+            .and(path("/skauswatch-logs-*/_doc/e1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "_source": {"id": "e1", "source": "system", "event_type": "process", "severity": "low", "message": "hi", "tenant_id": "tenant-b"},
             })))
             .mount(&mock_server)
             .await;
         let store =
-            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "skauswatch-logs-*", None, None);
         let state = state_with_store(store);
         let token = sign_token(&state, TENANT_A, READ_SCOPE);
         let server = test_server(state);
@@ -479,12 +479,12 @@ mod tests {
     async fn get_event_with_backend_404_is_not_found() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/aaa-events-*/_doc/missing"))
+            .and(path("/skauswatch-logs-*/_doc/missing"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&mock_server)
             .await;
         let store =
-            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "skauswatch-logs-*", None, None);
         let state = state_with_store(store);
         let token = sign_token(&state, TENANT_A, READ_SCOPE);
         let server = test_server(state);
@@ -502,12 +502,12 @@ mod tests {
     async fn get_event_backend_error_is_internal_server_error() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/aaa-events-*/_doc/e1"))
+            .and(path("/skauswatch-logs-*/_doc/e1"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&mock_server)
             .await;
         let store =
-            crate::es::ElasticsearchStore::new(mock_server.uri(), "aaa-events-*", None, None);
+            crate::es::ElasticsearchStore::new(mock_server.uri(), "skauswatch-logs-*", None, None);
         let state = state_with_store(store);
         let token = sign_token(&state, TENANT_A, READ_SCOPE);
         let server = test_server(state);

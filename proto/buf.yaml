@@ -6,11 +6,22 @@
 # MUST be excluded from this module to avoid duplicate-symbol errors. It is
 # its own standalone buf module (see baseline/buf.yaml) and is used only as
 # the `--against` input for `buf breaking`.
+#
+# The `otel/` subdirectory vendors upstream open-telemetry/opentelemetry-proto
+# files verbatim (mirroring that repo's own layout, root = `opentelemetry/
+# proto/...`) — compiled by crates/skauswatch-proto/build.rs for svc-ingest's
+# OTLP listener. Their `import "opentelemetry/proto/...";` statements resolve
+# relative to `otel/` itself, not this module's root, so including `otel/` here
+# makes every cross-file import unresolvable ("imported file does not exist").
+# It MUST be excluded from this module for the same reason as `baseline` and is
+# its own standalone buf module (see otel/buf.yaml) with imports resolving
+# correctly against its own root.
 version: v2
 modules:
   - path: .
     excludes:
       - baseline
+      - otel
 breaking:
   use:
     # FILE is buf's strictest breaking-change category: it includes all

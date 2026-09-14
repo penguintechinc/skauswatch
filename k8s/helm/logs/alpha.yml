@@ -1,5 +1,6 @@
 # Alpha overrides — local MicroK8s (local-alpha context), namespace: skauswatch.
-replicaCount: 1
+# DEPRECATED (svc-ingest cutover, Task 3.3): see values.yaml's comment.
+replicaCount: 0
 
 image:
   repository: localhost:32000/skauswatch/logs

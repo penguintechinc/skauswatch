@@ -6,8 +6,7 @@
 //! `helpers.async_bulk` output.
 
 use chrono::{DateTime, Utc};
-
-use crate::jsonord::JsonVal;
+use skauswatch_ocsf::JsonVal;
 
 /// v1 `INDEX_PATTERN` — the daily index gets a `-YYYY.MM.DD` suffix.
 const INDEX_PATTERN: &str = "skauswatch-logs";
@@ -179,7 +178,7 @@ mod tests {
 
     #[test]
     fn bulk_body_frames_action_and_document_lines() {
-        let doc = crate::jsonord::from_slice(br#"{"a":1}"#).unwrap();
+        let doc = skauswatch_ocsf::jsonord::from_slice(br#"{"a":1}"#).unwrap();
         let body = build_bulk_body("skauswatch-logs-2026.07.25", std::slice::from_ref(&doc));
         assert_eq!(
             body,

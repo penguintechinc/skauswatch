@@ -40,3 +40,7 @@ configMapData:
   db-pool-size: "2"
   license-server-url: "https://license.penguintech.io"
   release-mode: "false"
+  # svc-ingest cutover (Task 3.3): svc-ingest IS deployed in alpha
+  # (k8s/helm/svc-ingest/alpha.yml has a live receiver replicaCount: 1),
+  # so alpha repoints too -- see beta.yml's comment on this same key.
+  logs-url: "http://skauswatch-svc-ingest-receiver:8443"
