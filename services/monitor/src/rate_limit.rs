@@ -169,4 +169,49 @@ mod tests {
             .await
             .assert_status_ok();
     }
+
+    /// Regression test for the first-run microk8s deploy bug: `GET
+    /// /health` used to be merged into `routes::router`'s business route
+    /// set, so it sat inside the same governed router `main.rs::serve()`
+    /// wraps in `rate_limit::apply` — the tower_governor limiter 429'd it
+    /// under probe frequency once the burst was exhausted by other traffic
+    /// sharing the bucket. This reconstructs `main.rs`'s exact assembly
+    /// (business routes governed, `routes::health::router()` merged in
+    /// separately, unguarded) with an artificially tiny burst so the
+    /// governor is provably active, then proves `/health` never 429s on
+    /// the very same source IP that trips the governor on a business
+    /// route.
+    #[tokio::test]
+    async fn health_router_is_exempt_from_the_rate_limiter_that_governs_business_routes() {
+        let state = crate::routes::test_support::dev_state();
+        let api = apply_with(crate::routes::router(state.clone()), 60, 1).with_state(state.clone());
+        let health = crate::routes::health::router().with_state(state);
+        let app = Router::new().merge(api).merge(health);
+        let server = axum_test::TestServer::new(app);
+
+        // Five requests, well past the burst=1 governor limit applied to
+        // the business routes below — `/health` must never see a 429,
+        // with no Authorization header sent (k8s probes carry none).
+        for _ in 0..5 {
+            server
+                .get("/health")
+                .add_header("x-forwarded-for", "203.0.113.9")
+                .await
+                .assert_status(StatusCode::SERVICE_UNAVAILABLE); // dev_state has no event store — still not a 429
+        }
+
+        // Sanity: the same source IP genuinely trips the governor on the
+        // governed surface — proving this test would have caught the
+        // original bug rather than passing vacuously.
+        server
+            .get("/metrics/dashboard")
+            .add_header("x-forwarded-for", "203.0.113.9")
+            .await
+            .assert_status_ok();
+        server
+            .get("/metrics/dashboard")
+            .add_header("x-forwarded-for", "203.0.113.9")
+            .await
+            .assert_status(StatusCode::TOO_MANY_REQUESTS);
+    }
 }

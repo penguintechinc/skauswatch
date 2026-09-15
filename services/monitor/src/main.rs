@@ -162,7 +162,21 @@ async fn serve() -> anyhow::Result<()> {
             .nest("/api/v1", api.merge(routes::openapi::router()))
             .with_state(state.clone()),
     );
-    let app: Router<()> = governed.merge(skauswatch_telemetry::health_router(readiness.clone()));
+    // `routes::health::router()` (`GET /health` + `/version`, v1-parity
+    // paths) is merged in here — outside `governed` — same as
+    // `skauswatch_telemetry::health_router` below. First-run microk8s
+    // deploy bug: `/health` used to be part of `routes::router`'s merged
+    // set, so it sat inside `governed` and the tower_governor rate limiter
+    // 429'd it under probe frequency once the burst was exhausted by other
+    // traffic sharing the bucket.
+    let health = routes::health::router();
+    let health_alias = Router::new()
+        .merge(health.clone())
+        .nest("/api/v1", health)
+        .with_state(state.clone());
+    let app: Router<()> = governed
+        .merge(health_alias)
+        .merge(skauswatch_telemetry::health_router(readiness.clone()));
 
     let host = state.config.api.host.clone();
     let port = state.config.api.port;

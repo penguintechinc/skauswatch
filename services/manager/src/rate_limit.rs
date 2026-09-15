@@ -235,4 +235,87 @@ mod tests {
             .await
             .assert_status_ok();
     }
+
+    /// Dev-bypass license state, backed by a lazily-connected pool
+    /// pointed at the real local test Postgres (`make db-test-up`'s
+    /// `postgres://postgres:postgres@localhost:5432/postgres` — same
+    /// credentials `skauswatch-testkit::db` assumes elsewhere in this
+    /// suite). Deliberately NOT `crate::state::AppStateInner::for_tests`
+    /// (whose lazy pool points at the dead `127.0.0.1:1`): `/healthz`'s
+    /// real `SELECT 1` probe against that address only fails after sqlx's
+    /// ~30s `acquire_timeout`, and this test calls `/healthz` twice —
+    /// pointing at a reachable Postgres instead keeps the regression test
+    /// itself fast.
+    #[allow(clippy::panic)] // test-only constructor fails loudly by design
+    fn dev_state() -> crate::state::AppState {
+        let cfg = match penguin_licensing::LicenseConfig::new("skauswatch") {
+            Ok(c) => c,
+            Err(e) => panic!("license config: {e}"),
+        };
+        let license = match penguin_licensing::LicenseClient::new(cfg) {
+            Ok(c) => c,
+            Err(e) => panic!("license client: {e}"),
+        };
+        let db = match sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost:5432/postgres")
+        {
+            Ok(p) => p,
+            Err(e) => panic!("lazy test pool: {e}"),
+        };
+        crate::state::AppStateInner::for_tests_with_db(license, db)
+    }
+
+    /// Regression test for the first-run microk8s deploy bug: `health::
+    /// router` (`/healthz`, `/readyz`, `/version`) used to be merged into
+    /// the same `Router` passed to `apply_global`, so k8s probe traffic (no
+    /// JWT, high frequency) shared the same governed bucket as ordinary API
+    /// traffic and could be 429'd once the global burst was exhausted.
+    /// This reconstructs `main.rs`'s exact assembly — business routes
+    /// governed via `apply` (an artificially tiny burst so the governor is
+    /// provably active), `health::router` merged in separately, unguarded —
+    /// then proves `/healthz` never 429s while `/api/v1/openapi/login.json`
+    /// (a real, unauthenticated, zero-I/O business route — deliberately
+    /// not `/siem/health`, which makes a real `LOGS_URL` network probe and
+    /// would make this test slow/flaky on a DNS-less runner), on the very
+    /// same source IP, does.
+    #[tokio::test]
+    async fn health_router_is_exempt_from_the_rate_limiter_that_governs_business_routes() {
+        let state = dev_state();
+        let api = apply(
+            crate::routes::router(state.clone()),
+            1,
+            Duration::from_secs(60),
+            "test",
+        );
+        let health = crate::health::router(state, skauswatch_telemetry::Readiness::new());
+        let app = Router::new().merge(api).merge(health);
+        let server = axum_test::TestServer::new(app);
+
+        // Two requests from the same source IP — already past the
+        // burst=1 governor limit applied to `/api/v1/openapi/login.json`
+        // below — `/healthz` must never see a 429, with no Authorization
+        // header sent (k8s probes carry none).
+        for _ in 0..2 {
+            let res = server
+                .get("/healthz")
+                .add_header("x-forwarded-for", "203.0.113.50")
+                .await;
+            assert_ne!(res.status_code(), StatusCode::TOO_MANY_REQUESTS);
+        }
+
+        // Sanity: the same source IP genuinely trips the governor on the
+        // governed surface — proving this test would have caught the
+        // original bug rather than passing vacuously. `routes::router`
+        // nests everything under `/api/v1`.
+        server
+            .get("/api/v1/openapi/login.json")
+            .add_header("x-forwarded-for", "203.0.113.50")
+            .await
+            .assert_status_ok();
+        server
+            .get("/api/v1/openapi/login.json")
+            .add_header("x-forwarded-for", "203.0.113.50")
+            .await
+            .assert_status(StatusCode::TOO_MANY_REQUESTS);
+    }
 }

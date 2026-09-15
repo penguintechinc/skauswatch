@@ -24,7 +24,8 @@ pub struct Config {
     pub opensearch_url: String,
     /// Retention window in days (`LOG_RETENTION_DAYS`, validated 1..=400).
     pub log_retention_days: i64,
-    /// HTTP ingest port (`HTTP_PORT`) serving `/ingest` and `/healthz`.
+    /// HTTP ingest port (`HTTP_PORT`) serving `/ingest`, `/healthz`, and
+    /// `/readyz`.
     pub http_port: u16,
 }
 
