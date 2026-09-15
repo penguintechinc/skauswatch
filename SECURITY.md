@@ -1,233 +1,92 @@
 # Security Policy
 
-## Overview
+## Reporting a Vulnerability
 
-SkausWatch takes security seriously. As a security monitoring and alerting system, we understand the critical importance of maintaining the highest security standards in our codebase and operations.
+**Please do not open a public GitHub issue for security vulnerabilities.**
+
+Report privately to **security@penguintech.io**. If you would like to encrypt your
+report, ask in your first message and we will arrange a key exchange.
+
+Please include whatever you have:
+
+- A description of the vulnerability and the component it affects
+- Steps to reproduce, or a proof of concept
+- Your assessment of the impact
+- Any suggested mitigation
+- How you would like to be credited, if at all
+
+### What happens next
+
+| Stage | Target |
+|---|---|
+| Acknowledgement of your report | Within 48 hours |
+| Initial assessment and severity triage | Within 5 business days |
+| Fix developed and tested | Severity-dependent; critical issues take priority over roadmap work |
+| Coordinated disclosure | Timed with you — we will not publish before you are ready |
+| Public advisory and credit | On release of the fix, crediting you unless you prefer otherwise |
+
+We will keep you updated as the report moves through these stages. If you do not
+hear back within 48 hours, please follow up — a missed report is a bug in our
+process and we want to know about it.
 
 ## Supported Versions
 
-We provide security updates for the following versions:
+| Version | Supported |
+|---|---|
+| 2.0.x | :white_check_mark: |
+| < 2.0 | :x: |
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
-| < 0.1   | :x:                |
+Security fixes land on the current release line. The previous minor version
+receives fixes for high and critical severity issues; older lines do not.
 
-## Reporting Security Vulnerabilities
+## Safe Harbour
 
-**Please do not report security vulnerabilities through public GitHub issues.**
+We will not pursue legal action against researchers who act in good faith:
+access only data that is clearly your own or test data, avoid privacy violations
+and service degradation, do not exfiltrate data beyond what is needed to
+demonstrate the issue, and give us reasonable time to fix things before going
+public. Report promptly and we will treat you as a collaborator, not a threat.
 
-Instead, please report security vulnerabilities responsibly through one of the following methods:
+## How SkausWatch Is Built
 
-### Preferred Method: GitHub Security Advisories
+Security controls that are configuration are security controls someone forgets
+to turn on. These are defaults in this codebase:
 
-1. Navigate to the [Security tab](https://github.com/yourusername/SkausWatch/security) of this repository
-2. Click "Report a vulnerability"
-3. Fill out the form with detailed information about the vulnerability
+- **Multi-tenant isolation** — the tenant boundary is enforced at the query layer
+  and evaluated before any other authorization check
+- **OIDC scope-based authorization** — permissions resolve to scopes, never role
+  names; roles are pre-bundled scope sets
+- **Short-lived JWTs** — one-hour default expiry, refresh tokens rotate on every
+  use, and a reused refresh token revokes the whole chain
+- **Service identity** — SPIFFE-ready, accepting mTLS/X.509-SVID; every
+  inter-service call carries a short-lived signed JWT regardless of transport
+- **Encryption in transit and at rest** — TLS 1.2+ minimum, at-rest encryption on
+  every store holding sensitive data, backups included
+- **PII tokenization** — a single identity table; everything else references UUIDs
+- **Input and output validation** — inputs validated server-side, responses scoped
+  to an explicit schema so an endpoint cannot silently over-share
+- **Rootless containers** — rootless runtime and non-root process, both layers
+- **Default-deny networking** — deny-by-default network policy, filtered egress,
+  external access scoped to the port the service actually serves
+- **Pinned dependencies** — every dependency pinned to an immutable, verified
+  reference; no floating tags
+- **Automated scanning** — SAST, DAST, dependency audit, container, IaC, and
+  secrets scanning run in pre-commit and pre-push hooks as well as CI
+- **Enforced coverage** — 90% minimum across lines, branches, functions, and
+  statements; builds fail below it, and reported bugs get a regression test
 
-### Email Method
+## Compliance
 
-Send details to: **security@skauswatch.io**
+SkausWatch is **designed to support** organizations working toward SOC 2, ISO
+27001, NIST CSF, HIPAA, PCI DSS, and GDPR obligations — through audit logging,
+access control, encryption, and data handling built to those expectations.
 
-Include the following information:
-- Description of the vulnerability
-- Steps to reproduce
-- Potential impact
-- Suggested mitigation (if known)
-
-### What to Include
-
-When reporting a security issue, please include:
-
-1. **Description**: A clear description of the vulnerability
-2. **Impact**: What an attacker could achieve
-3. **Reproduction**: Step-by-step instructions to reproduce
-4. **Environment**: Versions, configurations, and environment details
-5. **Evidence**: Screenshots, logs, or proof-of-concept code
-6. **Timeline**: Any urgent timeline considerations
-
-## Security Response Process
-
-### Response Timeline
-
-- **Initial Response**: Within 24 hours
-- **Confirmation**: Within 72 hours
-- **Fix Development**: Depends on severity (see below)
-- **Release**: As soon as safely possible
-
-### Severity Levels
-
-#### Critical (CVSS 9.0-10.0)
-- **Response Time**: Immediate
-- **Fix Timeline**: Within 24-48 hours
-- **Examples**: Remote code execution, data breach, authentication bypass
-
-#### High (CVSS 7.0-8.9)
-- **Response Time**: Within 24 hours
-- **Fix Timeline**: Within 1 week
-- **Examples**: Privilege escalation, sensitive data exposure
-
-#### Medium (CVSS 4.0-6.9)
-- **Response Time**: Within 72 hours
-- **Fix Timeline**: Within 2 weeks
-- **Examples**: Cross-site scripting, information disclosure
-
-#### Low (CVSS 0.1-3.9)
-- **Response Time**: Within 1 week
-- **Fix Timeline**: Next scheduled release
-- **Examples**: Minor information disclosure, DoS with minimal impact
-
-### Response Process
-
-1. **Acknowledgment**: Confirm receipt of the report
-2. **Investigation**: Assess and validate the vulnerability
-3. **Impact Assessment**: Determine severity and affected systems
-4. **Fix Development**: Develop and test the security fix
-5. **Coordinated Disclosure**: Work with reporter on disclosure timeline
-6. **Release**: Deploy the fix and notify users
-7. **Post-Mortem**: Review and improve security processes
-
-## Security Features
-
-### Built-in Security Controls
-
-- **Authentication**: Multi-factor authentication support
-- **Authorization**: Role-based access control (RBAC)
-- **Encryption**: TLS 1.3 for all communications
-- **Certificate Management**: Automated PKI lifecycle management
-- **Audit Logging**: Comprehensive security event logging
-- **Input Validation**: Strict input validation and sanitization
-- **Rate Limiting**: API rate limiting and DDoS protection
-
-### Security Best Practices
-
-#### For Developers
-
-- Use static analysis tools (bandit, semgrep)
-- Follow secure coding guidelines
-- Implement proper input validation
-- Use parameterized queries for database operations
-- Keep dependencies updated
-- Never commit secrets to version control
-
-#### For Operators
-
-- Use strong passwords and enable 2FA
-- Keep systems and dependencies updated
-- Monitor security alerts and logs
-- Use TLS for all communications
-- Implement network segmentation
-- Regular security assessments
-
-## Vulnerability Disclosure Policy
-
-### Coordinated Disclosure
-
-We follow coordinated disclosure practices:
-
-1. **Initial Report**: Reporter submits vulnerability details
-2. **Acknowledgment**: We confirm receipt within 24 hours
-3. **Investigation**: We investigate and validate (up to 14 days)
-4. **Fix Development**: We develop and test fixes
-5. **Disclosure Timeline**: We agree on disclosure timeline with reporter
-6. **Public Disclosure**: We publish security advisory and release fixes
-
-### Disclosure Timeline
-
-- **Standard**: 90 days from initial report
-- **Extensions**: May be granted for complex issues
-- **Emergency**: Immediate disclosure for actively exploited vulnerabilities
-
-### Public Recognition
-
-With the reporter's permission, we will:
-- Credit the reporter in security advisories
-- Mention the reporter in release notes
-- Add the reporter to our security researcher acknowledgments
-
-## Security Contacts
-
-- **Primary**: security@skauswatch.io
-- **Backup**: Use GitHub Security Advisories
-- **GPG Key**: [Link to GPG key for encrypted communications]
-
-## Security Resources
-
-### Internal Resources
-
-- [Security Architecture Documentation](docs/security/architecture.md)
-- [Threat Model](docs/security/threat-model.md)
-- [Security Testing Guide](docs/security/testing.md)
-- [Incident Response Plan](docs/security/incident-response.md)
-
-### External Resources
-
-- [OWASP Top 10](https://owasp.org/www-project-top-ten/)
-- [CWE/SANS Top 25](https://www.sans.org/top25-software-errors/)
-- [NIST Cybersecurity Framework](https://www.nist.gov/cyberframework)
-- [CVSS Calculator](https://www.first.org/cvss/calculator/3.1)
+This is a statement about architecture, not a certification claim. We do not
+assert that this project is certified under any of these frameworks. Where a
+formal attestation is required, contact us and we will tell you honestly what
+does and does not exist today.
 
 ## Security Updates
 
-### Notification Methods
-
-Security updates are communicated through:
-
-1. **GitHub Security Advisories**: Primary method
-2. **Release Notes**: Included in all releases
-3. **Mailing List**: security-announce@skauswatch.com
-4. **Documentation**: Updated security documentation
-
-### Update Recommendations
-
-- **Critical/High**: Update immediately
-- **Medium**: Update within 30 days
-- **Low**: Update at next convenient maintenance window
-
-## Compliance and Standards
-
-### Standards Compliance
-
-SkausWatch aims to comply with:
-
-- **ISO 27001**: Information Security Management
-- **SOC 2 Type II**: Security and availability
-- **NIST Cybersecurity Framework**: Security controls
-- **GDPR**: Data protection and privacy
-
-### Security Certifications
-
-- Regular third-party security assessments
-- Penetration testing (annual)
-- Code security reviews
-- Dependency vulnerability scanning
-
-## Frequently Asked Questions
-
-### Q: What if I accidentally commit a secret?
-
-A: Immediately rotate the secret, remove it from git history, and contact us at security@skauswatch.io.
-
-### Q: How do I report a non-security bug?
-
-A: Use the normal GitHub issue process for non-security related bugs.
-
-### Q: Do you offer bug bounties?
-
-A: Currently, we rely on responsible disclosure. We may implement a bug bounty program in the future.
-
-### Q: How can I help improve security?
-
-A: Contribute to code reviews, security testing, documentation, and follow security best practices.
-
-## Version History
-
-- **v1.0** (2024-12-09): Initial security policy
-- Updates will be tracked here as the policy evolves
-
----
-
-**Last Updated**: December 9, 2024
-**Next Review**: March 9, 2025
-
-For questions about this security policy, contact: security@skauswatch.io
+Advisories are published as GitHub Security Advisories on this repository and
+noted in release notes. Watch this repository's releases to be notified.
