@@ -1,6 +1,6 @@
 //! Feature-flag gate for the monitor business routes. Uses the
 //! `skauswatch.monitor` key from the canonical flag registry
-//! (`services/manager/src/flags.rs::CORE_FLAGS`) — v1 had no feature-flag
+//! (`services/manager/src/flags.rs::MODULE_FLAGS`) — v1 had no feature-flag
 //! concept at all; this is a house-standard addition (`general.md` Feature
 //! Toggling & License Enforcement: "Every feature MUST be behind a
 //! toggle"), not a preserved v1 behavior.
@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use crate::state::AppState;
 
 /// The flag key gating events/alerts/dashboard — kept in sync with
-/// `services/manager/src/flags.rs::CORE_FLAGS`.
+/// `services/manager/src/flags.rs::MODULE_FLAGS`.
 pub const MONITOR_FLAG: &str = "skauswatch.monitor";
 
 /// Returns a 403 response if the flag is off; `None` (proceed) otherwise.

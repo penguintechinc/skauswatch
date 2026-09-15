@@ -37,7 +37,7 @@ const MAX_BATCH: usize = 10_000;
 const DEFAULT_SOURCE: &str = "http";
 /// PostHog flag gating the SIEM ingest surface — default OFF until
 /// validated (see `general.md` Feature Toggling & License Enforcement).
-/// Already declared in `services/manager/src/flags.rs`'s `CORE_FLAGS`
+/// Already declared in `services/manager/src/flags.rs`'s `MODULE_FLAGS`
 /// registry, but was never enforced anywhere in this crate until this pass.
 pub const LOG_INGEST_FLAG: &str = "skauswatch.log-ingest";
 
