@@ -1,0 +1,78 @@
+[package]
+publish = false
+name = "skauswatch-manager"
+description = "SkausWatch manager service — REST /api/v1 + gRPC control plane (Rust port)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "skauswatch-manager"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+bcrypt = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+# HttpOnly `sw_access`/`sw_refresh` + non-HttpOnly `sw_csrf` cookies (H2
+# audit fix — see `src/auth/cookies.rs`).
+cookie = { workspace = true }
+email_address = { workspace = true }
+hmac = { workspace = true }
+jsonwebtoken = { workspace = true }
+md-5 = { workspace = true }
+prost-types = { workspace = true }
+# CSPRNG for the `sw_csrf` double-submit token (`src/auth/cookies.rs`).
+rand_core = { workspace = true }
+sha2 = { workspace = true }
+rustls = { workspace = true }
+sqlx = { workspace = true }
+# "tls-connect-info" gives `tokio_rustls::server::TlsStream<T>` a `Connected`
+# impl (tonic::transport::server::Connected) without pulling in tonic's own
+# rustls crypto-provider features (tls-ring/tls-aws-lc) — the mTLS
+# ServerConfig itself is built by skauswatch-identity, not tonic; see
+# grpc/mod.rs and docs/v2-port/service-auth-model.md §2.
+tonic = { workspace = true, features = ["tls-connect-info"] }
+tokio-rustls = { workspace = true }
+tokio-stream = { workspace = true }
+skauswatch-db = { workspace = true }
+penguin-licensing = { workspace = true, features = ["axum"] }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+skauswatch-auth = { workspace = true }
+skauswatch-common = { workspace = true }
+skauswatch-identity = { workspace = true }
+skauswatch-proto = { workspace = true }
+skauswatch-s3 = { workspace = true }
+skauswatch-spire-entry = { workspace = true }
+skauswatch-streams = { workspace = true }
+skauswatch-telemetry = { workspace = true }
+skauswatch-vault = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tower_governor = { workspace = true }
+tracing = { workspace = true }
+utoipa = { workspace = true, features = ["yaml"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+axum-test = { workspace = true }
+wiremock = { workspace = true }
+# testutil: fake SPIFFE SVID/bundle fixtures for real mTLS handshake
+# integration tests (grpc::serve) without a live SPIRE agent — see
+# crates/skauswatch-identity's testutil module.
+skauswatch-identity = { workspace = true, features = ["testutil"] }
+skauswatch-testkit = { workspace = true }
+
+[lints]
+workspace = true

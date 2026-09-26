@@ -1,0 +1,12 @@
+# buf configuration for the FROZEN v1 wire-compat baseline module.
+#
+# This makes `proto/baseline/` a standalone buf module so CI can run:
+#   buf breaking proto --against proto/baseline
+# File paths inside this module mirror the live module exactly
+# (manager/v1/manager.proto, etc.) so buf's per-file FILE breaking rules
+# match files one-to-one between the live tree and the baseline.
+#
+# DO NOT edit the .proto files in this directory — see README.md.
+version: v2
+modules:
+  - path: .

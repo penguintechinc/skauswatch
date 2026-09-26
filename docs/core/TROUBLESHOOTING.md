@@ -103,32 +103,32 @@ docker-compose logs redis
 ```
 HTTP 503: Service Unavailable
 Deprecation: true
-Link: <https://icebox.example.com/api/v1/certificates>; rel="successor-version"
+Link: <https://vault.example.com/api/v1/certificates>; rel="successor-version"
 ```
 
-**Root cause:** IceBox not running or `$ICEBOX_PKI_URL` not configured
+**Root cause:** Vault not running or `$VAULT_PKI_URL` not configured
 
 **Fix:**
 ```bash
-# 1. Check if ICEBOX_PKI_URL is set
-grep ICEBOX_PKI .env
+# 1. Check if VAULT_PKI_URL is set
+grep VAULT_PKI .env
 
 # 2. If not set, add it
-echo "ICEBOX_PKI_URL=http://icebox:5101" >> .env
-echo "ICEBOX_SSH_CA_URL=http://icebox:5102" >> .env
+echo "VAULT_PKI_URL=http://vault:5101" >> .env
+echo "VAULT_SSHCA_URL=http://vault:5102" >> .env
 
-# 3. Check if IceBox is running
-docker-compose ps icebox
+# 3. Check if Vault is running
+docker-compose ps vault
 
-# 4. If not, start IceBox
-cd .worktrees/icebox/icebox
+# 4. If not, start Vault
+cd .worktrees/vault/vault
 docker-compose up -d
 
-# 5. Test IceBox endpoint
+# 5. Test Vault endpoint
 curl http://localhost:5101/api/v1/health
 
 # 6. Restart PKI/SSH CA shims
-docker-compose restart pki-server ssh-ca
+docker-compose restart pki sshca
 
 # 7. Verify shim proxy working
 curl http://localhost:5001/api/v1/certificates \
@@ -155,10 +155,10 @@ docker-compose restart manager
 ```
 
 **Fix (production):**
-Ensure IceBox has valid CA certificates:
+Ensure Vault has valid CA certificates:
 ```bash
-# Check certificate chain in IceBox
-curl -v http://icebox:5101/api/v1/health 2>&1 | grep "certificate"
+# Check certificate chain in Vault
+curl -v http://vault:5101/api/v1/health 2>&1 | grep "certificate"
 ```
 
 ## 🚀 Worker Issues
@@ -172,7 +172,7 @@ docker-compose exec redis redis-cli XLEN skauswatch:scan-jobs
 # Returns: 42 (growing)
 
 # But no workers processing
-docker-compose logs worker-s3 | grep "consuming"
+docker-compose logs s3scan | grep "consuming"
 # No output
 ```
 
@@ -184,11 +184,11 @@ docker-compose logs worker-s3 | grep "consuming"
 **Fix:**
 ```bash
 # 1. Check Redis connectivity
-docker-compose exec worker-s3 redis-cli -h redis PING
+docker-compose exec s3scan redis-cli -h redis PING
 # Should return: PONG
 
 # 2. View worker logs
-docker-compose logs -f worker-s3
+docker-compose logs -f s3scan
 
 # 3. Check consumer group status
 docker-compose exec redis redis-cli \
@@ -196,10 +196,10 @@ docker-compose exec redis redis-cli \
 
 # 4. If group exists but no consumers, reset it
 docker-compose exec redis redis-cli \
-  XGROUP DESTROY skauswatch:scan-jobs worker-s3-group
+  XGROUP DESTROY skauswatch:scan-jobs s3scan-group
 
 # 5. Restart worker
-docker-compose restart worker-s3
+docker-compose restart s3scan
 
 # 6. Monitor job consumption
 watch -n 1 'docker-compose exec redis redis-cli XLEN skauswatch:scan-jobs'
@@ -209,7 +209,7 @@ watch -n 1 'docker-compose exec redis redis-cli XLEN skauswatch:scan-jobs'
 
 **Symptoms:**
 ```
-docker stats worker-s3
+docker stats s3scan
 # MEMORY: 1.5G → 2.0G (growing)
 
 # Log shows
@@ -219,18 +219,18 @@ OutOfMemory: Cannot allocate memory
 **Fix:**
 ```bash
 # 1. Check worker logs for large operations
-docker-compose logs worker-s3 | tail -100
+docker-compose logs s3scan | tail -100
 
 # 2. Reduce batch size
 echo "WORKER_BATCH_SIZE=1" >> .env
-docker-compose restart worker-s3
+docker-compose restart s3scan
 
 # 3. Reduce S3 workspace size
 echo "S3_WORKSPACE_SIZE_GB=10" >> .env
-docker-compose restart worker-s3
+docker-compose restart s3scan
 
 # 4. Monitor memory
-docker stats worker-s3 --no-stream
+docker stats s3scan --no-stream
 
 # 5. If still failing, check for stuck jobs
 docker-compose exec redis redis-cli XLEN skauswatch:scan-jobs
@@ -240,7 +240,7 @@ docker-compose exec redis redis-cli XLEN skauswatch:scan-jobs
 
 **Symptoms:**
 ```
-docker-compose logs worker-s3 | grep "ClamAV"
+docker-compose logs s3scan | grep "ClamAV"
 # ClamAV definitions outdated (last update: 7 days ago)
 
 # Scan results missing expected malware
@@ -249,18 +249,18 @@ docker-compose logs worker-s3 | grep "ClamAV"
 **Fix:**
 ```bash
 # 1. Manually update ClamAV definitions
-docker-compose exec worker-s3 freshclam
+docker-compose exec s3scan freshclam
 
 # 2. Verify update success
-docker-compose exec worker-s3 clamscan --version
+docker-compose exec s3scan clamscan --version
 # Last db update: ...
 
 # 3. Check ClamAV daemon status
-docker-compose exec worker-s3 clamdscan --ping
+docker-compose exec s3scan clamdscan --ping
 # Should return: OK
 
 # 4. If not working, restart ClamAV
-docker-compose restart worker-s3
+docker-compose restart s3scan
 
 # 5. For persistent updates, add cron job (in Dockerfile)
 # /etc/cron.d/clamav: 0 */3 * * * /usr/bin/freshclam
@@ -472,11 +472,11 @@ S3 scan (1GB) taking 5+ minutes instead of typical 30-60s
 **Fix:**
 ```bash
 # 1. Profile ClamAV performance
-docker-compose exec worker-s3 \
+docker-compose exec s3scan \
   time clamdscan /path/to/file
 
 # 2. Check system resources
-docker stats worker-s3
+docker stats s3scan
 
 # 3. If CPU-bound, increase worker resources
 # In docker-compose.yml:
@@ -484,10 +484,10 @@ docker stats worker-s3
 # mem_limit: 2GB
 
 # 4. Restart worker
-docker-compose restart worker-s3
+docker-compose restart s3scan
 
 # 5. Check network bandwidth
-docker-compose exec worker-s3 iftop
+docker-compose exec s3scan iftop
 ```
 
 ### Problem: "High memory usage after many scans"
@@ -502,16 +502,16 @@ Memory grows from 512MB → 2GB over several hours
 **Fix:**
 ```bash
 # 1. Check for memory leaks
-docker-compose exec worker-s3 python -m memory_profiler worker.py
+docker-compose exec s3scan python -m memory_profiler worker.py
 
 # 2. Force garbage collection
-echo "import gc; gc.collect()" | docker-compose exec -T worker-s3 python
+echo "import gc; gc.collect()" | docker-compose exec -T s3scan python
 
 # 3. Restart worker periodically
-# Add to cron: 0 4 * * * docker-compose restart worker-s3
+# Add to cron: 0 4 * * * docker-compose restart s3scan
 
 # 4. Monitor memory
-docker stats worker-s3 --no-stream
+docker stats s3scan --no-stream
 ```
 
 ## 🆘 Emergency Procedures

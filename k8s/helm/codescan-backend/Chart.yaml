@@ -1,0 +1,14 @@
+apiVersion: v2
+name: skauswatch-codescan-backend
+description: SkausWatch CodeScan AI-code-review backend service
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skauswatch
+  - codescan
+  - rust
+  - api
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io

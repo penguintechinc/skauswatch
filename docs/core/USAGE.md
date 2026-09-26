@@ -162,30 +162,30 @@ curl http://localhost:5000/api/v1/profiles | jq '.[] | select(.name == "my-custo
 
 ### Modify YARA Rules
 
-1. Update rules file: `services/worker-s3/yara_rules/`
+1. Update rules file: `services/s3scan/yara_rules/`
 2. Restart worker:
 ```bash
-docker-compose restart worker-s3
+docker-compose restart s3scan
 ```
 
 ### Test with ClamAV Updates
 
 ```bash
 # Force ClamAV definition update
-docker-compose exec worker-s3 freshclam
+docker-compose exec s3scan freshclam
 
 # Verify signature count
-docker-compose exec worker-s3 clamscan --version
+docker-compose exec s3scan clamscan --version
 ```
 
 ### Adding a New Vulnerability Scanner
 
-1. Create scanner module in `services/worker-scanner/scanners/my_scanner.py`
+1. Create scanner module in `services/scanner/scanners/my_scanner.py`
 2. Implement `Scanner` interface
-3. Add to `worker-scanner/config.py`
+3. Add to `scanner/config.py`
 4. Test:
 ```bash
-cd services/worker-scanner
+cd services/scanner
 pytest tests/unit/test_my_scanner.py -v
 ```
 
@@ -201,7 +201,7 @@ docker-compose logs -f
 docker-compose logs -f manager
 
 # Last 100 lines, follow new entries
-docker-compose logs -f --tail=100 pki-server
+docker-compose logs -f --tail=100 pki
 
 # Search logs
 docker-compose logs manager | grep "ERROR"
@@ -219,7 +219,7 @@ curl http://localhost:5001/api/health
 # SSH CA
 curl http://localhost:5002/api/health
 
-# AAA Monitor
+# Monitor
 curl http://localhost:5003/api/health
 ```
 
@@ -352,27 +352,27 @@ grep "DB_" .env
 
 ```bash
 # Test connectivity
-docker-compose exec manager curl http://pki-server:5001/api/health
-docker-compose exec manager curl http://ssh-ca:5002/api/health
+docker-compose exec manager curl http://pki:5001/api/health
+docker-compose exec manager curl http://sshca:5002/api/health
 
 # Check if services are running
-docker-compose ps pki-server ssh-ca
+docker-compose ps pki sshca
 
 # View logs for errors
-docker-compose logs pki-server ssh-ca
+docker-compose logs pki sshca
 ```
 
 ### Worker jobs not processing
 
 ```bash
 # Check Redis connection
-docker-compose exec worker-s3 redis-cli -h redis ping
+docker-compose exec s3scan redis-cli -h redis ping
 
 # Check job queue
 docker-compose exec redis redis-cli XLEN skauswatch:scan-jobs
 
 # View worker logs
-docker-compose logs -f worker-s3
+docker-compose logs -f s3scan
 ```
 
 ## 📖 Reference Documentation

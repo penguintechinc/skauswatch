@@ -32,21 +32,21 @@ def manager_url() -> str:
 
 
 @pytest.fixture(scope="session")
-def pki_server_url() -> str:
+def pki_url() -> str:
     """PKI Server service base URL."""
-    return os.getenv("PKI_SERVER_URL", "http://localhost:5001")
+    return os.getenv("PKI_URL", "http://localhost:5001")
 
 
 @pytest.fixture(scope="session")
-def ssh_ca_url() -> str:
+def sshca_url() -> str:
     """SSH CA service base URL."""
-    return os.getenv("SSH_CA_URL", "http://localhost:5002")
+    return os.getenv("SSHCA_URL", "http://localhost:5002")
 
 
 @pytest.fixture(scope="session")
-def aaa_monitor_url() -> str:
-    """AAA Monitor service base URL."""
-    return os.getenv("AAA_MONITOR_URL", "http://localhost:5003")
+def monitor_url() -> str:
+    """Monitor service base URL."""
+    return os.getenv("MONITOR_URL", "http://localhost:5003")
 
 
 @pytest.fixture(scope="session")
@@ -87,16 +87,16 @@ def auth_headers(jwt_token: Optional[str]) -> dict:
 @pytest.fixture(scope="session", autouse=True)
 def check_services_available(
     manager_url: str,
-    pki_server_url: str,
-    ssh_ca_url: str,
-    aaa_monitor_url: str,
+    pki_url: str,
+    sshca_url: str,
+    monitor_url: str,
 ) -> dict:
     """Check service availability and skip tests if services are not running."""
     services = {
         "manager": manager_url,
-        "pki_server": pki_server_url,
-        "ssh_ca": ssh_ca_url,
-        "aaa_monitor": aaa_monitor_url,
+        "pki": pki_url,
+        "sshca": sshca_url,
+        "monitor": monitor_url,
     }
 
     available = {}

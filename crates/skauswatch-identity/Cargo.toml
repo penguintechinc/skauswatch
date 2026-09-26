@@ -1,0 +1,41 @@
+[package]
+publish = false
+name = "skauswatch-identity"
+description = "SPIFFE Workload API integration for SVID-based mTLS and federated trust-domain identity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+# Optional: only pulled in for the `testutil` feature (downstream
+# integration tests building fake SPIFFE identities — see src/testutil.rs).
+# Also listed unconditionally under [dev-dependencies] below so this
+# crate's own unit tests build without requiring callers to pass
+# `--features testutil`.
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true }
+skauswatch-auth = { workspace = true }
+spiffe = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+
+[features]
+# Exposes `IdentityProvider::from_svid_for_test`/`degraded_for_test` and the
+# `testutil` fixture module (fake SPIFFE SVIDs/bundles via `rcgen`) to
+# downstream crates, so a service can integration-test real mTLS
+# accept/reject without a live SPIRE agent. Intended for `[dev-dependencies]`
+# only — never enable this for a crate's normal (non-test) build.
+testutil = ["dep:rcgen"]
+
+[lints]
+workspace = true

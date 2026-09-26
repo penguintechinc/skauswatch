@@ -1,0 +1,53 @@
+# PrometheusRule -- release-audit finding (gh-150, 0 PrometheusRule objects
+# existed). services/pki/src has no custom counter!/histogram!/gauge!
+# metrics as of this pass (grep-verified) -- only the bare Prometheus
+# exporter mount (skauswatch_telemetry::install_metrics_exporter). No
+# error/failure-rate alert is added below since there is no real metric to
+# alert on yet.
+#
+# `job` is assumed to equal the underlying Service's name (Prometheus
+# Operator's default ServiceMonitor behavior when `jobLabel` isn't set) --
+# see templates/servicemonitor.yaml, whose target Service is this chart's
+# fullname.
+#
+# NOTE on the backtick-wrapped double-brace sequences below: Prometheus's
+# own alert annotation templating uses the same double-brace delimiter as
+# Helm/Go templates. Wrapping each one in a raw Go-template string (single
+# backticks) is the standard Helm escape so `$labels` survives `helm
+# template` untouched and is evaluated by Prometheus at alert-fire time.
+#
+# Requires the Prometheus Operator CRDs (monitoring.coreos.com/v1)
+# installed in-cluster -- disable prometheusRule.enabled if not.
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "skauswatch-pki.fullname" . }}
+  labels:
+    {{- include "skauswatch-pki.labels" . | nindent 4 }}
+    {{- if .Values.monitoring.releaseLabel }}
+    release: {{ .Values.monitoring.releaseLabel | quote }}
+    {{- end }}
+    {{- with .Values.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  groups:
+    - name: skauswatch-pki.rules
+      rules:
+        - alert: PkiTargetDown
+          expr: absent(up{job="{{ include "skauswatch-pki.fullname" . }}"}) or up{job="{{ include "skauswatch-pki.fullname" . }}"} == 0
+          for: {{ .Values.prometheusRule.targetDownFor | quote }}
+          labels:
+            severity: critical
+          annotations:
+            summary: "pki is not being scraped by Prometheus"
+            description: >-
+              No successful scrape of pki's :9090 metrics endpoint on
+              pod {{`{{ $labels.pod }}`}} (namespace
+              {{`{{ $labels.namespace }}`}}) for at least
+              {{ .Values.prometheusRule.targetDownFor }} -- the pod is down,
+              crash-looping, or the ServiceMonitor/Service selector no
+              longer matches.
+{{- end }}

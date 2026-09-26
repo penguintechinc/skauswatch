@@ -1,141 +1,81 @@
-# Multi-stage build for SkausWatch Manager Service
-# Stage 1: Build stage
-FROM python:3.13-slim-bookworm as builder
+# syntax=docker/dockerfile:1.7
+#
+# skauswatch-manager — REST /api/v1 + gRPC control-plane server.
+# Multi-stage: compiled against the full workspace in a Rust builder image,
+# shipped as a single static-ish binary in a minimal non-root Debian runtime.
+#
+# Workspace build — context MUST be the repo root:
+#   docker build -f services/manager/Dockerfile -t <tag> .
 
-# Set build arguments
-ARG BUILD_DATE
-ARG VERSION
-ARG VCS_REF
+FROM rust:1.97-slim-bookworm@sha256:99e09cb2284e2ddbb73a995deee3e91783fd04d177602ccf6eab326d778ee777 AS builder
 
-# Add metadata
-LABEL org.label-schema.build-date=$BUILD_DATE \
-      org.label-schema.name="SkausWatch Manager" \
-      org.label-schema.description="SkausWatch Manager Service - Main orchestration service" \
-      org.label-schema.version=$VERSION \
-      org.label-schema.vcs-ref=$VCS_REF \
-      org.label-schema.schema-version="1.0" \
-      maintainer="SkausWatch Team <support@skauswatch.io>"
-
-# Install system dependencies for building
+# aws-lc-sys (rustls' default crypto provider, pulled in transitively by
+# reqwest/sqlx-tls everywhere in the workspace) needs cmake + a C/C++
+# compiler + perl for its assembly codegen, plus libclang for bindgen. git is
+# needed for the penguin-licensing workspace dependency (pinned git rev).
+# protox (proto codegen) and yara-x are pure Rust — no protoc/libyara needed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    gcc \
-    g++ \
-    pkg-config \
-    libffi-dev \
-    libssl-dev \
+        cmake \
+        clang \
+        libclang-dev \
+        perl \
+        pkg-config \
+        g++ \
+        make \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
-# Create virtual environment
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+WORKDIR /build
 
-# Upgrade pip and install build tools
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+# Full workspace manifests + source. Every service path-depends on
+# crates/skauswatch-*, so cargo needs real source (not stub files) to resolve
+# the workspace at all — a manifests-only pre-copy layer doesn't buy anything
+# here. Real incremental-build caching comes from the BuildKit cache mounts
+# below (registry + target dir), which persist independently of whether this
+# COPY layer's hash changes.
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY services/ services/
+COPY proto/ proto/
 
-# Copy dependency files
-COPY pyproject.toml requirements-dev.txt ./
+# rust-toolchain.toml (repo root) pins rustup channel "1.97.0" exactly, but
+# this builder image ships rustc 1.97.1 directly — the base image digest
+# above *is* the toolchain pin. Deliberately not copied into the build
+# context: doing so makes the rustup shim re-download 1.97.0 over the
+# network on every build, which both defeats the point of pinning the base
+# image by digest and makes the build non-hermetic.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=skauswatch-cargo-registry,sharing=locked \
+    --mount=type=cache,target=/build/target,id=skauswatch-cargo-target-manager,sharing=locked \
+    cargo build --release --locked -p skauswatch-manager \
+    && cp target/release/skauswatch-manager /tmp/skauswatch-manager
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -e .[dev] && \
-    pip install --no-cache-dir -r requirements-dev.txt
+# --- Runtime -----------------------------------------------------------
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
-# Stage 2: Runtime stage
-FROM python:3.13-slim-bookworm as runtime
+ARG VERSION=0.0.0-dev
+LABEL org.opencontainers.image.title="skauswatch-manager" \
+      org.opencontainers.image.description="SkausWatch manager service — REST /api/v1 + gRPC control plane (Rust port)" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.vendor="Penguin Tech Inc" \
+      org.opencontainers.image.source="https://github.com/penguintechinc/skauswatch" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
 
-# Set runtime arguments
-ARG BUILD_DATE
-ARG VERSION
-ARG VCS_REF
-
-# Add metadata
-LABEL org.label-schema.build-date=$BUILD_DATE \
-      org.label-schema.name="SkausWatch Manager" \
-      org.label-schema.description="SkausWatch Manager Service - Main orchestration service" \
-      org.label-schema.version=$VERSION \
-      org.label-schema.vcs-ref=$VCS_REF \
-      org.label-schema.schema-version="1.0" \
-      maintainer="SkausWatch Team <support@skauswatch.io>"
-
-# Install runtime system dependencies
+# ca-certificates: TLS roots for outbound reqwest/sqlx-tls/AWS SDK calls.
+# rustls only (workspace deny.toml bans openssl-sys) — nothing else needed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    netcat-traditional \
+        ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --no-create-home --shell /usr/sbin/nologin appuser
 
-# Create non-root user for security
-RUN groupadd -r skauswatch && \
-    useradd -r -g skauswatch -d /app -s /bin/bash skauswatch
+COPY --from=builder --chown=appuser:appuser /tmp/skauswatch-manager /usr/local/bin/skauswatch-manager
 
-# Create application directories
-RUN mkdir -p /app/logs /app/certs /app/keys /app/data && \
-    chown -R skauswatch:skauswatch /app
+USER appuser
 
-# Copy virtual environment from builder stage
-COPY --from=builder --chown=skauswatch:skauswatch /opt/venv /opt/venv
+# REST /api/v1 (API_PORT, default 5000) + gRPC control plane (GRPC_PORT, default 50051)
+EXPOSE 5000 50051
 
-# Set environment variables
-ENV PATH="/opt/venv/bin:$PATH" \
-    PYTHONPATH="/app" \
-    PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    SERVICE_NAME="manager" \
-    SERVICE_PORT="8000" \
-    LOG_LEVEL="INFO" \
-    ENVIRONMENT="production"
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["skauswatch-manager", "healthcheck"]
 
-# Switch to non-root user
-USER skauswatch
-
-# Set working directory
-WORKDIR /app
-
-# Copy application code with proper ownership
-COPY --chown=skauswatch:skauswatch . .
-
-# Create entrypoint script
-RUN echo '#!/bin/bash\n\
-set -e\n\
-\n\
-# Wait for dependencies\n\
-echo "Waiting for database..."\n\
-while ! nc -z ${DATABASE_HOST:-postgres} ${DATABASE_PORT:-5432}; do\n\
-  sleep 1\n\
-done\n\
-echo "Database is ready!"\n\
-\n\
-echo "Waiting for Redis..."\n\
-while ! nc -z ${REDIS_HOST:-redis} ${REDIS_PORT:-6379}; do\n\
-  sleep 1\n\
-done\n\
-echo "Redis is ready!"\n\
-\n\
-# Run database migrations\n\
-if [ "$ENVIRONMENT" != "development" ]; then\n\
-  echo "Running database migrations..."\n\
-  python -m alembic upgrade head\n\
-fi\n\
-\n\
-# Start the application\n\
-echo "Starting SkausWatch Manager Service on port $SERVICE_PORT..."\n\
-exec uvicorn skauswatch.services.manager.main:app \\\n\
-  --host 0.0.0.0 \\\n\
-  --port $SERVICE_PORT \\\n\
-  --log-level ${LOG_LEVEL,,} \\\n\
-  --access-log \\\n\
-  --use-colors false\n\
-' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD curl -f http://localhost:$SERVICE_PORT/health || exit 1
-
-# Expose port
-EXPOSE $SERVICE_PORT
-
-# Set entrypoint
-ENTRYPOINT ["/app/entrypoint.sh"]
+ENTRYPOINT ["skauswatch-manager"]

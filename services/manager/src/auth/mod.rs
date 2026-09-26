@@ -1,0 +1,1100 @@
+//! Authentication: bcrypt password hashes, ES256 access tokens in the house
+//! `skauswatch_auth::Claims` shape (`sub/iss/aud/iat/exp/scope/tenant/teams/
+//! roles` — see `security.md` Authentication & Authorization), and the
+//! `CurrentUser` extractor that mirrors v1's `@auth_required`. This service
+//! is the workspace's sole issuer: it holds `JWT_SIGNING_KEY` (private) as
+//! well as `JWT_VERIFY_KEY` (public, `AuthSettings::jwt_verify_key`); every
+//! other service holds only the verify key (audit finding H1b).
+//!
+//! Tenancy retrofit (docs/v2-port/tenancy-model.md): the access token used to
+//! be the exact v1 shape (`{sub, role, type, exp, iat}`) — that is now
+//! replaced by the shared `Claims` model so every access token carries a
+//! `tenant` claim, per the hard tenant-isolation boundary in `security.md`.
+//! This is a deliberate wire-contract break; `docs/v2-port/tenancy-model.md`
+//! §8 records the confirmation that no in-repo client (webui, ENDPOINT
+//! agents) decodes JWT claims directly — both only read the JSON response
+//! *bodies* of `/auth/login`/`/auth/me` (unchanged shapes), never the token
+//! payload, so this is safe. Refresh tokens keep their own minimal
+//! `RefreshClaims` shape unchanged: they carry no `tenant` claim at all —
+//! rotation reads `tenant_id` straight off the `refresh_tokens` row instead
+//! (denormalized from `users` at issuance), never re-deriving it from a
+//! second `users` join. `ServiceClaims` (pki/sshca/this service's own gRPC
+//! surface) is a separate, tenant-free machine-token shape and is untouched
+//! by this change — see `skauswatch_auth::ServiceClaims` docs.
+
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
+use chrono::Utc;
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use skauswatch_auth::Claims;
+
+use crate::error::ApiError;
+use crate::state::AppState;
+
+pub(crate) mod cookies;
+
+/// Issuer/audience stamped on every access token this service mints —
+/// matches the fixture values already established elsewhere in the
+/// workspace for `skauswatch_auth::Claims` (e.g. `services/monitor`).
+const CLAIMS_ISSUER: &str = "https://auth.skauswatch.app";
+const CLAIMS_AUDIENCE: &str = "skauswatch";
+
+/// Fixed, reproducible bootstrap tenant seeded by
+/// `migrations/0002_tenancy.sql` — literal value must match the migration's
+/// seed row exactly. Self-service `/auth/register` has no admin/inviter
+/// context to derive a tenant from, so new registrants are attached here
+/// (v2.0 decision: admin-provisioned tenants, single default tenant — see
+/// docs/v2-port/tenancy-model.md §8; self-serve multi-tenant signup is a
+/// v2.1 backlog item).
+pub(crate) const DEFAULT_TENANT_ID: &str = "00000000-0000-0000-0000-000000000001";
+
+/// Parses [`DEFAULT_TENANT_ID`] into a `Uuid`. The constant is a hardcoded,
+/// compile-time-known literal — not user input, never fallible in practice
+/// — so a parse failure here can only mean the literal itself was typo'd;
+/// panicking immediately at the call site is preferable to threading a
+/// spurious `Result` for an error that can never occur at runtime.
+#[allow(clippy::panic)]
+pub(crate) fn default_tenant_uuid() -> uuid::Uuid {
+    DEFAULT_TENANT_ID
+        .parse()
+        .unwrap_or_else(|e| panic!("DEFAULT_TENANT_ID is not a valid UUID literal: {e}"))
+}
+
+/// Expands a role name into the house OIDC scope bundle it corresponds to
+/// (`security.md` "Scope bundles"). `users.role` remains the authoritative
+/// permission model — every route handler's authz gate
+/// (`CurrentUser::require_scope`/`has_scope`) resolves this bundle from the
+/// DB-authoritative `role` column on every call, never from a token's own
+/// (possibly stale) `scope` claim; `scope` is also populated on the minted
+/// JWT so any other consumer that authorizes on
+/// `skauswatch_auth::Claims::has_scope` sees the same bundle. Unknown roles
+/// get no scope at all — fail closed, never a guessed bundle.
+///
+/// `super_admin` and `maintainer` both carry scopes with no `*:<action>`
+/// counterpart in `admin`'s bundle (`tenants:root`/`spire:root`,
+/// `codescan:review`) — this is deliberate, not an oversight: it preserves
+/// two pre-existing role-string quirks byte-for-byte across the
+/// role-string → scope mechanism swap (`docs/v2-port/`; see call sites in
+/// `routes::tenants`/`routes::admin` and `routes::codescan::create_review`):
+/// `super_admin` is disjoint from `admin` (a `super_admin`-role user does
+/// NOT also pass `admin`-gated endpoints), and `routes::codescan::
+/// create_review` admits ONLY the `maintainer` role, admin included.
+pub(crate) fn role_scope_bundle(role: &str) -> &'static str {
+    match role {
+        "admin" => "*:read *:write *:admin *:delete settings:write users:admin",
+        "maintainer" => "*:read *:write teams:read reports:read analytics:read codescan:review",
+        "viewer" => "*:read",
+        // Manager-internal, DB-only role (never settable via the public
+        // users API — see `routes/users.rs::ROLES`), gating exactly four
+        // operational endpoints (`routes::tenants::create_tenant`/
+        // `create_enrollment_token`, `routes::admin::get_svid_ttl`/
+        // `update_svid_ttl`) via the `tenants:root`/`spire:root` scopes
+        // below — literals chosen so no `admin` wildcard (`*:read`/
+        // `*:write`/`*:admin`/`*:delete`) accidentally satisfies them.
+        "super_admin" => "tenants:root spire:root",
+        _ => "",
+    }
+}
+
+/// Refresh-token claims — v1 shape (`sub`/`type`/`exp`/`iat`) plus a `jti`
+/// nonce. Bug found via real-DB testing (`docs/v2-port/testing-pattern.md`):
+/// v1's Python `datetime.utcnow().timestamp()` carries microsecond
+/// precision, but the Rust port's `Utc::now().timestamp()` truncates to
+/// whole seconds — so two refresh tokens minted for the same user within
+/// the same wall-clock second (e.g. login immediately followed by refresh,
+/// or two concurrent refreshes) become byte-identical JWTs. Since
+/// `refresh_tokens.token_hash` is `UNIQUE` (schema authority:
+/// `tests/parity/seed_v2.sql`), the second `INSERT` in `issue_token_pair`
+/// then fails with a constraint violation, surfacing as a 500 on an
+/// otherwise-valid request. `jti` is a fresh UUID per issuance, guaranteeing
+/// `token_hash` uniqueness regardless of timing; it is never validated on
+/// decode (`#[serde(default)]`), so it changes nothing about the v1 wire
+/// contract — no client ever inspects individual JWT claims, only the
+/// opaque `access_token`/`refresh_token` strings in the HTTP response body.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RefreshClaims {
+    /// String-encoded user id.
+    pub sub: String,
+    /// Token type discriminator: `refresh`.
+    #[serde(rename = "type")]
+    pub token_type: String,
+    /// Expiry (epoch seconds).
+    pub exp: i64,
+    /// Issued-at (epoch seconds).
+    pub iat: i64,
+    /// Per-issuance random nonce — see struct docs.
+    #[serde(default)]
+    pub jti: String,
+}
+
+/// Issues an access token in the house `skauswatch_auth::Claims` shape.
+/// `tenant` must be a stringified tenant UUID (see `DEFAULT_TENANT_ID`,
+/// or a caller's own `CurrentUser::tenant_id`/`users.tenant_id` row) — never
+/// empty, since every downstream consumer (this service's own
+/// `tenant_middleware`/`CurrentUser`, and any future service that adopts
+/// the shared `Claims` model) rejects a token with no usable tenant claim.
+pub fn create_access_token(
+    user_id: i32,
+    role: &str,
+    tenant: &str,
+    signing_key: &EncodingKey,
+    expires_minutes: i64,
+) -> Result<String, ApiError> {
+    let now = Utc::now().timestamp();
+    let claims = Claims {
+        sub: user_id.to_string(),
+        iss: CLAIMS_ISSUER.to_owned(),
+        aud: CLAIMS_AUDIENCE.to_owned(),
+        iat: now,
+        exp: now + expires_minutes * 60,
+        scope: role_scope_bundle(role).to_owned(),
+        tenant: tenant.to_owned(),
+        teams: vec![],
+        roles: vec![role.to_owned()],
+    };
+    jsonwebtoken::encode(&Header::new(Algorithm::ES256), &claims, signing_key)
+        .map_err(|e| ApiError::internal("jwt encode", e))
+}
+
+/// Issues a v1-shape refresh token. Intra-service only (mint AND verify
+/// both happen inside this service — never presented to another service),
+/// but still ES256-signed with the same `JWT_SIGNING_KEY`/`JWT_VERIFY_KEY`
+/// keypair rather than a separate symmetric secret: the workspace-wide
+/// `JWT_SECRET_KEY` env var is retired entirely (audit finding H1b, hard
+/// cutover), and introducing a second dedicated secret just for refresh
+/// tokens would be new scope this migration doesn't need.
+pub fn create_refresh_token(
+    user_id: i32,
+    signing_key: &EncodingKey,
+    expires_days: i64,
+) -> Result<String, ApiError> {
+    let now = Utc::now().timestamp();
+    let claims = RefreshClaims {
+        sub: user_id.to_string(),
+        token_type: "refresh".to_owned(),
+        exp: now + expires_days * 86_400,
+        iat: now,
+        jti: uuid::Uuid::new_v4().to_string(),
+    };
+    jsonwebtoken::encode(&Header::new(Algorithm::ES256), &claims, signing_key)
+        .map_err(|e| ApiError::internal("jwt encode", e))
+}
+
+/// Decodes signature/exp into raw claims. Error strings are caller-supplied
+/// because v1 words them per flow ("Token expired" vs "Refresh token
+/// expired", ...); the type check happens after, exactly like v1's
+/// jwt.decode-then-`payload.get("type")` ordering. Used by [`decode_refresh`]
+/// only — [`decode_access`] uses `skauswatch_auth::decode_claims` instead,
+/// since the access token has moved to the shared `Claims` shape.
+fn decode_generic_claims(
+    token: &str,
+    verify_key: &DecodingKey,
+    expired_msg: &str,
+    invalid_msg: &str,
+) -> Result<serde_json::Value, ApiError> {
+    let mut validation = Validation::new(Algorithm::ES256);
+    validation.validate_exp = true;
+    validation.required_spec_claims.clear();
+    jsonwebtoken::decode::<serde_json::Value>(token, verify_key, &validation)
+        .map(|data| data.claims)
+        .map_err(|e| match e.kind() {
+            jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
+                ApiError::Unauthorized(expired_msg.to_owned())
+            }
+            _ => ApiError::Unauthorized(invalid_msg.to_owned()),
+        })
+}
+
+/// Decodes and tenant-validates an access token: ES256 signature, expiry,
+/// and a non-empty `tenant` claim — the same tenant-isolation boundary
+/// `skauswatch_auth::tenant_middleware` enforces at the router layer,
+/// enforced again here so `CurrentUser` fails closed even for a handler
+/// reached through a router that (for whatever reason, e.g. a per-module
+/// test router) never mounted the outer middleware. "Token expired"/
+/// "Invalid token" wording matches v1's `auth_required` messages.
+pub fn decode_access(token: &str, verify_key: &DecodingKey) -> Result<Claims, ApiError> {
+    let claims = skauswatch_auth::decode_claims(token, verify_key).map_err(|e| match e {
+        skauswatch_auth::TenantAuthError::Expired => {
+            ApiError::Unauthorized("Token expired".to_owned())
+        }
+        _ => ApiError::Unauthorized("Invalid token".to_owned()),
+    })?;
+    claims
+        .require_tenant()
+        .map_err(|_| ApiError::Forbidden("missing or empty tenant claim".to_owned()))?;
+    Ok(claims)
+}
+
+/// Decodes and type-checks a refresh token (v1 `/auth/refresh` strings).
+pub fn decode_refresh(token: &str, verify_key: &DecodingKey) -> Result<RefreshClaims, ApiError> {
+    let claims = decode_generic_claims(
+        token,
+        verify_key,
+        "Refresh token expired",
+        "Invalid refresh token",
+    )?;
+    if claims.get("type").and_then(|t| t.as_str()) != Some("refresh") {
+        return Err(ApiError::Unauthorized("Invalid token type".to_owned()));
+    }
+    serde_json::from_value(claims)
+        .map_err(|_| ApiError::Unauthorized("Invalid refresh token".to_owned()))
+}
+
+/// bcrypt hash (v1 parity: bcrypt.hashpw with default cost).
+pub fn hash_password(password: &str) -> Result<String, ApiError> {
+    bcrypt::hash(password, bcrypt::DEFAULT_COST).map_err(|e| ApiError::internal("bcrypt", e))
+}
+
+/// bcrypt verify.
+pub fn verify_password(password: &str, hash: &str) -> bool {
+    bcrypt::verify(password, hash).unwrap_or(false)
+}
+
+/// sha256 hex of a refresh JWT — the stored `refresh_tokens.token_hash`.
+pub fn token_hash(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Marker inserted into request extensions by [`cookie_auth_bridge`] when it
+/// promotes the `sw_access` cookie into a synthesized `Authorization:
+/// Bearer` header. [`CurrentUser`] checks for this so it can still tell a
+/// promoted cookie-authed request apart from a genuine client-supplied
+/// Bearer header even after the header has been overwritten — the
+/// distinction CSRF enforcement depends on (H2 audit fix; see
+/// [`CurrentUser::from_request_parts`]).
+#[derive(Clone, Copy)]
+pub(crate) struct PromotedFromCookie;
+
+/// Outermost layer of this service's protected route tier (mounted in
+/// `routes::mod`, layered OUTSIDE `skauswatch_auth::tenant_middleware`).
+/// That shared crate is used by five services and only understands
+/// `Authorization: Bearer` — it has no concept of the `sw_access` cookie
+/// only this service issues. Rather than teach the shared crate about a
+/// cookie only one of its consumers sets, this bridge promotes `sw_access`
+/// into a synthesized Bearer header before `tenant_middleware` ever sees
+/// the request, so that layer's existing header-only check keeps working
+/// unmodified for every service, cookie-aware or not.
+///
+/// Does nothing when a real `Authorization` header is already present
+/// (header takes precedence, matching [`CurrentUser`]'s own rule) or when
+/// there's no usable `sw_access` cookie either — falls through to
+/// `tenant_middleware`'s existing 401 in that case, same as today.
+pub(crate) async fn cookie_auth_bridge(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let has_bearer = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("Bearer "));
+
+    if !has_bearer
+        && let Some(token) = cookies::cookie_value(request.headers(), cookies::ACCESS_COOKIE)
+        && let Ok(value) = axum::http::HeaderValue::from_str(&format!("Bearer {token}"))
+    {
+        request
+            .headers_mut()
+            .insert(axum::http::header::AUTHORIZATION, value);
+        request.extensions_mut().insert(PromotedFromCookie);
+    }
+
+    next.run(request).await
+}
+
+/// Where a resolved access token came from — determines whether CSRF
+/// double-submit validation applies to a mutating request (`security.md`:
+/// browsers never auto-attach `Authorization`, so a Bearer header isn't a
+/// CSRF vector; a cookie is).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenOrigin {
+    /// A real `Authorization: Bearer` header — CLI, mobile, service-to-
+    /// service, and the golden parity harness.
+    Bearer,
+    /// The `sw_access` cookie, either read directly (per-module test
+    /// routers that never mount [`cookie_auth_bridge`]) or via the
+    /// bridge's promoted header ([`PromotedFromCookie`] marker present).
+    Cookie,
+}
+
+/// Resolves the caller's access token: a real `Authorization: Bearer`
+/// header takes precedence; otherwise the `sw_access` cookie. Deliberately
+/// re-checks the cookie directly here (not solely relying on
+/// [`cookie_auth_bridge`]'s promotion) so this extractor works standalone
+/// against the many per-module test routers in this service that never
+/// mount the full app's middleware stack — the same reasoning
+/// [`CurrentUser::from_request_parts`]'s tenant re-check already documents.
+fn resolve_token(parts: &Parts) -> Option<(String, TokenOrigin)> {
+    if parts.extensions.get::<PromotedFromCookie>().is_none()
+        && let Some(header) = parts
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+        && let Some(token) = header.strip_prefix("Bearer ")
+    {
+        return Some((token.to_owned(), TokenOrigin::Bearer));
+    }
+    cookies::cookie_value(&parts.headers, cookies::ACCESS_COOKIE).map(|t| (t, TokenOrigin::Cookie))
+}
+
+/// The authenticated user, mirroring v1 `g.current_user`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CurrentUser {
+    /// User id.
+    pub id: i32,
+    /// Email address.
+    pub email: String,
+    /// Display name.
+    pub full_name: Option<String>,
+    /// Role (admin/maintainer/viewer/super_admin).
+    pub role: String,
+    /// Active flag.
+    pub is_active: bool,
+    /// MFA enabled flag.
+    pub mfa_enabled: bool,
+    /// Creation timestamp (RFC3339).
+    pub created_at: Option<String>,
+    /// The caller's tenant, read from `users.tenant_id` (the DB row, not
+    /// the JWT claim — same convention `role` already followed before this
+    /// field existed: the token authenticates identity, the database row is
+    /// the authoritative source for everything else). Every tenant-scoped
+    /// query/insert a handler issues must filter/stamp on this, never on a
+    /// client-supplied value — see docs/v2-port/tenancy-model.md §4.
+    pub tenant_id: uuid::Uuid,
+}
+
+impl CurrentUser {
+    /// v1 `role_required` equivalent: 403 unless role is in `roles`.
+    /// Superseded by [`CurrentUser::require_scope`] as the mechanism every
+    /// route handler's authz gate actually uses (`security.md` OIDC Claims
+    /// & Scopes: "middleware checks scopes only, never role names") — kept
+    /// as a thin, still-tested wrapper for any future caller that
+    /// genuinely needs a literal-role gate rather than a scope one.
+    #[allow(dead_code)] // no production caller since the scope-authz migration; direct-tested below
+    pub fn require_role(&self, roles: &[&str]) -> Result<(), ApiError> {
+        if roles.contains(&self.role.as_str()) {
+            Ok(())
+        } else {
+            Err(ApiError::Forbidden("Insufficient permissions".to_owned()))
+        }
+    }
+
+    /// Builds a transient `skauswatch_auth::Claims` view of this user for
+    /// scope checks. Scope is resolved from the DB-authoritative `role`
+    /// column (via [`role_scope_bundle`]) on every call — never from a
+    /// bearer token's own `scope` claim, which could be stale relative to
+    /// a role change made after the token was minted (same "DB row is
+    /// authoritative" contract `role`/`tenant_id` already follow — see
+    /// [`CurrentUser`] struct docs). Only `.scope` is read by
+    /// [`skauswatch_auth::Claims::has_scope`]/`require_scope`; the other
+    /// fields are unused placeholders, not re-verified here.
+    fn scope_claims(&self) -> Claims {
+        Claims {
+            sub: self.id.to_string(),
+            iss: CLAIMS_ISSUER.to_owned(),
+            aud: CLAIMS_AUDIENCE.to_owned(),
+            iat: 0,
+            exp: 0,
+            scope: role_scope_bundle(&self.role).to_owned(),
+            tenant: self.tenant_id.to_string(),
+            teams: vec![],
+            roles: vec![self.role.clone()],
+        }
+    }
+
+    /// Scope-based authorization check (`security.md` OIDC Claims &
+    /// Scopes) — the mechanism every route handler's authz gate uses in
+    /// place of [`CurrentUser::require_role`]. Wildcards on the resource
+    /// segment are honored (`*:read` satisfies `alerts:read`) per
+    /// [`skauswatch_auth::Claims::has_scope`].
+    pub fn has_scope(&self, required: &str) -> bool {
+        self.scope_claims().has_scope(required)
+    }
+
+    /// Enforces a required scope, 403 "Insufficient permissions" on
+    /// absence — same response shape [`CurrentUser::require_role`] always
+    /// returned, so this is a pure mechanism swap for every existing
+    /// caller (role-string branching → scope branching), never a policy
+    /// change.
+    pub fn require_scope(&self, required: &str) -> Result<(), ApiError> {
+        if self.has_scope(required) {
+            Ok(())
+        } else {
+            Err(ApiError::Forbidden("Insufficient permissions".to_owned()))
+        }
+    }
+}
+
+impl FromRequestParts<AppState> for CurrentUser {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+        // v1 uses one message for both missing and non-Bearer headers.
+        const HEADER_MSG: &str = "Missing or invalid authorization header";
+        // H2 audit fix: the token source is now `Authorization: Bearer` OR
+        // the `sw_access` cookie (header takes precedence) — see
+        // `resolve_token`/`TokenOrigin`. A cookie-sourced token additionally
+        // must clear CSRF double-submit validation on mutating methods;
+        // `Bearer` bypasses it entirely (browsers never auto-attach
+        // `Authorization`, so it can't be a CSRF vector — this is what
+        // keeps CLI/mobile/the golden parity harness's write endpoints
+        // working unchanged).
+        let (token, origin) =
+            resolve_token(parts).ok_or_else(|| ApiError::Unauthorized(HEADER_MSG.to_owned()))?;
+        if origin == TokenOrigin::Cookie && cookies::is_mutating(&parts.method) {
+            cookies::verify_csrf(&parts.headers)?;
+        }
+        let claims = decode_access(&token, &state.auth.jwt_verify_key)?;
+        let user_id: i32 = claims
+            .sub
+            .parse()
+            .map_err(|_| ApiError::Unauthorized("Invalid token".to_owned()))?;
+
+        let row = sqlx::query_as::<_, UserRow>(
+            "SELECT id, email, full_name, role, is_active, mfa_enabled, created_at::text, \
+                    tenant_id \
+             FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| ApiError::Unauthorized("User not found or inactive".to_owned()))?;
+
+        if !row.is_active {
+            return Err(ApiError::Unauthorized(
+                "User not found or inactive".to_owned(),
+            ));
+        }
+        Ok(row.into())
+    }
+}
+
+/// sqlx row mapping for the users table subset the extractor needs.
+#[derive(sqlx::FromRow)]
+pub struct UserRow {
+    /// User id.
+    pub id: i32,
+    /// Email.
+    pub email: String,
+    /// Display name.
+    pub full_name: Option<String>,
+    /// Role.
+    pub role: String,
+    /// Active flag.
+    pub is_active: bool,
+    /// MFA flag.
+    pub mfa_enabled: bool,
+    /// Creation timestamp as text.
+    pub created_at: Option<String>,
+    /// Tenant — authoritative source for `CurrentUser::tenant_id`.
+    pub tenant_id: uuid::Uuid,
+}
+
+impl From<UserRow> for CurrentUser {
+    fn from(r: UserRow) -> Self {
+        Self {
+            id: r.id,
+            email: r.email,
+            full_name: r.full_name,
+            role: r.role,
+            is_active: r.is_active,
+            mfa_enabled: r.mfa_enabled,
+            created_at: r.created_at,
+            tenant_id: r.tenant_id,
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::*;
+
+    /// Throwaway ES256 fixture keypair shared with every other service's
+    /// tests — see `crates/skauswatch-testkit::jwt` docs.
+    fn signing() -> &'static jsonwebtoken::EncodingKey {
+        skauswatch_testkit::jwt::signing_key()
+    }
+    fn verify() -> &'static jsonwebtoken::DecodingKey {
+        skauswatch_testkit::jwt::verify_key()
+    }
+
+    #[test]
+    fn access_token_roundtrips_with_tenant_and_scope() {
+        let token = match create_access_token(42, "admin", "tenant-a", signing(), 30) {
+            Ok(t) => t,
+            Err(e) => panic!("encode: {e:?}"),
+        };
+        let claims = match decode_access(&token, verify()) {
+            Ok(c) => c,
+            Err(e) => panic!("decode: {e:?}"),
+        };
+        assert_eq!(claims.sub, "42");
+        assert_eq!(claims.tenant, "tenant-a");
+        assert_eq!(claims.iss, CLAIMS_ISSUER);
+        assert_eq!(claims.aud, CLAIMS_AUDIENCE);
+        assert!(claims.has_scope("users:admin"));
+        assert_eq!(claims.roles, vec!["admin".to_owned()]);
+    }
+
+    #[test]
+    fn role_scope_bundle_matches_security_md_and_fails_closed_on_unknown() {
+        assert!(role_scope_bundle("admin").contains("users:admin"));
+        assert!(role_scope_bundle("maintainer").contains("teams:read"));
+        assert_eq!(role_scope_bundle("viewer"), "*:read");
+        assert_eq!(role_scope_bundle("not-a-role"), "");
+    }
+
+    fn user_with_role(role: &str) -> CurrentUser {
+        CurrentUser {
+            id: 1,
+            email: "u@example.com".to_owned(),
+            full_name: None,
+            role: role.to_owned(),
+            is_active: true,
+            mfa_enabled: false,
+            created_at: None,
+            tenant_id: uuid::Uuid::nil(),
+        }
+    }
+
+    #[test]
+    fn require_scope_allows_and_denies_like_the_role_gate_it_replaces() {
+        // Mirrors `require_role_allows_and_denies` below, one level down the
+        // stack: `admin`'s bundle carries `*:admin`, which satisfies any
+        // `<resource>:admin` requirement (the shape every former
+        // `require_role(&["admin"])` call site now uses).
+        assert!(
+            user_with_role("admin")
+                .require_scope("codescan:admin")
+                .is_ok()
+        );
+        for role in ["maintainer", "viewer"] {
+            match user_with_role(role).require_scope("codescan:admin") {
+                Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
+                other => panic!("expected 403 for {role}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn require_scope_admin_and_maintainer_gate_via_wildcard_write() {
+        // The former `require_role(&["admin", "maintainer"])` shape: both
+        // bundles carry `*:write`, viewer's `*:read`-only bundle does not.
+        for role in ["admin", "maintainer"] {
+            assert!(user_with_role(role).require_scope("alerts:write").is_ok());
+        }
+        match user_with_role("viewer").require_scope("alerts:write") {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
+            other => panic!("expected 403 for viewer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_scope_super_admin_is_disjoint_from_admin() {
+        // Preserved quirk (`role_scope_bundle` docs): `super_admin` passes
+        // its own root-only scopes but NOT `admin`'s bundle, and `admin`
+        // does not pass `super_admin`'s — exactly like the literal
+        // role-string equality `require_role(&["super_admin"])` enforced.
+        assert!(
+            user_with_role("super_admin")
+                .require_scope("tenants:root")
+                .is_ok()
+        );
+        assert!(
+            user_with_role("super_admin")
+                .require_scope("spire:root")
+                .is_ok()
+        );
+        assert!(
+            user_with_role("super_admin")
+                .require_scope("codescan:admin")
+                .is_err()
+        );
+        assert!(
+            user_with_role("admin")
+                .require_scope("tenants:root")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn require_scope_codescan_review_admits_maintainer_only() {
+        // Preserved quirk: `routes::codescan::create_review`'s
+        // `require_role(&["maintainer"])` rejected admins too — `admin`'s
+        // bundle has no wildcard action named "review", so it still fails.
+        assert!(
+            user_with_role("maintainer")
+                .require_scope("codescan:review")
+                .is_ok()
+        );
+        for role in ["admin", "viewer"] {
+            assert!(
+                user_with_role(role)
+                    .require_scope("codescan:review")
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn access_token_with_empty_tenant_is_rejected_by_decode() {
+        // create_access_token itself never validates its `tenant` argument —
+        // the tenant-isolation boundary is enforced on decode, matching
+        // `skauswatch_auth::tenant_middleware`'s "reject if absent/empty"
+        // contract (never a silent bypass at mint time).
+        let token = match create_access_token(1, "viewer", "", signing(), 30) {
+            Ok(t) => t,
+            Err(e) => panic!("encode: {e:?}"),
+        };
+        match decode_access(&token, verify()) {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "missing or empty tenant claim"),
+            other => panic!("expected 403, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refresh_token_is_rejected_as_access() {
+        let token = match create_refresh_token(42, signing(), 7) {
+            Ok(t) => t,
+            Err(e) => panic!("encode: {e:?}"),
+        };
+        assert!(decode_access(&token, verify()).is_err());
+    }
+
+    #[test]
+    fn expired_token_maps_to_token_expired() {
+        let now = Utc::now().timestamp();
+        let claims = Claims {
+            sub: "1".into(),
+            iss: CLAIMS_ISSUER.into(),
+            aud: CLAIMS_AUDIENCE.into(),
+            iat: now - 240,
+            exp: now - 120,
+            scope: role_scope_bundle("viewer").to_owned(),
+            tenant: "tenant-a".into(),
+            teams: vec![],
+            roles: vec!["viewer".into()],
+        };
+        let token = match jsonwebtoken::encode(&Header::new(Algorithm::ES256), &claims, signing()) {
+            Ok(t) => t,
+            Err(e) => panic!("encode: {e}"),
+        };
+        match decode_access(&token, verify()) {
+            Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "Token expired"),
+            other => panic!("expected 401 Token expired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn password_hash_verifies_and_rejects() {
+        let hash = match hash_password("hunter2!") {
+            Ok(h) => h,
+            Err(e) => panic!("hash: {e:?}"),
+        };
+        assert!(verify_password("hunter2!", &hash));
+        assert!(!verify_password("wrong", &hash));
+    }
+
+    #[test]
+    fn token_hash_is_sha256_hex() {
+        assert_eq!(token_hash("abc").len(), 64);
+        assert_eq!(
+            token_hash("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    fn parts_with_auth(header: Option<&str>) -> axum::http::request::Parts {
+        let mut builder = axum::http::Request::builder().method("GET").uri("/x");
+        if let Some(h) = header {
+            builder = builder.header(axum::http::header::AUTHORIZATION, h);
+        }
+        let req = match builder.body(()) {
+            Ok(r) => r,
+            Err(e) => panic!("request: {e}"),
+        };
+        req.into_parts().0
+    }
+
+    /// Like [`parts_with_auth`] but with method/cookie/CSRF-header control,
+    /// for the bearer-or-cookie + CSRF regression tests below.
+    fn parts_for(
+        method: &str,
+        auth_header: Option<&str>,
+        cookie_header: Option<&str>,
+        csrf_header: Option<&str>,
+    ) -> axum::http::request::Parts {
+        let mut builder = axum::http::Request::builder().method(method).uri("/x");
+        if let Some(h) = auth_header {
+            builder = builder.header(axum::http::header::AUTHORIZATION, h);
+        }
+        if let Some(c) = cookie_header {
+            builder = builder.header(axum::http::header::COOKIE, c);
+        }
+        if let Some(x) = csrf_header {
+            builder = builder.header(cookies::CSRF_HEADER, x);
+        }
+        let req = match builder.body(()) {
+            Ok(r) => r,
+            Err(e) => panic!("request: {e}"),
+        };
+        req.into_parts().0
+    }
+
+    fn dev_license() -> std::sync::Arc<penguin_licensing::LicenseClient> {
+        skauswatch_testkit::license::dev_license("skauswatch")
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_missing_header() {
+        let state = crate::state::AppStateInner::for_tests(dev_license());
+        let mut parts = parts_with_auth(None);
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Unauthorized(msg)) => {
+                assert_eq!(msg, "Missing or invalid authorization header");
+            }
+            other => panic!("expected 401, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_non_bearer_scheme() {
+        let state = crate::state::AppStateInner::for_tests(dev_license());
+        let mut parts = parts_with_auth(Some("Token abc"));
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Unauthorized(msg)) => {
+                assert_eq!(msg, "Missing or invalid authorization header");
+            }
+            other => panic!("expected 401, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_garbage_token() {
+        let state = crate::state::AppStateInner::for_tests(dev_license());
+        let mut parts = parts_with_auth(Some("Bearer not-a-jwt"));
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "Invalid token"),
+            other => panic!("expected 401, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_unknown_user_id_against_real_db() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let token = create_access_token(
+            999_999,
+            "admin",
+            DEFAULT_TENANT_ID,
+            &state.auth.jwt_signing_key,
+            30,
+        )
+        .unwrap_or_else(|e| panic!("encode: {e:?}"));
+        let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "User not found or inactive"),
+            other => panic!("expected 401, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_inactive_user() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id,): (i32,) = match sqlx::query_as(
+            "INSERT INTO users (email, password_hash, full_name, role, is_active, created_at, \
+             tenant_id) \
+             VALUES ('inactive@example.com', 'x', 'Inactive', 'viewer', false, now(), $1) \
+             RETURNING id",
+        )
+        .bind(default_tenant_uuid())
+        .fetch_one(&state.db)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => panic!("seed: {e}"),
+        };
+        let token = create_access_token(
+            id,
+            "viewer",
+            DEFAULT_TENANT_ID,
+            &state.auth.jwt_signing_key,
+            30,
+        )
+        .unwrap_or_else(|e| panic!("encode: {e:?}"));
+        let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Unauthorized(msg)) => assert_eq!(msg, "User not found or inactive"),
+            other => panic!("expected 401, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_resolves_active_user_from_db() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) =
+            crate::routes::test_support::authed_user(&state, "active@example.com", "admin").await;
+        let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+        assert_eq!(user.email, "active@example.com");
+        assert_eq!(user.role, "admin");
+        assert!(user.is_active);
+        assert_eq!(user.tenant_id.to_string(), DEFAULT_TENANT_ID);
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_token_with_no_tenant_even_without_outer_middleware() {
+        // Defense in depth: CurrentUser enforces the tenant boundary itself
+        // (see decode_access), independent of whether tenant_middleware ran
+        // — this is what every per-module test router (which never mounts
+        // tenant_middleware) implicitly relies on.
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, _) =
+            crate::routes::test_support::authed_user(&state, "no-tenant@example.com", "admin")
+                .await;
+        let token = create_access_token(id, "admin", "", &state.auth.jwt_signing_key, 30)
+            .unwrap_or_else(|e| panic!("encode: {e:?}"));
+        let mut parts = parts_with_auth(Some(&format!("Bearer {token}")));
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "missing or empty tenant claim"),
+            other => panic!("expected 403, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_role_allows_and_denies() {
+        let user = CurrentUser {
+            id: 1,
+            email: "u@example.com".to_owned(),
+            full_name: None,
+            role: "viewer".to_owned(),
+            is_active: true,
+            mfa_enabled: false,
+            created_at: None,
+            tenant_id: uuid::Uuid::nil(),
+        };
+        assert!(user.require_role(&["viewer", "admin"]).is_ok());
+        match user.require_role(&["admin"]) {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "Insufficient permissions"),
+            other => panic!("expected 403, got {other:?}"),
+        }
+    }
+
+    // -- H2 audit fix: bearer-or-cookie auth + CSRF double-submit ----------
+
+    #[tokio::test]
+    async fn current_user_resolves_via_sw_access_cookie_when_no_bearer_header() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) =
+            crate::routes::test_support::authed_user(&state, "cookie-auth@example.com", "admin")
+                .await;
+        let mut parts = parts_for("GET", None, Some(&format!("sw_access={token}")), None);
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok via sw_access cookie, got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+    }
+
+    /// Regression guard: Bearer auth must keep working byte-for-byte — CLI,
+    /// mobile, and the golden parity harness all depend on it (H2 backend
+    /// task contract: "breaking it fails CI").
+    #[tokio::test]
+    async fn current_user_still_resolves_via_bearer_header_unchanged() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) =
+            crate::routes::test_support::authed_user(&state, "bearer-still@example.com", "admin")
+                .await;
+        let mut parts = parts_for("GET", Some(&format!("Bearer {token}")), None, None);
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok via bearer, got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+    }
+
+    #[tokio::test]
+    async fn current_user_prefers_bearer_header_over_cookie_when_both_present() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (bearer_id, bearer_token) = crate::routes::test_support::authed_user(
+            &state,
+            "precedence-bearer@example.com",
+            "admin",
+        )
+        .await;
+        let (_cookie_id, cookie_token) = crate::routes::test_support::authed_user(
+            &state,
+            "precedence-cookie@example.com",
+            "admin",
+        )
+        .await;
+        let mut parts = parts_for(
+            "GET",
+            Some(&format!("Bearer {bearer_token}")),
+            Some(&format!("sw_access={cookie_token}")),
+            None,
+        );
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(
+            user.id, bearer_id,
+            "header must take precedence over cookie"
+        );
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_cookie_authed_mutation_without_csrf_token() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (_, token) =
+            crate::routes::test_support::authed_user(&state, "csrf-missing@example.com", "admin")
+                .await;
+        let mut parts = parts_for(
+            "POST",
+            None,
+            Some(&format!("sw_access={token}; sw_csrf=expected-token")),
+            None,
+        );
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "CSRF token missing or invalid"),
+            other => panic!("expected 403, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_rejects_cookie_authed_mutation_with_mismatched_csrf_token() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (_, token) =
+            crate::routes::test_support::authed_user(&state, "csrf-mismatch@example.com", "admin")
+                .await;
+        let mut parts = parts_for(
+            "POST",
+            None,
+            Some(&format!("sw_access={token}; sw_csrf=expected-token")),
+            Some("wrong-token"),
+        );
+        match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Forbidden(msg)) => assert_eq!(msg, "CSRF token missing or invalid"),
+            other => panic!("expected 403, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_user_allows_cookie_authed_mutation_with_matching_csrf_token() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) =
+            crate::routes::test_support::authed_user(&state, "csrf-ok@example.com", "admin").await;
+        let mut parts = parts_for(
+            "POST",
+            None,
+            Some(&format!("sw_access={token}; sw_csrf=expected-token")),
+            Some("expected-token"),
+        );
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok, got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+    }
+
+    #[tokio::test]
+    async fn current_user_cookie_authed_get_never_requires_csrf() {
+        // Safe methods are exempt regardless of auth mechanism.
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) =
+            crate::routes::test_support::authed_user(&state, "csrf-safe-get@example.com", "admin")
+                .await;
+        let mut parts = parts_for("GET", None, Some(&format!("sw_access={token}")), None);
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok (GET is CSRF-exempt), got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+    }
+
+    /// Critical regression: a Bearer-authed mutating request must NEVER be
+    /// rejected for a missing `X-CSRF-Token` — Bearer isn't auto-attached by
+    /// browsers, so it can't be a CSRF vector. This is what keeps CLI/
+    /// mobile/the parity harness's write endpoints working after the H2
+    /// cookie-auth rollout.
+    #[tokio::test]
+    async fn current_user_bearer_authed_mutation_bypasses_csrf_entirely() {
+        let state = crate::routes::test_support::db_state(dev_license()).await;
+        let (id, token) = crate::routes::test_support::authed_user(
+            &state,
+            "bearer-csrf-bypass@example.com",
+            "admin",
+        )
+        .await;
+        let mut parts = parts_for("POST", Some(&format!("Bearer {token}")), None, None);
+        let user = match CurrentUser::from_request_parts(&mut parts, &state).await {
+            Ok(u) => u,
+            Err(e) => panic!("expected ok (bearer bypasses csrf), got {e:?}"),
+        };
+        assert_eq!(user.id, id);
+    }
+
+    #[tokio::test]
+    async fn cookie_auth_bridge_promotes_cookie_to_bearer_for_tenant_middleware() {
+        use axum::body::Body;
+        use axum::extract::Request;
+        use axum::middleware::{self, Next};
+
+        // An opaque string is enough here — this test only checks that the
+        // bridge relays whatever `sw_access` cookie value it finds into a
+        // synthesized Bearer header; JWT validity is exercised by the
+        // `decode_access`/`CurrentUser` tests elsewhere in this module.
+        let token = "opaque-cookie-token-value";
+
+        async fn echo_auth_header(request: Request, next: Next) -> axum::response::Response {
+            let promoted = request
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let mut response = next.run(request).await;
+            if let Some(h) = promoted
+                && let Ok(v) = axum::http::HeaderValue::from_str(&h)
+            {
+                response.headers_mut().insert("x-echo-auth", v);
+            }
+            response
+        }
+
+        let app = axum::Router::new()
+            .route("/probe", axum::routing::get(|| async { "ok" }))
+            .layer(middleware::from_fn(echo_auth_header))
+            .layer(middleware::from_fn(cookie_auth_bridge));
+
+        let req = match Request::builder()
+            .method("GET")
+            .uri("/probe")
+            .header(axum::http::header::COOKIE, format!("sw_access={token}"))
+            .body(Body::empty())
+        {
+            Ok(r) => r,
+            Err(e) => panic!("request: {e}"),
+        };
+
+        let res = match tower::ServiceExt::oneshot(app, req).await {
+            Ok(r) => r,
+            Err(e) => panic!("bridge probe request failed: {e:?}"),
+        };
+        let echoed = res
+            .headers()
+            .get("x-echo-auth")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert_eq!(echoed, format!("Bearer {token}"));
+    }
+}

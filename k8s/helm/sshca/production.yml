@@ -1,0 +1,76 @@
+# Production overrides — pinned by SHA256 digest, HA replicas + HPA.
+#
+# Mounts a pre-provisioned CA key (secretData.ca-key below) read-only at
+# /etc/pki/sshca so all replicas share one CA identity and certs stay
+# verifiable across restarts (services/sshca/src/ca.rs: the app's own
+# fallback is an EPHEMERAL, non-persisted key — unsafe in a multi-replica
+# deployment). Replace secretData.ca-key with a real OpenSSH Ed25519
+# private key via a sealed secret before going live.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/sshca
+  # Pin to the released digest before deploying — see pinning-dependency-digests skill.
+  tag: "sha256:<digest>"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+ingress:
+  enabled: false
+
+httproute:
+  enabled: false
+
+volumeMounts:
+  - name: ca-key
+    mountPath: /etc/pki
+    readOnly: true
+
+volumes:
+  - name: ca-key
+    secret:
+      secretName: '{{ include "skauswatch-sshca.secretName" $ }}'
+      items:
+        - key: ca-key
+          path: sshca
+          mode: 0400
+
+configMapData:
+  log-level: "warn"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "20"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+
+# MUST be set via --set/values or existingSecret; services fail closed on a
+# blank/known-default secret. Prefer existingSecret (a pre-provisioned
+# Secret / ExternalSecret) for production credential rotation over inline
+# secretData below.
+secretData:
+  db-user: ""
+  db-pass: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
+  # REQUIRED: replace with `ssh-keygen -t ed25519 -f ca-key` output before
+  # deploying — an empty/placeholder value here means every pod falls back
+  # to its own ephemeral CA key (see warning above).
+  ca-key: ""

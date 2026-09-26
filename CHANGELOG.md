@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - Unreleased
+
+Full platform rewrite. Tracked on branch `release/v2.0.x`; `release/v1.0.x` is
+feature-frozen (security fixes only) until v2.0.0 ships.
+
+### Added
+- Rust rewrite of all backend services (core, Vault, CodeScan) — single Cargo
+  workspace; axum REST, tonic gRPC, sqlx (PostgreSQL), Redis/Valkey Streams
+  worker harness replacing Celery
+- `penguin-licensing` Rust crate (penguin-libs): PostHog-compatible feature
+  flags + license entitlement via license.penguintech.io, fail-safe caching,
+  axum feature/tier gating middleware
+- Feature flags (`skauswatch.*`, default OFF) wrapping every feature area,
+  including module gates `skauswatch.vault` and `skauswatch.codescan`
+- Unified React frontend: Vault and CodeScan UIs merged into `services/webui`
+  as entitlement-gated lazy-loaded modules (`/vault/*`, `/codescan/*`)
+
+### Changed
+- Migrations: Alembic replaced by `sqlx migrate`
+- Containers: per-service multi-stage Dockerfiles (`rust:1.97-slim-bookworm`
+  builder → `debian:bookworm-slim` runtime, non-root uid 10001, digest-pinned,
+  native `<binary> healthcheck` subcommand — no curl)
+- CI: single `build.yml` image matrix (12 services + webui, multi-arch,
+  env-aware `beta`/`gamma`/`v{semver}` tags + rolling `:beta-latest`); the
+  redundant `beta.yml`/`publish.yml` build workflows were consolidated into it
+- Build tooling: `Makefile` is now cargo/npm-based (Python `make` targets gone)
+- Supply chain: git-credential AEAD nonces use aes-gcm's `AeadCore` (dropping a
+  direct `rand` dependency); `cargo deny` policy allows the workspace's own
+  `AGPL-3.0-only` and documents three transitive advisory exceptions
+- **Modules renamed to descriptive names** — `edr`→`endpoint`, `icebox`→`vault`,
+  `darwin`→`codescan`, `worker-scanner`→`scanner`, `aaa-monitor`→`monitor`,
+  `pki-server`→`pki`, `ssh-ca`→`sshca`, `log-receiver`→`logs`. Full mapping and
+  path/flag/topic details in [`docs/MIGRATION.md`](docs/MIGRATION.md).
+  (SkausWatch never shipped to production, so wire/schema/name changes are free —
+  no data migration, no fielded-agent compatibility constraint.)
+
+### Deprecated
+- Old pre-rename REST paths (`/api/v1/{edr,icebox,darwin,aaa}/*`) — mounted as
+  aliases with `Deprecation`/`Sunset` headers; removed in a later release. Old
+  feature-flag keys read as fallbacks during transition. See `docs/MIGRATION.md`.
+
+### Removed
+- All Python services and the Go EDR (endpoint) agent implementation (ported to Rust)
+- Legacy `services/manager/`, `services/pki/`, `services/flask-backend/`,
+  vendored `darwin/shared/`, py4web remnants
+- Standalone Vault and CodeScan webuis; Kustomize/raw K8s manifests (Helm only)
+
 ## [Unreleased]
 
 ### Added
@@ -38,9 +85,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `requirements-dev.txt` for development dependencies
 - Service directories:
   - Manager Service (`services/manager/`)
-  - PKI Server Service (`services/pki-server/`)
-  - SSH CA Service (`services/ssh-ca/`)
-  - AAA Monitor Service (`services/aaa-monitor/`)
+  - PKI Server Service (`services/pki/`)
+  - SSH CA Service (`services/sshca/`)
+  - Monitor Service (`services/monitor/`)
 - Shared components:
   - Models (`shared/models/`)
   - Utils (`shared/utils/`)

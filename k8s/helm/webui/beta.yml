@@ -1,0 +1,44 @@
+# Beta overrides — dal2-beta cluster, namespace: skauswatch.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/webui
+  tag: "beta-0000000000"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+service:
+  type: ClusterIP
+
+ingress:
+  enabled: false
+
+httproute:
+  enabled: true
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.penguintech.cloud
+  rules:
+    - path: /
+      service: skauswatch-webui
+      port: 3000
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+configMapData:
+  node-env: "production"
+  manager-url: "http://skauswatch-manager:5000"
+  vault-backend-url: "http://skauswatch-vault:8080"
+  codescan-backend-url: "http://skauswatch-codescan-backend:5005"
+  monitor-url: "http://skauswatch-monitor:8003"

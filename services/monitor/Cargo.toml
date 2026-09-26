@@ -1,0 +1,64 @@
+[package]
+publish = false
+name = "skauswatch-monitor"
+description = "SkausWatch monitor service — REST event/alert API over Elasticsearch/OpenSearch + MongoDB (Rust port)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "skauswatch-monitor"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+futures = { workspace = true }
+jsonwebtoken = { workspace = true }
+metrics = { workspace = true }
+penguin-licensing = { workspace = true, features = ["axum"] }
+# Log collectors (phase 12): auditd/file/journald/lxc pattern classification.
+regex = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+skauswatch-auth = { workspace = true }
+skauswatch-common = { workspace = true }
+# Own Postgres schema for the TAXII threat-intel engine (feeds/IOCs/matches —
+# see src/threat_intel — deliberately separate from manager's
+# `threat_indicators` IOC-CRUD table, see that module's docs). Monitor's own
+# DB connection degrades gracefully (None) exactly like the ES event store,
+# not skauswatch-db's fail-fast `connect_postgres` used by vault/pki/etc —
+# see state.rs.
+skauswatch-db = { workspace = true }
+skauswatch-telemetry = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
+tower-http = { workspace = true }
+# Per-IP rate limiting on the production router (`src/rate_limit.rs`).
+tower_governor = { workspace = true }
+tracing = { workspace = true }
+# File collector (phase 12): recursive host-mounted log file discovery.
+walkdir = { workspace = true }
+# "yaml" adds serde_yaml so `skauswatch-monitor openapi` can emit true YAML
+# for openapi/v1.yaml (workspace default features are json-only) — see
+# docs/v2-port/openapi-pattern.md.
+utoipa = { workspace = true, features = ["yaml"] }
+uuid = { workspace = true }
+
+[dev-dependencies]
+axum-test = { workspace = true }
+skauswatch-testkit = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,36 @@
+# Beta overrides — dal2-beta cluster, namespace: skauswatch.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/worker-vault-sync
+  tag: "beta-0000000000"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+configMapData:
+  log-level: "info"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "5"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+
+# Enabled here so beta stays SPIRE-parity with production ahead of any
+# release-mode flip. Backs awsIdentity.mode: "spire" above.
+spire:
+  enabled: true

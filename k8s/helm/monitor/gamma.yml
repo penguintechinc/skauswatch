@@ -1,0 +1,35 @@
+# Gamma overrides — dal2-gamma cluster, namespace: skauswatch. Internal service only.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/monitor
+  tag: "gamma-0000000000"
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+ingress:
+  enabled: false
+
+httproute:
+  enabled: false
+
+configMapData:
+  auth-enabled: "true"
+  es-enabled: "true"
+  es-url: "http://opensearch:9200"
+  es-index-pattern: "skauswatch-events-*"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"

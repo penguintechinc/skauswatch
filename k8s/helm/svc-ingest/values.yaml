@@ -1,0 +1,545 @@
+# Default (prod-safe baseline) values for skauswatch-svc-ingest.
+# Per-environment overrides live in alpha.yml / beta.yml / gamma.yml / production.yml.
+#
+# Dual-Deployment chart, one shared image, one binary, two `serve --mode`
+# args (services/svc-ingest/src/main.rs, src/bootstrap.rs):
+#   - receiver: terminates syslog UDP/TCP/TLS, OTLP gRPC/HTTP, and HTTPS
+#     OCSF/JSON listeners, normalizes to OCSF, enqueues onto NATS
+#     JetStream. Has a multi-port Service (templates/service-receiver.yaml).
+#   - writer: drains the JetStream consumer and bulk-writes to OpenSearch.
+#     No inbound service port at all -- reads JetStream only, so this chart
+#     intentionally creates NO Service for it (Spec's own port table: "None
+#     (internal, reads JetStream only)"). Exposes a private /healthz+/readyz
+#     surface on WRITER_HEALTH_PORT purely for kubelet probes.
+# They scale independently -- separate replicaCount/resources/autoscaling/
+# HPA per component below.
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/svc-ingest
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Name of a pre-provisioned Secret (or ExternalSecret target, e.g. synced
+# from svc-vault) to use instead of the chart-managed one below. When set,
+# templates/secret.yaml is not rendered and the receiver Deployment's env
+# vars read from this Secret instead. MUST supply at minimum: db-user,
+# db-pass, jwt-verify-key, license-key -- plus the ingest mTLS cert/key and
+# bearer-token material svc-vault issues once the syslog-TLS/HTTPS-token
+# auth paths are wired to consume secretKeyRef entries from this same
+# Secret (not yet wired as of Task 2.4 -- receiver's TLS listeners
+# currently source certs via the SPIFFE Workload API, not this Secret).
+existingSecret: ""
+
+podSecurityContext:
+  runAsNonRoot: true
+  # Matches services/svc-ingest/Dockerfile's `useradd -u 1000 appuser`.
+  runAsUser: 1000
+  fsGroup: 1000
+  # Required for Pod Security Admission "restricted" compliance (and good
+  # practice under "baseline") -- see k8s/helm/README.md "Cluster security
+  # baseline".
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+# Tetragon exec-allowlist enforcement (templates/tracingpolicy.yaml).
+# Requires the Tetragon agent DaemonSet in-cluster -- set false to render
+# without it (e.g. a cluster that hasn't rolled Tetragon out yet).
+tetragon:
+  enabled: true
+
+# services/svc-ingest/src/config.rs / src/bootstrap.rs port defaults
+# (docs/v2-port/ingest-module-spec.md Spec §3b, §7a).
+ports:
+  # Syslog UDP + TCP -- unprivileged default. See privilegedSyslogPort
+  # below before ever pointing this at the real privileged :514.
+  syslogPort: 5140
+  syslogTlsPort: 6514
+  otlpGrpcPort: 4317
+  otlpHttpPort: 4318
+  # HTTPS OCSF/JSON ingest -- also carries receiver's /healthz + /readyz.
+  httpPort: 8443
+  metricsPort: 9090
+  # Writer-only private health surface (WRITER_HEALTH_PORT) -- not a public
+  # protocol listener, see services/svc-ingest/src/bootstrap.rs.
+  writerHealthPort: 9091
+
+# UDP :514 is the real privileged syslog port referenced in Spec §9c.
+# `enabled: false` here is load-bearing: default ports.syslogPort (5140) is
+# unprivileged and needs no extra capability. Flipping this to true AND
+# pointing ports.syslogPort at a port <1024 requires an explicit
+# NET_BIND_SERVICE capability grant plus a documented
+# `# ROOT EXCEPTION (approved): <reason>` comment and separate user
+# approval per devops-containers.md -- NEVER add NET_BIND_SERVICE/NET_ADMIN
+# to securityContext.capabilities.add without that approval first.
+privilegedSyslogPort:
+  enabled: false
+
+# OpenSearch snapshot repository name (SNAPSHOT_REPO in
+# services/svc-ingest/src/config.rs) used by cold-tier ISM
+# searchable-snapshot restore. Optional in the app -- an unset/blank value
+# falls back to the same default here. NOTE: this chart does not provision
+# the snapshot repository itself -- it MUST be registered in OpenSearch
+# out-of-band (e.g. via the `_snapshot` API) before cold-tier ISM restore
+# will function.
+snapshotRepo: "skauswatch-snapshots"
+
+# DLQ JetStream stream retention (DLQ_RETENTION_DAYS in
+# services/svc-ingest/src/config.rs::dlq_retention_from_env, consumed only
+# by crate::writer::build_dlq_buffer -- receiver never reads this).
+# Unset/blank in the app defaults to the same 30 here
+# (DEFAULT_DLQ_RETENTION_DAYS) -- set explicitly so the chart's rendered
+# value always matches what an operator sees in `helm template`/`--values`.
+dlqRetentionDays: "30"
+
+# NATS client auth (services/svc-ingest/src/config.rs::NatsAuthConfig,
+# applied via buffer/jetstream.rs::NatsAuthMode -- shared by both the main
+# ingest connection AND the DLQ connection, receiver AND writer alike).
+# Fully OFF by default (`enabled: false`): renders with NO NATS_* auth env
+# at all, which is byte-for-byte what NatsAuthConfig::from_env produces
+# when every NATS_* auth var is unset -- today's unauthenticated
+# connection is unaffected. NEVER put creds/nkey/password values here --
+# refs into a Secret only (this chart's own managed Secret via
+# secretName: "", or a separate pre-provisioned one).
+nats:
+  auth:
+    enabled: false
+    # Exactly one of: "credsFile" | "nkey" | "userPassword". Mirrors
+    # NatsAuthMode::from_config's precedence (creds file > nkey > user/
+    # password) if more than one is populated, so picking the wrong mode
+    # here with unrelated leftover secret keys still resolves safely.
+    mode: "credsFile"
+    # Require TLS to the NATS server (NATS_TLS) -- independent of mode;
+    # not sensitive.
+    tls: false
+
+    # NATS_CREDS_FILE: the app reads this as a filesystem path, so the
+    # Secret content is mounted read-only rather than passed as an env
+    # var. secretName blank falls back to this chart's own managed Secret
+    # (templates/secret.yaml) -- add the key under secretData/existingSecret
+    # yourself; this chart does not create placeholder keys by default.
+    credsFile:
+      secretName: ""
+      secretKey: "nats-creds"
+      mountPath: /etc/nats/creds
+
+    # NATS_NKEY: the app reads the raw seed value directly from the env
+    # var (not a file), so it's sourced via secretKeyRef like DB_PASS
+    # above -- never a mounted file for this one.
+    nkey:
+      secretName: ""
+      secretKey: "nats-nkey"
+
+    # NATS_USER / NATS_PASSWORD: username isn't sensitive on its own, so
+    # it's a plain value here; password always comes from a Secret.
+    userPassword:
+      username: ""
+      passwordSecretName: ""
+      passwordSecretKey: "nats-password"
+
+receiver:
+  replicaCount: 3
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 2
+
+  # CONFIRMED against services/svc-ingest/src/config.rs (RawConfig::from_env)
+  # and src/bootstrap.rs::run_receiver (DB/JWT/license wiring). NATS
+  # production-hardening env (NATS_JETSTREAM_SYNC_ALWAYS) is baked directly
+  # into templates/deployment-receiver.yaml, NOT listed here -- see that
+  # template's comment for why it must be non-overridable.
+  env:
+    - name: SYSLOG_PORT
+      value: "5140"
+    - name: SYSLOG_TLS_PORT
+      value: "6514"
+    - name: OTLP_GRPC_PORT
+      value: "4317"
+    - name: OTLP_HTTP_PORT
+      value: "4318"
+    - name: HTTP_PORT
+      value: "8443"
+    # UDP syslog has no authentication -- OFF by default, explicit
+    # operator opt-in only (Spec §6c).
+    - name: SYSLOG_UDP_ENABLED
+      value: "false"
+    - name: SYSLOG_UDP_TENANT_ID
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: syslog-udp-tenant-id
+          optional: true
+    - name: OPENSEARCH_URL
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: opensearch-url
+    - name: NATS_URL
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: nats-url
+    - name: NATS_JETSTREAM_SUBJECT_PREFIX
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: nats-jetstream-subject-prefix
+    - name: DB_TYPE
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: db-type
+    - name: DB_HOST
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: db-host
+    - name: DB_PORT
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: db-port
+    - name: DB_NAME
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: db-name
+    - name: DB_POOL_SIZE
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: db-pool-size
+    - name: DB_USER
+      valueFrom:
+        secretKeyRef:
+          name: '{{ include "skauswatch-svc-ingest.secretName" . }}'
+          key: db-user
+    - name: DB_PASS
+      valueFrom:
+        secretKeyRef:
+          name: '{{ include "skauswatch-svc-ingest.secretName" . }}'
+          key: db-pass
+    # PEM EC P-256 public key (SPKI) verifying ES256 tokens minted by
+    # manager (the sole issuer) -- see k8s/helm/manager/values.yaml
+    # secretData for keypair generation commands.
+    - name: JWT_VERIFY_KEY
+      valueFrom:
+        secretKeyRef:
+          name: '{{ include "skauswatch-svc-ingest.secretName" . }}'
+          key: jwt-verify-key
+    - name: LICENSE_KEY
+      valueFrom:
+        secretKeyRef:
+          name: '{{ include "skauswatch-svc-ingest.secretName" . }}'
+          key: license-key
+    - name: LICENSE_SERVER_URL
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: license-server-url
+    - name: RELEASE_MODE
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: release-mode
+    - name: SNAPSHOT_REPO
+      value: '{{ .Values.snapshotRepo }}'
+
+writer:
+  replicaCount: 3
+
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: health
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 2
+
+  # CONFIRMED against src/bootstrap.rs::run_writer -- writer touches NATS
+  # + OpenSearch only (no DB, no JWT, no license client in that path).
+  env:
+    - name: WRITER_HEALTH_PORT
+      value: "9091"
+    # config::dlq_retention_from_env -- writer-only, see dlqRetentionDays
+    # above for why receiver.env has no matching entry.
+    - name: DLQ_RETENTION_DAYS
+      value: '{{ .Values.dlqRetentionDays }}'
+    - name: OPENSEARCH_URL
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: opensearch-url
+    - name: NATS_URL
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: nats-url
+    - name: NATS_JETSTREAM_SUBJECT_PREFIX
+      valueFrom:
+        configMapKeyRef:
+          name: skauswatch-svc-ingest-config
+          key: nats-jetstream-subject-prefix
+
+service:
+  type: ClusterIP
+  annotations: {}
+  # Set per-port nodePort overrides only in alpha.yml (NodePort type) --
+  # see that file for the assigned values.
+  nodePorts: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+
+volumeMounts: []
+volumes: []
+
+# --- SPIFFE Workload API socket (SPIRE) --------------------------------
+# receiver's OTLP gRPC listener uses skauswatch_identity::IdentityProvider
+# for mTLS termination (src/bootstrap.rs::run_receiver) -- same pattern as
+# k8s/helm/manager/values.yaml. writer never touches SPIFFE identity, so
+# this only wires into deployment-receiver.yaml. MUST be enabled wherever
+# RELEASE_MODE=true -- beta/gamma/production all set spire.enabled: true;
+# alpha stays off.
+spire:
+  enabled: false
+  socketDir: /run/spire/sockets
+  csiDriver:
+    enabled: false
+
+configMapData:
+  opensearch-url: "http://opensearch:9200"
+  # Assumed in-cluster Service name for the NATS JetStream dependency --
+  # NOT owned by this chart (no k8s/helm/nats-jetstream chart exists yet).
+  # Requires NATS server >=2.14 with the JetStream file store's
+  # `sync_always: true` set at the NATS server config level (Spec §7a
+  # production-hardening requirement #1/#2) -- that is cluster-ops config
+  # for whatever chart/manifest deploys nats-jetstream, not something this
+  # chart can enforce from the client side.
+  nats-url: "nats://nats-jetstream:4222"
+  nats-jetstream-subject-prefix: "svc-ingest.logs"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "20"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "true"
+  # Fixed tenant stamped onto trusted-CIDR UDP syslog packets (Spec §6c).
+  # Blank means "no CIDR trusted" -- UDP is also OFF by default
+  # (receiver.env SYSLOG_UDP_ENABLED), so this is a deliberate no-op until
+  # both are explicitly opted into together by an operator.
+  syslog-udp-tenant-id: ""
+
+# MUST be set via --set/values or existingSecret; services fail closed on a
+# blank/known-default secret (never ship a real credential here).
+secretData:
+  db-user: ""
+  db-pass: ""
+  # PEM EC P-256 public key (SPKI) -- see receiver.env JWT_VERIFY_KEY above.
+  jwt-verify-key: ""
+  license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
+
+# One-time aaa-events -> unified OCSF/OpenSearch index reindex Job
+# (`skauswatch-svc-ingest backfill`). Command::Backfill does not exist in
+# the built binary as of Task 2.4 (Wave 1 only ships serve/healthcheck/
+# openapi/migrate, see src/main.rs) -- this Job is forward-declared per the
+# Task 2.4 brief and MUST stay disabled until a later task lands the
+# `backfill` subcommand; `helm template` still renders cleanly with it off.
+backfill:
+  enabled: false
+  args:
+    - backfill
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+  restartPolicy: OnFailure
+  backoffLimit: 3
+
+# One-time OpenSearch snapshot-repository registration (Helm
+# post-install/post-upgrade hook, templates/snapshot-repo-job.yaml) --
+# PUTs _snapshot/<snapshotRepo> so the cold-tier ISM policy's
+# searchable-snapshot restore (SNAPSHOT_REPO, see snapshotRepo above) has
+# an actual repository to restore from. This chart does NOT provision the
+# underlying S3 bucket/MinIO instance or shared filesystem mount -- only
+# registers the repo definition against an already-reachable OpenSearch
+# cluster. Disabled by default: an operator opts in only once real
+# repoType-appropriate storage exists; `helm template`/`helm install`
+# render/apply no Job at all while off.
+snapshotRepoJob:
+  enabled: false
+  image:
+    repository: curlimages/curl
+    tag: "8.11.1"
+    # Multi-arch manifest-list digest (`docker buildx imagetools inspect
+    # curlimages/curl:8.11.1`) -- covers amd64/arm64 both, per
+    # pinning-dependency-digests skill.
+    digest: "sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
+  # "s3" (AWS S3 or an S3-compatible endpoint like MinIO) or "fs" (a
+  # filesystem path already mounted identically on every OpenSearch
+  # data/master node -- this chart provisions neither).
+  repoType: s3
+  s3:
+    bucket: ""
+    # Non-AWS S3-compatible endpoint (e.g. MinIO) -- blank uses AWS S3.
+    endpoint: ""
+    region: "us-east-1"
+    basePath: ""
+  fs:
+    location: "/mnt/snapshots"
+  # OpenSearch cluster basic-auth credentials for the registration call.
+  # Disabled by default (no auth) -- matches an OpenSearch cluster with
+  # the security plugin off/dev mode. NEVER plaintext here -- Secret only;
+  # secretName blank falls back to this chart's own managed Secret, same
+  # existingSecret rule as nats.auth above.
+  auth:
+    enabled: false
+    secretName: ""
+    usernameSecretKey: "opensearch-user"
+    passwordSecretKey: "opensearch-password"
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  restartPolicy: OnFailure
+  backoffLimit: 3
+
+# --- Ops observability (PodDisruptionBudget / PrometheusRule /
+# ServiceMonitor / PodMonitor) ------------------------------------------
+# Release-audit Medium finding: this chart shipped 0 PodDisruptionBudgets
+# and 0 PrometheusRule/ServiceMonitor objects. All four below assume the
+# Prometheus Operator CRDs (monitoring.coreos.com/v1, policy/v1 is core)
+# are already installed in-cluster -- disable the relevant toggle if not
+# (e.g. a cluster still on unmanaged scrape configs).
+
+# Voluntary-disruption budgets for both Deployments. maxUnavailable (not
+# minAvailable) deliberately -- at the beta/alpha default of
+# replicaCount: 1, minAvailable: 1 would block ALL voluntary disruptions
+# (including node drains) since 0 replicas could ever remain healthy;
+# maxUnavailable: 1 computes desiredHealthy = replicas - 1, which is 0 at
+# replicas: 1, so it always permits eviction of the sole pod while still
+# capping disruption to 1 pod at a time once replicaCount scales up (prod:
+# 3+, see receiver/writer.replicaCount above).
+pdb:
+  enabled: true
+  receiver:
+    maxUnavailable: 1
+  writer:
+    maxUnavailable: 1
+
+# Label most Prometheus Operator installs (kube-prometheus-stack's default
+# ruleSelector/serviceMonitorSelector/podMonitorSelector) require to
+# discover a PrometheusRule/ServiceMonitor/PodMonitor -- conventionally the
+# Prometheus Operator's own Helm release name. Override per-cluster if that
+# release isn't named "prometheus"; set to "" to omit the label entirely
+# (e.g. an Operator configured with an empty/any selector).
+monitoring:
+  releaseLabel: "prometheus"
+
+# Alerts on the three failure-mode metrics that already exist --
+# services/svc-ingest/src/otel.rs::metric_names (WRITER_OPENSEARCH_ERRORS_TOTAL,
+# BUFFER_FULL_REJECTIONS_TOTAL) and writer.rs's DLQ counter
+# (svc_ingest_writer_events_dlq_total). See templates/prometheusrule.yaml.
+prometheusRule:
+  enabled: true
+  additionalLabels: {}
+  # DLQ events are precious (each one is data that failed OpenSearch
+  # bulk-write) -- fire fast, but still require the condition to hold
+  # across at least one more scrape rather than a single noisy sample.
+  dlqFor: "1m"
+  bufferFullFor: "5m"
+  opensearchErrorsFor: "5m"
+
+# Scrapes the receiver's Service (templates/service-receiver.yaml) on its
+# "metrics" port (:9090). See templates/servicemonitor.yaml.
+serviceMonitor:
+  enabled: true
+  additionalLabels: {}
+  interval: "30s"
+  scrapeTimeout: "10s"
+
+# Optional alternative scrape path for the writer Deployment, which has NO
+# Service (deployment-writer.yaml's port comment) -- Prometheus already
+# reaches its :9090 by pod IP via the CiliumNetworkPolicy ingress rule in
+# ciliumnetworkpolicy-writer.yaml, so this is off by default. Enable only
+# if the cluster's Prometheus Operator install needs an explicit
+# PodMonitor rather than relying on that CNP-permitted pod-IP scrape.
+podMonitor:
+  enabled: false
+  additionalLabels: {}
+  interval: "30s"
+  scrapeTimeout: "10s"

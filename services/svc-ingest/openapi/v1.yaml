@@ -1,0 +1,352 @@
+openapi: 3.1.0
+info:
+  title: SkausWatch svc-ingest API
+  description: Internal, authenticated SIEM OCSF/JSON log ingest sink. The manager's siem router is the only intended caller.
+  contact:
+    name: Penguin Tech Inc
+    email: support@penguintech.io
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+  version: '1'
+paths:
+  /api/v1/admin/ingest/lifecycle:
+    put:
+      tags:
+      - svc-ingest-admin
+      summary: |-
+        `PUT /api/v1/admin/ingest/lifecycle` — platform/super-admin only (Spec
+        §8a1). Rejects a non-monotonic configuration with 400 *before* ever
+        contacting OpenSearch; only a validated configuration is turned into a
+        policy document and applied.
+      operationId: handle_put_lifecycle
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LifecycleRequest'
+        required: true
+      responses:
+        '200':
+          description: Lifecycle policy applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LifecycleResponse'
+        '400':
+          description: Transition ages are not strictly increasing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminErrorResponse'
+        '401':
+          description: Missing, invalid, or expired bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminErrorResponse'
+        '403':
+          description: Token lacks the platform/super-admin scope, or carries no tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminErrorResponse'
+        '502':
+          description: OpenSearch rejected the policy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminErrorResponse'
+      security:
+      - bearer_jwt: []
+  /api/v1/admin/ingest/restore:
+    post:
+      tags:
+      - svc-ingest-admin
+      summary: |-
+        `POST /api/v1/admin/ingest/restore` — SIEM-admin only, audited (Spec
+        §8a1). Triggers a real OpenSearch snapshot restore of `req.index` from
+        the configured repository (not a searchable-snapshot mount — see
+        [`ism`]'s module docs for why COLD data needs an explicit restore) and
+        records the action via [`AppState::audit`] before answering.
+      operationId: handle_post_restore
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreRequest'
+        required: true
+      responses:
+        '202':
+          description: Cold-tier restore triggered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreResponse'
+        '400':
+          description: index does not match skauswatch-logs-YYYY.MM.DD
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminErrorResponse'
+        '401':
+          description: Missing, invalid, or expired bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminErrorResponse'
+        '403':
+          description: Token lacks the SIEM-admin scope, or carries no tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminErrorResponse'
+        '502':
+          description: OpenSearch rejected the restore request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminErrorResponse'
+      security:
+      - bearer_jwt: []
+  /healthz:
+    get:
+      tags:
+      - svc-ingest
+      summary: '`GET /healthz` — v1 liveness body `{"status":"ok","service":"svc-ingest"}`.'
+      operationId: handle_health
+      responses:
+        '200':
+          description: Service liveness
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /ingest:
+    post:
+      tags:
+      - svc-ingest
+      summary: |-
+        `POST /ingest` — accepts a single JSON object or a JSON array of records,
+        normalizes each to OCSF, bulk-indexes them into the daily OpenSearch index,
+        and answers `202 {"ingested": <count>}`. Ported verbatim from v1
+        `HTTPIngestHandler.handle_ingest` (the S3/Parquet mirror-write is a
+        documented deferral — see the port contract).
+      operationId: handle_ingest
+      requestBody:
+        description: A single JSON log record object, or a JSON array of up to 10,000 record objects. Each record is normalized to OCSF, stamped with the caller's JWT tenant, and bulk-indexed into the daily OpenSearch index.
+        content:
+          application/json:
+            schema: {}
+        required: true
+      responses:
+        '202':
+          description: Records accepted for indexing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestAcceptedResponse'
+        '400':
+          description: Request body is not valid JSON
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          description: Missing, invalid, or expired bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestErrorResponse'
+        '403':
+          description: Token carries no usable tenant claim, or the skauswatch.log-ingest flag is disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestErrorResponse'
+        '413':
+          description: Batch exceeds the 10,000 record cap
+          content:
+            text/plain:
+              schema:
+                type: string
+        '429':
+          description: Event buffer is full; retry with backoff
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestErrorResponse'
+        '500':
+          description: OCSF normalization failed or the event buffer push errored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestErrorResponse'
+      security:
+      - bearer_jwt: []
+  /readyz:
+    get:
+      tags:
+      - svc-ingest
+      summary: '`GET /readyz` — readiness probe following the standard convention.'
+      operationId: handle_ready
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: Service is not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+components:
+  schemas:
+    AdminErrorResponse:
+      type: object
+      description: Documentation-only mirror of every error body this router emits.
+      required:
+      - error
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+    HealthResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `handle_health`'s
+        `200 {"status":"ok","service":"svc-ingest"}` body.
+      required:
+      - status
+      - service
+      properties:
+        service:
+          type: string
+          description: Always `"svc-ingest"` — identifies which service answered.
+        status:
+          type: string
+          description: Always `"ok"` when the process is serving requests.
+    IngestAcceptedResponse:
+      type: object
+      description: 'Documentation-only mirror of `handle_ingest`''s `202 {"ingested": N}` body.'
+      required:
+      - ingested
+      properties:
+        ingested:
+          type: integer
+          format: int64
+          description: Number of records accepted in this batch (post OCSF normalization).
+    IngestErrorResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of the `500 {"error": "..."}` body emitted on
+        OCSF normalization failure or an OpenSearch bulk-write error.
+      required:
+      - error
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+    LifecycleRequest:
+      type: object
+      description: '`PUT /api/v1/admin/ingest/lifecycle` request body.'
+      required:
+      - hot_to_warm_days
+      - warm_to_cold_days
+      - cold_to_delete_days
+      properties:
+        cold_to_delete_days:
+          type: integer
+          format: int64
+          description: COLD -> DELETE transition age, in days.
+        hot_to_warm_days:
+          type: integer
+          format: int64
+          description: HOT -> WARM transition age, in days.
+        warm_to_cold_days:
+          type: integer
+          format: int64
+          description: WARM -> COLD transition age, in days.
+    LifecycleResponse:
+      type: object
+      description: |-
+        `PUT /api/v1/admin/ingest/lifecycle` success response — echoes the
+        applied configuration plus the managed policy id. `Deserialize` is only
+        for this module's own tests to round-trip the response body; production
+        callers just serialize it out.
+      required:
+      - hot_to_warm_days
+      - warm_to_cold_days
+      - cold_to_delete_days
+      - policy_id
+      properties:
+        cold_to_delete_days:
+          type: integer
+          format: int64
+          description: The applied COLD -> DELETE age.
+        hot_to_warm_days:
+          type: integer
+          format: int64
+          description: The applied HOT -> WARM age.
+        policy_id:
+          type: string
+          description: The OpenSearch ISM policy id this service manages.
+        warm_to_cold_days:
+          type: integer
+          format: int64
+          description: The applied WARM -> COLD age.
+    ReadyResponse:
+      type: object
+      description: Documentation-only mirror of `handle_ready`'s readiness response.
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          description: '`"ready"` when ready, `"not ready"` when not.'
+    RestoreRequest:
+      type: object
+      description: '`POST /api/v1/admin/ingest/restore` request body.'
+      required:
+      - index
+      properties:
+        index:
+          type: string
+          description: |-
+            The COLD-tier index to restore — must match
+            `skauswatch-logs-YYYY.MM.DD` exactly (see [`validate_index_name`]).
+            Client-supplied and interpolated into an OpenSearch URL path
+            segment, so anything outside that exact shape (extra `/` segments,
+            `..` traversal, arbitrary strings) is rejected before it ever
+            reaches [`trigger_cold_restore`].
+    RestoreResponse:
+      type: object
+      description: |-
+        `POST /api/v1/admin/ingest/restore` response. `Deserialize` is only for
+        this module's own tests to round-trip the response body; production
+        callers just serialize it out.
+      required:
+      - index
+      - status
+      properties:
+        index:
+          type: string
+          description: The index a restore was triggered for.
+        status:
+          type: string
+          description: |-
+            Always `"restore_triggered"` on success — the restore itself runs in
+            the background on the OpenSearch cluster (Spec §8a1: "slow, ~minutes").
+  securitySchemes:
+    bearer_jwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+tags:
+- name: svc-ingest
+  description: OCSF/JSON ingest and liveness
+- name: svc-ingest-admin
+  description: ISM hot/warm/cold lifecycle configuration and cold-tier restore

@@ -1,0 +1,49 @@
+# Production overrides — pinned by SHA256 digest, HA replicas + HPA.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/webui
+  # Pin to the released digest before deploying — see pinning-dependency-digests skill.
+  tag: "sha256:<digest>"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+service:
+  type: ClusterIP
+
+ingress:
+  enabled: false
+
+httproute:
+  enabled: true
+  gatewayName: shared
+  gatewayNamespace: gateway
+  host: skauswatch.app
+  rules:
+    - path: /
+      service: skauswatch-webui
+      port: 3000
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+configMapData:
+  node-env: "production"
+  manager-url: "http://skauswatch-manager:5000"
+  vault-backend-url: "http://skauswatch-vault:8080"
+  codescan-backend-url: "http://skauswatch-codescan-backend:5005"
+  monitor-url: "http://skauswatch-monitor:8003"

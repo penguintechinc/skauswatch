@@ -1,0 +1,33 @@
+{{- if and .Values.spire.enabled .Values.spire.oidcProvider.enabled .Values.spire.oidcProvider.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "skauswatch-spire.fullname" . }}-oidc-provider
+  labels:
+    {{- include "skauswatch-spire.labels" . | nindent 4 }}
+    component: oidc-provider
+  namespace: {{ .Release.Namespace }}
+  {{- with .Values.spire.oidcProvider.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.spire.oidcProvider.ingress.className }}
+  ingressClassName: {{ .Values.spire.oidcProvider.ingress.className }}
+  {{- end }}
+  {{- with .Values.spire.oidcProvider.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ required "spire.oidcProvider.issuerHost is required when oidcProvider.ingress.enabled" .Values.spire.oidcProvider.issuerHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "skauswatch-spire.fullname" . }}-oidc-provider
+                port:
+                  number: {{ .Values.spire.oidcProvider.port }}
+{{- end }}

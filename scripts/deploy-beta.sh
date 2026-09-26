@@ -8,25 +8,40 @@ set -euo pipefail
 
 # === Configuration ===
 RELEASE_NAME="skauswatch"
-NAMESPACE="skauswatch-beta"
+NAMESPACE="skauswatch"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHART_PATH="${PROJECT_ROOT}/k8s/helm"
 KUSTOMIZE_PATH="${PROJECT_ROOT}/k8s/kustomize/overlays/beta"
 
 # Registry and cluster configuration
-IMAGE_REGISTRY="registry-dal2.penguintech.io"
+IMAGE_REGISTRY="ghcr.io/penguintechinc/skauswatch"
 KUBE_CONTEXT="dal2-beta"
 APP_HOST="skauswatch.penguintech.cloud"
 
-# Services configuration (from docker-compose.yml and helm charts)
+# Services configuration — one entry per Helm chart + Dockerfile
 SERVICES=(
-  "flask-backend:services/flask-backend"
-  "go-backend:services/go-backend"
+  "monitor:services/monitor"
+  "endpoint-agent:services/endpoint-agent"
+  "manager:services/manager"
+  "pki:services/pki"
+  "sshca:services/sshca"
   "webui:services/webui"
+  "worker-codescan:services/worker-codescan"
+  "s3scan:services/s3scan"
+  "scanner:services/scanner"
 )
 
 # Image defaults
-DEFAULT_TAG="$(date +%s)"
+# Resolve latest CI-built beta tag from ghcr.io
+resolve_latest_beta_tag() {
+    local svc="manager"
+    local tag
+    tag=$(gh api "users/penguintechinc/packages/container/skauswatch-${svc}/versions" \
+        --jq '.[].metadata.container.tags[] | select(startswith("beta-"))' 2>/dev/null | sort -r | head -1)
+    echo "${tag:-beta-latest}"
+}
+
+DEFAULT_TAG="$(resolve_latest_beta_tag)"
 IMAGE_TAG="${DEFAULT_TAG}"
 SKIP_BUILD=false
 DRY_RUN=false
@@ -142,67 +157,46 @@ check_prerequisites() {
         return 1
     fi
 
-    # Switch context
-    kubectl config use-context "${KUBE_CONTEXT}" > /dev/null
     log_success "Using Kubernetes context: ${KUBE_CONTEXT}"
 
     # Check namespace exists
-    if ! kubectl get namespace "${NAMESPACE}" &> /dev/null; then
+    if ! kubectl --context "${KUBE_CONTEXT}" get namespace "${NAMESPACE}" &> /dev/null; then
         log_warning "Namespace '${NAMESPACE}' does not exist, creating..."
-        kubectl create namespace "${NAMESPACE}"
+        kubectl --context "${KUBE_CONTEXT}" create namespace "${NAMESPACE}"
         log_success "Created namespace: ${NAMESPACE}"
     fi
 
     log_success "Prerequisites check completed"
 }
 
-# Build and push Docker images
-build_and_push_images() {
-    log_header "Building and Pushing Docker Images"
-
-    for service_spec in "${SERVICES[@]}"; do
-        IFS=':' read -r service_name service_path <<< "$service_spec"
-
-        # Skip if specific service requested and this isn't it
-        if [ -n "$SPECIFIC_SERVICE" ] && [ "$SPECIFIC_SERVICE" != "$service_name" ]; then
-            continue
-        fi
-
-        local dockerfile_path="${PROJECT_ROOT}/${service_path}/Dockerfile"
-        local image_name="${IMAGE_REGISTRY}/${service_name}"
-        local image_tag="${IMAGE_TAG}"
-
-        if [ ! -f "$dockerfile_path" ]; then
-            log_warning "Dockerfile not found for $service_name at $dockerfile_path, skipping"
-            continue
-        fi
-
-        log_info "Building Docker image: ${image_name}:${image_tag}"
-
-        # Build the Docker image
-        if docker build \
-            -t "${image_name}:${image_tag}" \
-            -t "${image_name}:latest" \
-            -f "$dockerfile_path" \
-            "${PROJECT_ROOT}/${service_path}"; then
-            log_success "Built image: ${image_name}:${image_tag}"
-        else
-            log_error "Failed to build image: ${image_name}:${image_tag}"
-            return 1
-        fi
-
-        log_info "Pushing Docker image: ${image_name}:${image_tag}"
-
-        # Push the image
-        if docker push "${image_name}:${image_tag}"; then
-            log_success "Pushed image: ${image_name}:${image_tag}"
-        else
-            log_error "Failed to push image: ${image_name}:${image_tag}"
-            return 1
+# Copy wildcard TLS secret to namespace
+copy_wildcard_tls_secret() {
+    local secret_name="penguintech-cloud-wildcard-tls"
+    if kubectl --context "${KUBE_CONTEXT}" get secret "${secret_name}" -n "${NAMESPACE}" &>/dev/null; then
+        log_success "Wildcard TLS secret already present in namespace"
+        return 0
+    fi
+    log_info "Copying wildcard TLS secret to namespace ${NAMESPACE}..."
+    # Try common source namespaces
+    for src_ns in current-beta icecharts killkrill; do
+        if kubectl --context "${KUBE_CONTEXT}" get secret "${secret_name}" -n "${src_ns}" &>/dev/null; then
+            kubectl --context "${KUBE_CONTEXT}" get secret "${secret_name}" -n "${src_ns}" -o json \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); d['metadata']={'name':d['metadata']['name'],'namespace':'${NAMESPACE}'}; print(json.dumps(d))" \
+                | kubectl --context "${KUBE_CONTEXT}" apply -f -
+            log_success "Copied ${secret_name} from ${src_ns}"
+            return 0
         fi
     done
+    log_warning "Could not copy ${secret_name} — TLS may not work until secret is created manually"
+}
 
-    log_success "Image build and push completed"
+# Build and push Docker images
+build_and_push_images() {
+    log_header "Beta Image Strategy"
+    log_info "Beta images are built by CI from ghcr.io — local build skipped"
+    log_info "Using tag: ${IMAGE_TAG}"
+    log_info "If images are missing, trigger CI: gh workflow run build.yml --ref release/v1.0.x"
+    log_success "Using CI-built images from ${IMAGE_REGISTRY}"
 }
 
 # Deploy using Helm
@@ -232,6 +226,7 @@ do_deploy_helm() {
             "helm" "upgrade" "--install"
             "${release_name}"
             "${chart_path}"
+            "--kube-context" "${KUBE_CONTEXT}"
             "--namespace" "${NAMESPACE}"
             "--create-namespace"
             "--values" "${values_file}"
@@ -298,7 +293,7 @@ verify_deployment() {
         log_info "Checking deployment status (attempt $((retry_count + 1))/$max_retries)..."
 
         local deployments
-        deployments=$(kubectl get deployments -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}')
+        deployments=$(kubectl --context "${KUBE_CONTEXT}" get deployments -n "${NAMESPACE}" -o jsonpath='{.items[*].metadata.name}')
 
         if [ -z "$deployments" ]; then
             log_warning "No deployments found in namespace: ${NAMESPACE}"
@@ -309,7 +304,7 @@ verify_deployment() {
 
         local all_ready=true
         for deployment in $deployments; do
-            local ready=$(kubectl get deployment "$deployment" -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
+            local ready=$(kubectl --context "${KUBE_CONTEXT}" get deployment "$deployment" -n "${NAMESPACE}" -o jsonpath='{.status.conditions[?(@.type=="Available")].status}')
             if [ "$ready" != "True" ]; then
                 all_ready=false
                 log_info "  Waiting for deployment: $deployment"
@@ -343,7 +338,7 @@ do_rollback() {
 
         log_info "Rolling back Helm release: ${release_name}"
 
-        if helm rollback "${release_name}" -n "${NAMESPACE}"; then
+        if helm rollback "${release_name}" --kube-context "${KUBE_CONTEXT}" -n "${NAMESPACE}"; then
             log_success "Rolled back: ${release_name}"
         else
             log_warning "Failed to rollback: ${release_name}"
@@ -417,6 +412,9 @@ main() {
         exit 1
     fi
 
+    # Copy wildcard TLS secret
+    copy_wildcard_tls_secret
+
     # Handle rollback
     if [ "$ROLLBACK" = true ]; then
         if ! do_rollback; then
@@ -458,9 +456,9 @@ main() {
     echo "  Go API:           https://go-api.penguintech.cloud/api/v1"
     echo ""
     echo "View deployment logs:"
-    echo "  kubectl logs -n ${NAMESPACE} -l app=skauswatch-flask-backend"
-    echo "  kubectl logs -n ${NAMESPACE} -l app=skauswatch-go-backend"
-    echo "  kubectl logs -n ${NAMESPACE} -l app=skauswatch-webui"
+    echo "  kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l app=skauswatch-manager"
+    echo "  kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l app=skauswatch-webui"
+    echo "  kubectl --context ${KUBE_CONTEXT} logs -n ${NAMESPACE} -l app=skauswatch-monitor"
     echo ""
     echo "View Helm releases:"
     echo "  helm list -n ${NAMESPACE}"

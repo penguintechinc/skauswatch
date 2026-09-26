@@ -1,0 +1,48 @@
+# Production overrides — pinned by SHA256 digest, HA replicas + HPA.
+replicaCount: 3
+
+image:
+  repository: ghcr.io/penguintechinc/skauswatch/worker-vault-sync
+  # Pin to the released digest before deploying — see pinning-dependency-digests skill.
+  tag: "sha256:<digest>"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+# skauswatch prod today runs on-prem (dal2-equivalent) -> inherits the
+# base chart's "spire" default. If a future prod cluster is EKS, override:
+# awsIdentity:
+#   mode: "irsa"
+#   irsa:
+#     roleArn: "arn:aws:iam::<account-id>:role/skauswatch-base"
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+configMapData:
+  log-level: "warn"
+  db-type: "postgresql"
+  db-host: "postgres"
+  db-port: "5432"
+  db-name: "skauswatch"
+  db-pool-size: "20"
+  redis-url: "redis://redis:6379/0"
+  redis-key-prefix: "skauswatch"
+
+# MUST be enabled: identity-consuming services hard-require a live SVID
+# whenever RELEASE_MODE is "true". Backs awsIdentity.mode: "spire" above.
+spire:
+  enabled: true

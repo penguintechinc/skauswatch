@@ -1,0 +1,13 @@
+# Spectral ruleset for the per-service OpenAPI specs (services/*/openapi/v1.yaml).
+# Lints the utoipa-generated specs against OpenAPI best practices.
+extends: ["spectral:oas"]
+rules:
+  # utoipa does not emit info.contact / license / servers by default; these are
+  # informational for internal, source-committed specs — downgrade to hints so
+  # `spectral lint --fail-severity=error` (CI) is not blocked by their absence.
+  info-contact: off
+  info-license: off
+  oas3-api-servers: off
+  # Every operation has an operationId (utoipa emits fn-name or explicit ones);
+  # keep this ON — a collision or missing id is a real spec defect.
+  operation-operationId-unique: error

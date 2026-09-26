@@ -1,0 +1,43 @@
+# SPIRE Agent Configuration Template for SkausWatch
+# This file is used by the enroll.sh script with environment variable substitution.
+
+agent {
+  data_dir = "/var/lib/spire-agent"
+  log_level = "INFO"
+  server_address = "${SPIRE_SERVER_ADDRESS}"
+  server_port = ${SPIRE_SERVER_PORT:-8081}
+  socket_path = "/run/spire/sockets/agent.sock"
+  trust_domain = "${SPIRE_TRUST_DOMAIN}"
+  trust_bundle_path = "/etc/spire-agent/bundle.crt"
+  insecure_bootstrap = false
+}
+
+plugins {
+  NodeAttestor "join_token" {
+    plugin_data {}
+  }
+
+  KeyManager "disk" {
+    plugin_data {
+      directory = "/var/lib/spire-agent/keys"
+    }
+  }
+
+  WorkloadAttestor "unix" {
+    plugin_data {}
+  }
+
+  WorkloadAttestor "docker" {
+    plugin_data {
+      docker_socket_path = "/var/run/docker.sock"
+    }
+  }
+}
+
+health_checks {
+  listener_enabled = true
+  bind_address = "0.0.0.0"
+  bind_port = 8088
+  live_path = "/live"
+  ready_path = "/ready"
+}

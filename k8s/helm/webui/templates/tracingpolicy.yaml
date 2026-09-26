@@ -1,0 +1,37 @@
+# Tetragon exec-allowlist for {{ include "skauswatch-webui.fullname" . }}.
+# ENFORCE: any sys_execve NOT matching one of the listed binaries is
+# SIGKILLed -- blocks a dropped shell/reverse-shell/living-off-the-land
+# binary (bash, sh, curl, nc, wget, python3, perl, ...) in a pod whose only
+# legitimate process is the binaries below. Requires the Tetragon agent
+# DaemonSet running in the cluster (cluster add-on, not part of this chart
+# -- see k8s/helm/README.md "Tetragon prerequisite").
+# webui's own process is the Node.js runtime executing dist/server/
+# index.js (services/webui Dockerfile CMD) -- no other subprocess is
+# spawned by the Express BFF server.
+{{- if .Values.tetragon.enabled | default true }}
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: {{ include "skauswatch-webui.fullname" . }}-exec-allowlist
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "skauswatch-webui.selectorLabels" . | nindent 6 }}
+  kprobes:
+    - call: "sys_execve"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+        - index: 1
+          type: "string_arr"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "NotEqual"
+              values:
+                - "/usr/local/bin/node"
+          matchActions:
+            - action: Sigkill
+{{- end }}

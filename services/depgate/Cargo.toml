@@ -1,0 +1,116 @@
+[package]
+publish = false
+name = "skauswatch-depgate"
+description = "SkausWatch DepGate — OCI/npm/PyPI pull-through registry proxy: scan-on-ingest, content-addressed cache, verdict-as-object-tags (docs/v2-port/v2.1-depgate.md P1 OCI + P2 npm/PyPI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "skauswatch-depgate"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+axum = { workspace = true }
+# Cosign signature payload decoding (`src/provenance.rs`) + asymmetric
+# bundle-manifest signature encoding (`src/bundle.rs`, P4) — already
+# resolved in this lockfile transitively (jsonwebtoken/aws-sdk-* all pull
+# it), pinning it here as a direct dep does not move anything already
+# locked.
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+jsonwebtoken = { workspace = true }
+# Gunzips PyPI sdist tarballs for `src/tarutil.rs`'s dependency-free tar
+# reader (`crate::heuristics::evaluate_pypi`'s setup.py-presence check) and
+# air-gap bundle manifest hashing input framing (`src/bundle.rs`) — already
+# resolved in this lockfile transitively via `zip` (see that dep's own
+# comment below), pinning it here as a direct dep does not move anything
+# already locked.
+flate2 = { workspace = true }
+futures = { workspace = true }
+# HMAC-SHA256 bundle-manifest signing (`src/bundle.rs`, §6b) was P3's
+# symmetric stand-in for asymmetric signing; P4 adds RSA (see `rsa` below)
+# as the preferred export-side scheme, but HMAC verification is kept for
+# already-exported (`signature_algorithm` absent/`"hmac-sha256"`) bundles —
+# see `src/bundle.rs` module docs.
+hmac = { workspace = true }
+metrics = { workspace = true }
+penguin-licensing = { workspace = true, features = ["axum"] }
+# PEP 503 simple-index href rewriting (src/pypi.rs) — npm's packument
+# rewrite is plain JSON manipulation and needs no regex.
+regex = { workspace = true }
+# "stream" adds Response::bytes_stream(), used by src/upstream.rs to enforce
+# the size guard while reading rather than fully buffering an unbounded body
+# first — not part of the workspace's base reqwest feature set.
+reqwest = { workspace = true, features = ["stream"] }
+# Asymmetric bundle-manifest signing (`src/bundle.rs`, P4) + cosign RSA
+# image-signature verification (`src/provenance.rs`, P4) — the exact same
+# `RsaPrivateKey`/`RsaPublicKey` + `pkcs1v15::{SigningKey, VerifyingKey}`
+# primitives `services/worker-vault-sync/src/providers/oracle.rs` already
+# uses for OCI request signing; no new crypto stack for this crate.
+# "getrandom" is needed only by this crate's own tests (`src/test_support.rs`
+# generates a fresh RSA keypair via `RsaPrivateKey::new(&mut OsRng, ...)`,
+# never in production signing/verification, which take no external RNG) —
+# `services/worker-vault-sync/Cargo.toml` enables the same feature for the
+# identical reason.
+rsa = { workspace = true, features = ["getrandom"] }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+# `Hashes::sha256` (bundle manifest/artifact integrity, `src/bundle.rs`)
+# already covers hashing; `sha2` here is `hmac`'s companion digest type
+# (`Hmac<Sha256>`), not a second hashing implementation.
+sha2 = { workspace = true }
+skauswatch-auth = { workspace = true }
+skauswatch-common = { workspace = true }
+skauswatch-db = { workspace = true }
+# SPIFFE Workload API identity (docs/v2-port/service-auth-model.md §1) —
+# backs the mesh-only mTLS admin listener (`src/mesh_admin.rs`).
+skauswatch-identity = { workspace = true }
+skauswatch-s3 = { workspace = true }
+skauswatch-scan-core = { workspace = true }
+skauswatch-telemetry = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+# mTLS termination for the mesh admin listener — ServerConfig itself is
+# built by skauswatch-identity, not this crate directly; mirrors
+# services/pki's `tokio-rustls` usage in its maintenance listener.
+tokio-rustls = { workspace = true }
+# Per-IP rate limiting on the pull-through proxy (`/v2/*`, `/npm/*`,
+# `/pypi/*`, `/crates/*`, `/go/*` — the abuse/egress-cost surface) and the
+# admin/report API (`src/rate_limit.rs`).
+tower_governor = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+utoipa = { workspace = true, features = ["yaml"] }
+uuid = { workspace = true }
+# Air-gap bundle format (`src/bundle.rs`, §6b): a single portable archive
+# holding `manifest.json` + content-addressed artifact bytes. Already
+# resolved in this lockfile transitively via `skauswatch-scan-core`'s YARA-X
+# dependency chain — pinning it here as a direct dep does not move anything
+# already locked. `default-features = false` for the same reason
+# `worker-codescan`/`codescan-backend` disable them: pulls in bzip2/ppmd
+# codecs outside deny.toml's license allow-list that this crate never uses.
+zip = { workspace = true }
+
+[dev-dependencies]
+axum-test = { workspace = true }
+# testutil feature: constructs an IdentityProvider from injected SVID/bundle
+# material without a live SPIRE agent — see crates/skauswatch-identity's
+# testutil module.
+skauswatch-identity = { workspace = true, features = ["testutil"] }
+skauswatch-testkit = { workspace = true }
+wiremock = { workspace = true }
+
+[lints]
+workspace = true

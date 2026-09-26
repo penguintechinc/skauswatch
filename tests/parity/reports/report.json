@@ -1,0 +1,2580 @@
+{
+  "counts": {
+    "PASS": 177,
+    "ALLOWLISTED": 105,
+    "FINDING": 0
+  },
+  "results": [
+    {
+      "id": "root.healthz",
+      "method": "GET",
+      "path": "/healthz",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "root.readyz",
+      "method": "GET",
+      "path": "/readyz",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "root.version",
+      "method": "GET",
+      "path": "/version",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "root.unknown-route",
+      "method": "GET",
+      "path": "/api/v1/nope",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.login.happy-admin",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.login.val-bad-email",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "auth.login.val-empty-password",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "auth.login.unknown-email",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.login.inactive-correct-pw",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.login.inactive-wrong-pw",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.me.admin",
+      "method": "GET",
+      "path": "/api/v1/auth/me",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.me.viewer",
+      "method": "GET",
+      "path": "/api/v1/auth/me",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.me.no-token",
+      "method": "GET",
+      "path": "/api/v1/auth/me",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.me.invalid-token",
+      "method": "GET",
+      "path": "/api/v1/auth/me",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.me.basic-scheme",
+      "method": "GET",
+      "path": "/api/v1/auth/me",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.me.refresh-as-access",
+      "method": "GET",
+      "path": "/api/v1/auth/me",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-auth-me-refresh-as-access-wording"
+      ]
+    },
+    {
+      "id": "auth.refresh.setup-login",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.refresh.happy",
+      "method": "POST",
+      "path": "/api/v1/auth/refresh",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.refresh.reuse-revoked",
+      "method": "POST",
+      "path": "/api/v1/auth/refresh",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.refresh.garbage-token",
+      "method": "POST",
+      "path": "/api/v1/auth/refresh",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.refresh.access-as-refresh",
+      "method": "POST",
+      "path": "/api/v1/auth/refresh",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-auth-refresh-access-as-refresh-wording"
+      ]
+    },
+    {
+      "id": "auth.refresh.val-missing-field",
+      "method": "POST",
+      "path": "/api/v1/auth/refresh",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "auth.logout.viewer",
+      "method": "POST",
+      "path": "/api/v1/auth/logout",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.me.after-logout",
+      "method": "GET",
+      "path": "/api/v1/auth/me",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.logout.no-token",
+      "method": "POST",
+      "path": "/api/v1/auth/logout",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.list.viewer-403",
+      "method": "GET",
+      "path": "/api/v1/users",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.list.maintainer",
+      "method": "GET",
+      "path": "/api/v1/users",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.list.paginated",
+      "method": "GET",
+      "path": "/api/v1/users",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.list.per-page-capped",
+      "method": "GET",
+      "path": "/api/v1/users",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.list.no-token",
+      "method": "GET",
+      "path": "/api/v1/users",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.get.self-viewer",
+      "method": "GET",
+      "path": "/api/v1/users/3",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.get.other-viewer-403",
+      "method": "GET",
+      "path": "/api/v1/users/1",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.get.other-maintainer",
+      "method": "GET",
+      "path": "/api/v1/users/1",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.get.404",
+      "method": "GET",
+      "path": "/api/v1/users/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.create.viewer-403",
+      "method": "POST",
+      "path": "/api/v1/users",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.create.val-bad-email",
+      "method": "POST",
+      "path": "/api/v1/users",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "users.create.val-short-password",
+      "method": "POST",
+      "path": "/api/v1/users",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "users.create.val-bad-role",
+      "method": "POST",
+      "path": "/api/v1/users",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "users.create.duplicate-409",
+      "method": "POST",
+      "path": "/api/v1/users",
+      "v1_status": 409,
+      "v2_status": 409,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.create.happy",
+      "method": "POST",
+      "path": "/api/v1/users",
+      "v1_status": 201,
+      "v2_status": 201,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.update.admin-role-change",
+      "method": "PUT",
+      "path": "/api/v1/users/5",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.update.self-viewer",
+      "method": "PUT",
+      "path": "/api/v1/users/3",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.update.self-role-dropped",
+      "method": "PUT",
+      "path": "/api/v1/users/3",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.update.other-viewer-403",
+      "method": "PUT",
+      "path": "/api/v1/users/1",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.update.404",
+      "method": "PUT",
+      "path": "/api/v1/users/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.update.email-conflict-409",
+      "method": "PUT",
+      "path": "/api/v1/users/5",
+      "v1_status": 409,
+      "v2_status": 409,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.update.val-bad-email",
+      "method": "PUT",
+      "path": "/api/v1/users/3",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "users.delete.viewer-403",
+      "method": "DELETE",
+      "path": "/api/v1/users/5",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.delete.self-400",
+      "method": "DELETE",
+      "path": "/api/v1/users/1",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.delete.404",
+      "method": "DELETE",
+      "path": "/api/v1/users/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "users.delete.happy",
+      "method": "DELETE",
+      "path": "/api/v1/users/5",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.register.val-bad-email",
+      "method": "POST",
+      "path": "/api/v1/auth/register",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "auth.register.val-short-password",
+      "method": "POST",
+      "path": "/api/v1/auth/register",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "auth.register.duplicate-409",
+      "method": "POST",
+      "path": "/api/v1/auth/register",
+      "v1_status": 409,
+      "v2_status": 409,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.register.happy",
+      "method": "POST",
+      "path": "/api/v1/auth/register",
+      "v1_status": 201,
+      "v2_status": 201,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.lockout.bad-1",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.lockout.bad-2",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.lockout.bad-3",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.lockout.bad-4",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.lockout.bad-5",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.lockout.locked-correct-pw",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.list.viewer",
+      "method": "GET",
+      "path": "/api/v1/alerts",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.list.filter-severity",
+      "method": "GET",
+      "path": "/api/v1/alerts",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-alerts.list.filter-severity"
+      ]
+    },
+    {
+      "id": "alerts.list.filter-status-source",
+      "method": "GET",
+      "path": "/api/v1/alerts",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-alerts.list.filter-status-source"
+      ]
+    },
+    {
+      "id": "alerts.list.filter-empty",
+      "method": "GET",
+      "path": "/api/v1/alerts",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-alerts.list.filter-empty"
+      ]
+    },
+    {
+      "id": "alerts.list.paginated",
+      "method": "GET",
+      "path": "/api/v1/alerts",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.list.no-token",
+      "method": "GET",
+      "path": "/api/v1/alerts",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.get.happy",
+      "method": "GET",
+      "path": "/api/v1/alerts/3",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.get.404",
+      "method": "GET",
+      "path": "/api/v1/alerts/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.create.viewer-403",
+      "method": "POST",
+      "path": "/api/v1/alerts",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.create.val-bad-severity",
+      "method": "POST",
+      "path": "/api/v1/alerts",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "alerts.create.val-missing-description",
+      "method": "POST",
+      "path": "/api/v1/alerts",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "alerts.create.happy",
+      "method": "POST",
+      "path": "/api/v1/alerts",
+      "v1_status": 201,
+      "v2_status": 201,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.update.maintainer",
+      "method": "PUT",
+      "path": "/api/v1/alerts/5",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.update.viewer-403",
+      "method": "PUT",
+      "path": "/api/v1/alerts/1",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.update.404",
+      "method": "PUT",
+      "path": "/api/v1/alerts/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.update.val-bad-status",
+      "method": "PUT",
+      "path": "/api/v1/alerts/1",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "alerts.status.viewer-defect7",
+      "method": "PUT",
+      "path": "/api/v1/alerts/2/status",
+      "v1_status": 200,
+      "v2_status": 403,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect7-alerts-status-role-gate"
+      ]
+    },
+    {
+      "id": "alerts.status.admin",
+      "method": "PUT",
+      "path": "/api/v1/alerts/1/status",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.status.invalid-value",
+      "method": "PUT",
+      "path": "/api/v1/alerts/1/status",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.status.404",
+      "method": "PUT",
+      "path": "/api/v1/alerts/999/status",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.ai-review.viewer-403",
+      "method": "POST",
+      "path": "/api/v1/alerts/1/ai-review",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.ai-review.404",
+      "method": "POST",
+      "path": "/api/v1/alerts/999/ai-review",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.ai-review.happy",
+      "method": "POST",
+      "path": "/api/v1/alerts/1/ai-review",
+      "v1_status": 202,
+      "v2_status": 202,
+      "verdict": "PASS"
+    },
+    {
+      "id": "alerts.search.by-text",
+      "method": "POST",
+      "path": "/api/v1/alerts/search",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-alerts.search.by-text"
+      ]
+    },
+    {
+      "id": "alerts.search.filters",
+      "method": "POST",
+      "path": "/api/v1/alerts/search",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-alerts.search.filters"
+      ]
+    },
+    {
+      "id": "alerts.search.val-bad-page",
+      "method": "POST",
+      "path": "/api/v1/alerts/search",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "alerts.statistics",
+      "method": "GET",
+      "path": "/api/v1/alerts/statistics",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.list",
+      "method": "GET",
+      "path": "/api/v1/threat-intel/iocs",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-ti.iocs.list"
+      ]
+    },
+    {
+      "id": "ti.iocs.list-include-expired",
+      "method": "GET",
+      "path": "/api/v1/threat-intel/iocs",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.list-filters",
+      "method": "GET",
+      "path": "/api/v1/threat-intel/iocs",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-ti.iocs.list-filters"
+      ]
+    },
+    {
+      "id": "ti.iocs.list-source-filter",
+      "method": "GET",
+      "path": "/api/v1/threat-intel/iocs",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-ti.iocs.list-source-filter"
+      ]
+    },
+    {
+      "id": "ti.iocs.list-per-page-capped",
+      "method": "GET",
+      "path": "/api/v1/threat-intel/iocs",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-ti.iocs.list-per-page-capped"
+      ]
+    },
+    {
+      "id": "ti.iocs.list.no-token",
+      "method": "GET",
+      "path": "/api/v1/threat-intel/iocs",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.get",
+      "method": "GET",
+      "path": "/api/v1/threat-intel/iocs/1",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.get-404",
+      "method": "GET",
+      "path": "/api/v1/threat-intel/iocs/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.create.viewer-403",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.create.val-bad-ip",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs",
+      "v1_status": 500,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect10-ti.iocs.create.val-bad-ip"
+      ]
+    },
+    {
+      "id": "ti.iocs.create.val-bad-type",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "ti.iocs.create.duplicate-409",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs",
+      "v1_status": 409,
+      "v2_status": 409,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.create.happy",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs",
+      "v1_status": 201,
+      "v2_status": 201,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.bulk.mixed",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs/bulk",
+      "v1_status": 201,
+      "v2_status": 201,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.bulk.val-invalid-item",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs/bulk",
+      "v1_status": 500,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect10-ti.iocs.bulk.val-invalid-item"
+      ]
+    },
+    {
+      "id": "ti.iocs.bulk.viewer-403",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs/bulk",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.delete.maintainer-403",
+      "method": "DELETE",
+      "path": "/api/v1/threat-intel/iocs/6",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.delete.404",
+      "method": "DELETE",
+      "path": "/api/v1/threat-intel/iocs/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.delete.happy",
+      "method": "DELETE",
+      "path": "/api/v1/threat-intel/iocs/6",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.search.value-substring",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs/search",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-ti.iocs.search.value-substring"
+      ]
+    },
+    {
+      "id": "ti.iocs.search.filters",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs/search",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-ti.iocs.search.filters"
+      ]
+    },
+    {
+      "id": "ti.iocs.search.val-per-page",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs/search",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "ti.iocs.lookup.hit",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs/lookup",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.lookup.miss",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs/lookup",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.lookup.expired-miss",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs/lookup",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.iocs.lookup.missing-fields",
+      "method": "POST",
+      "path": "/api/v1/threat-intel/iocs/lookup",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.statistics",
+      "method": "GET",
+      "path": "/api/v1/threat-intel/statistics",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "ti.feeds",
+      "method": "GET",
+      "path": "/api/v1/threat-intel/feeds",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.list",
+      "method": "GET",
+      "path": "/api/v1/approvals",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.list.filters",
+      "method": "GET",
+      "path": "/api/v1/approvals",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-approvals.list.filters"
+      ]
+    },
+    {
+      "id": "approvals.list.requester-filter",
+      "method": "GET",
+      "path": "/api/v1/approvals",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-approvals.list.requester-filter"
+      ]
+    },
+    {
+      "id": "approvals.list.no-token",
+      "method": "GET",
+      "path": "/api/v1/approvals",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.pending.maintainer",
+      "method": "GET",
+      "path": "/api/v1/approvals/pending",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.pending.viewer-403",
+      "method": "GET",
+      "path": "/api/v1/approvals/pending",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.get.full",
+      "method": "GET",
+      "path": "/api/v1/approvals/3",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.get.404",
+      "method": "GET",
+      "path": "/api/v1/approvals/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.create.happy-viewer",
+      "method": "POST",
+      "path": "/api/v1/approvals",
+      "v1_status": 201,
+      "v2_status": 201,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.create.val-bad-type",
+      "method": "POST",
+      "path": "/api/v1/approvals",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "approvals.create.val-approvals-range",
+      "method": "POST",
+      "path": "/api/v1/approvals",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "approvals.decide.admin-approve",
+      "method": "POST",
+      "path": "/api/v1/approvals/1/decide",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.decide.double-decide-400",
+      "method": "POST",
+      "path": "/api/v1/approvals/1/decide",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.decide.own-request-403",
+      "method": "POST",
+      "path": "/api/v1/approvals/1/decide",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.decide.reject",
+      "method": "POST",
+      "path": "/api/v1/approvals/2/decide",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.decide.already-completed-400",
+      "method": "POST",
+      "path": "/api/v1/approvals/2/decide",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.decide.expired-400",
+      "method": "POST",
+      "path": "/api/v1/approvals/4/decide",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.decide.viewer-403",
+      "method": "POST",
+      "path": "/api/v1/approvals/1/decide",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.decide.404",
+      "method": "POST",
+      "path": "/api/v1/approvals/999/decide",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.decide.val-missing-approved",
+      "method": "POST",
+      "path": "/api/v1/approvals/1/decide",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "approvals.cancel.not-requester-403",
+      "method": "POST",
+      "path": "/api/v1/approvals/1/cancel",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.cancel.requester",
+      "method": "POST",
+      "path": "/api/v1/approvals/1/cancel",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.cancel.completed-400",
+      "method": "POST",
+      "path": "/api/v1/approvals/3/cancel",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.cancel.404",
+      "method": "POST",
+      "path": "/api/v1/approvals/999/cancel",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.statistics.maintainer",
+      "method": "GET",
+      "path": "/api/v1/approvals/statistics",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "approvals.statistics.viewer-403",
+      "method": "GET",
+      "path": "/api/v1/approvals/statistics",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.register.new-agent",
+      "method": "POST",
+      "path": "/api/v1/edr/register",
+      "v1_status": 201,
+      "v2_status": 201,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.register.re-register",
+      "method": "POST",
+      "path": "/api/v1/edr/register",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.register.bad-key-401",
+      "method": "POST",
+      "path": "/api/v1/edr/register",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.register.missing-headers-401",
+      "method": "POST",
+      "path": "/api/v1/edr/register",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.register.val-missing-fields",
+      "method": "POST",
+      "path": "/api/v1/edr/register",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "edr.heartbeat.happy",
+      "method": "POST",
+      "path": "/api/v1/edr/heartbeat",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.heartbeat.unregistered-404",
+      "method": "POST",
+      "path": "/api/v1/edr/heartbeat",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.heartbeat.val-bad-status",
+      "method": "POST",
+      "path": "/api/v1/edr/heartbeat",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "edr.events.single",
+      "method": "POST",
+      "path": "/api/v1/edr/events",
+      "v1_status": 202,
+      "v2_status": 202,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.events.batch-mixed",
+      "method": "POST",
+      "path": "/api/v1/edr/events",
+      "v1_status": 202,
+      "v2_status": 202,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details-edr-batch"
+      ]
+    },
+    {
+      "id": "edr.config.get",
+      "method": "GET",
+      "path": "/api/v1/edr/config",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.config.metadata-override",
+      "method": "GET",
+      "path": "/api/v1/edr/config",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.config.unregistered-404",
+      "method": "GET",
+      "path": "/api/v1/edr/config",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.agents.list.maintainer",
+      "method": "GET",
+      "path": "/api/v1/edr/agents",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.agents.list.viewer-403",
+      "method": "GET",
+      "path": "/api/v1/edr/agents",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.agents.list.filter-status",
+      "method": "GET",
+      "path": "/api/v1/edr/agents",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-edr.agents.list.filter-status"
+      ]
+    },
+    {
+      "id": "edr.agents.list.filter-os",
+      "method": "GET",
+      "path": "/api/v1/edr/agents",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-edr.agents.list.filter-os"
+      ]
+    },
+    {
+      "id": "edr.agents.get",
+      "method": "GET",
+      "path": "/api/v1/edr/agents/agent-beta",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.agents.get-404",
+      "method": "GET",
+      "path": "/api/v1/edr/agents/agent-nope",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.agents.events",
+      "method": "GET",
+      "path": "/api/v1/edr/agents/agent-alpha/events",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.agents.events-paginated",
+      "method": "GET",
+      "path": "/api/v1/edr/agents/agent-alpha/events",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.agents.events-404",
+      "method": "GET",
+      "path": "/api/v1/edr/agents/agent-nope/events",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.deactivate.maintainer-403",
+      "method": "POST",
+      "path": "/api/v1/edr/agents/agent-beta/deactivate",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.deactivate.admin",
+      "method": "POST",
+      "path": "/api/v1/edr/agents/agent-beta/deactivate",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.deactivate.404",
+      "method": "POST",
+      "path": "/api/v1/edr/agents/agent-nope/deactivate",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.agents.get-after-deactivate",
+      "method": "GET",
+      "path": "/api/v1/edr/agents/agent-beta",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "edr.statistics",
+      "method": "GET",
+      "path": "/api/v1/edr/statistics",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.buckets.list",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/buckets",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-s3-buckets-new-credential-fields"
+      ]
+    },
+    {
+      "id": "s3.buckets.list.no-token",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/buckets",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.buckets.get",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/buckets/1",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-s3-buckets-get-new-credential-fields"
+      ]
+    },
+    {
+      "id": "s3.buckets.get-404",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/buckets/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.buckets.create.viewer-403",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/buckets",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.buckets.create.val-bad-endpoint",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/buckets",
+      "v1_status": 500,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect10-s3.buckets.create.val-bad-endpoint"
+      ]
+    },
+    {
+      "id": "s3.buckets.create.duplicate-409",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/buckets",
+      "v1_status": 409,
+      "v2_status": 409,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.buckets.create.happy",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/buckets",
+      "v1_status": 500,
+      "v2_status": 201,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect11-s3.buckets.create.happy"
+      ]
+    },
+    {
+      "id": "s3.buckets.update.happy",
+      "method": "PUT",
+      "path": "/api/v1/s3-scan/buckets/4",
+      "v1_status": 404,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect11-s3.buckets.update.happy"
+      ]
+    },
+    {
+      "id": "s3.buckets.update.404",
+      "method": "PUT",
+      "path": "/api/v1/s3-scan/buckets/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.buckets.update.val-bad-size",
+      "method": "PUT",
+      "path": "/api/v1/s3-scan/buckets/1",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "s3.buckets.get-after-update",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/buckets/4",
+      "v1_status": 404,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect11-s3.buckets.get-after-update"
+      ]
+    },
+    {
+      "id": "s3.buckets.delete.maintainer-403",
+      "method": "DELETE",
+      "path": "/api/v1/s3-scan/buckets/1",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.buckets.delete.404",
+      "method": "DELETE",
+      "path": "/api/v1/s3-scan/buckets/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.buckets.delete.v2-only-defect11",
+      "method": "DELETE",
+      "path": "/api/v1/s3-scan/buckets/4",
+      "v1_status": 404,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect11-s3.buckets.delete.v2-only-defect11"
+      ]
+    },
+    {
+      "id": "s3.buckets.test.happy",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/buckets/1/test",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect12-bucket-test"
+      ]
+    },
+    {
+      "id": "s3.buckets.test.viewer-403",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/buckets/1/test",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.buckets.test.404",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/buckets/999/test",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.scan.trigger-disabled-400",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/buckets/2/scan",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.scan.trigger-404",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/buckets/999/scan",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.scan.trigger-viewer-403",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/buckets/1/scan",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.scan.trigger-happy-defect1",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/buckets/1/scan",
+      "v1_status": 500,
+      "v2_status": 201,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-trigger-scan"
+      ]
+    },
+    {
+      "id": "s3.jobs.list-defect1",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/jobs",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-jobs-list"
+      ]
+    },
+    {
+      "id": "s3.jobs.list.filter-empty",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/jobs",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-s3.jobs.list.filter-empty"
+      ]
+    },
+    {
+      "id": "s3.jobs.get-defect1",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/jobs/1",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-jobs-get"
+      ]
+    },
+    {
+      "id": "s3.jobs.get-404",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/jobs/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.jobs.cancel.running",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/jobs/2/cancel",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.jobs.cancel.already-cancelled-400",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/jobs/3/cancel",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.jobs.cancel.viewer-403",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/jobs/1/cancel",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.jobs.cancel.404",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/jobs/999/cancel",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.results.list-defect1",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/results",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-results-list"
+      ]
+    },
+    {
+      "id": "s3.results.list.filter-empty",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/results",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect8-s3.results.list.filter-empty"
+      ]
+    },
+    {
+      "id": "s3.results.list.filter-malware-defect1",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/results",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-results-list-malware-filter"
+      ]
+    },
+    {
+      "id": "s3.results.get-defect1",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/results/2",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-results-get"
+      ]
+    },
+    {
+      "id": "s3.results.get-404",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/results/999",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.statistics-defect1",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/statistics",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-statistics"
+      ]
+    },
+    {
+      "id": "s3.schedule.get-defect1",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/buckets/1/schedule",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-schedule-get"
+      ]
+    },
+    {
+      "id": "s3.schedule.get-none-404",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/buckets/2/schedule",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.schedule.get-bucket-404",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/buckets/999/schedule",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.schedule.put.happy",
+      "method": "PUT",
+      "path": "/api/v1/s3-scan/buckets/2/schedule",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.schedule.put.update-existing",
+      "method": "PUT",
+      "path": "/api/v1/s3-scan/buckets/1/schedule",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.schedule.put.val-bad-cron",
+      "method": "PUT",
+      "path": "/api/v1/s3-scan/buckets/2/schedule",
+      "v1_status": 500,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect10-s3.schedule.put.val-bad-cron"
+      ]
+    },
+    {
+      "id": "s3.schedule.put.viewer-403",
+      "method": "PUT",
+      "path": "/api/v1/s3-scan/buckets/2/schedule",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.schedule.delete.happy",
+      "method": "DELETE",
+      "path": "/api/v1/s3-scan/buckets/2/schedule",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.schedule.delete.none-404",
+      "method": "DELETE",
+      "path": "/api/v1/s3-scan/buckets/2/schedule",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.upload.post-defect1",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/upload",
+      "v1_status": 500,
+      "v2_status": 201,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-upload-post"
+      ]
+    },
+    {
+      "id": "s3.upload.post-no-file-400",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/upload",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.upload.get-defect1",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/upload/1",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-upload-get"
+      ]
+    },
+    {
+      "id": "s3.upload.get-not-owner-defect1",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/upload/1",
+      "v1_status": 500,
+      "v2_status": 403,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-upload-get-not-owner"
+      ]
+    },
+    {
+      "id": "s3.upload.history-defect1",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/upload/history",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-upload-history"
+      ]
+    },
+    {
+      "id": "s3.upload.delete-defect1",
+      "method": "DELETE",
+      "path": "/api/v1/s3-scan/upload/2",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-upload-delete"
+      ]
+    },
+    {
+      "id": "s3.ti.create-indicator.404",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/results/999/create-indicator",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.ti.create-indicator.not-threat-400",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/results/1/create-indicator",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.ti.create-indicator.viewer-403",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/results/2/create-indicator",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.ti.create-indicator.threat-defect1",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/results/2/create-indicator",
+      "v1_status": 500,
+      "v2_status": 201,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-create-indicator"
+      ]
+    },
+    {
+      "id": "s3.ti.enrichment-defect1",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/results/2/ti-enrichment",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect1-ti-enrichment"
+      ]
+    },
+    {
+      "id": "s3.ti.enrichment-404",
+      "method": "GET",
+      "path": "/api/v1/s3-scan/results/999/ti-enrichment",
+      "v1_status": 404,
+      "v2_status": 404,
+      "verdict": "PASS"
+    },
+    {
+      "id": "s3.hash-lookup.hit-defect3",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/hash-lookup",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect3-hash-lookup-hit"
+      ]
+    },
+    {
+      "id": "s3.hash-lookup.miss",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/hash-lookup",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-s3-hash-lookup-case-normalization"
+      ]
+    },
+    {
+      "id": "s3.hash-lookup.val-bad-hex",
+      "method": "POST",
+      "path": "/api/v1/s3-scan/hash-lookup",
+      "v1_status": 500,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "defect10-s3.hash-lookup.val-bad-hex"
+      ]
+    },
+    {
+      "id": "siem.health",
+      "method": "GET",
+      "path": "/api/v1/siem/health",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-siem-health-logs-rename"
+      ]
+    },
+    {
+      "id": "siem.ingest.proxy",
+      "method": "POST",
+      "path": "/api/v1/siem/ingest",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "siem.ingest.no-token",
+      "method": "POST",
+      "path": "/api/v1/siem/ingest",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "siem.search.opensearch-down",
+      "method": "GET",
+      "path": "/api/v1/siem/search",
+      "v1_status": 500,
+      "v2_status": 500,
+      "verdict": "PASS"
+    },
+    {
+      "id": "siem.stats.opensearch-down",
+      "method": "GET",
+      "path": "/api/v1/siem/stats",
+      "v1_status": 500,
+      "v2_status": 500,
+      "verdict": "PASS"
+    },
+    {
+      "id": "siem.config.get",
+      "method": "GET",
+      "path": "/api/v1/siem/config",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-siem-config-logs-rename"
+      ]
+    },
+    {
+      "id": "siem.config.put.happy",
+      "method": "PUT",
+      "path": "/api/v1/siem/config",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "siem.config.put.no-body-field",
+      "method": "PUT",
+      "path": "/api/v1/siem/config",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "siem.config.put.out-of-range",
+      "method": "PUT",
+      "path": "/api/v1/siem/config",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "siem.config.put.wrong-type",
+      "method": "PUT",
+      "path": "/api/v1/siem/config",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "PASS"
+    },
+    {
+      "id": "siem.config.put.viewer-403",
+      "method": "PUT",
+      "path": "/api/v1/siem/config",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "asm.scans.create",
+      "method": "POST",
+      "path": "/api/v1/asm/scans",
+      "v1_status": 200,
+      "v2_status": 201,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.create"
+      ]
+    },
+    {
+      "id": "asm.scans.create-empty-body",
+      "method": "POST",
+      "path": "/api/v1/asm/scans",
+      "v1_status": 200,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.create-empty-body"
+      ]
+    },
+    {
+      "id": "asm.scans.list",
+      "method": "GET",
+      "path": "/api/v1/asm/scans",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.list"
+      ]
+    },
+    {
+      "id": "asm.scans.get",
+      "method": "GET",
+      "path": "/api/v1/asm/scans/7",
+      "v1_status": 200,
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.get"
+      ]
+    },
+    {
+      "id": "asm.scans.hosts",
+      "method": "GET",
+      "path": "/api/v1/asm/scans/7/hosts",
+      "v1_status": 200,
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.hosts"
+      ]
+    },
+    {
+      "id": "asm.scans.screenshots",
+      "method": "GET",
+      "path": "/api/v1/asm/scans/7/screenshots",
+      "v1_status": 200,
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.screenshots"
+      ]
+    },
+    {
+      "id": "asm.scans.certs",
+      "method": "GET",
+      "path": "/api/v1/asm/scans/7/certs",
+      "v1_status": 200,
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.certs"
+      ]
+    },
+    {
+      "id": "asm.scans.diff",
+      "method": "GET",
+      "path": "/api/v1/asm/scans/7/diff",
+      "v1_status": 200,
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.diff"
+      ]
+    },
+    {
+      "id": "asm.scans.report",
+      "method": "GET",
+      "path": "/api/v1/asm/scans/7/report",
+      "v1_status": 200,
+      "v2_status": 404,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.scans.report"
+      ]
+    },
+    {
+      "id": "asm.settings.ports.get",
+      "method": "GET",
+      "path": "/api/v1/asm/settings/ports",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.settings.ports.get"
+      ]
+    },
+    {
+      "id": "asm.settings.ports.put.admin",
+      "method": "PUT",
+      "path": "/api/v1/asm/settings/ports",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-asm-real-impl-asm.settings.ports.put.admin"
+      ]
+    },
+    {
+      "id": "asm.settings.ports.put.viewer-403",
+      "method": "PUT",
+      "path": "/api/v1/asm/settings/ports",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "asm.scans.no-token",
+      "method": "GET",
+      "path": "/api/v1/asm/scans",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "darwin.status",
+      "method": "GET",
+      "path": "/api/v1/darwin/status",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "darwin.status.no-token",
+      "method": "GET",
+      "path": "/api/v1/darwin/status",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "darwin.repos.list",
+      "method": "GET",
+      "path": "/api/v1/darwin/repos",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "darwin.repos.create.admin",
+      "method": "POST",
+      "path": "/api/v1/darwin/repos",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "darwin.repos.create.viewer-403",
+      "method": "POST",
+      "path": "/api/v1/darwin/repos",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "darwin.repos.create.maintainer-403",
+      "method": "POST",
+      "path": "/api/v1/darwin/repos",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "darwin.repos.get",
+      "method": "GET",
+      "path": "/api/v1/darwin/repos/3",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "darwin.repos.update.admin",
+      "method": "PUT",
+      "path": "/api/v1/darwin/repos/3",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "darwin.repos.delete.admin",
+      "method": "DELETE",
+      "path": "/api/v1/darwin/repos/3",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "darwin.repos.delete.maintainer-403",
+      "method": "DELETE",
+      "path": "/api/v1/darwin/repos/3",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "darwin.reviews.list",
+      "method": "GET",
+      "path": "/api/v1/darwin/reviews",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "darwin.reviews.create.maintainer",
+      "method": "POST",
+      "path": "/api/v1/darwin/reviews",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "darwin.reviews.create.admin-403",
+      "method": "POST",
+      "path": "/api/v1/darwin/reviews",
+      "v1_status": 403,
+      "v2_status": 403,
+      "verdict": "PASS"
+    },
+    {
+      "id": "darwin.reviews.get",
+      "method": "GET",
+      "path": "/api/v1/darwin/reviews/9",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "darwin.plans.list",
+      "method": "GET",
+      "path": "/api/v1/darwin/plans",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "darwin.plans.create",
+      "method": "POST",
+      "path": "/api/v1/darwin/plans",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "darwin.plans.get",
+      "method": "GET",
+      "path": "/api/v1/darwin/plans/2",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-darwin-codescan-rename"
+      ]
+    },
+    {
+      "id": "research.lookup.no-token",
+      "method": "POST",
+      "path": "/api/v1/research/lookup",
+      "v1_status": 401,
+      "v2_status": 401,
+      "verdict": "PASS"
+    },
+    {
+      "id": "research.lookup.val-missing-query",
+      "method": "POST",
+      "path": "/api/v1/research/lookup",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "research.lookup.decision2",
+      "method": "POST",
+      "path": "/api/v1/research/lookup",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision2-research-lookup"
+      ]
+    },
+    {
+      "id": "research.whois.val-missing-type",
+      "method": "POST",
+      "path": "/api/v1/research/whois",
+      "v1_status": 400,
+      "v2_status": 400,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision-validation-details"
+      ]
+    },
+    {
+      "id": "research.whois.decision2",
+      "method": "POST",
+      "path": "/api/v1/research/whois",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision2-research-whois"
+      ]
+    },
+    {
+      "id": "research.dns.decision2",
+      "method": "POST",
+      "path": "/api/v1/research/dns",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision2-research-dns"
+      ]
+    },
+    {
+      "id": "research.asn.decision2",
+      "method": "POST",
+      "path": "/api/v1/research/asn",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision2-research-asn"
+      ]
+    },
+    {
+      "id": "research.shodan.disabled",
+      "method": "POST",
+      "path": "/api/v1/research/shodan",
+      "v1_status": 500,
+      "v2_status": 503,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision2-research-shodan"
+      ]
+    },
+    {
+      "id": "research.maltego.disabled",
+      "method": "POST",
+      "path": "/api/v1/research/maltego",
+      "v1_status": 500,
+      "v2_status": 503,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision2-research-maltego"
+      ]
+    },
+    {
+      "id": "research.config.decision2",
+      "method": "GET",
+      "path": "/api/v1/research/config",
+      "v1_status": 500,
+      "v2_status": 200,
+      "verdict": "ALLOWLISTED",
+      "allowlist_entries": [
+        "decision2-research-config"
+      ]
+    },
+    {
+      "id": "auth.login.mixed-case-email",
+      "method": "POST",
+      "path": "/api/v1/auth/login",
+      "v1_status": 200,
+      "v2_status": 200,
+      "verdict": "PASS"
+    },
+    {
+      "id": "auth.register.mixed-case-email",
+      "method": "POST",
+      "path": "/api/v1/auth/register",
+      "v1_status": 201,
+      "v2_status": 201,
+      "verdict": "PASS"
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+# NOTE: {{ include "skauswatch-endpoint-agent.fullname" . }} runs with hostNetwork: true
+# (see values.yaml ROOT EXCEPTION). A standard Cilium endpointSelector
+# CiliumNetworkPolicy does not meaningfully constrain a host-networked pod's
+# ingress (traffic arrives on the node's network namespace, not a pod
+# identity) -- Cilium's host firewall (CiliumClusterwideNetworkPolicy +
+# nodeSelector) is the correct primitive for that, but it affects ALL host
+# traffic on selected nodes and is a cluster-wide, cutover-ops decision, not
+# something this chart should apply unilaterally. Deliberately NOT rendered
+# here -- see k8s/helm/README.md "endpoint-agent: CNP does not apply".
+# Egress from THIS pod's own process (not host-level traffic) is still
+# scoped below, since Cilium can attribute egress to the process even under
+# hostNetwork via its identity-aware egress path.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "skauswatch-endpoint-agent.fullname" . }}
+  labels:
+    {{- include "skauswatch-endpoint-agent.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "skauswatch-endpoint-agent.selectorLabels" . | nindent 6 }}
+  egress:
+    # DNS resolution (kube-dns) -- required for any Service/FQDN egress below.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # manager enrollment/heartbeat/telemetry API
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: skauswatch-manager
+      toPorts:
+        - ports:
+            - port: "5000"
+              protocol: TCP
+    # PenguinTech license/feature-flag server (all environments except
+    # domain-bypassed *.penguintech.cloud/*.penguincloud.io deploys still
+    # call out for entitlement checks in the common case).
+    - toFQDNs:
+        - matchName: "license.penguintech.io"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

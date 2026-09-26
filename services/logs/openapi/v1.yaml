@@ -1,0 +1,108 @@
+openapi: 3.1.0
+info:
+  title: SkausWatch Logs Ingest API
+  description: Internal, unauthenticated SIEM log ingest sink. The manager's siem router (`LOGS_URL`) is the only intended caller; this service is never exposed outside the cluster network and has no auth layer of its own.
+  contact:
+    name: Penguin Tech Inc
+    email: support@penguintech.io
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+  version: '1'
+paths:
+  /healthz:
+    get:
+      tags:
+      - logs
+      summary: '`GET /healthz` — v1 liveness body `{"status":"ok","service":"logs"}`.'
+      operationId: handle_health
+      responses:
+        '200':
+          description: Service liveness
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /ingest:
+    post:
+      tags:
+      - logs
+      summary: |-
+        `POST /ingest` — accepts a single JSON object or a JSON array of records,
+        normalizes each to OCSF, bulk-indexes them into the daily OpenSearch index,
+        and answers `202 {"ingested": <count>}`. Ported verbatim from v1
+        `HTTPIngestHandler.handle_ingest` (the S3/Parquet mirror-write is a
+        documented deferral — see the port contract).
+      operationId: handle_ingest
+      requestBody:
+        description: A single JSON log record object, or a JSON array of up to 10,000 record objects. Each record is normalized to OCSF and bulk-indexed into the daily OpenSearch index.
+        content:
+          application/json:
+            schema: {}
+        required: true
+      responses:
+        '202':
+          description: Records accepted for indexing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestAcceptedResponse'
+        '400':
+          description: Request body is not valid JSON
+          content:
+            text/plain:
+              schema:
+                type: string
+        '413':
+          description: Batch exceeds the 10,000 record cap
+          content:
+            text/plain:
+              schema:
+                type: string
+        '500':
+          description: OCSF normalization failed or the OpenSearch bulk write errored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestErrorResponse'
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of `handle_health`'s
+        `200 {"status":"ok","service":"logs"}` body.
+      required:
+      - status
+      - service
+      properties:
+        service:
+          type: string
+          description: Always `"logs"` — identifies which service answered.
+        status:
+          type: string
+          description: Always `"ok"` when the process is serving requests.
+    IngestAcceptedResponse:
+      type: object
+      description: 'Documentation-only mirror of `handle_ingest`''s `202 {"ingested": N}` body.'
+      required:
+      - ingested
+      properties:
+        ingested:
+          type: integer
+          format: int64
+          description: Number of records accepted in this batch (post OCSF normalization).
+    IngestErrorResponse:
+      type: object
+      description: |-
+        Documentation-only mirror of the `500 {"error": "..."}` body emitted on
+        OCSF normalization failure or an OpenSearch bulk-write error.
+      required:
+      - error
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+tags:
+- name: logs
+  description: SIEM log ingest and liveness

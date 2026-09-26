@@ -1,0 +1,115 @@
+# Cilium default-deny + explicit allow for the receiver Deployment.
+# Selecting this pod with ANY CiliumNetworkPolicy makes Cilium deny every
+# ingress/egress path not explicitly listed below (Cilium per-endpoint
+# default-deny model) -- there is no separate blanket "default-deny" object
+# needed alongside this one. See k8s/helm/README.md "Cluster security
+# baseline" for the full policy.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "skauswatch-svc-ingest.receiver.fullname" . }}
+  labels:
+    {{- include "skauswatch-svc-ingest.receiver.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "skauswatch-svc-ingest.receiver.selectorLabels" . | nindent 6 }}
+  ingress:
+    # kubelet liveness/readiness probes originate from the node, not a pod
+    # identity -- must be explicitly allowed or probes fail closed once this
+    # pod is selected by any CiliumNetworkPolicy.
+    - fromEntities:
+        - host
+        - remote-node
+    # Task 2.4 brief: syslog UDP/TCP, syslog-TLS, OTLP gRPC/HTTP, and HTTPS
+    # OCSF/JSON ingest are all accepted from any pod in the same namespace
+    # (log-forwarding agents, collectors, and other in-cluster services all
+    # legitimately call these ports) -- `fromEndpoints: [{}]` with no
+    # namespace label scopes this to the policy's own namespace only, per
+    # Cilium's default fromEndpoints behavior.
+    - fromEndpoints:
+        - {}
+      toPorts:
+        - ports:
+            - port: "{{ .Values.ports.syslogPort }}"
+              protocol: UDP
+            - port: "{{ .Values.ports.syslogPort }}"
+              protocol: TCP
+            - port: "{{ .Values.ports.syslogTlsPort }}"
+              protocol: TCP
+            - port: "{{ .Values.ports.otlpGrpcPort }}"
+              protocol: TCP
+            - port: "{{ .Values.ports.otlpHttpPort }}"
+              protocol: TCP
+            - port: "{{ .Values.ports.httpPort }}"
+              protocol: TCP
+    # Prometheus scrape (same-namespace collector -- adjust label if the
+    # cluster's Prometheus/Alloy runs in a dedicated monitoring namespace).
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "{{ .Values.ports.metricsPort }}"
+              protocol: TCP
+  egress:
+    # DNS resolution (kube-dns) -- required for any Service/FQDN egress below.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+          rules:
+            dns:
+              - matchPattern: "*"
+    # CONFIRMED (services/svc-ingest/src/bootstrap.rs::build_event_buffer):
+    # NATS JetStream, same-namespace dependency; NOT owned by this chart
+    # (no k8s/helm/nats-jetstream chart exists yet -- see values.yaml
+    # configMapData.nats-url comment). Requires NATS server >=2.14.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: nats-jetstream
+      toPorts:
+        - ports:
+            - port: "4222"
+              protocol: TCP
+    # CONFIRMED (services/svc-ingest/src/bootstrap.rs::build_ingest_state /
+    # config.rs OPENSEARCH_URL): same-namespace dependency; NOT owned by
+    # this chart.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: opensearch
+      toPorts:
+        - ports:
+            - port: "9200"
+              protocol: TCP
+    # Task 2.4 brief specifies "svc-vault:8200" for ingest TLS/token
+    # secret material. NOT YET CONFIRMED against source (no runtime vault
+    # API client call site found in services/svc-ingest/src -- Secrets are
+    # currently expected to arrive via existingSecret/K8s Secret sync, not
+    # a live HTTP call). Port corrected to match the ACTUAL deployed
+    # k8s/helm/vault chart's Service (values.yaml httpPort: 8080, NOT the
+    # generic HashiCorp Vault 8200 default the brief assumed) -- flag for
+    # review if a different vault instance/port was intended.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: skauswatch-vault
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # PenguinTech license/feature-flag server (all environments except
+    # domain-bypassed *.penguintech.cloud/*.penguincloud.io deploys still
+    # call out for entitlement checks in the common case).
+    - toFQDNs:
+        - matchName: "license.penguintech.io"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

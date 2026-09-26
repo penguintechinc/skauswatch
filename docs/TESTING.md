@@ -1,6 +1,6 @@
 # Testing Guide - SkausWatch
 
-Comprehensive testing documentation for SkausWatch's eight-service architecture with IceBox and Darwin sub-modules, including unit tests, integration tests, PKI testing, SSH CA testing, smoke tests, mock data, and cross-architecture validation.
+Comprehensive testing documentation for SkausWatch's eight-service architecture with Vault and CodeScan sub-modules, including unit tests, integration tests, PKI testing, SSH CA testing, smoke tests, mock data, and cross-architecture validation.
 
 ## Overview
 
@@ -14,7 +14,7 @@ Testing is organized into multiple levels to ensure comprehensive coverage, fast
 | **PKI Tests** | Certificate management validation | 2-5 min | Certificate generation, revocation, OCSP |
 | **SSH CA Tests** | SSH certificate authority validation | 2-5 min | SSH cert generation, validation, expiry |
 | **E2E Tests** | Critical workflows end-to-end | 5-10 min | User scenarios, business logic |
-| **IceBox Tests** | Secrets vault validation | 2-5 min | Encryption, JIT tokens, one-time secrets, API |
+| **Vault Tests** | Secrets vault validation | 2-5 min | Encryption, JIT tokens, one-time secrets, API |
 | **Performance Tests** | Scalability and throughput validation | 5-15 min | Load, latency, resource usage |
 
 ---
@@ -180,7 +180,7 @@ All projects **MUST** implement smoke tests before committing:
 - ✅ **Build Tests**: All containers build successfully without errors
 - ✅ **Run Tests**: All containers start and remain healthy
 - ✅ **API Health Checks**: All API endpoints respond with 200/healthy status
-- ✅ **Service Communication**: Manager can communicate with PKI, SSH CA, AAA Monitor
+- ✅ **Service Communication**: Manager can communicate with PKI, SSH CA, Monitor
 - ✅ **Database Connectivity**: All services connect to database successfully
 
 ### Location & Structure
@@ -190,18 +190,18 @@ tests/smoke/
 ├── build/          # Container build verification
 │   ├── test-manager-build.sh
 │   ├── test-pki-build.sh
-│   ├── test-ssh-ca-build.sh
-│   └── test-aaa-monitor-build.sh
+│   ├── test-sshca-build.sh
+│   └── test-monitor-build.sh
 ├── run/            # Container runtime and health
 │   ├── test-manager-run.sh
 │   ├── test-pki-run.sh
-│   ├── test-ssh-ca-run.sh
-│   └── test-aaa-monitor-run.sh
+│   ├── test-sshca-run.sh
+│   └── test-monitor-run.sh
 ├── api/            # API health endpoint validation
 │   ├── test-manager-health.sh
 │   ├── test-pki-health.sh
-│   ├── test-ssh-ca-health.sh
-│   ├── test-aaa-monitor-health.sh
+│   ├── test-sshca-health.sh
+│   ├── test-monitor-health.sh
 │   └── README.md
 ├── integration/    # Service communication
 │   ├── test-service-communication.sh
@@ -288,7 +288,7 @@ curl -s http://localhost:8001/api/health || exit 1
 # Manager → SSH CA
 curl -s http://localhost:8002/api/health || exit 1
 
-# Manager → AAA Monitor
+# Manager → Monitor
 curl -s http://localhost:8003/api/health || exit 1
 
 echo "✓ All services communicating correctly"
@@ -310,15 +310,15 @@ tests/unit/
 │   ├── test_auth.py
 │   ├── test_models.py
 │   └── test_api.py
-├── pki-server/
+├── pki/
 │   ├── test_certificate_generation.py
 │   ├── test_revocation.py
 │   └── test_ocsp.py
-├── ssh-ca/
+├── sshca/
 │   ├── test_ssh_key_generation.py
 │   ├── test_cert_issuance.py
 │   └── test_validation.py
-└── aaa-monitor/
+└── monitor/
     ├── test_log_parsing.py
     └── test_threat_detection.py
 ```
@@ -354,17 +354,17 @@ tests/integration/
 │   ├── test_auth_flow.py
 │   ├── test_user_creation.py
 │   └── test_api_contracts.py
-├── pki-server/
+├── pki/
 │   ├── test_certificate_lifecycle.py
 │   ├── test_database_operations.py
 │   └── test_ocsp_integration.py
-├── ssh-ca/
+├── sshca/
 │   ├── test_ssh_cert_flow.py
 │   └── test_database_operations.py
 ├── services/
 │   ├── test_manager_pki_communication.py
-│   ├── test_manager_ssh_ca_communication.py
-│   └── test_aaa_monitor_integration.py
+│   ├── test_manager_sshca_communication.py
+│   └── test_monitor_integration.py
 └── database/
     ├── test_migrations.py
     └── test_queries.py
@@ -393,26 +393,26 @@ pytest tests/integration/manager  # Service-specific
 
 ```bash
 # Test certificate generation
-pytest tests/integration/pki-server/test_certificate_lifecycle.py
+pytest tests/integration/pki/test_certificate_lifecycle.py
 
 # Test with different key sizes
-pytest tests/integration/pki-server/ -k "key_size"
+pytest tests/integration/pki/ -k "key_size"
 
 # Test certificate validation
-pytest tests/integration/pki-server/ -k "validation"
+pytest tests/integration/pki/ -k "validation"
 ```
 
 ### Revocation Testing
 
 ```bash
 # Test certificate revocation
-pytest tests/integration/pki-server/test_revocation.py
+pytest tests/integration/pki/test_revocation.py
 
 # Test CRL generation
-pytest tests/integration/pki-server/ -k "crl"
+pytest tests/integration/pki/ -k "crl"
 
 # Test OCSP responder
-pytest tests/integration/pki-server/test_ocsp_integration.py
+pytest tests/integration/pki/test_ocsp_integration.py
 ```
 
 ### OCSP Testing
@@ -420,7 +420,7 @@ pytest tests/integration/pki-server/test_ocsp_integration.py
 Mock OCSP client and server interactions:
 
 ```python
-# tests/integration/pki-server/test_ocsp_integration.py
+# tests/integration/pki/test_ocsp_integration.py
 def test_ocsp_response_format():
     """Verify OCSP response is properly formatted"""
     # Generate certificate
@@ -442,32 +442,32 @@ def test_ocsp_response_format():
 
 ```bash
 # Test SSH key pair generation
-pytest tests/integration/ssh-ca/test_ssh_key_generation.py
+pytest tests/integration/sshca/test_ssh_key_generation.py
 
 # Test with different key types
-pytest tests/integration/ssh-ca/ -k "key_type"
+pytest tests/integration/sshca/ -k "key_type"
 
 # Test key validation
-pytest tests/integration/ssh-ca/ -k "validation"
+pytest tests/integration/sshca/ -k "validation"
 ```
 
 ### SSH Certificate Issuance Testing
 
 ```bash
 # Test SSH certificate issuance
-pytest tests/integration/ssh-ca/test_ssh_cert_flow.py
+pytest tests/integration/sshca/test_ssh_cert_flow.py
 
 # Test certificate signing
-pytest tests/integration/ssh-ca/ -k "signing"
+pytest tests/integration/sshca/ -k "signing"
 
 # Test with different principals
-pytest tests/integration/ssh-ca/ -k "principals"
+pytest tests/integration/sshca/ -k "principals"
 ```
 
 ### SSH Certificate Validation Testing
 
 ```python
-# tests/integration/ssh-ca/test_validation.py
+# tests/integration/sshca/test_validation.py
 def test_ssh_cert_validation():
     """Verify SSH certificate validates correctly"""
     # Generate CA key
@@ -483,14 +483,14 @@ def test_ssh_cert_validation():
 
 ---
 
-## IceBox Sub-Module Tests
+## Vault Sub-Module Tests
 
 ### Location
 
-IceBox tests live in the IceBox worktree, separate from core SkausWatch tests:
+Vault tests live in the Vault worktree, separate from core SkausWatch tests:
 
 ```
-.worktrees/icebox/icebox/
+.worktrees/vault/vault/
 ├── services/flask-backend/tests/
 │   ├── test_envelope.py           # AES-256-GCM roundtrip, tamper, MEK rotation
 │   ├── test_jit_token.py          # HMAC token format, expiry, tamper detection
@@ -499,7 +499,7 @@ IceBox tests live in the IceBox worktree, separate from core SkausWatch tests:
     └── run-all.sh                 # 6-phase smoke runner
 ```
 
-### IceBox Smoke Tests
+### Vault Smoke Tests
 
 **6-phase smoke runner:**
 
@@ -515,23 +515,23 @@ icebox/tests/smoke/run-all.sh --skip-build
 ```
 
 **Phases:**
-1. Build all 5 IceBox containers
-2. Start services (flask-backend, pki-server, ssh-ca, sync-worker, webui)
+1. Build all 5 Vault containers
+2. Start services (flask-backend, pki, sshca, sync-worker, webui)
 3. Wait for health checks
 4. API health validation
 5. Core API smoke (secrets CRUD, JIT request, one-time create)
 6. Teardown
 
-**Requirements**: IceBox namespace must exist on `--context local-alpha`. Provision with:
+**Requirements**: Vault namespace must exist on `--context local-alpha`. Provision with:
 ```bash
 kubectl apply --context local-alpha -k icebox/k8s/kustomize/overlays/alpha
 ```
 
-### IceBox Unit Tests
+### Vault Unit Tests
 
 ```bash
-# All IceBox unit tests
-cd .worktrees/icebox/icebox/services/flask-backend
+# All Vault unit tests
+cd .worktrees/vault/vault/services/flask-backend
 pytest tests/ -v
 
 # Envelope encryption tests
@@ -548,9 +548,9 @@ pytest tests/test_jit_flow_integration.py -v
 # Also covers: one-time secret create → view → verify view-once enforcement
 ```
 
-### IceBox WebUI Smoke Tests
+### Vault WebUI Smoke Tests
 
-IceBox WebUI has 9 pages, each requiring a smoke test:
+Vault WebUI has 9 pages, each requiring a smoke test:
 - `/login` — LoginPageBuilder with ALTCHA CAPTCHA
 - `/dashboard` — Secrets summary cards
 - `/secrets` — Secrets list and CRUD
@@ -559,11 +559,11 @@ IceBox WebUI has 9 pages, each requiring a smoke test:
 - `/audit` — Audit log viewer
 - `/one-time` — One-time secrets
 - `/settings` — MEK rotation, license key management
-- `/pki` and `/ssh` — IceBox PKI/SSH CA management
+- `/pki` and `/ssh` — Vault PKI/SSH CA management
 
 Run via Playwright:
 ```bash
-cd .worktrees/icebox/icebox/webui
+cd .worktrees/vault/vault/webui
 npx playwright test tests/smoke/
 ```
 
@@ -580,7 +580,7 @@ E2E tests verify critical user workflows from start to finish, testing the entir
 ```
 tests/e2e/
 ├── certificate-lifecycle.spec.ts
-├── ssh-ca-flow.spec.ts
+├── sshca-flow.spec.ts
 ├── user-authentication.spec.ts
 └── audit-logging.spec.ts
 ```
@@ -669,7 +669,7 @@ Create `scripts/build/test-multiarch.sh`:
 
 set -e
 
-SERVICES=("manager-new" "pki-server-new" "ssh-ca" "aaa-monitor" "worker-s3" "worker-scanner" "edr-agent" "webui")
+SERVICES=("manager-new" "pki" "sshca" "monitor" "s3scan" "scanner" "endpoint-agent" "webui")
 ARCHITECTURES=("linux/amd64" "linux/arm64")
 
 for service in "${SERVICES[@]}"; do
@@ -722,7 +722,7 @@ Follow this order for efficient testing before commits:
 6. **Unit tests** (1-2 min)
 7. **Integration tests** (2-5 min)
 8. **PKI/SSH CA tests** (2-5 min)
-9. **IceBox smoke tests** (if IceBox modified): `icebox/tests/smoke/run-all.sh --build-only`
+9. **Vault smoke tests** (if Vault modified): `icebox/tests/smoke/run-all.sh --build-only`
 10. **E2E tests** (5-10 min)
 11. **Cross-architecture build** (optional, slow)
 

@@ -1,0 +1,34 @@
+# Alpha overrides — local MicroK8s (local-alpha context), namespace: skauswatch.
+replicaCount: 1
+
+image:
+  repository: localhost:32000/skauswatch/monitor
+  tag: "alpha-latest"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+autoscaling:
+  enabled: false
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+ingress:
+  enabled: false
+
+httproute:
+  enabled: false
+
+configMapData:
+  auth-enabled: "true"
+  es-enabled: "true"
+  es-url: "http://opensearch:9200"
+  es-index-pattern: "skauswatch-events-*"
+  license-server-url: "https://license.penguintech.io"
+  release-mode: "false"

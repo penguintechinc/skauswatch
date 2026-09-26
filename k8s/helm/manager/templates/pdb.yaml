@@ -1,0 +1,17 @@
+# PodDisruptionBudget -- release-audit finding (gh-148, 0 PodDisruptionBudgets
+# existed). See values.yaml's pdb.* comment for why maxUnavailable (not
+# minAvailable) is the policy.
+{{- if .Values.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "skauswatch-manager.fullname" . }}
+  labels:
+    {{- include "skauswatch-manager.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  maxUnavailable: {{ .Values.pdb.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "skauswatch-manager.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -59,14 +59,14 @@ Configuration for `services/manager-new/`
 
 ## 🔐 PKI Server (Port 5001)
 
-Configuration for `services/pki-server-new/`
+Configuration for `services/pki/`
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `PKI_PORT` | No | `5001` | HTTP server port |
 | `PKI_HOST` | No | `0.0.0.0` | Bind address |
 | `PKI_DEBUG` | No | `false` | Enable debug logging |
-| `ICEBOX_PKI_URL` | No | — | IceBox PKI backend URL (shim proxy target) |
+| `VAULT_PKI_URL` | No | — | Vault PKI backend URL (shim proxy target) |
 | `PKI_CERT_VALIDITY_DAYS` | No | `365` | Default certificate validity period |
 | `PKI_KEY_SIZE` | No | `4096` | Default RSA key size |
 | `PKI_COUNTRY` | No | `US` | Default cert subject country |
@@ -75,26 +75,26 @@ Configuration for `services/pki-server-new/`
 
 ## 🔑 SSH CA (Port 5002)
 
-Configuration for `services/ssh-ca/`
+Configuration for `services/sshca/`
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `SSH_CA_PORT` | No | `5002` | HTTP server port |
-| `SSH_CA_HOST` | No | `0.0.0.0` | Bind address |
-| `SSH_CA_DEBUG` | No | `false` | Enable debug logging |
-| `ICEBOX_SSH_CA_URL` | No | — | IceBox SSH CA backend URL (shim proxy target) |
+| `SSHCA_PORT` | No | `5002` | HTTP server port |
+| `SSHCA_HOST` | No | `0.0.0.0` | Bind address |
+| `SSHCA_DEBUG` | No | `false` | Enable debug logging |
+| `VAULT_SSHCA_URL` | No | — | Vault SSH CA backend URL (shim proxy target) |
 | `SSH_CERT_VALIDITY_SECONDS` | No | `3600` | Default SSH cert validity (1 hour) |
 | `LOG_LEVEL` | No | `INFO` | Log level |
 
-## 📊 AAA Monitor (Port 5003)
+## 📊 Monitor (Port 5003)
 
-Configuration for `services/aaa-monitor/`
+Configuration for `services/monitor/`
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `AAA_PORT` | No | `5003` | HTTP server port |
-| `AAA_HOST` | No | `0.0.0.0` | Bind address |
-| `AAA_DEBUG` | No | `false` | Enable debug logging |
+| `MONITOR_PORT` | No | `5003` | HTTP server port |
+| `MONITOR_HOST` | No | `0.0.0.0` | Bind address |
+| `MONITOR_DEBUG` | No | `false` | Enable debug logging |
 | `K8S_LOG_COLLECTOR_ENABLED` | No | `true` | Collect K8s cluster logs |
 | `K8S_NAMESPACE` | No | `skauswatch` | K8s namespace to monitor |
 | `AUDITD_ENABLED` | No | `false` | Collect Linux auditd logs |
@@ -103,13 +103,13 @@ Configuration for `services/aaa-monitor/`
 | `LOG_RETENTION_DAYS` | No | `90` | Audit log retention period |
 | `LOG_LEVEL` | No | `INFO` | Log level |
 
-## 🔍 Worker-S3
+## 🔍 S3scan
 
-Configuration for `services/worker-s3/`
+Configuration for `services/s3scan/`
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `WORKER_CONSUMER_GROUP` | No | `worker-s3-group` | Redis consumer group name |
+| `WORKER_CONSUMER_GROUP` | No | `s3scan-group` | Redis consumer group name |
 | `WORKER_BATCH_SIZE` | No | `5` | Jobs to consume per batch |
 | `WORKER_POLL_TIMEOUT_MS` | No | `1000` | Redis XREADGROUP timeout |
 | `CLAMAV_HOST` | No | `localhost` | ClamAV server hostname |
@@ -124,13 +124,13 @@ Configuration for `services/worker-s3/`
 | `S3_WORKSPACE_SIZE_GB` | No | `50` | Max temp storage for S3 objects (GB) |
 | `LOG_LEVEL` | No | `INFO` | Log level |
 
-## 🛡️ Worker-Scanner
+## 🛡️ Scanner
 
-Configuration for `services/worker-scanner/`
+Configuration for `services/scanner/`
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `WORKER_CONSUMER_GROUP` | No | `worker-scanner-group` | Redis consumer group name |
+| `WORKER_CONSUMER_GROUP` | No | `scanner-group` | Redis consumer group name |
 | `WORKER_BATCH_SIZE` | No | `2` | Jobs per batch (lower than S3 due to heaviness) |
 | `NUCLEI_ENABLED` | No | `true` | Enable Nuclei scanner |
 | `NUCLEI_TIMEOUT` | No | `120` | Nuclei scan timeout (seconds) |
@@ -157,35 +157,35 @@ Configuration for `services/webui/`
 | `NODE_ENV` | No | `development` | Node.js environment |
 | `GITHUB_TOKEN` | Yes | — | GitHub personal access token (for npm.pkg.github.com) |
 
-## 🔒 IceBox Sub-Module (Licensed)
+## 🔒 Vault Sub-Module (Licensed)
 
-Configuration for `.worktrees/icebox/icebox/` (if installed)
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ICEBOX_PORT` | No | `5100` | IceBox Flask backend port |
-| `ICEBOX_MEK` | Yes | — | Master Encryption Key (32-byte hex) |
-| `ICEBOX_DB_HOST` | Yes | — | IceBox database host |
-| `ICEBOX_DB_PORT` | Yes | `5432` | IceBox database port |
-| `ICEBOX_DB_NAME` | Yes | `icebox_dev` | IceBox database name |
-| `ICEBOX_DB_USER` | Yes | — | IceBox database user |
-| `ICEBOX_DB_PASS` | Yes | — | IceBox database password |
-| `ICEBOX_REDIS_URL` | No | `redis://localhost:6379/1` | IceBox Redis (separate DB recommended) |
-
-## 🤖 Darwin Sub-Module (Licensed)
-
-Configuration for `darwin/` and `services/worker-darwin/`
+Configuration for `.worktrees/vault/vault/` (if installed)
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DARWIN_ENABLED` | No | `false` | Enable Darwin integration |
-| `DARWIN_AI_PROVIDER` | No | `claude` | AI provider: `claude`, `openai`, `ollama` |
-| `DARWIN_CLAUDE_API_KEY` | No | — | Anthropic Claude API key |
-| `DARWIN_OPENAI_API_KEY` | No | — | OpenAI API key |
-| `DARWIN_OLLAMA_ENDPOINT` | No | `http://ollama:11434` | Ollama server endpoint |
-| `DARWIN_GITHUB_WEBHOOK_SECRET` | No | — | GitHub webhook HMAC secret |
-| `DARWIN_GITLAB_WEBHOOK_SECRET` | No | — | GitLab webhook HMAC secret |
-| `DARWIN_REPOS` | No | — | Comma-separated repos to scan (e.g., `org/repo1,org/repo2`) |
+| `VAULT_PORT` | No | `5100` | Vault Flask backend port |
+| `VAULT_MEK` | Yes | — | Master Encryption Key (32-byte hex) |
+| `VAULT_DB_HOST` | Yes | — | Vault database host |
+| `VAULT_DB_PORT` | Yes | `5432` | Vault database port |
+| `VAULT_DB_NAME` | Yes | `vault_dev` | Vault database name |
+| `VAULT_DB_USER` | Yes | — | Vault database user |
+| `VAULT_DB_PASS` | Yes | — | Vault database password |
+| `VAULT_REDIS_URL` | No | `redis://localhost:6379/1` | Vault Redis (separate DB recommended) |
+
+## 🤖 CodeScan Sub-Module (Licensed)
+
+Configuration for `codescan/` and `services/worker-codescan/`
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `CODESCAN_ENABLED` | No | `false` | Enable CodeScan integration |
+| `CODESCAN_AI_PROVIDER` | No | `claude` | AI provider: `claude`, `openai`, `ollama` |
+| `CODESCAN_CLAUDE_API_KEY` | No | — | Anthropic Claude API key |
+| `CODESCAN_OPENAI_API_KEY` | No | — | OpenAI API key |
+| `CODESCAN_OLLAMA_ENDPOINT` | No | `http://ollama:11434` | Ollama server endpoint |
+| `CODESCAN_GITHUB_WEBHOOK_SECRET` | No | — | GitHub webhook HMAC secret |
+| `CODESCAN_GITLAB_WEBHOOK_SECRET` | No | — | GitLab webhook HMAC secret |
+| `CODESCAN_REPOS` | No | — | Comma-separated repos to scan (e.g., `org/repo1,org/repo2`) |
 
 ## 📝 Example Configurations
 
@@ -214,9 +214,9 @@ LICENSE_KEY=dev
 VIRUSTOTAL_API_KEY=
 OTX_API_KEY=
 
-# IceBox (optional)
-ICEBOX_PKI_URL=http://localhost:5101
-ICEBOX_SSH_CA_URL=http://localhost:5102
+# Vault (optional)
+VAULT_PKI_URL=http://localhost:5101
+VAULT_SSHCA_URL=http://localhost:5102
 ```
 
 ### Beta (Staging)
@@ -244,8 +244,8 @@ LICENSE_KEY=${LICENSE_KEY}  # From secrets manager
 VIRUSTOTAL_API_KEY=${VT_KEY}
 OTX_API_KEY=${OTX_KEY}
 
-ICEBOX_PKI_URL=http://icebox-pki:5101
-ICEBOX_SSH_CA_URL=http://icebox-ssh-ca:5102
+VAULT_PKI_URL=http://vault-pki:5101
+VAULT_SSHCA_URL=http://vault-sshca:5102
 ```
 
 ### Production
@@ -273,15 +273,15 @@ LICENSE_KEY=${PROD_LICENSE_KEY}
 VIRUSTOTAL_API_KEY=${PROD_VT_KEY}
 OTX_API_KEY=${PROD_OTX_KEY}
 
-ICEBOX_MEK=${ICEBOX_MEK_PROD}
-ICEBOX_DB_HOST=icebox-rds.amazonaws.com
-ICEBOX_DB_NAME=icebox_prod
-ICEBOX_DB_USER=${ICEBOX_USER}
-ICEBOX_DB_PASS=${ICEBOX_PASS}
+VAULT_MEK=${VAULT_MEK_PROD}
+VAULT_DB_HOST=vault-rds.amazonaws.com
+VAULT_DB_NAME=vault_prod
+VAULT_DB_USER=${VAULT_USER}
+VAULT_DB_PASS=${VAULT_PASS}
 
-DARWIN_ENABLED=true
-DARWIN_AI_PROVIDER=claude
-DARWIN_CLAUDE_API_KEY=${PROD_CLAUDE_KEY}
+CODESCAN_ENABLED=true
+CODESCAN_AI_PROVIDER=claude
+CODESCAN_CLAUDE_API_KEY=${PROD_CLAUDE_KEY}
 ```
 
 ## 🔑 Generating Secrets

@@ -1,0 +1,25 @@
+[Unit]
+Description=SPIFFE/SPIRE Agent (SkausWatch)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=spire
+Group=spire
+ExecStart=/usr/local/bin/spire-agent run -config /etc/spire-agent/agent.conf
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=spire-agent
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/spire-agent /run/spire/sockets /etc/spire-agent
+
+[Install]
+WantedBy=multi-user.target

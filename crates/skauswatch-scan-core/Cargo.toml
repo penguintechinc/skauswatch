@@ -1,0 +1,33 @@
+[package]
+publish = false
+name = "skauswatch-scan-core"
+description = "Shared byte-oriented malware scan engine (ClamAV + YARA-X) for s3scan, scanner, DepGate, and Sentinel — see docs/v2-port/v2.1-depgate.md §3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+infer = { workspace = true }
+md-5 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+yara-x = { workspace = true }
+# Not a workspace dependency (only `services/scanner` pins it directly today
+# — see that Cargo.toml); pinned here the same exact way.
+glob = "=0.3.4"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

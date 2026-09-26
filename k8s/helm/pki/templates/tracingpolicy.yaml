@@ -1,0 +1,38 @@
+# Tetragon exec-allowlist for {{ include "skauswatch-pki.fullname" . }}.
+# ENFORCE: any sys_execve NOT matching one of the listed binaries is
+# SIGKILLed -- blocks a dropped shell/reverse-shell/living-off-the-land
+# binary (bash, sh, curl, nc, wget, python3, perl, ...) in a pod whose only
+# legitimate process is the binaries below. Requires the Tetragon agent
+# DaemonSet running in the cluster (cluster add-on, not part of this chart
+# -- see k8s/helm/README.md "Tetragon prerequisite").
+# ssh-keygen is spawned by services/pki/src/ca/ssh.rs (SSH CA key
+# generation/signing/verification) -- pki absorbed SSH CA functionality;
+# no network egress needed for it (local keypair/cert operations only).
+{{- if .Values.tetragon.enabled | default true }}
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: {{ include "skauswatch-pki.fullname" . }}-exec-allowlist
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "skauswatch-pki.selectorLabels" . | nindent 6 }}
+  kprobes:
+    - call: "sys_execve"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+        - index: 1
+          type: "string_arr"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: "NotEqual"
+              values:
+                - "/usr/local/bin/skauswatch-pki"
+                - "/usr/bin/ssh-keygen"
+          matchActions:
+            - action: Sigkill
+{{- end }}

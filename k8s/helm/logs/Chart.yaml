@@ -1,0 +1,14 @@
+apiVersion: v2
+name: skauswatch-logs
+description: SkausWatch log ingest service (HTTP -> OpenSearch)
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - skauswatch
+  - logs
+  - rust
+  - opensearch
+maintainers:
+  - name: Penguin Tech Inc
+    email: support@penguintech.io

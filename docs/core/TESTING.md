@@ -52,17 +52,17 @@ tests/smoke/
 ├── build/                  # Container build verification
 │   ├── test-manager-build.sh
 │   ├── test-pki-build.sh
-│   ├── test-ssh-ca-build.sh
-│   ├── test-aaa-monitor-build.sh
-│   ├── test-worker-s3-build.sh
-│   ├── test-worker-scanner-build.sh
-│   ├── test-edr-agent-build.sh
+│   ├── test-sshca-build.sh
+│   ├── test-monitor-build.sh
+│   ├── test-s3scan-build.sh
+│   ├── test-scanner-build.sh
+│   ├── test-endpoint-agent-build.sh
 │   └── test-webui-build.sh
 ├── api/                    # API health checks
 │   ├── test-manager-health.sh
 │   ├── test-pki-health.sh
-│   ├── test-ssh-ca-health.sh
-│   └── test-aaa-monitor-health.sh
+│   ├── test-sshca-health.sh
+│   └── test-monitor-health.sh
 ├── integration/            # Service communication
 │   └── test-service-communication.sh
 ├── run-all.sh              # Master test runner
@@ -104,12 +104,12 @@ tests/unit/
 │   ├── test_models.py        # Data models, validators
 │   ├── test_encryption.py    # S3 credential encryption
 │   └── test_api.py           # API endpoints
-├── pki-server/
+├── pki/
 │   ├── test_certificate.py   # Cert generation
 │   └── test_revocation.py    # Revocation logic
-├── ssh-ca/
+├── sshca/
 │   └── test_ssh_certs.py     # SSH cert issuance
-└── aaa-monitor/
+└── monitor/
     └── test_threat_analysis.py
 ```
 
@@ -176,15 +176,15 @@ tests/integration/
 │   ├── test_auth_flow.py      # Full auth workflow
 │   ├── test_scan_lifecycle.py # S3 scan end-to-end
 │   └── test_user_creation.py  # User CRUD
-├── pki-server/
+├── pki/
 │   ├── test_certificate_lifecycle.py
 │   └── test_ocsp_integration.py
-├── ssh-ca/
+├── sshca/
 │   └── test_ssh_cert_flow.py
 ├── services/
 │   ├── test_manager_pki_communication.py
-│   ├── test_manager_ssh_ca_communication.py
-│   └── test_aaa_monitor_integration.py
+│   ├── test_manager_sshca_communication.py
+│   └── test_monitor_integration.py
 └── database/
     └── test_migrations.py
 ```
@@ -219,16 +219,16 @@ scripts/mock-data/
 └── README.md
 ```
 
-## 🚨 IceBox Sub-Module Tests
+## 🚨 Vault Sub-Module Tests
 
-IceBox tests run independently in the IceBox worktree.
+Vault tests run independently in the Vault worktree.
 
-### IceBox Unit Tests
+### Vault Unit Tests
 
 ```bash
-cd .worktrees/icebox/icebox/services/flask-backend
+cd .worktrees/vault/vault/services/flask-backend
 
-# All IceBox unit tests
+# All Vault unit tests
 pytest tests/ -v
 
 # Envelope encryption (AES-256-GCM)
@@ -241,7 +241,7 @@ pytest tests/test_jit_token.py -v
 pytest tests/test_jit_flow_integration.py -v
 ```
 
-### IceBox Smoke Tests
+### Vault Smoke Tests
 
 ```bash
 # Full 6-phase smoke run (build + start + health + API + teardown)
@@ -363,7 +363,7 @@ Run tests in this order for efficiency:
 4. **Smoke tests** (fast, <2 min) ← Gates further testing
 5. **Unit tests** (1-2 min)
 6. **Integration tests** (2-5 min)
-7. **IceBox tests** (if IceBox modified)
+7. **Vault tests** (if Vault modified)
 8. **E2E tests** (optional, 5-10 min)
 
 ## 🏆 Testing Checklist

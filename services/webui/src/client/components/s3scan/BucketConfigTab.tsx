@@ -88,7 +88,8 @@ const BucketConfigTab: React.FC = () => {
       setLoading(true);
       setError(null);
       const data = await s3ScanApi.listBuckets();
-      setBuckets(data);
+      // Extract items array if data is a paginated response
+      setBuckets(Array.isArray(data) ? data : (data as unknown as { items: BucketConfig[] }).items || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load buckets');
     } finally {
@@ -106,6 +107,7 @@ const BucketConfigTab: React.FC = () => {
 
   const openEditModal = (bucket: BucketConfig) => {
     setEditingBucket(bucket);
+    const bucketWithSchedule = bucket as unknown as BucketConfigFormData;
     setFormData({
       name: bucket.name,
       endpoint_url: bucket.endpoint_url,
@@ -119,8 +121,8 @@ const BucketConfigTab: React.FC = () => {
       max_file_size_mb: bucket.max_file_size_mb || 100,
       scan_enabled: bucket.scan_enabled !== false,
       yara_enabled: bucket.yara_enabled || false,
-      schedule: bucket.schedule || '',
-      schedule_timezone: bucket.schedule_timezone || 'UTC',
+      schedule: bucketWithSchedule.schedule || '',
+      schedule_timezone: bucketWithSchedule.schedule_timezone || 'UTC',
     });
     setFormErrors({});
     setTestResult(null);
@@ -264,7 +266,7 @@ const BucketConfigTab: React.FC = () => {
   };
 
   const handleTriggerScan = async (bucket: BucketConfig) => {
-    setScanningBucketId(bucket.id);
+    setScanningBucketId(String(bucket.id));
     try {
       const result = await s3ScanApi.triggerScan(bucket.id);
       setScanJobId(result.job_id);
@@ -284,7 +286,7 @@ const BucketConfigTab: React.FC = () => {
   const handleDeleteConfirm = async () => {
     if (!bucketToDelete) return;
 
-    setDeletingBucketId(bucketToDelete.id);
+    setDeletingBucketId(String(bucketToDelete.id));
     try {
       await s3ScanApi.deleteBucket(bucketToDelete.id);
       setSuccessMessage(`Bucket "${bucketToDelete.name}" deleted successfully`);
@@ -423,10 +425,10 @@ const BucketConfigTab: React.FC = () => {
                       </button>
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
-                      {bucket.schedule ? (
+                      {(bucket as unknown as BucketConfigFormData).schedule ? (
                         <div className="text-dark-300 text-sm">
-                          <div className="font-mono">{bucket.schedule}</div>
-                          <div className="text-xs text-dark-400">{bucket.schedule_timezone || 'UTC'}</div>
+                          <div className="font-mono">{(bucket as unknown as BucketConfigFormData).schedule}</div>
+                          <div className="text-xs text-dark-400">{(bucket as unknown as BucketConfigFormData).schedule_timezone || 'UTC'}</div>
                         </div>
                       ) : (
                         <span className="text-dark-500 text-sm">Not scheduled</span>
@@ -454,11 +456,11 @@ const BucketConfigTab: React.FC = () => {
                         </button>
                         <button
                           onClick={() => handleTriggerScan(bucket)}
-                          disabled={scanningBucketId === bucket.id}
+                          disabled={scanningBucketId === String(bucket.id)}
                           className="text-green-400 hover:text-green-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                           title="Trigger manual scan"
                         >
-                          {scanningBucketId === bucket.id ? (
+                          {scanningBucketId === String(bucket.id) ? (
                             <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
                               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
@@ -471,7 +473,7 @@ const BucketConfigTab: React.FC = () => {
                         </button>
                         <button
                           onClick={() => handleDeleteClick(bucket)}
-                          disabled={deletingBucketId === bucket.id}
+                          disabled={deletingBucketId === String(bucket.id)}
                           className="text-red-400 hover:text-red-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                           title="Delete configuration"
                         >

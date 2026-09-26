@@ -1,0 +1,319 @@
+// Canonical source for the skauswatch manager gRPC contract.
+// WIRE-COMPAT POLICY: package name `skauswatch.manager` is part of the gRPC
+// method path and MUST NOT change — fielded v1 ENDPOINT agents depend on it.
+// Guarded by `buf breaking` in CI. New fields only; never renumber.
+syntax = "proto3";
+
+package skauswatch.manager;
+
+option go_package = "github.com/penguintechinc/skauswatch/proto/manager/v1;managerv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+// Manager Service - Internal gRPC API
+service ManagerService {
+    // Health check (google.protobuf.Empty request — exempt from api_version)
+    rpc HealthCheck(google.protobuf.Empty) returns (HealthResponse);
+
+    // Alert management
+    rpc CreateAlert(AlertRequest) returns (AlertResponse);
+    rpc GetAlert(AlertQuery) returns (AlertResponse);
+    rpc UpdateAlertStatus(AlertStatusUpdate) returns (AlertResponse);
+    rpc StreamAlerts(AlertFilter) returns (stream AlertEvent);
+
+    // AI Review
+    rpc RequestAIReview(AIReviewRequest) returns (AIReviewResponse);
+    rpc GetAIReviewResult(AIReviewQuery) returns (AIReviewResult);
+
+    // Threat Intelligence
+    rpc CreateIOC(IOCRequest) returns (IOCResponse);
+    rpc QueryIOCs(IOCQuery) returns (IOCListResponse);
+    rpc LookupIndicator(IndicatorLookup) returns (IndicatorMatch);
+    rpc EnrichIndicator(EnrichRequest) returns (EnrichResponse);
+
+    // Approvals
+    rpc CreateApprovalRequest(ApprovalRequest) returns (ApprovalResponse);
+    rpc ProcessApproval(ApprovalDecision) returns (ApprovalResponse);
+    rpc GetApprovalStatus(ApprovalQuery) returns (ApprovalResponse);
+
+    // Audit logging
+    rpc LogAuditEvent(AuditEvent) returns (AuditResponse);
+}
+
+// Common types
+message HealthResponse {
+    string status = 1;
+    string version = 2;
+    string database = 3;
+    string redis = 4;
+    google.protobuf.Timestamp timestamp = 5;
+}
+
+// Alert types
+enum AlertSeverity {
+    SEVERITY_UNSPECIFIED = 0;
+    SEVERITY_INFO = 1;
+    SEVERITY_LOW = 2;
+    SEVERITY_MEDIUM = 3;
+    SEVERITY_HIGH = 4;
+    SEVERITY_CRITICAL = 5;
+}
+
+enum AlertStatus {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_PENDING = 1;
+    STATUS_IN_PROGRESS = 2;
+    STATUS_RESOLVED = 3;
+    STATUS_FALSE_POSITIVE = 4;
+    STATUS_ESCALATED = 5;
+}
+
+message AlertRequest {
+    string title = 1;
+    string description = 2;
+    AlertSeverity severity = 3;
+    string source = 4;
+    repeated string indicators = 5;
+    map<string, string> metadata = 6;
+    // API version for runtime routing ("v1"); empty treated as v1 for
+    // backward compatibility with fielded v1 agents.
+    string api_version = 7;
+}
+
+message AlertQuery {
+    int64 alert_id = 1;
+    string api_version = 2;
+}
+
+message AlertResponse {
+    int64 id = 1;
+    string title = 2;
+    string description = 3;
+    AlertSeverity severity = 4;
+    AlertStatus status = 5;
+    string source = 6;
+    repeated string indicators = 7;
+    AIReviewResult ai_review = 8;
+    google.protobuf.Timestamp created_at = 9;
+    google.protobuf.Timestamp updated_at = 10;
+}
+
+message AlertStatusUpdate {
+    int64 alert_id = 1;
+    AlertStatus new_status = 2;
+    string resolution_notes = 3;
+    string api_version = 4;
+}
+
+message AlertFilter {
+    repeated AlertSeverity severities = 1;
+    repeated AlertStatus statuses = 2;
+    string source = 3;
+    google.protobuf.Timestamp since = 4;
+    string api_version = 5;
+}
+
+message AlertEvent {
+    AlertResponse alert = 1;
+    string event_type = 2;  // created, updated, resolved
+    google.protobuf.Timestamp timestamp = 3;
+}
+
+// AI Review types
+message AIReviewRequest {
+    int64 alert_id = 1;
+    string analysis_type = 2;
+    int32 priority = 3;
+    string provider = 4;
+    map<string, string> context = 5;
+    string api_version = 6;
+}
+
+message AIReviewQuery {
+    string job_id = 1;
+    string api_version = 2;
+}
+
+message AIReviewResponse {
+    string job_id = 1;
+    string status = 2;
+    google.protobuf.Timestamp submitted_at = 3;
+}
+
+message AIReviewResult {
+    string job_id = 1;
+    string status = 2;
+    float confidence_score = 3;
+    string threat_level = 4;
+    repeated string recommendations = 5;
+    repeated string key_findings = 6;
+    string provider_used = 7;
+    float processing_time = 8;
+    google.protobuf.Timestamp completed_at = 9;
+}
+
+// Threat Intelligence types
+enum IndicatorType {
+    INDICATOR_UNSPECIFIED = 0;
+    INDICATOR_IP = 1;
+    INDICATOR_DOMAIN = 2;
+    INDICATOR_HASH = 3;
+    INDICATOR_URL = 4;
+    INDICATOR_EMAIL = 5;
+    INDICATOR_FILE = 6;
+}
+
+enum ThreatLevel {
+    THREAT_UNSPECIFIED = 0;
+    THREAT_INFO = 1;
+    THREAT_LOW = 2;
+    THREAT_MEDIUM = 3;
+    THREAT_HIGH = 4;
+    THREAT_CRITICAL = 5;
+}
+
+message IOCRequest {
+    IndicatorType indicator_type = 1;
+    string value = 2;
+    ThreatLevel threat_level = 3;
+    float confidence = 4;
+    string source = 5;
+    repeated string tags = 6;
+    map<string, string> metadata = 7;
+    google.protobuf.Timestamp expires_at = 8;
+    string api_version = 9;
+}
+
+message IOCResponse {
+    int64 id = 1;
+    IndicatorType indicator_type = 2;
+    string value = 3;
+    ThreatLevel threat_level = 4;
+    float confidence = 5;
+    string source = 6;
+    repeated string tags = 7;
+    google.protobuf.Timestamp created_at = 8;
+}
+
+message IOCQuery {
+    repeated IndicatorType types = 1;
+    repeated ThreatLevel threat_levels = 2;
+    string source = 3;
+    float confidence_min = 4;
+    bool include_expired = 5;
+    int32 limit = 6;
+    int32 offset = 7;
+    string api_version = 8;
+}
+
+message IOCListResponse {
+    repeated IOCResponse iocs = 1;
+    int32 total = 2;
+    int32 page = 3;
+    int32 per_page = 4;
+}
+
+message IndicatorLookup {
+    IndicatorType type = 1;
+    string value = 2;
+    string api_version = 3;
+}
+
+message IndicatorMatch {
+    bool found = 1;
+    IOCResponse ioc = 2;
+}
+
+message EnrichRequest {
+    IndicatorType type = 1;
+    string value = 2;
+    repeated string sources = 3;  // otx, virustotal, etc.
+    string api_version = 4;
+}
+
+message EnrichResponse {
+    string value = 1;
+    IndicatorType type = 2;
+    repeated EnrichmentResult results = 3;
+}
+
+message EnrichmentResult {
+    string source = 1;
+    bool found = 2;
+    ThreatLevel threat_level = 3;
+    float confidence = 4;
+    map<string, string> details = 5;
+    google.protobuf.Timestamp last_seen = 6;
+}
+
+// Approval types
+enum ApprovalType {
+    APPROVAL_UNSPECIFIED = 0;
+    APPROVAL_CERTIFICATE = 1;
+    APPROVAL_USER = 2;
+    APPROVAL_SERVICE = 3;
+    APPROVAL_CONFIGURATION = 4;
+}
+
+enum ApprovalStatus {
+    APPROVAL_STATUS_UNSPECIFIED = 0;
+    APPROVAL_STATUS_PENDING = 1;
+    APPROVAL_STATUS_APPROVED = 2;
+    APPROVAL_STATUS_REJECTED = 3;
+    APPROVAL_STATUS_EXPIRED = 4;
+}
+
+message ApprovalRequest {
+    ApprovalType request_type = 1;
+    string resource_id = 2;
+    string resource_type = 3;
+    int32 required_approvals = 4;
+    int32 expires_hours = 5;
+    map<string, string> metadata = 6;
+    string api_version = 7;
+}
+
+message ApprovalQuery {
+    int64 approval_id = 1;
+    string api_version = 2;
+}
+
+message ApprovalDecision {
+    int64 approval_id = 1;
+    bool approved = 2;
+    string reason = 3;
+    int64 approver_id = 4;
+    string api_version = 5;
+}
+
+message ApprovalResponse {
+    int64 id = 1;
+    ApprovalType request_type = 2;
+    string resource_id = 3;
+    ApprovalStatus status = 4;
+    int32 required_approvals = 5;
+    int32 current_approvals = 6;
+    google.protobuf.Timestamp expires_at = 7;
+    google.protobuf.Timestamp completed_at = 8;
+}
+
+// Audit types
+message AuditEvent {
+    string event_type = 1;
+    string action = 2;
+    string resource_type = 3;
+    string resource_id = 4;
+    int64 user_id = 5;
+    string ip_address = 6;
+    bool success = 7;
+    map<string, string> details = 8;
+    string severity = 9;
+    string api_version = 10;
+}
+
+message AuditResponse {
+    string event_id = 1;
+    bool success = 2;
+    google.protobuf.Timestamp timestamp = 3;
+}
