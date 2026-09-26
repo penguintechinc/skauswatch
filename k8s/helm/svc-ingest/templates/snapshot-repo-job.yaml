@@ -1,0 +1,89 @@
+# One-time OpenSearch snapshot-repository registration -- see
+# values.yaml snapshotRepoJob's doc comment for why this exists (cold-tier
+# ISM's searchable-snapshot restore needs SNAPSHOT_REPO to actually exist
+# as a registered OpenSearch repository, not just a config value). Runs as
+# a Helm post-install/post-upgrade hook, same pattern as
+# k8s/helm/spire/templates/auto-enroll-job.yaml, so it re-registers (a PUT
+# is idempotent) on every upgrade rather than only the first install.
+# Disabled by default -- `helm template`/`helm install` render/apply no
+# Job at all while off.
+{{- if .Values.snapshotRepoJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "skauswatch-svc-ingest.fullname" . }}-snapshot-repo
+  labels:
+    {{- include "skauswatch-svc-ingest.labels" . | nindent 4 }}
+    app.kubernetes.io/component: snapshot-repo
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.snapshotRepoJob.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "skauswatch-svc-ingest.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: snapshot-repo
+    spec:
+      restartPolicy: {{ .Values.snapshotRepoJob.restartPolicy }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: snapshot-repo
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.snapshotRepoJob.image.repository }}@{{ .Values.snapshotRepoJob.image.digest }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: OPENSEARCH_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "skauswatch-svc-ingest.fullname" . }}-config
+                  key: opensearch-url
+            - name: SNAPSHOT_REPO
+              value: {{ .Values.snapshotRepo | quote }}
+            {{- if .Values.snapshotRepoJob.auth.enabled }}
+            - name: OS_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.snapshotRepoJob.auth.secretName | default (include "skauswatch-svc-ingest.secretName" .) }}
+                  key: {{ .Values.snapshotRepoJob.auth.usernameSecretKey }}
+            - name: OS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.snapshotRepoJob.auth.secretName | default (include "skauswatch-svc-ingest.secretName" .) }}
+                  key: {{ .Values.snapshotRepoJob.auth.passwordSecretKey }}
+            {{- end }}
+            {{- if eq .Values.snapshotRepoJob.repoType "s3" }}
+            {{- $s3 := .Values.snapshotRepoJob.s3 }}
+            {{- $settings := dict "bucket" $s3.bucket "region" $s3.region }}
+            {{- if $s3.endpoint }}{{- $settings = merge $settings (dict "endpoint" $s3.endpoint) }}{{- end }}
+            {{- if $s3.basePath }}{{- $settings = merge $settings (dict "base_path" $s3.basePath) }}{{- end }}
+            - name: REPO_BODY
+              value: {{ dict "type" "s3" "settings" $settings | toJson | quote }}
+            {{- else }}
+            - name: REPO_BODY
+              value: {{ dict "type" "fs" "settings" (dict "location" .Values.snapshotRepoJob.fs.location) | toJson | quote }}
+            {{- end }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              AUTH_ARGS=""
+              if [ -n "${OS_USER:-}" ]; then
+                AUTH_ARGS="-u ${OS_USER}:${OS_PASSWORD}"
+              fi
+              curl -fsS -X PUT "${OPENSEARCH_URL}/_snapshot/${SNAPSHOT_REPO}" \
+                -H "Content-Type: application/json" \
+                -d "${REPO_BODY}" \
+                ${AUTH_ARGS}
+          resources:
+            {{- toYaml .Values.snapshotRepoJob.resources | nindent 12 }}
+{{- end }}

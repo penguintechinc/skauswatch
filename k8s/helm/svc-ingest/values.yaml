@@ -94,6 +94,59 @@ privilegedSyslogPort:
 # will function.
 snapshotRepo: "skauswatch-snapshots"
 
+# DLQ JetStream stream retention (DLQ_RETENTION_DAYS in
+# services/svc-ingest/src/config.rs::dlq_retention_from_env, consumed only
+# by crate::writer::build_dlq_buffer -- receiver never reads this).
+# Unset/blank in the app defaults to the same 30 here
+# (DEFAULT_DLQ_RETENTION_DAYS) -- set explicitly so the chart's rendered
+# value always matches what an operator sees in `helm template`/`--values`.
+dlqRetentionDays: "30"
+
+# NATS client auth (services/svc-ingest/src/config.rs::NatsAuthConfig,
+# applied via buffer/jetstream.rs::NatsAuthMode -- shared by both the main
+# ingest connection AND the DLQ connection, receiver AND writer alike).
+# Fully OFF by default (`enabled: false`): renders with NO NATS_* auth env
+# at all, which is byte-for-byte what NatsAuthConfig::from_env produces
+# when every NATS_* auth var is unset -- today's unauthenticated
+# connection is unaffected. NEVER put creds/nkey/password values here --
+# refs into a Secret only (this chart's own managed Secret via
+# secretName: "", or a separate pre-provisioned one).
+nats:
+  auth:
+    enabled: false
+    # Exactly one of: "credsFile" | "nkey" | "userPassword". Mirrors
+    # NatsAuthMode::from_config's precedence (creds file > nkey > user/
+    # password) if more than one is populated, so picking the wrong mode
+    # here with unrelated leftover secret keys still resolves safely.
+    mode: "credsFile"
+    # Require TLS to the NATS server (NATS_TLS) -- independent of mode;
+    # not sensitive.
+    tls: false
+
+    # NATS_CREDS_FILE: the app reads this as a filesystem path, so the
+    # Secret content is mounted read-only rather than passed as an env
+    # var. secretName blank falls back to this chart's own managed Secret
+    # (templates/secret.yaml) -- add the key under secretData/existingSecret
+    # yourself; this chart does not create placeholder keys by default.
+    credsFile:
+      secretName: ""
+      secretKey: "nats-creds"
+      mountPath: /etc/nats/creds
+
+    # NATS_NKEY: the app reads the raw seed value directly from the env
+    # var (not a file), so it's sourced via secretKeyRef like DB_PASS
+    # above -- never a mounted file for this one.
+    nkey:
+      secretName: ""
+      secretKey: "nats-nkey"
+
+    # NATS_USER / NATS_PASSWORD: username isn't sensitive on its own, so
+    # it's a plain value here; password always comes from a Secret.
+    userPassword:
+      username: ""
+      passwordSecretName: ""
+      passwordSecretKey: "nats-password"
+
 receiver:
   replicaCount: 3
 
@@ -273,6 +326,10 @@ writer:
   env:
     - name: WRITER_HEALTH_PORT
       value: "9091"
+    # config::dlq_retention_from_env -- writer-only, see dlqRetentionDays
+    # above for why receiver.env has no matching entry.
+    - name: DLQ_RETENTION_DAYS
+      value: '{{ .Values.dlqRetentionDays }}'
     - name: OPENSEARCH_URL
       valueFrom:
         configMapKeyRef:
@@ -367,5 +424,56 @@ backfill:
     requests:
       cpu: 500m
       memory: 512Mi
+  restartPolicy: OnFailure
+  backoffLimit: 3
+
+# One-time OpenSearch snapshot-repository registration (Helm
+# post-install/post-upgrade hook, templates/snapshot-repo-job.yaml) --
+# PUTs _snapshot/<snapshotRepo> so the cold-tier ISM policy's
+# searchable-snapshot restore (SNAPSHOT_REPO, see snapshotRepo above) has
+# an actual repository to restore from. This chart does NOT provision the
+# underlying S3 bucket/MinIO instance or shared filesystem mount -- only
+# registers the repo definition against an already-reachable OpenSearch
+# cluster. Disabled by default: an operator opts in only once real
+# repoType-appropriate storage exists; `helm template`/`helm install`
+# render/apply no Job at all while off.
+snapshotRepoJob:
+  enabled: false
+  image:
+    repository: curlimages/curl
+    tag: "8.11.1"
+    # Multi-arch manifest-list digest (`docker buildx imagetools inspect
+    # curlimages/curl:8.11.1`) -- covers amd64/arm64 both, per
+    # pinning-dependency-digests skill.
+    digest: "sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69"
+  # "s3" (AWS S3 or an S3-compatible endpoint like MinIO) or "fs" (a
+  # filesystem path already mounted identically on every OpenSearch
+  # data/master node -- this chart provisions neither).
+  repoType: s3
+  s3:
+    bucket: ""
+    # Non-AWS S3-compatible endpoint (e.g. MinIO) -- blank uses AWS S3.
+    endpoint: ""
+    region: "us-east-1"
+    basePath: ""
+  fs:
+    location: "/mnt/snapshots"
+  # OpenSearch cluster basic-auth credentials for the registration call.
+  # Disabled by default (no auth) -- matches an OpenSearch cluster with
+  # the security plugin off/dev mode. NEVER plaintext here -- Secret only;
+  # secretName blank falls back to this chart's own managed Secret, same
+  # existingSecret rule as nats.auth above.
+  auth:
+    enabled: false
+    secretName: ""
+    usernameSecretKey: "opensearch-user"
+    passwordSecretKey: "opensearch-password"
+  resources:
+    limits:
+      cpu: 200m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
   restartPolicy: OnFailure
   backoffLimit: 3
