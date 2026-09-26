@@ -69,10 +69,25 @@ fn legacy_router() -> Router<AppState> {
 }
 
 /// Shared HTTP client for worker-codescan proxying — built once per process
-/// (per-request timeouts keep the v1 client semantics).
+/// (per-request timeouts keep the v1 client semantics). Bounded per
+/// `crate::state::HttpClientConfig` (audit finding, issue #149, HIGH): a
+/// hung TCP connect to worker-codescan must never wedge indefinitely, even
+/// though the existing per-request `PROXY_TIMEOUT` (120s, AI review is
+/// genuinely slow) is intentionally left untouched below.
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    CLIENT.get_or_init(|| {
+        crate::state::http_client().unwrap_or_else(|e| {
+            // `ClientBuilder::build()` only fails on conflicting TLS-backend/
+            // proxy config, none of which `crate::state::http_client` sets —
+            // this fallback keeps the OnceLock initializer infallible
+            // (`get_or_init` can't propagate a `Result`) without an
+            // `.unwrap()`/`.expect()` panic on a path that should be
+            // unreachable in practice.
+            tracing::error!(error = %e, "bounded http client build failed, falling back to unbounded default");
+            reqwest::Client::new()
+        })
+    })
 }
 
 /// v1 `CODESCAN_BASE`: `{WORKER_CODESCAN_URL}/api/v1/codescan`, default
