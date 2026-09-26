@@ -113,8 +113,14 @@ async fn fetch_github_zip(
     let auth_header = format!("token {}", creds.token);
 
     // Redirects disabled deliberately — see module docs' Known limitation.
+    // Bounded per `crate::config::HttpClientConfig` (audit finding, issue
+    // #149, HIGH): a hung TCP connect to the zipball host must never wedge
+    // this fetch indefinitely.
+    let cfg = crate::config::HttpClientConfig::from_env();
     let client = Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(cfg.timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(cfg.connect_timeout_secs))
         .build()?;
     let resp = client
         .get(&url)
@@ -163,7 +169,7 @@ async fn fetch_gitlab_zip(
         urlencoding::encode(&project_path),
         urlencoding::encode(branch)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("PRIVATE-TOKEN", &creds.token)
         .header("User-Agent", USER_AGENT)

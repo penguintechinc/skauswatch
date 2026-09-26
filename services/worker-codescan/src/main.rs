@@ -298,7 +298,11 @@ async fn healthcheck() -> anyhow::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080u16);
     let url = format!("http://127.0.0.1:{port}/healthz");
-    let resp = reqwest::Client::new()
+    // `config::http_client()` bounds connect time
+    // (`WORKER_CODESCAN_HTTP_CONNECT_TIMEOUT_SECS`, default 10s) — the
+    // explicit 3s `.timeout()` below still overrides the client-level
+    // whole-request default per call, unchanged from before.
+    let resp = config::http_client()
         .get(&url)
         .timeout(std::time::Duration::from_secs(3))
         .send()
