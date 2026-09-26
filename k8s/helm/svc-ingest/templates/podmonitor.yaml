@@ -1,0 +1,43 @@
+# PodMonitor -- optional, off by default. Alternative scrape path for the
+# writer Deployment, which has NO Service (see
+# templates/servicemonitor.yaml's header comment for why a ServiceMonitor
+# can't target it). Selects the writer's pods directly by label and scrapes
+# the "metrics" containerPort (:9090, see templates/deployment-writer.yaml).
+#
+# Off by default: Prometheus already reaches the writer's :9090 by pod IP
+# via the CiliumNetworkPolicy ingress rule in
+# ciliumnetworkpolicy-writer.yaml without an Operator-native scrape object.
+# Enable only if the cluster's Prometheus Operator install doesn't discover
+# that pod-IP path on its own (e.g. it relies exclusively on
+# PodMonitor/ServiceMonitor selection rather than static/pod-IP scrape
+# configs).
+#
+# Requires the Prometheus Operator CRDs (monitoring.coreos.com/v1)
+# installed in-cluster -- disable podMonitor.enabled if not.
+{{- if .Values.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "skauswatch-svc-ingest.writer.fullname" . }}
+  labels:
+    {{- include "skauswatch-svc-ingest.writer.labels" . | nindent 4 }}
+    {{- if .Values.monitoring.releaseLabel }}
+    release: {{ .Values.monitoring.releaseLabel | quote }}
+    {{- end }}
+    {{- with .Values.podMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "skauswatch-svc-ingest.writer.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.podMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.podMonitor.scrapeTimeout | quote }}
+{{- end }}

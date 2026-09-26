@@ -1,0 +1,17 @@
+# PodDisruptionBudget for the receiver Deployment -- release-audit Medium
+# finding (0 PodDisruptionBudgets existed). See values.yaml's pdb.* comment
+# for why maxUnavailable (not minAvailable) is the policy.
+{{- if .Values.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "skauswatch-svc-ingest.receiver.fullname" . }}
+  labels:
+    {{- include "skauswatch-svc-ingest.receiver.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  maxUnavailable: {{ .Values.pdb.receiver.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "skauswatch-svc-ingest.receiver.selectorLabels" . | nindent 6 }}
+{{- end }}
