@@ -90,7 +90,9 @@ spec:
             - name: SPIFFE_ENDPOINT_SOCKET
               value: "unix://{{ .Values.spire.socketDir }}/agent.sock"
         {{- end }}
-        {{- include "skauswatch-svc-ingest.natsAuthEnv" . | nindent 12 }}
+        {{- with (include "skauswatch-svc-ingest.natsAuthEnv" . | trim) }}
+        {{- . | nindent 12 }}
+        {{- end }}
         {{- if or .Values.volumeMounts .Values.spire.enabled (and .Values.nats.auth.enabled (eq .Values.nats.auth.mode "credsFile")) }}
         volumeMounts:
           {{- with .Values.volumeMounts }}

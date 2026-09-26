@@ -117,9 +117,14 @@ NATS client auth env vars (services/svc-ingest/src/config.rs::
 NatsAuthConfig / buffer/jetstream.rs::NatsAuthMode) -- shared verbatim by
 both deployment-receiver.yaml and deployment-writer.yaml (both connect to
 NATS: the main ingest connection AND, on the writer side, the DLQ
-connection). Renders NOTHING when nats.auth.enabled is false, which is
-byte-for-byte what NatsAuthConfig::from_env produces with every NATS_*
-var unset -- today's unauthenticated connection is unaffected.
+connection). Renders the empty string when nats.auth.enabled is false,
+matching NatsAuthConfig::from_env's exact behavior with every NATS_* var
+unset -- today's unauthenticated connection is unaffected. Call sites
+MUST NOT pipe this directly into `nindent` (nindent of an empty string
+still emits a newline + spaces, injecting a spurious blank line) -- wrap
+with `{{- with (include ... | trim) }}{{- . | nindent N }}{{- end }}` so
+the empty case emits nothing at all, as both deployment-receiver.yaml and
+deployment-writer.yaml do.
 */}}
 {{- define "skauswatch-svc-ingest.natsAuthEnv" -}}
 {{- if .Values.nats.auth.enabled }}

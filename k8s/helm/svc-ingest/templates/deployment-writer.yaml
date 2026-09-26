@@ -68,7 +68,9 @@ spec:
             # rationale; baked in directly so it can't be overridden away.
             - name: NATS_JETSTREAM_SYNC_ALWAYS
               value: "true"
-        {{- include "skauswatch-svc-ingest.natsAuthEnv" . | nindent 12 }}
+        {{- with (include "skauswatch-svc-ingest.natsAuthEnv" . | trim) }}
+        {{- . | nindent 12 }}
+        {{- end }}
         {{- if or .Values.volumeMounts (and .Values.nats.auth.enabled (eq .Values.nats.auth.mode "credsFile")) }}
         volumeMounts:
           {{- with .Values.volumeMounts }}
