@@ -142,11 +142,18 @@ impl BulkOutcome {
 /// caller treats the whole batch as failed — nacks/DLQs on this, never
 /// acks), but a 200 response is inspected for `"errors": true` — those
 /// specific documents are reported via [`BulkOutcome::failed_ids`] rather
-/// than silently treated as written.
+/// than silently treated as written. `client` is expected to carry a
+/// request timeout (`crate::bootstrap::run_writer` builds it with
+/// `OPENSEARCH_TIMEOUT_SECS` — release audit Finding A, HIGH): a timed-out
+/// `.send()` surfaces here as an ordinary `reqwest::Error`, which the
+/// `Err` branch below already treats identically to any other transport
+/// failure — the caller's existing retry/backoff → DLQ path, never a
+/// silent drop or an ack.
 ///
 /// # Errors
-/// Returns the reqwest error on transport failure, a non-2xx bulk
-/// response, or a response body that isn't valid JSON.
+/// Returns the reqwest error on transport failure (including a client-side
+/// request timeout), a non-2xx bulk response, or a response body that
+/// isn't valid JSON.
 pub async fn write_bulk(
     client: &reqwest::Client,
     base_url: &str,

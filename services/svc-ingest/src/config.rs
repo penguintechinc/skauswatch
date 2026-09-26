@@ -325,6 +325,44 @@ pub fn dlq_retention_from_env() -> Result<Duration, ConfigError> {
     dlq_retention_from_value(std::env::var("DLQ_RETENTION_DAYS").ok().as_deref())
 }
 
+/// Default request timeout applied to every `reqwest::Client` this service
+/// builds against OpenSearch (`OPENSEARCH_TIMEOUT_SECS`) — release audit
+/// Finding A (HIGH): both the writer's `_bulk` client
+/// (`crate::bootstrap::run_writer`) and the admin/ISM client
+/// (`crate::bootstrap::build_admin_state`, used by `crate::admin`'s
+/// lifecycle/restore handlers and `crate::opensearch::ism`) previously had
+/// no request timeout at all, so a hung/slow OpenSearch wedged the caller
+/// indefinitely. 30s comfortably covers a large `_bulk` batch under normal
+/// load while still bounding a genuinely stuck connection; a bulk-write
+/// timeout surfaces as an ordinary `reqwest::Error` — the exact same
+/// `Err` arm `crate::writer::process_batch_inner` already routes through
+/// the retry/backoff → DLQ path for any other transport failure, never a
+/// silent drop or an ack.
+const DEFAULT_OPENSEARCH_TIMEOUT_SECS: u32 = 30;
+
+/// Parses `OPENSEARCH_TIMEOUT_SECS` into a [`Duration`], defaulting to
+/// [`DEFAULT_OPENSEARCH_TIMEOUT_SECS`] when unset/empty — pure function of
+/// the raw string, mirroring [`dlq_retention_from_value`]'s split for
+/// unit-testability without mutating process environment state.
+fn opensearch_timeout_from_value(raw: Option<&str>) -> Result<Duration, ConfigError> {
+    let secs = match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => DEFAULT_OPENSEARCH_TIMEOUT_SECS,
+        Some(s) => s
+            .parse::<u32>()
+            .map_err(|_| ConfigError::Int("OPENSEARCH_TIMEOUT_SECS"))?,
+    };
+    Ok(Duration::from_secs(u64::from(secs)))
+}
+
+/// Loads `OPENSEARCH_TIMEOUT_SECS` from the environment (see
+/// [`opensearch_timeout_from_value`]). Kept independent of [`Config`] for
+/// the same reason as [`dlq_retention_from_env`]: adding this knob must
+/// never require touching every exhaustive `Config { .. }` struct-literal
+/// test fixture elsewhere in this crate.
+pub fn opensearch_timeout_from_env() -> Result<Duration, ConfigError> {
+    opensearch_timeout_from_value(std::env::var("OPENSEARCH_TIMEOUT_SECS").ok().as_deref())
+}
+
 /// NATS client authentication settings (Spec §7a / P2 hardening —
 /// `buffer::jetstream::connect_options` applies these to
 /// `async_nats::ConnectOptions`). Loaded independently of [`Config`] for
@@ -739,5 +777,31 @@ mod tests {
     fn dlq_retention_invalid_value_is_config_error_not_panic() {
         let err = dlq_retention_from_value(Some("not-a-number")).unwrap_err();
         assert_eq!(err, ConfigError::Int("DLQ_RETENTION_DAYS"));
+    }
+
+    // -- opensearch_timeout_from_value (release audit Finding A, HIGH) --
+
+    #[test]
+    fn opensearch_timeout_defaults_to_thirty_seconds() {
+        let timeout = opensearch_timeout_from_value(None).unwrap();
+        assert_eq!(timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn opensearch_timeout_reads_custom_seconds() {
+        let timeout = opensearch_timeout_from_value(Some("5")).unwrap();
+        assert_eq!(timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn opensearch_timeout_empty_value_falls_back_to_default() {
+        let timeout = opensearch_timeout_from_value(Some("  ")).unwrap();
+        assert_eq!(timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn opensearch_timeout_invalid_value_is_config_error_not_panic() {
+        let err = opensearch_timeout_from_value(Some("not-a-number")).unwrap_err();
+        assert_eq!(err, ConfigError::Int("OPENSEARCH_TIMEOUT_SECS"));
     }
 }

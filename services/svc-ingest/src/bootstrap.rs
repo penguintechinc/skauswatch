@@ -26,22 +26,32 @@
 //! half-degraded protocol surface.
 //!
 //! No separate `skauswatch_telemetry::Readiness` flag is threaded through
-//! receiver mode: `listeners::http::router`'s own `/readyz` (out of this
-//! gate's file scope — Task 1.3) already answers 200 unconditionally once
-//! the plain-HTTP listener is bound and serving, which is the same "ready
-//! once bound" contract a `Readiness` flag would otherwise express.
+//! receiver mode: `listeners::http::router`'s own `/readyz` (Task 1.3) binds
+//! its readiness directly to a bounded NATS/JetStream buffer reachability
+//! probe (release audit Finding B, HIGH — see that module's own doc
+//! comment), which subsumes the simpler "ready once bound" contract a
+//! `Readiness` flag would otherwise express.
 //!
 //! # Writer mode ([`run_writer`])
 //!
 //! Drains the same kind of JetStream buffer (as a consumer, never a
 //! publisher) and bulk-writes to OpenSearch via [`crate::writer::run`].
 //! Unlike receiver mode, the writer has no public protocol listener of its
-//! own, so [`run_writer`] binds a minimal `skauswatch_telemetry::
-//! health_router` on `WRITER_HEALTH_PORT` (default
-//! [`DEFAULT_WRITER_HEALTH_PORT`]) purely so k8s can still probe it.
+//! own, so [`run_writer`] binds a minimal `/healthz`+`/readyz` surface on
+//! `WRITER_HEALTH_PORT` (default [`DEFAULT_WRITER_HEALTH_PORT`]) purely so
+//! k8s can still probe it. `/readyz` is dependency-aware (release audit
+//! Finding B, HIGH — see [`writer_readyz`]): a bounded, throwaway
+//! reachability probe against both NATS and OpenSearch, gated behind the
+//! `skauswatch_telemetry::Readiness` flag [`run_writer`] still flips once
+//! it has finished binding. This module builds its own small router for
+//! it (rather than `skauswatch_telemetry::health_router`, which only ever
+//! answers unconditionally once bound) — `/healthz` stays a plain,
+//! dependency-free liveness check per `critical-rules.md` Observability
+//! ("only READINESS gates on dependencies").
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -116,17 +126,22 @@ async fn build_grpc_identity_store() -> anyhow::Result<IdentityStore> {
 /// Takes the same [`EventBuffer`] every other receiver-mode listener
 /// publishes through (Task 3.0b: `/ingest` used to write straight to
 /// OpenSearch instead, bypassing the buffer's durability guarantee — see
-/// `listeners::http`'s own doc comment).
+/// `listeners::http`'s own doc comment). `nats_url` feeds `/readyz`'s
+/// dependency-aware reachability probe (release audit Finding B, HIGH) —
+/// see [`http::AppState`]'s own doc comment for why it's a bare URL rather
+/// than the shared, already-connected `EventBuffer` itself.
 fn build_ingest_state(
     buffer: Arc<dyn EventBuffer>,
     jwt_verify_key: jsonwebtoken::DecodingKey,
     license: Arc<penguin_licensing::LicenseClient>,
+    nats_url: Arc<str>,
 ) -> http::AppState {
     http::AppState {
         buffer,
         clock: http::Clock::System,
         jwt_verify_key,
         license,
+        nats_url,
     }
 }
 
@@ -147,7 +162,14 @@ fn build_admin_state(
     snapshot_repo: Arc<str>,
     jwt_verify_key: jsonwebtoken::DecodingKey,
 ) -> anyhow::Result<admin::AppState> {
+    // Release audit Finding A (HIGH): this client previously had no request
+    // timeout at all, so a hung/slow OpenSearch wedged the ISM
+    // lifecycle/restore handlers indefinitely. See
+    // `config::opensearch_timeout_from_env`'s own doc comment.
+    let opensearch_timeout = crate::config::opensearch_timeout_from_env()
+        .map_err(|e| anyhow::anyhow!("OPENSEARCH_TIMEOUT_SECS: {e}"))?;
     let http = reqwest::Client::builder()
+        .timeout(opensearch_timeout)
         .build()
         .map_err(|e| anyhow::anyhow!("admin http client: {e}"))?;
     Ok(admin::AppState {
@@ -292,7 +314,12 @@ pub(crate) async fn run_receiver(cfg: Config) -> anyhow::Result<()> {
     // Shares the same `EventBuffer` every other receiver-mode listener
     // publishes through — the writer, never this listener, owns all
     // OpenSearch writes (Task 3.0b).
-    let ingest_state = build_ingest_state(Arc::clone(&buffer), jwt_verify_key, license);
+    let ingest_state = build_ingest_state(
+        Arc::clone(&buffer),
+        jwt_verify_key,
+        license,
+        cfg.nats_url.as_str().into(),
+    );
     // Merged, not nested: `crate::admin`'s `/api/v1/admin/...` paths are
     // disjoint from `crate::listeners::http`'s `/ingest`+`/healthz`+
     // `/readyz`, so `.merge()` is unambiguous and each router keeps its own
@@ -402,6 +429,134 @@ fn writer_health_port(raw: Option<&str>) -> u16 {
         .unwrap_or(DEFAULT_WRITER_HEALTH_PORT)
 }
 
+/// Bound on each individual dependency probe [`writer_readyz`] runs —
+/// independent of `OPENSEARCH_TIMEOUT_SECS` (which bounds the writer's real
+/// `_bulk` traffic and can reasonably be tens of seconds): a readiness
+/// probe must stay fast regardless of that setting, or k8s's own
+/// `readinessProbe.timeoutSeconds` starts flapping the pod on a slow-but-not
+/// -yet-timed-out dependency.
+const READYZ_DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Bounded, throwaway NATS reachability probe for `/readyz` (release audit
+/// Finding B, HIGH) — deliberately a brand-new connection via the same
+/// [`NatsAuthConfig::from_env`] auth every real connection in this crate
+/// applies (`jetstream::connect_options`), rather than reusing the shared,
+/// already-connected [`EventBuffer`] a writer/listener publishes or
+/// consumes through: a readiness poll must never contend with or steal
+/// from real message traffic on that shared connection. Capped at
+/// [`READYZ_DEPENDENCY_TIMEOUT`] so a wedged NATS server can't hang the
+/// probe itself. Duplicated (in spirit) in `listeners::http` for the
+/// receiver's own `/readyz` — see that module's copy for why it isn't
+/// shared from here (would invert this module's dependency on
+/// `listeners::http`).
+async fn nats_reachable(nats_url: &str, timeout: Duration) -> bool {
+    let Ok(auth) = NatsAuthConfig::from_env() else {
+        return false;
+    };
+    let Ok(options) = jetstream::connect_options(&auth).await else {
+        return false;
+    };
+    tokio::time::timeout(timeout, options.connect(nats_url))
+        .await
+        .is_ok_and(|connected| connected.is_ok())
+}
+
+/// Bounded OpenSearch reachability probe for `/readyz` (release audit
+/// Finding B, HIGH) — any completed HTTP response (regardless of status
+/// code) counts as "reachable": `/readyz` cares about network-level
+/// liveness, not authorization/mapping errors the real `_bulk` path
+/// already handles on its own (`opensearch::write_bulk`). Capped at
+/// `timeout` independently of the client's own configured
+/// `OPENSEARCH_TIMEOUT_SECS`, which can legitimately be much longer than a
+/// health probe should ever wait.
+async fn opensearch_reachable(
+    client: &reqwest::Client,
+    opensearch_url: &str,
+    timeout: Duration,
+) -> bool {
+    tokio::time::timeout(timeout, client.get(opensearch_url).send())
+        .await
+        .is_ok_and(|sent| sent.is_ok())
+}
+
+/// Shared state for the writer's dependency-aware `/readyz` — see
+/// [`writer_readyz`].
+#[derive(Clone)]
+struct WriterHealthState {
+    /// Flipped once [`run_writer`] has finished binding the health surface
+    /// — `/readyz` reports not-ready before that regardless of dependency
+    /// state, same as every other `skauswatch_telemetry::Readiness` user.
+    readiness: skauswatch_telemetry::Readiness,
+    nats_url: Arc<str>,
+    opensearch_url: Arc<str>,
+    /// The SAME client [`crate::writer::run`] bulk-writes through (already
+    /// carries `OPENSEARCH_TIMEOUT_SECS` — see [`run_writer`]), reused here
+    /// rather than built twice.
+    http_client: reqwest::Client,
+}
+
+/// `GET /healthz` — always 200 once the writer's health surface is bound.
+/// Liveness only, per `critical-rules.md` Observability ("only READINESS
+/// gates on dependencies") — never touches NATS/OpenSearch.
+async fn writer_healthz() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({ "status": "ok" }))
+}
+
+/// `GET /readyz` — 503 until [`run_writer`]'s own startup has completed
+/// AND a fresh, bounded probe of both NATS and OpenSearch succeeds; 200
+/// only when all three hold. Fixes release audit Finding B (HIGH): this
+/// endpoint used to be `skauswatch_telemetry::health_router`'s
+/// unconditional-once-bound readyz, so a writer wedged on either
+/// dependency still reported ready to k8s.
+async fn writer_readyz(
+    axum::extract::State(state): axum::extract::State<WriterHealthState>,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    if !state.readiness.is_ready() {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({ "status": "not ready" })),
+        );
+    }
+    let (nats_ok, opensearch_ok) = tokio::join!(
+        nats_reachable(&state.nats_url, READYZ_DEPENDENCY_TIMEOUT),
+        opensearch_reachable(
+            &state.http_client,
+            &state.opensearch_url,
+            READYZ_DEPENDENCY_TIMEOUT
+        ),
+    );
+    if nats_ok && opensearch_ok {
+        (
+            axum::http::StatusCode::OK,
+            axum::Json(serde_json::json!({ "status": "ready" })),
+        )
+    } else {
+        tracing::warn!(
+            nats_ok,
+            opensearch_ok,
+            "writer_readyz_dependency_unreachable"
+        );
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({
+                "status": "not ready",
+                "nats": nats_ok,
+                "opensearch": opensearch_ok,
+            })),
+        )
+    }
+}
+
+/// Builds the writer's `/healthz`+`/readyz` router — see [`writer_readyz`]'s
+/// own doc comment for why this replaces `skauswatch_telemetry::
+/// health_router` for writer mode.
+fn writer_health_router(state: WriterHealthState) -> axum::Router {
+    axum::Router::new()
+        .route("/healthz", axum::routing::get(writer_healthz))
+        .route("/readyz", axum::routing::get(writer_readyz))
+        .with_state(state)
+}
+
 /// Runs the writer-mode consume→bulk-write loop ([`crate::writer::run`])
 /// until a SIGTERM/SIGINT shutdown signal, alongside a minimal
 /// `/healthz`+`/readyz` surface on `WRITER_HEALTH_PORT` — see this module's
@@ -409,14 +564,26 @@ fn writer_health_port(raw: Option<&str>) -> u16 {
 ///
 /// # Errors
 /// Returns an error if NATS is unreachable (the main buffer, or the
-/// dead-letter sink — see [`crate::writer::run`]), the health surface port
+/// dead-letter sink — see [`crate::writer::run`]), `OPENSEARCH_TIMEOUT_SECS`
+/// is set but not a valid non-negative integer, the health surface port
 /// cannot be bound, or the writer loop itself exits with an error.
 pub(crate) async fn run_writer(
     cfg: Config,
     readiness: skauswatch_telemetry::Readiness,
 ) -> anyhow::Result<()> {
     let buffer = build_event_buffer(&cfg).await?;
+    // Release audit Finding A (HIGH): this client previously had no
+    // request timeout at all, so a hung/slow OpenSearch wedged the writer
+    // indefinitely with events still ack-pending on the main stream. A
+    // timeout here surfaces as an ordinary `reqwest::Error`, which
+    // `crate::writer::process_batch_inner` already routes through the same
+    // retry/backoff → DLQ path as any other bulk-write transport failure —
+    // never a silent drop or an ack. See
+    // `config::opensearch_timeout_from_env`'s own doc comment.
+    let opensearch_timeout = crate::config::opensearch_timeout_from_env()
+        .map_err(|e| anyhow::anyhow!("OPENSEARCH_TIMEOUT_SECS: {e}"))?;
     let http_client = reqwest::Client::builder()
+        .timeout(opensearch_timeout)
         .build()
         .map_err(|e| anyhow::anyhow!("http client: {e}"))?;
 
@@ -434,8 +601,14 @@ pub(crate) async fn run_writer(
         let _ = shutdown_tx.send(true);
     });
 
+    let health_state = WriterHealthState {
+        readiness,
+        nats_url: cfg.nats_url.as_str().into(),
+        opensearch_url: cfg.opensearch_url.as_str().into(),
+        http_client: http_client.clone(),
+    };
     let health = async {
-        axum::serve(listener, skauswatch_telemetry::health_router(readiness))
+        axum::serve(listener, writer_health_router(health_state))
             .with_graceful_shutdown(wait_for_shutdown(shutdown_rx))
             .await
             .map_err(|e| anyhow::anyhow!("writer health server: {e}"))
@@ -577,6 +750,150 @@ mod tests {
         assert_eq!(writer_health_port(Some("  ")), DEFAULT_WRITER_HEALTH_PORT);
     }
 
+    // -- writer readiness (release audit Finding B, HIGH) -------------------
+
+    /// Starts a minimal real NATS 2.14+ server for [`nats_reachable_is_true_
+    /// for_a_reachable_nats_server`] — mirrors `buffer::jetstream::tests::
+    /// start_test_nats` (this module's file scope doesn't include
+    /// `buffer/jetstream.rs`, so the helper is duplicated rather than
+    /// shared; both are private to their own test module).
+    async fn start_test_nats() -> (
+        testcontainers::ContainerAsync<testcontainers::GenericImage>,
+        String,
+    ) {
+        use testcontainers::core::{IntoContainerPort, WaitFor};
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers::{GenericImage, ImageExt};
+
+        let image = GenericImage::new("nats", "2.14-alpine")
+            .with_exposed_port(4222.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+            .with_startup_timeout(Duration::from_secs(180));
+        let container = image.start().await.expect("start nats container");
+        let host = container.get_host().await.expect("nats container host");
+        let port = container
+            .get_host_port_ipv4(4222)
+            .await
+            .expect("nats container mapped port");
+        (container, format!("nats://{host}:{port}"))
+    }
+
+    #[tokio::test]
+    async fn nats_reachable_is_false_for_an_unreachable_url() {
+        let ok = nats_reachable("nats://127.0.0.1:1", Duration::from_secs(1)).await;
+        assert!(
+            !ok,
+            "nothing listens on 127.0.0.1:1 -- must report unreachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn nats_reachable_is_true_for_a_reachable_nats_server() {
+        let (_container, url) = start_test_nats().await;
+        let ok = nats_reachable(&url, READYZ_DEPENDENCY_TIMEOUT).await;
+        assert!(
+            ok,
+            "a live, freshly-started NATS server must report reachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn opensearch_reachable_is_false_for_an_unreachable_url() {
+        let client = reqwest::Client::new();
+        let ok = opensearch_reachable(&client, "http://127.0.0.1:1", Duration::from_secs(1)).await;
+        assert!(
+            !ok,
+            "nothing listens on 127.0.0.1:1 -- must report unreachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn opensearch_reachable_is_true_for_any_completed_response() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&mock)
+            .await;
+        let client = reqwest::Client::new();
+        let ok = opensearch_reachable(&client, &mock.uri(), READYZ_DEPENDENCY_TIMEOUT).await;
+        assert!(ok, "a live mock OpenSearch endpoint must report reachable");
+    }
+
+    /// `/readyz` must stay 503 until [`run_writer`]'s own startup flag is
+    /// set, regardless of dependency state -- proves the readiness gate is
+    /// checked BEFORE the (here, unreachable) dependency probes even run.
+    #[tokio::test]
+    async fn writer_readyz_is_503_before_the_readiness_flag_is_set() {
+        let state = WriterHealthState {
+            readiness: skauswatch_telemetry::Readiness::new(),
+            nats_url: "nats://127.0.0.1:1".into(),
+            opensearch_url: "http://127.0.0.1:1".into(),
+            http_client: reqwest::Client::new(),
+        };
+        let server = axum_test::TestServer::new(writer_health_router(state));
+        server
+            .get("/readyz")
+            .await
+            .assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// The Finding-B regression guard itself: once marked ready, `/readyz`
+    /// must still report 503 while NATS/OpenSearch are unreachable -- the
+    /// exact defect the release audit found (unconditional 200 once bound).
+    #[tokio::test]
+    async fn writer_readyz_is_503_when_ready_but_dependencies_are_unreachable() {
+        let readiness = skauswatch_telemetry::Readiness::new();
+        readiness.set_ready();
+        let state = WriterHealthState {
+            readiness,
+            nats_url: "nats://127.0.0.1:1".into(),
+            opensearch_url: "http://127.0.0.1:1".into(),
+            http_client: reqwest::Client::new(),
+        };
+        let server = axum_test::TestServer::new(writer_health_router(state));
+        let response = server.get("/readyz").await;
+        response.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = response.json();
+        assert_eq!(body["nats"], false);
+        assert_eq!(body["opensearch"], false);
+    }
+
+    /// The positive counterpart: once marked ready AND both dependencies are
+    /// genuinely reachable (a real NATS server, a mock OpenSearch endpoint),
+    /// `/readyz` reports 200.
+    #[tokio::test]
+    async fn writer_readyz_is_200_when_ready_and_dependencies_are_reachable() {
+        let (_container, nats_url) = start_test_nats().await;
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&mock)
+            .await;
+
+        let readiness = skauswatch_telemetry::Readiness::new();
+        readiness.set_ready();
+        let state = WriterHealthState {
+            readiness,
+            nats_url: nats_url.into(),
+            opensearch_url: mock.uri().into(),
+            http_client: reqwest::Client::new(),
+        };
+        let server = axum_test::TestServer::new(writer_health_router(state));
+        server.get("/readyz").await.assert_status_ok();
+    }
+
+    #[tokio::test]
+    async fn writer_healthz_is_always_ok_regardless_of_readiness_or_dependencies() {
+        let state = WriterHealthState {
+            readiness: skauswatch_telemetry::Readiness::new(),
+            nats_url: "nats://127.0.0.1:1".into(),
+            opensearch_url: "http://127.0.0.1:1".into(),
+            http_client: reqwest::Client::new(),
+        };
+        let server = axum_test::TestServer::new(writer_health_router(state));
+        server.get("/healthz").await.assert_status_ok();
+    }
+
     /// Gate-1→2 wiring smoke test: the shared dependencies `run_receiver`
     /// assembles (the `EventBuffer`, a JWT verify key, a license client)
     /// really do fit `listeners::http::AppState`'s shape, and
@@ -592,6 +909,7 @@ mod tests {
             buffer,
             skauswatch_testkit::jwt::verify_key().clone(),
             license,
+            "nats://127.0.0.1:1".into(),
         );
         let _router = http::router(state);
     }
@@ -614,7 +932,12 @@ mod tests {
         let license = skauswatch_testkit::license::dev_license("skauswatch");
         let buffer: Arc<dyn EventBuffer> = Arc::new(crate::buffer::InMemoryBuffer::new(10));
         let jwt_verify_key = skauswatch_testkit::jwt::verify_key().clone();
-        let ingest_state = build_ingest_state(buffer, jwt_verify_key.clone(), license);
+        let ingest_state = build_ingest_state(
+            buffer,
+            jwt_verify_key.clone(),
+            license,
+            "nats://127.0.0.1:1".into(),
+        );
         let admin_state = build_admin_state(
             "http://opensearch.invalid:9200".into(),
             "skauswatch-snapshots".into(),

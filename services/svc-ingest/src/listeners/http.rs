@@ -21,6 +21,10 @@
 //! downstream tenant-scoped search (e.g. monitor's `tenant_id` term filter)
 //! has provenance to filter on. `GET /healthz` + `/readyz` stay
 //! unauthenticated — they are the manager's liveness and readiness probes.
+//! `/readyz` is dependency-aware (release audit Finding B, HIGH — see
+//! [`handle_ready`]): 503 unless a bounded, throwaway reachability probe of
+//! the NATS/JetStream buffer connection succeeds; `/healthz` stays a plain,
+//! dependency-free liveness check.
 //!
 //! Task 3.0b fix: this handler used to write straight to OpenSearch via
 //! `opensearch::write_bulk`, bypassing the JetStream-backed
@@ -32,6 +36,7 @@
 //! listener, owns all OpenSearch writes.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -45,10 +50,19 @@ use penguin_licensing::axum::{FlagGate, flag_gate};
 use sha2::{Digest, Sha256};
 use skauswatch_auth::TenantContext;
 
+use crate::buffer::jetstream;
 use crate::buffer::{BufferError, EventBuffer, NormalizedEvent};
+use crate::config::NatsAuthConfig;
 use skauswatch_ocsf::jsonord::{self, JsonVal};
 use skauswatch_ocsf::normalize;
 use skauswatch_ocsf::schema::{is_native_ocsf, validate_required_fields};
+
+/// Bound on `/readyz`'s NATS reachability probe (see [`nats_reachable`]) —
+/// independent of any writer-side OpenSearch timeout knob: a readiness
+/// probe must stay fast regardless, or k8s's own `readinessProbe.
+/// timeoutSeconds` starts flapping the pod on a slow-but-not-yet-timed-out
+/// dependency.
+const READYZ_DEPENDENCY_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// v1 batch cap: a single `/ingest` request may carry at most 10,000 records.
 const MAX_BATCH: usize = 10_000;
@@ -102,12 +116,40 @@ pub struct AppState {
     /// License entitlement + PostHog flag client (fail-safe) — gates
     /// `/ingest` on [`LOG_INGEST_FLAG`].
     pub license: Arc<LicenseClient>,
+    /// NATS server URL (`cfg.nats_url`), used ONLY by [`handle_ready`]'s
+    /// bounded reachability probe (release audit Finding B, HIGH) — a
+    /// fresh, throwaway connection attempt via [`nats_reachable`], never the
+    /// shared, already-connected [`Self::buffer`] itself: a readiness poll
+    /// must never contend with or steal from `/ingest`'s real publish
+    /// traffic on that connection.
+    pub nats_url: Arc<str>,
 }
 
 impl skauswatch_auth::JwtSecretSource for AppState {
     fn jwt_verify_key(&self) -> &jsonwebtoken::DecodingKey {
         &self.jwt_verify_key
     }
+}
+
+/// Bounded, throwaway NATS reachability probe backing [`handle_ready`]
+/// (release audit Finding B, HIGH) — connects fresh via the same
+/// [`NatsAuthConfig::from_env`] auth every real connection in this crate
+/// applies (`jetstream::connect_options`), rather than reusing
+/// [`AppState::buffer`]'s own connection (see that field's doc comment for
+/// why). Capped at `timeout` so a wedged NATS server can't hang the probe
+/// itself. Duplicated (in spirit) in `crate::bootstrap` for the writer's own
+/// `/readyz` — kept separate rather than shared from there, which would
+/// invert `bootstrap`'s existing dependency on this module.
+async fn nats_reachable(nats_url: &str, timeout: Duration) -> bool {
+    let Ok(auth) = NatsAuthConfig::from_env() else {
+        return false;
+    };
+    let Ok(options) = jetstream::connect_options(&auth).await else {
+        return false;
+    };
+    tokio::time::timeout(timeout, options.connect(nats_url))
+        .await
+        .is_ok_and(|connected| connected.is_ok())
 }
 
 /// Builds the ingest router (`POST /ingest`, `GET /healthz`, `GET /readyz`).
@@ -376,6 +418,11 @@ pub(crate) async fn handle_health() -> Response {
 }
 
 /// `GET /readyz` — readiness probe following the standard convention.
+/// Fixes release audit Finding B (HIGH): this used to return an
+/// unconditional 200 regardless of dependency state, so a wedged receiver
+/// (its NATS/JetStream buffer connection unusable) still reported ready.
+/// Now 503 unless a fresh, bounded probe of that connection succeeds (see
+/// [`nats_reachable`]).
 #[utoipa::path(
     get,
     path = "/readyz",
@@ -385,10 +432,19 @@ pub(crate) async fn handle_health() -> Response {
         (status = 503, description = "Service is not ready", body = crate::openapi::ReadyResponse),
     ),
 )]
-pub(crate) async fn handle_ready() -> (StatusCode, Response) {
-    let status = StatusCode::OK;
-    let body = Json(serde_json::json!({ "status": "ready" }));
-    (status, body.into_response())
+pub(crate) async fn handle_ready(State(state): State<AppState>) -> (StatusCode, Response) {
+    if nats_reachable(&state.nats_url, READYZ_DEPENDENCY_TIMEOUT).await {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "ready" })).into_response(),
+        )
+    } else {
+        tracing::warn!("receiver_readyz_nats_buffer_unreachable");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "status": "not ready" })).into_response(),
+        )
+    }
 }
 
 /// Parses request bytes into an order-preserving value, collapsing any parse
@@ -464,6 +520,11 @@ mod tests {
         out.into_bytes()
     }
 
+    /// Placeholder `nats_url` for tests that exercise `/ingest`, not
+    /// `/readyz` — nothing listens on `127.0.0.1:1`, but [`handle_ready`]'s
+    /// probe is never invoked by these tests, so its unreachability is
+    /// inert. Readyz-specific tests build their own [`AppState`] with an
+    /// explicit reachable/unreachable URL instead of this helper.
     fn state_for(
         buffer: Arc<dyn EventBuffer>,
         clock: Clock,
@@ -474,6 +535,7 @@ mod tests {
             clock,
             jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
             license,
+            nats_url: "nats://127.0.0.1:1".into(),
         }
     }
 
@@ -654,6 +716,83 @@ mod tests {
         let res = server.get("/healthz").await;
         res.assert_status_ok();
         assert_eq!(res.text(), r#"{"status":"ok","service":"svc-ingest"}"#);
+    }
+
+    // -- /readyz (release audit Finding B, HIGH) -----------------------------
+
+    /// Starts a minimal real NATS 2.14+ server for
+    /// [`readyz_is_200_when_the_nats_buffer_is_reachable`] — mirrors
+    /// `buffer::jetstream::tests::start_test_nats` (this module's file scope
+    /// doesn't include `buffer/jetstream.rs`, so the helper is duplicated
+    /// rather than shared; both are private to their own test module).
+    async fn start_test_nats() -> (
+        testcontainers::ContainerAsync<testcontainers::GenericImage>,
+        String,
+    ) {
+        use testcontainers::core::{IntoContainerPort, WaitFor};
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers::{GenericImage, ImageExt};
+
+        let image = GenericImage::new("nats", "2.14-alpine")
+            .with_exposed_port(4222.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("Server is ready"))
+            .with_startup_timeout(Duration::from_secs(180));
+        let container = image.start().await.expect("start nats container");
+        let host = container.get_host().await.expect("nats container host");
+        let port = container
+            .get_host_port_ipv4(4222)
+            .await
+            .expect("nats container mapped port");
+        (container, format!("nats://{host}:{port}"))
+    }
+
+    #[tokio::test]
+    async fn nats_reachable_is_false_for_an_unreachable_url() {
+        let ok = nats_reachable("nats://127.0.0.1:1", Duration::from_secs(1)).await;
+        assert!(
+            !ok,
+            "nothing listens on 127.0.0.1:1 -- must report unreachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn nats_reachable_is_true_for_a_reachable_nats_server() {
+        let (_container, url) = start_test_nats().await;
+        let ok = nats_reachable(&url, READYZ_DEPENDENCY_TIMEOUT).await;
+        assert!(
+            ok,
+            "a live, freshly-started NATS server must report reachable"
+        );
+    }
+
+    /// The Finding-B regression guard itself: `state_for`'s `nats_url`
+    /// points nowhere (see that helper's own doc comment), so `/readyz`
+    /// must report 503 -- the exact defect the release audit found was an
+    /// unconditional 200 regardless of buffer reachability.
+    #[tokio::test]
+    async fn readyz_is_503_when_the_nats_buffer_is_unreachable() {
+        let server = test_server(buffer(10));
+        server
+            .get("/readyz")
+            .await
+            .assert_status(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// The positive counterpart: once the buffer's NATS endpoint is
+    /// genuinely reachable (a real, freshly-started NATS server), `/readyz`
+    /// reports 200.
+    #[tokio::test]
+    async fn readyz_is_200_when_the_nats_buffer_is_reachable() {
+        let (_container, nats_url) = start_test_nats().await;
+        let state = AppState {
+            buffer: buffer(10),
+            clock: Clock::Fixed(pinned_now()),
+            jwt_verify_key: skauswatch_testkit::jwt::verify_key().clone(),
+            license: skauswatch_testkit::license::dev_license("skauswatch"),
+            nats_url: nats_url.into(),
+        };
+        let server = axum_test::TestServer::new(router(state));
+        server.get("/readyz").await.assert_status_ok();
     }
 
     #[tokio::test]
