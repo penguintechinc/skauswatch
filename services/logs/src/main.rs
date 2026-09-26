@@ -70,7 +70,16 @@ async fn serve() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("metrics exporter: {e}"))?;
 
     let cfg = Config::from_env().map_err(|e| anyhow::anyhow!("config: {e}"))?;
+    // Bounded per `config::HttpClientConfig` (audit finding, issue #149,
+    // HIGH): a hung/slow OpenSearch endpoint must never wedge the ingest
+    // path indefinitely — this client was previously built with no timeout
+    // at all.
+    let http_cfg = config::HttpClientConfig::from_env();
     let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(http_cfg.timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(
+            http_cfg.connect_timeout_secs,
+        ))
         .build()
         .map_err(|e| anyhow::anyhow!("http client: {e}"))?;
 
@@ -164,7 +173,18 @@ async fn healthcheck() -> anyhow::Result<()> {
         .and_then(|p| p.trim().parse().ok())
         .unwrap_or(5010u16);
     let url = format!("http://127.0.0.1:{port}/healthz");
-    let resp = reqwest::Client::new()
+    // `config::HttpClientConfig` bounds connect time
+    // (`LOGS_HTTP_CONNECT_TIMEOUT_SECS`, default 10s) — the explicit 3s
+    // `.timeout()` below still overrides the client-level whole-request
+    // default per call, unchanged from before.
+    let http_cfg = config::HttpClientConfig::from_env();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(http_cfg.timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(
+            http_cfg.connect_timeout_secs,
+        ))
+        .build()?;
+    let resp = client
         .get(&url)
         .timeout(std::time::Duration::from_secs(3))
         .send()

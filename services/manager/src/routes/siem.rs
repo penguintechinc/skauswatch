@@ -123,7 +123,13 @@ fn health_json(receiver_ok: bool) -> serde_json::Value {
 /// Probes `{logs_url}/healthz` with the v1 5s timeout; only an exact
 /// 200 counts as healthy (v1 `resp.status_code == 200`).
 async fn probe_logs(base_url: &str) -> bool {
-    let resp = reqwest::Client::new()
+    // A bounds-build failure (see `state::http_client`'s doc comment for why
+    // that's practically unreachable here) degrades the same as any other
+    // transport failure: not-ok, matching the v1 liveness-probe semantics.
+    let Ok(client) = crate::state::http_client() else {
+        return false;
+    };
+    let resp = client
         .get(format!("{base_url}/healthz"))
         .timeout(Duration::from_secs(5))
         .send()
@@ -193,7 +199,9 @@ pub(crate) async fn proxy_ingest(
     ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let settings = SiemSettings::from_env();
-    let mut req = reqwest::Client::new()
+    let client =
+        crate::state::http_client().map_err(|e| ApiError::internal("logs ingest client", e))?;
+    let mut req = client
         .post(format!("{}/ingest", settings.logs_url))
         .timeout(Duration::from_secs(10))
         .json(&body);
@@ -284,7 +292,9 @@ async fn os_search(
     base_url: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, ApiError> {
-    let resp = reqwest::Client::new()
+    let client =
+        crate::state::http_client().map_err(|e| ApiError::internal("opensearch client", e))?;
+    let resp = client
         .post(format!("{base_url}/{LOG_INDEX}/_search"))
         .timeout(Duration::from_secs(10))
         .json(body)

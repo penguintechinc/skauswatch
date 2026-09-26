@@ -5,7 +5,6 @@
 //! Contents API — reusing the same `GitCredentials`/base-URL-override
 //! pattern the PR-diff functions above already established.
 
-use reqwest::Client;
 const USER_AGENT: &str = "skauswatch-worker-codescan (sentinel)";
 
 /// Git provider credentials (from codescan_git_credentials table).
@@ -46,7 +45,7 @@ async fn fetch_github_diff(
 
     let api = base_url.unwrap_or("https://api.github.com");
     let url = format!("{}/repos/{}/{}/pulls/{}", api, owner, repo, pr_num);
-    let client = Client::new();
+    let client = crate::config::http_client();
 
     let response = client
         .get(&url)
@@ -110,7 +109,7 @@ async fn fetch_gitlab_diff(
         mr_num
     );
 
-    let client = Client::new();
+    let client = crate::config::http_client();
     let response = client
         .get(&url)
         .header("PRIVATE-TOKEN", token)
@@ -271,7 +270,7 @@ async fn fetch_github_default_branch(
     let (owner, repo) = parse_github_repo(repo_url)?;
     let api = base_url.unwrap_or("https://api.github.com");
     let url = format!("{api}/repos/{owner}/{repo}");
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("Authorization", format!("token {token}"))
         .header("Accept", "application/vnd.github+json")
@@ -296,7 +295,7 @@ async fn list_github_branches(
     let (owner, repo) = parse_github_repo(repo_url)?;
     let api = base_url.unwrap_or("https://api.github.com");
     let url = format!("{api}/repos/{owner}/{repo}/branches?per_page=100");
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("Authorization", format!("token {token}"))
         .header("Accept", "application/vnd.github+json")
@@ -327,7 +326,7 @@ async fn fetch_github_file(
         "{api}/repos/{owner}/{repo}/contents/{file_path}?ref={}",
         urlencoding::encode(git_ref)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("Authorization", format!("token {token}"))
         // The raw media type returns file bytes directly instead of the
@@ -358,7 +357,7 @@ async fn fetch_gitlab_default_branch(
         "{host}/api/v4/projects/{}",
         urlencoding::encode(&project_path)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("PRIVATE-TOKEN", token)
         .send()
@@ -386,7 +385,7 @@ async fn list_gitlab_branches(
         "{host}/api/v4/projects/{}/repository/branches?per_page=100",
         urlencoding::encode(&project_path)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("PRIVATE-TOKEN", token)
         .send()
@@ -419,7 +418,7 @@ async fn fetch_gitlab_file(
         urlencoding::encode(file_path),
         urlencoding::encode(git_ref)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("PRIVATE-TOKEN", token)
         .send()

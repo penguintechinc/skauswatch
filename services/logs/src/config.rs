@@ -17,6 +17,39 @@ const DEFAULT_RETENTION_DAYS: i64 = 90;
 /// proxies to is `http://logs:5010`).
 const DEFAULT_HTTP_PORT: u16 = 5010;
 
+/// Bounds the shared `reqwest::Client` `main.rs::serve` builds for every
+/// OpenSearch call (`opensearch::write_bulk`/`ensure_ism_policy`) and its own
+/// `/healthz` self-probe — audit finding (issue #149, HIGH): a hung/slow
+/// OpenSearch endpoint must never wedge the ingest path indefinitely. Mirrors
+/// `services/depgate/src/config.rs::HttpClientConfig` exactly.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpClientConfig {
+    /// Whole-request timeout in seconds (`LOGS_HTTP_TIMEOUT_SECS`, default
+    /// 30).
+    pub timeout_secs: u64,
+    /// TCP+TLS connect timeout in seconds (`LOGS_HTTP_CONNECT_TIMEOUT_SECS`,
+    /// default 10).
+    pub connect_timeout_secs: u64,
+}
+
+impl HttpClientConfig {
+    /// Loads the shared bounds from the environment. Back-compat: unset env
+    /// vars preserve prior behavior except now bounded (previously
+    /// unbounded — no timeout at all on the shared `reqwest::Client`).
+    pub fn from_env() -> Self {
+        Self {
+            timeout_secs: std::env::var("LOGS_HTTP_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            connect_timeout_secs: std::env::var("LOGS_HTTP_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+        }
+    }
+}
+
 /// Loaded configuration for the ported ingest path.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -145,5 +178,16 @@ mod tests {
             Config::from_values(None, None, Some("70000")),
             Err(ConfigError::Int("HTTP_PORT"))
         ));
+    }
+
+    #[test]
+    fn http_client_config_defaults_are_bounded() {
+        // regression: gh-149 — the shared reqwest::Client must never build
+        // with an unbounded (no-timeout) default.
+        assert!(std::env::var("LOGS_HTTP_TIMEOUT_SECS").is_err());
+        assert!(std::env::var("LOGS_HTTP_CONNECT_TIMEOUT_SECS").is_err());
+        let cfg = HttpClientConfig::from_env();
+        assert_eq!(cfg.timeout_secs, 30);
+        assert_eq!(cfg.connect_timeout_secs, 10);
     }
 }

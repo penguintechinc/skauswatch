@@ -41,9 +41,31 @@ use crate::config::TlsConfig;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Manager REST request timeout — matches v1's `http.Client{Timeout: 30 *
-/// time.Second}`.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Manager REST whole-request timeout — matches v1's `http.Client{Timeout:
+/// 30 * time.Second}`. Env-configurable
+/// (`ENDPOINT_AGENT_HTTP_TIMEOUT_SECS`, default 30) — back-compat: unset
+/// preserves the prior hardcoded 30s.
+fn request_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("ENDPOINT_AGENT_HTTP_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30),
+    )
+}
+
+/// TCP+TLS connect timeout for the manager connection
+/// (`ENDPOINT_AGENT_HTTP_CONNECT_TIMEOUT_SECS`, default 10) — audit finding
+/// (issue #149, HIGH): the underlying `reqwest::Client` previously set no
+/// connect bound at all, only the whole-request [`request_timeout`].
+fn connect_timeout() -> Duration {
+    Duration::from_secs(
+        std::env::var("ENDPOINT_AGENT_HTTP_CONNECT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+    )
+}
 /// Cap on events per report request — mirrors the manager's
 /// `MAX_EVENTS_PER_REQUEST` (services/manager/src/routes/endpoint.rs); the agent
 /// batches before this limit is ever reached (see `crate::agent`).
@@ -186,7 +208,8 @@ impl Reporter {
         tls: &TlsConfig,
     ) -> Result<Self, Error> {
         let mut builder = Client::builder()
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(request_timeout())
+            .connect_timeout(connect_timeout())
             .user_agent(format!(
                 "SkausWatch-ENDPOINT-Agent-Rust/{}",
                 env!("CARGO_PKG_VERSION")
@@ -454,6 +477,16 @@ mod tests {
         let payload = EventPayload::from_collected("agent-1", &file_event);
         assert!(payload.file_operations.is_some());
         assert!(payload.network_connections.is_none());
+    }
+
+    #[test]
+    fn http_timeout_defaults_are_bounded() {
+        // regression: gh-149 — the manager `reqwest::Client` must never
+        // build with an unbounded connect timeout.
+        assert!(std::env::var("ENDPOINT_AGENT_HTTP_TIMEOUT_SECS").is_err());
+        assert!(std::env::var("ENDPOINT_AGENT_HTTP_CONNECT_TIMEOUT_SECS").is_err());
+        assert_eq!(request_timeout(), Duration::from_secs(30));
+        assert_eq!(connect_timeout(), Duration::from_secs(10));
     }
 
     #[tokio::test]

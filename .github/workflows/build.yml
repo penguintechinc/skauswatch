@@ -215,3 +215,61 @@ jobs:
             ${rolling_tag} \
             "ghcr.io/penguintechinc/skauswatch/${SERVICE}:${TAG}-amd64" \
             "ghcr.io/penguintechinc/skauswatch/${SERVICE}:${TAG}-arm64"
+
+  sbom:
+    name: SBOM ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: [determine-tag, merge-manifests]
+    # Self-SBOM for our own release artifacts (EU CRA) — every pushed image
+    # (beta/gamma/prod), never the build-only PR path. Additive: does not
+    # gate or alter the build/push steps above.
+    if: needs.determine-tag.outputs.push == 'true'
+    permissions:
+      contents: write
+      packages: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - manager
+          - pki
+          - sshca
+          - logs
+          - codescan-backend
+          - depgate
+          - monitor
+          - vault
+          - s3scan
+          - scanner
+          - worker-codescan
+          - worker-vault-sync
+          - endpoint-agent
+          - svc-ingest
+          - webui
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate CycloneDX SBOM (syft) for ${{ matrix.service }}
+        # Same tool/format the CodeScan customer feature uses (syft, -o
+        # cyclonedx-json — see services/worker-codescan/src/scanner_tool.rs)
+        # applied to our own just-pushed multi-arch image. upload-artifact
+        # always publishes a workflow artifact; upload-release-assets only
+        # applies for a real v* tag build, where version-release.yml has
+        # already created the GitHub release (as a pre-release) that owns
+        # this tag — branch pushes (main/release/**) have no release to
+        # attach to.
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
+        with:
+          image: ghcr.io/penguintechinc/skauswatch/${{ matrix.service }}:${{ needs.determine-tag.outputs.tag }}
+          format: cyclonedx-json
+          output-file: sbom-${{ matrix.service }}-${{ needs.determine-tag.outputs.tag }}.cyclonedx.json
+          artifact-name: sbom-${{ matrix.service }}-${{ needs.determine-tag.outputs.tag }}.cyclonedx.json
+          upload-artifact: true
+          upload-artifact-retention: 90
+          upload-release-assets: ${{ startsWith(github.ref, 'refs/tags/v') }}

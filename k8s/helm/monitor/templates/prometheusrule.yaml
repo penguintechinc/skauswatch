@@ -1,0 +1,83 @@
+# PrometheusRule -- release-audit finding (gh-150, 0 PrometheusRule objects
+# existed). Unlike most other charts in this pass, services/monitor/src DOES
+# emit genuine failure-mode counters (ingest.rs) -- monitor_events_index_errors_total
+# (OpenSearch/ES index write failures, flush_batch) and
+# monitor_events_dropped_total{reason="backpressure"} (events dropped because
+# the ingest channel was full for a non-critical event, IngestHandle::ingest).
+# The other two `reason` values on that counter (no_tenant, flag_disabled)
+# are expected/benign drops, not failures, so they are deliberately excluded
+# from the alert expression below.
+#
+# `job` is assumed to equal the underlying Service's name (Prometheus
+# Operator's default ServiceMonitor behavior when `jobLabel` isn't set) --
+# see templates/servicemonitor.yaml, whose target Service is this chart's
+# fullname.
+#
+# NOTE on the backtick-wrapped double-brace sequences below: Prometheus's
+# own alert annotation templating uses the same double-brace delimiter as
+# Helm/Go templates. Wrapping each one in a raw Go-template string (single
+# backticks) is the standard Helm escape so `$value`/`$labels` survive
+# `helm template` untouched and are evaluated by Prometheus at alert-fire
+# time instead.
+#
+# Requires the Prometheus Operator CRDs (monitoring.coreos.com/v1)
+# installed in-cluster -- disable prometheusRule.enabled if not.
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "skauswatch-monitor.fullname" . }}
+  labels:
+    {{- include "skauswatch-monitor.labels" . | nindent 4 }}
+    {{- if .Values.monitoring.releaseLabel }}
+    release: {{ .Values.monitoring.releaseLabel | quote }}
+    {{- end }}
+    {{- with .Values.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  groups:
+    - name: skauswatch-monitor.rules
+      rules:
+        - alert: MonitorTargetDown
+          expr: absent(up{job="{{ include "skauswatch-monitor.fullname" . }}"}) or up{job="{{ include "skauswatch-monitor.fullname" . }}"} == 0
+          for: {{ .Values.prometheusRule.targetDownFor | quote }}
+          labels:
+            severity: critical
+          annotations:
+            summary: "monitor is not being scraped by Prometheus"
+            description: >-
+              No successful scrape of monitor's :9090 metrics endpoint on
+              pod {{`{{ $labels.pod }}`}} (namespace
+              {{`{{ $labels.namespace }}`}}) for at least
+              {{ .Values.prometheusRule.targetDownFor }} -- the pod is down,
+              crash-looping, or the ServiceMonitor/Service selector no
+              longer matches.
+        - alert: MonitorEventsIndexErrors
+          expr: increase(monitor_events_index_errors_total[5m]) > 0
+          for: {{ .Values.prometheusRule.indexErrorsFor | quote }}
+          labels:
+            severity: critical
+          annotations:
+            summary: "monitor is failing to index events into the event store"
+            description: >-
+              {{`{{ $value }}`}} event(s) failed to index over the last 5m
+              on pod {{`{{ $labels.pod }}`}} (namespace
+              {{`{{ $labels.namespace }}`}}) -- see flush_batch's
+              store.index_event error path (ingest.rs). Check OpenSearch/ES
+              cluster health and the pod's logs for the underlying error.
+        - alert: MonitorEventsDroppedBackpressure
+          expr: increase(monitor_events_dropped_total{reason="backpressure"}[5m]) > 0
+          for: {{ .Values.prometheusRule.droppedBackpressureFor | quote }}
+          labels:
+            severity: warning
+          annotations:
+            summary: "monitor is dropping non-critical events under backpressure"
+            description: >-
+              {{`{{ $value }}`}} non-critical event(s) dropped on pod
+              {{`{{ $labels.pod }}`}} over the last 5m because the ingest
+              channel was full (IngestHandle::ingest, ingest.rs) -- critical
+              events are never dropped this way, but sustained drops mean
+              the flush pipeline is falling behind collector throughput.
+{{- end }}

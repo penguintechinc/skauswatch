@@ -113,6 +113,33 @@ pub fn spiffe_env() -> String {
     env_or("SPIFFE_ENV", "beta")
 }
 
+/// Bounds the ad hoc `reqwest::Client` `main.rs::healthcheck` builds for its
+/// own `/healthz` self-probe — audit finding (issue #149, HIGH): a hung
+/// connect must never wedge indefinitely. Mirrors
+/// `services/depgate/src/config.rs::HttpClientConfig` exactly.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpClientConfig {
+    /// Whole-request timeout in seconds (`PKI_HTTP_TIMEOUT_SECS`, default
+    /// 30) — the call site's own explicit 3s `.timeout()` still overrides
+    /// this per call.
+    pub timeout_secs: u64,
+    /// TCP+TLS connect timeout in seconds (`PKI_HTTP_CONNECT_TIMEOUT_SECS`,
+    /// default 10).
+    pub connect_timeout_secs: u64,
+}
+
+impl HttpClientConfig {
+    /// Loads the shared bounds from the environment. Back-compat: unset env
+    /// vars preserve prior behavior except now bounded (previously
+    /// unbounded — no timeout at all on a bare `reqwest::Client::new()`).
+    pub fn from_env() -> Self {
+        Self {
+            timeout_secs: env_int("PKI_HTTP_TIMEOUT_SECS", 30) as u64,
+            connect_timeout_secs: env_int("PKI_HTTP_CONNECT_TIMEOUT_SECS", 10) as u64,
+        }
+    }
+}
+
 /// REST + gRPC bind settings (v1 `APIConfig` / `GRPCConfig`).
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -172,5 +199,16 @@ mod tests {
     fn spiffe_env_defaults_to_beta_when_unset() {
         assert!(std::env::var("SPIFFE_ENV").is_err());
         assert_eq!(spiffe_env(), "beta");
+    }
+
+    #[test]
+    fn http_client_config_defaults_are_bounded() {
+        // regression: gh-149 — the healthcheck's reqwest::Client must never
+        // build with an unbounded (no-timeout) default.
+        assert!(std::env::var("PKI_HTTP_TIMEOUT_SECS").is_err());
+        assert!(std::env::var("PKI_HTTP_CONNECT_TIMEOUT_SECS").is_err());
+        let cfg = HttpClientConfig::from_env();
+        assert_eq!(cfg.timeout_secs, 30);
+        assert_eq!(cfg.connect_timeout_secs, 10);
     }
 }

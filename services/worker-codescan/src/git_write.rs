@@ -13,7 +13,7 @@
 //! retry loop (spec §7: "human-gated", never silently dropped).
 
 use base64::Engine as _;
-use reqwest::{Client, StatusCode};
+use reqwest::StatusCode;
 
 use crate::git_provider::{self, GitCredentials};
 
@@ -136,7 +136,7 @@ async fn github_fetch_file_with_sha(
         "{api}/repos/{owner}/{repo}/contents/{file_path}?ref={}",
         urlencoding::encode(git_ref)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("Authorization", format!("token {token}"))
         .header("Accept", "application/vnd.github+json")
@@ -186,7 +186,7 @@ async fn gitlab_fetch_file_with_sha(
         urlencoding::encode(file_path),
         urlencoding::encode(git_ref)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("PRIVATE-TOKEN", token)
         .send()
@@ -267,7 +267,7 @@ async fn github_ensure_branch(
 ) -> Result<(), GitWriteError> {
     let (owner, repo) = git_provider::parse_github_repo(repo_url)?;
     let api = base_url.unwrap_or("https://api.github.com");
-    let client = Client::new();
+    let client = crate::config::http_client();
 
     let ref_url = format!("{api}/repos/{owner}/{repo}/git/ref/heads/{base_branch}");
     let resp = client
@@ -330,7 +330,7 @@ async fn gitlab_ensure_branch(
         urlencoding::encode(branch),
         urlencoding::encode(base_branch)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .post(&url)
         .header("PRIVATE-TOKEN", token)
         .send()
@@ -412,7 +412,7 @@ async fn github_commit_file(
     let api = base_url.unwrap_or("https://api.github.com");
     let url = format!("{api}/repos/{owner}/{repo}/contents/{file_path}");
     let encoded = base64::engine::general_purpose::STANDARD.encode(new_content);
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .put(&url)
         .header("Authorization", format!("token {token}"))
         .header("Accept", "application/vnd.github+json")
@@ -450,7 +450,7 @@ async fn gitlab_commit_file(
         urlencoding::encode(&project_path),
         urlencoding::encode(file_path)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .put(&url)
         .header("PRIVATE-TOKEN", token)
         .json(&serde_json::json!({
@@ -522,7 +522,7 @@ async fn github_open_pr(
     let (owner, repo) = git_provider::parse_github_repo(repo_url)?;
     let api = base_url.unwrap_or("https://api.github.com");
     let url = format!("{api}/repos/{owner}/{repo}/pulls");
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .post(&url)
         .header("Authorization", format!("token {token}"))
         .header("Accept", "application/vnd.github+json")
@@ -573,7 +573,7 @@ async fn gitlab_open_mr(
         "{host}/api/v4/projects/{}/merge_requests",
         urlencoding::encode(&project_path)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .post(&url)
         .header("PRIVATE-TOKEN", token)
         .json(&serde_json::json!({
@@ -656,7 +656,7 @@ async fn github_update_pr_body(
     let (owner, repo) = git_provider::parse_github_repo(repo_url)?;
     let api = base_url.unwrap_or("https://api.github.com");
     let url = format!("{api}/repos/{owner}/{repo}/pulls/{pr_number}");
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .patch(&url)
         .header("Authorization", format!("token {token}"))
         .header("Accept", "application/vnd.github+json")
@@ -686,7 +686,7 @@ async fn gitlab_update_mr_body(
         "{host}/api/v4/projects/{}/merge_requests/{pr_number}",
         urlencoding::encode(&project_path)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .put(&url)
         .header("PRIVATE-TOKEN", token)
         .json(&serde_json::json!({ "description": body }))
@@ -746,7 +746,7 @@ async fn github_list_open_prs(
     let (owner, repo) = git_provider::parse_github_repo(repo_url)?;
     let api = base_url.unwrap_or("https://api.github.com");
     let url = format!("{api}/repos/{owner}/{repo}/pulls?state=open&head={owner}:{head_branch}");
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("Authorization", format!("token {token}"))
         .header("Accept", "application/vnd.github+json")
@@ -779,7 +779,7 @@ async fn gitlab_list_open_mrs(
         urlencoding::encode(&project_path),
         urlencoding::encode(head_branch)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("PRIVATE-TOKEN", token)
         .send()
@@ -827,7 +827,7 @@ async fn github_pr_state(
     let (owner, repo) = git_provider::parse_github_repo(repo_url)?;
     let api = base_url.unwrap_or("https://api.github.com");
     let url = format!("{api}/repos/{owner}/{repo}/pulls/{pr_number}");
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("Authorization", format!("token {token}"))
         .header("Accept", "application/vnd.github+json")
@@ -870,7 +870,7 @@ async fn gitlab_mr_state(
         "{host}/api/v4/projects/{}/merge_requests/{pr_number}",
         urlencoding::encode(&project_path)
     );
-    let resp = Client::new()
+    let resp = crate::config::http_client()
         .get(&url)
         .header("PRIVATE-TOKEN", token)
         .send()

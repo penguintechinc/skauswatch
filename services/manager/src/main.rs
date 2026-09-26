@@ -171,7 +171,10 @@ async fn shutdown_signal() {
 
 async fn healthcheck() -> anyhow::Result<()> {
     let url = format!("http://127.0.0.1:{}/healthz", http_port());
-    let resp = reqwest::Client::new()
+    // `state::http_client()` bounds connect time (`MANAGER_HTTP_CONNECT_TIMEOUT_SECS`,
+    // default 10s); the explicit 3s `.timeout()` below still overrides the
+    // client-level whole-request default per call, unchanged from before.
+    let resp = state::http_client()?
         .get(&url)
         .timeout(std::time::Duration::from_secs(3))
         .send()

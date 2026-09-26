@@ -451,3 +451,51 @@ secretData:
   # never committed; empty means the integration is fully disabled (zero
   # requests ever sent, see src/socket.rs).
   socket-api-key: ""
+
+# --- Ops observability (PodDisruptionBudget / PrometheusRule /
+# ServiceMonitor) ---------------------------------------------------------
+# Release-audit finding (gh-148/gh-150): this chart shipped 0
+# PodDisruptionBudgets and 0 PrometheusRule/ServiceMonitor objects. Both
+# assume the Prometheus Operator CRDs (monitoring.coreos.com/v1, policy/v1
+# is core) are already installed in-cluster -- disable the relevant toggle
+# if not. Pattern mirrors k8s/helm/svc-ingest's values.yaml (same section).
+
+# maxUnavailable (not minAvailable) deliberately -- at replicaCount: 1
+# (alpha/beta/gamma), minAvailable: 1 would block ALL voluntary
+# disruptions (including node drains) since 0 replicas could ever remain
+# healthy; maxUnavailable: 1 computes desiredHealthy = replicas - 1, which
+# is 0 at replicas: 1, so it always permits eviction of the sole pod while
+# still capping disruption to 1 pod at a time once replicaCount scales up
+# (prod: 3, see replicaCount above).
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+# Label most Prometheus Operator installs (kube-prometheus-stack's default
+# ruleSelector/serviceMonitorSelector) require to discover a
+# PrometheusRule/ServiceMonitor -- conventionally the Prometheus Operator's
+# own Helm release name. Override per-cluster if that release isn't named
+# "prometheus"; set to "" to omit the label entirely (e.g. an Operator
+# configured with an empty/any selector).
+monitoring:
+  releaseLabel: "prometheus"
+
+# services/depgate/src emits exactly one custom counter --
+# depgate_cache_lookups_total{result="hit"|"miss"} (state.rs) -- which is
+# a cache-effectiveness metric, not a failure/error signal, so it is not a
+# sound basis for an error-rate alert. No error/failure counter exists as
+# of this pass (grep-verified), so the baseline here is target-down only
+# rather than a fabricated error-rate alert. Revisit once the service
+# emits a request/mesh-admin error counter.
+prometheusRule:
+  enabled: true
+  additionalLabels: {}
+  targetDownFor: "5m"
+
+# Scrapes the Service (templates/service.yaml) on its "metrics" port
+# (:9090). See templates/servicemonitor.yaml.
+serviceMonitor:
+  enabled: true
+  additionalLabels: {}
+  interval: "30s"
+  scrapeTimeout: "10s"

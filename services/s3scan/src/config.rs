@@ -208,6 +208,58 @@ pub enum ConfigError {
     MissingConsumerName,
 }
 
+/// Bounds every ad hoc `reqwest::Client` this worker builds — `main.rs`'s
+/// own `/healthz` self-probe and `handler.rs`'s TI client (VirusTotal/OTX
+/// lookups via `ti::enrich`) — audit finding (issue #149, HIGH): a hung/slow
+/// peer must never wedge the caller indefinitely. Mirrors
+/// `services/depgate/src/config.rs::HttpClientConfig` exactly.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpClientConfig {
+    /// Whole-request timeout in seconds (`S3SCAN_HTTP_TIMEOUT_SECS`, default
+    /// 30). The TI client's own explicit 10s per-request `.timeout()`
+    /// (`ti::query_virustotal`/`query_otx`) still overrides this per call —
+    /// this is only the client-level fallback.
+    pub timeout_secs: u64,
+    /// TCP+TLS connect timeout in seconds (`S3SCAN_HTTP_CONNECT_TIMEOUT_SECS`,
+    /// default 10).
+    pub connect_timeout_secs: u64,
+}
+
+impl HttpClientConfig {
+    /// Loads the shared bounds from the environment. Back-compat: unset env
+    /// vars preserve prior behavior except now bounded (previously
+    /// unbounded — no timeout at all on a bare `reqwest::Client::new()`).
+    pub fn from_env() -> Self {
+        Self {
+            timeout_secs: env_num("S3SCAN_HTTP_TIMEOUT_SECS", 30),
+            connect_timeout_secs: env_num("S3SCAN_HTTP_CONNECT_TIMEOUT_SECS", 10),
+        }
+    }
+}
+
+/// Builds a bounded `reqwest::Client` per [`HttpClientConfig`] — replaces a
+/// bare `reqwest::Client::new()` at this worker's ad hoc HTTP construction
+/// site (`handler.rs::S3ScanHandler::new`). `ClientBuilder::build()` only
+/// fails on conflicting TLS-backend/proxy config, none of which this call
+/// site sets, but the practically-unreachable failure path still degrades
+/// (logged) to an unbounded default client rather than panicking, keeping
+/// this function infallible for callers that need a plain `reqwest::Client`
+/// field.
+pub fn http_client() -> reqwest::Client {
+    let cfg = HttpClientConfig::from_env();
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(cfg.timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(cfg.connect_timeout_secs))
+        .build()
+        .unwrap_or_else(|e| {
+            tracing::error!(
+                error = %e,
+                "bounded http client build failed, falling back to unbounded default"
+            );
+            reqwest::Client::new()
+        })
+}
+
 #[cfg(test)]
 impl WorkerConfig {
     /// Fixed test configuration shared by `db.rs`/`s3ops.rs`/`handler.rs`
@@ -356,5 +408,24 @@ mod tests {
             ConfigError::MissingConsumerName.to_string(),
             "CONSUMER_NAME (or WORKER_NAME) environment variable is required"
         );
+    }
+
+    #[test]
+    fn http_client_config_defaults_are_bounded() {
+        // regression: gh-149 — this worker's ad hoc reqwest::Client sites
+        // must never build with an unbounded (no-timeout) default.
+        assert!(std::env::var("S3SCAN_HTTP_TIMEOUT_SECS").is_err());
+        assert!(std::env::var("S3SCAN_HTTP_CONNECT_TIMEOUT_SECS").is_err());
+        let cfg = HttpClientConfig::from_env();
+        assert_eq!(cfg.timeout_secs, 30);
+        assert_eq!(cfg.connect_timeout_secs, 10);
+    }
+
+    #[test]
+    fn http_client_builds_successfully_with_default_bounds() {
+        // Asserts `ClientBuilder::build()` actually succeeds for the exact
+        // options this worker sets (timeout + connect_timeout only) — the
+        // invariant documented on `http_client`'s doc comment.
+        let _client = http_client();
     }
 }

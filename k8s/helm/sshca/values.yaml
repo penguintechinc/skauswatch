@@ -205,3 +205,36 @@ secretData:
   db-pass: ""
   license-key: "PENG-XXXX-XXXX-XXXX-XXXX-ABCD"
   jwt-verify-key: ""
+
+# PodDisruptionBudget -- release-audit finding (gh-148, 0 PodDisruptionBudgets
+# existed). maxUnavailable (not minAvailable) so a 1-replica alpha/beta
+# deployment can still drain during a voluntary eviction instead of
+# permanently blocking it.
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+# Label most Prometheus Operator installs (kube-prometheus-stack's default
+# ruleSelector/serviceMonitorSelector) require to discover a
+# PrometheusRule/ServiceMonitor -- conventionally the Prometheus Operator's
+# own Helm release name. Set to "" to skip the label if your Prometheus
+# Operator doesn't use ruleSelector/serviceMonitorSelector label matching.
+monitoring:
+  releaseLabel: "prometheus"
+
+# services/sshca/src has no custom counter!/histogram!/gauge! metrics as of
+# this pass (grep-verified) -- only the bare Prometheus exporter mount. No
+# error/failure-rate alert is added below since there is no real metric to
+# alert on yet.
+prometheusRule:
+  enabled: true
+  additionalLabels: {}
+  targetDownFor: "5m"
+
+# Scrapes the Service (templates/service.yaml) on its "metrics" port
+# (:9090) -- not the "http" port. See templates/servicemonitor.yaml.
+serviceMonitor:
+  enabled: true
+  additionalLabels: {}
+  interval: "30s"
+  scrapeTimeout: "10s"

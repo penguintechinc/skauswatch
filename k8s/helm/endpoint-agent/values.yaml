@@ -56,6 +56,21 @@ tetragon:
 service:
   enabled: false
 
+# Release-audit findings gh-148 (PodDisruptionBudget) / gh-150
+# (PrometheusRule/ServiceMonitor/PodMonitor) are intentionally NOT applied
+# to this chart:
+#   - PDB: this workload is a DaemonSet, not a Deployment/StatefulSet --
+#     each node runs exactly one pod, so there is no "spare replica" a PDB
+#     protects; `kubectl drain --ignore-daemonsets` is the standard
+#     operational path for DaemonSet pods regardless.
+#   - PrometheusRule/ServiceMonitor/PodMonitor: services/endpoint-agent/src
+#     has no HTTP listener at all (grep-verified -- no
+#     skauswatch_telemetry::install_metrics_exporter call in main.rs,
+#     unlike every other chart in this pass) and no metrics port, matching
+#     service.enabled: false above. The agent pushes its state to manager
+#     over the client connection above rather than exposing anything for
+#     Prometheus to scrape, so there is no metrics endpoint to monitor.
+
 ingress:
   enabled: false
 

@@ -128,7 +128,7 @@ db-test-down: ## Testing - Stop the local test Postgres + Valkey containers
 test-security: ## Testing - Run security scans (cargo-deny, npm audit, gitleaks)
 	@echo "$(BLUE)Running security scans...$(RESET)"
 	cargo deny check
-	@cd services/webui && npm audit --omit=dev || true
+	@cd services/webui && npm audit --omit=dev --audit-level=high
 	@if command -v gitleaks >/dev/null 2>&1; then echo "-- gitleaks --"; gitleaks detect --source . --no-git; fi
 
 test-functional: ## Testing - Run functional tests

@@ -61,6 +61,39 @@ pub struct AppStateInner {
 /// Cheap-to-clone handle used as axum state.
 pub type AppState = Arc<AppStateInner>;
 
+/// Bounds the ad hoc `reqwest::Client` `main.rs::healthcheck` builds for its
+/// own `/healthz` self-probe — audit finding (issue #149, HIGH): a hung
+/// connect must never wedge indefinitely. Mirrors
+/// `services/depgate/src/config.rs::HttpClientConfig` exactly.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpClientConfig {
+    /// Whole-request timeout in seconds (`CODESCAN_BACKEND_HTTP_TIMEOUT_SECS`,
+    /// default 30) — the call site's own explicit 3s `.timeout()` still
+    /// overrides this per call.
+    pub timeout_secs: u64,
+    /// TCP+TLS connect timeout in seconds
+    /// (`CODESCAN_BACKEND_HTTP_CONNECT_TIMEOUT_SECS`, default 10).
+    pub connect_timeout_secs: u64,
+}
+
+impl HttpClientConfig {
+    /// Loads the shared bounds from the environment. Back-compat: unset env
+    /// vars preserve prior behavior except now bounded (previously
+    /// unbounded — no timeout at all on a bare `reqwest::Client::new()`).
+    pub fn from_env() -> Self {
+        Self {
+            timeout_secs: std::env::var("CODESCAN_BACKEND_HTTP_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            connect_timeout_secs: std::env::var("CODESCAN_BACKEND_HTTP_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+        }
+    }
+}
+
 impl AppStateInner {
     /// Builds state from environment configuration. DB connects with
     /// retry/backoff; license client degrades to cached/community; the
@@ -146,5 +179,21 @@ impl AppStateInner {
             crypto: Arc::new(crypto),
             streams: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_client_config_defaults_are_bounded() {
+        // regression: gh-149 — the healthcheck's reqwest::Client must never
+        // build with an unbounded (no-timeout) default.
+        assert!(std::env::var("CODESCAN_BACKEND_HTTP_TIMEOUT_SECS").is_err());
+        assert!(std::env::var("CODESCAN_BACKEND_HTTP_CONNECT_TIMEOUT_SECS").is_err());
+        let cfg = HttpClientConfig::from_env();
+        assert_eq!(cfg.timeout_secs, 30);
+        assert_eq!(cfg.connect_timeout_secs, 10);
     }
 }

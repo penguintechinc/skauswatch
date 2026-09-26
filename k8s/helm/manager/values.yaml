@@ -282,3 +282,50 @@ secretData:
   jwt-signing-key: ""
   # PEM EC P-256 public key (SPKI) -- manager also verifies its own tokens.
   jwt-verify-key: ""
+
+# --- Ops observability (PodDisruptionBudget / PrometheusRule /
+# ServiceMonitor) ---------------------------------------------------------
+# Release-audit finding (gh-148/gh-150): this chart shipped 0
+# PodDisruptionBudgets and 0 PrometheusRule/ServiceMonitor objects. Both
+# assume the Prometheus Operator CRDs (monitoring.coreos.com/v1, policy/v1
+# is core) are already installed in-cluster -- disable the relevant toggle
+# if not. Pattern mirrors k8s/helm/svc-ingest's values.yaml (same section).
+
+# maxUnavailable (not minAvailable) deliberately -- at replicaCount: 1
+# (alpha/beta/gamma), minAvailable: 1 would block ALL voluntary
+# disruptions (including node drains) since 0 replicas could ever remain
+# healthy; maxUnavailable: 1 computes desiredHealthy = replicas - 1, which
+# is 0 at replicas: 1, so it always permits eviction of the sole pod while
+# still capping disruption to 1 pod at a time once replicaCount scales up
+# (prod: 3, see replicaCount above).
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+# Label most Prometheus Operator installs (kube-prometheus-stack's default
+# ruleSelector/serviceMonitorSelector) require to discover a
+# PrometheusRule/ServiceMonitor -- conventionally the Prometheus Operator's
+# own Helm release name. Override per-cluster if that release isn't named
+# "prometheus"; set to "" to omit the label entirely (e.g. an Operator
+# configured with an empty/any selector).
+monitoring:
+  releaseLabel: "prometheus"
+
+# services/manager/src has no custom counter!/histogram!/gauge! metrics as
+# of this pass (grep-verified) -- only the bare Prometheus exporter mount
+# (skauswatch_telemetry::install_metrics_exporter). No error/failure-rate
+# alert is added below since there is no real metric to alert on yet.
+# Baseline for now is target-down only. Revisit once the service emits a
+# request/auth-failure error counter.
+prometheusRule:
+  enabled: true
+  additionalLabels: {}
+  targetDownFor: "5m"
+
+# Scrapes the Service (templates/service.yaml) on its "metrics" port
+# (:9090) -- not the "http" or "grpc" ports. See templates/servicemonitor.yaml.
+serviceMonitor:
+  enabled: true
+  additionalLabels: {}
+  interval: "30s"
+  scrapeTimeout: "10s"

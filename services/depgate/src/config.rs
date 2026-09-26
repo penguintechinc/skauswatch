@@ -222,6 +222,45 @@ impl GoProxyUpstreamConfig {
     }
 }
 
+/// Bounds for the single shared `reqwest::Client` built in
+/// `crate::state::AppStateInner::from_env` and handed to every upstream
+/// registry wrapper (OCI, npm, PyPI, crates.io, Go proxy, Socket.dev) —
+/// audit finding (issue #149, HIGH): a hung/slow registry endpoint must
+/// never wedge the caller indefinitely.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpClientConfig {
+    /// Whole-request timeout in seconds (`DEPGATE_HTTP_TIMEOUT_SECS`,
+    /// default 30) — covers connect + write + read.
+    pub timeout_secs: u64,
+    /// TCP+TLS connect timeout in seconds
+    /// (`DEPGATE_HTTP_CONNECT_TIMEOUT_SECS`, default 10).
+    pub connect_timeout_secs: u64,
+}
+
+fn resolve_http_client(
+    timeout_secs: Option<&str>,
+    connect_timeout_secs: Option<&str>,
+) -> HttpClientConfig {
+    HttpClientConfig {
+        timeout_secs: resolve_num(timeout_secs, 30),
+        connect_timeout_secs: resolve_num(connect_timeout_secs, 10),
+    }
+}
+
+impl HttpClientConfig {
+    /// Loads the shared upstream HTTP client's timeout bounds from the
+    /// environment. Back-compat: unset env vars preserve prior behavior
+    /// except now bounded (previously unbounded — no timeout at all).
+    pub fn from_env() -> Self {
+        resolve_http_client(
+            std::env::var("DEPGATE_HTTP_TIMEOUT_SECS").ok().as_deref(),
+            std::env::var("DEPGATE_HTTP_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .as_deref(),
+        )
+    }
+}
+
 /// How `crate::scanpipe::ScanPipeline::ingest` treats a scan-engine failure
 /// (`ScanError` — the YARA-X engine itself erroring, not a plain
 /// ClamAV-unreachable degrade-to-clean; see `skauswatch_scan_core::engine`'s
@@ -417,6 +456,22 @@ mod tests {
         assert_eq!(cfg.base_url, "https://ghcr.io");
         assert_eq!(cfg.username.as_deref(), Some("user"));
         assert_eq!(cfg.password.as_deref(), Some("pass"));
+    }
+
+    #[test]
+    fn http_client_defaults_are_bounded() {
+        // regression: gh-149 — the shared upstream reqwest::Client must
+        // never build with an unbounded (no-timeout) default.
+        let cfg = resolve_http_client(None, None);
+        assert_eq!(cfg.timeout_secs, 30);
+        assert_eq!(cfg.connect_timeout_secs, 10);
+    }
+
+    #[test]
+    fn http_client_honors_overrides() {
+        let cfg = resolve_http_client(Some("5"), Some("2"));
+        assert_eq!(cfg.timeout_secs, 5);
+        assert_eq!(cfg.connect_timeout_secs, 2);
     }
 
     #[test]
