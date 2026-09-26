@@ -138,7 +138,18 @@ impl AppStateInner {
 
         let cfg = DepgateConfig::from_env();
         let upstream_cfg = crate::config::UpstreamConfig::from_env();
+        // Audit finding (issue #149, HIGH): this client is shared by every
+        // upstream registry wrapper below (OCI, npm, PyPI, crates.io, Go
+        // proxy, Socket.dev) — a hung/slow registry must never wedge the
+        // caller indefinitely. Bounds are env-configurable (see
+        // `crate::config::HttpClientConfig`); defaults preserve prior
+        // behavior except now bounded (previously unbounded).
+        let http_cfg = crate::config::HttpClientConfig::from_env();
         let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(http_cfg.timeout_secs))
+            .connect_timeout(std::time::Duration::from_secs(
+                http_cfg.connect_timeout_secs,
+            ))
             .build()
             .map_err(|e| anyhow::anyhow!("http client: {e}"))?;
         let upstream = UpstreamClient::new(http.clone(), upstream_cfg);

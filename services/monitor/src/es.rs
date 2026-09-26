@@ -162,6 +162,38 @@ fn shape_search_response(
     })
 }
 
+/// Reads a positive-integer-seconds env var, falling back to `default` when
+/// unset, empty, or unparseable — shared by every plain-`reqwest` HTTP
+/// client this service builds ([`ElasticsearchStore`], [`IngestHttpStore`]).
+fn env_secs(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+/// Builds a `reqwest::Client` bounded by `MONITOR_HTTP_TIMEOUT_SECS`
+/// (default 30s, whole-request) and `MONITOR_HTTP_CONNECT_TIMEOUT_SECS`
+/// (default 10s, TCP+TLS connect) — audit finding (issue #149, HIGH): a
+/// hung/slow ES/OpenSearch or svc-ingest endpoint must never wedge the
+/// caller indefinitely. Back-compat: unset env vars preserve prior behavior
+/// except now bounded (previously unbounded). Falls back to
+/// [`reqwest::Client::default`] on the (effectively unreachable) builder
+/// error rather than panicking.
+fn bounded_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(env_secs(
+            "MONITOR_HTTP_TIMEOUT_SECS",
+            30,
+        )))
+        .connect_timeout(std::time::Duration::from_secs(env_secs(
+            "MONITOR_HTTP_CONNECT_TIMEOUT_SECS",
+            10,
+        )))
+        .build()
+        .unwrap_or_default()
+}
+
 /// Elasticsearch/OpenSearch-backed [`EventStore`], talking to the REST API
 /// directly (house pattern — no ES client crate).
 pub struct ElasticsearchStore {
@@ -181,7 +213,7 @@ impl ElasticsearchStore {
         password: Option<String>,
     ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: bounded_http_client(),
             base_url: base_url.into(),
             index_pattern: index_pattern.into(),
             auth: username.zip(password),
@@ -299,7 +331,7 @@ impl IngestHttpStore {
     /// `https://svc-ingest:8002`) with bearer token `token`.
     pub fn new(url: impl Into<String>, token: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: bounded_http_client(),
             url: url.into(),
             token: token.into(),
         }
@@ -349,6 +381,18 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn http_client_timeout_defaults_are_bounded_when_env_unset() {
+        // regression: gh-149 — the ES/ingest http clients must never build
+        // with an unbounded (no-timeout) default. `env_secs` can't be
+        // exercised with an env override here (workspace denies
+        // `unsafe_code`, which `std::env::set_var` requires), so this only
+        // asserts the no-env-var-set default path, matching production's
+        // common case.
+        assert_eq!(env_secs("MONITOR_HTTP_TIMEOUT_SECS_NONEXISTENT", 30), 30);
+        let _client = bounded_http_client();
+    }
 
     #[test]
     fn search_body_with_no_filters_still_scopes_to_tenant() {
