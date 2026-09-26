@@ -113,6 +113,47 @@ app.kubernetes.io/component: writer
 {{- end }}
 
 {{/*
+NATS client auth env vars (services/svc-ingest/src/config.rs::
+NatsAuthConfig / buffer/jetstream.rs::NatsAuthMode) -- shared verbatim by
+both deployment-receiver.yaml and deployment-writer.yaml (both connect to
+NATS: the main ingest connection AND, on the writer side, the DLQ
+connection). Renders the empty string when nats.auth.enabled is false,
+matching NatsAuthConfig::from_env's exact behavior with every NATS_* var
+unset -- today's unauthenticated connection is unaffected. Call sites
+MUST NOT pipe this directly into `nindent` (nindent of an empty string
+still emits a newline + spaces, injecting a spurious blank line) -- wrap
+with `{{- with (include ... | trim) }}{{- . | nindent N }}{{- end }}` so
+the empty case emits nothing at all, as both deployment-receiver.yaml and
+deployment-writer.yaml do.
+*/}}
+{{- define "skauswatch-svc-ingest.natsAuthEnv" -}}
+{{- if .Values.nats.auth.enabled }}
+{{- if eq .Values.nats.auth.mode "credsFile" }}
+- name: NATS_CREDS_FILE
+  value: "{{ .Values.nats.auth.credsFile.mountPath }}/{{ .Values.nats.auth.credsFile.secretKey }}"
+{{- else if eq .Values.nats.auth.mode "nkey" }}
+- name: NATS_NKEY
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.nats.auth.nkey.secretName | default (include "skauswatch-svc-ingest.secretName" .) }}
+      key: {{ .Values.nats.auth.nkey.secretKey }}
+{{- else if eq .Values.nats.auth.mode "userPassword" }}
+- name: NATS_USER
+  value: {{ .Values.nats.auth.userPassword.username | quote }}
+- name: NATS_PASSWORD
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.nats.auth.userPassword.passwordSecretName | default (include "skauswatch-svc-ingest.secretName" .) }}
+      key: {{ .Values.nats.auth.userPassword.passwordSecretKey }}
+{{- end }}
+{{- if .Values.nats.auth.tls }}
+- name: NATS_TLS
+  value: "true"
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
 Full image reference -- shared by both receiver and writer (one binary,
 `serve --mode receiver|writer` selects behavior). Production pins by
 SHA256 digest (tag starts with "sha256:") -> "repo@sha256:...". Alpha/

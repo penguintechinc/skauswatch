@@ -1,0 +1,17 @@
+# PodDisruptionBudget for the writer Deployment -- release-audit Medium
+# finding (0 PodDisruptionBudgets existed). See values.yaml's pdb.* comment
+# for why maxUnavailable (not minAvailable) is the policy.
+{{- if .Values.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "skauswatch-svc-ingest.writer.fullname" . }}
+  labels:
+    {{- include "skauswatch-svc-ingest.writer.labels" . | nindent 4 }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  maxUnavailable: {{ .Values.pdb.writer.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "skauswatch-svc-ingest.writer.selectorLabels" . | nindent 6 }}
+{{- end }}

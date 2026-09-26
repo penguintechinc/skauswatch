@@ -1,0 +1,76 @@
+# PrometheusRule -- release-audit Medium finding (0 PrometheusRule objects
+# existed). Alerts on the three failure-mode metrics that already exist:
+# services/svc-ingest/src/otel.rs::metric_names (WRITER_OPENSEARCH_ERRORS_TOTAL,
+# BUFFER_FULL_REJECTIONS_TOTAL) and writer.rs's DLQ counter
+# (svc_ingest_writer_events_dlq_total, incremented in route_to_dlq). Names
+# below are copy-verbatim from those two source files -- do not respell.
+#
+# NOTE on the backtick-wrapped double-brace sequences below: Prometheus's
+# own alert annotation templating uses the same double-brace delimiter as
+# Helm/Go templates. Wrapping each one in a raw Go-template string (single
+# backticks) is the standard Helm escape so `$value`/`$labels` survive
+# `helm template` untouched and are evaluated by Prometheus at alert-fire
+# time instead.
+#
+# Requires the Prometheus Operator CRDs (monitoring.coreos.com/v1)
+# installed in-cluster -- disable prometheusRule.enabled if not.
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "skauswatch-svc-ingest.fullname" . }}
+  labels:
+    {{- include "skauswatch-svc-ingest.labels" . | nindent 4 }}
+    {{- if .Values.monitoring.releaseLabel }}
+    release: {{ .Values.monitoring.releaseLabel | quote }}
+    {{- end }}
+    {{- with .Values.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  groups:
+    - name: skauswatch-svc-ingest.rules
+      rules:
+        - alert: SvcIngestWriterDLQEventsDetected
+          expr: increase(svc_ingest_writer_events_dlq_total[5m]) > 0
+          for: {{ .Values.prometheusRule.dlqFor | quote }}
+          labels:
+            severity: critical
+          annotations:
+            summary: "svc-ingest writer is routing events to the dead-letter queue"
+            description: >-
+              {{`{{ $value }}`}} event(s) landed in the DLQ over the last 5m
+              on writer pod {{`{{ $labels.pod }}`}} (namespace
+              {{`{{ $labels.namespace }}`}}). DLQ events are OpenSearch
+              bulk-write failures that could not be recovered inline --
+              investigate before DLQ_RETENTION_DAYS elapses and the
+              JetStream DLQ stream expires them permanently.
+        - alert: SvcIngestBufferFullRejections
+          expr: increase(svc_ingest_buffer_full_rejections_total[5m]) > 0
+          for: {{ .Values.prometheusRule.bufferFullFor | quote }}
+          labels:
+            severity: warning
+          annotations:
+            summary: "svc-ingest is rejecting events because its buffer is full"
+            description: >-
+              {{`{{ $value }}`}} event(s) rejected for backpressure on pod
+              {{`{{ $labels.pod }}`}} over the last 5m -- the receiver's
+              JetStream enqueue buffer is full. Check JetStream consumer
+              lag and writer throughput; sustained rejections mean events
+              are being dropped, not queued.
+        - alert: SvcIngestWriterOpenSearchErrors
+          expr: rate(svc_ingest_writer_opensearch_errors_total[5m]) > 0
+          for: {{ .Values.prometheusRule.opensearchErrorsFor | quote }}
+          labels:
+            severity: critical
+          annotations:
+            summary: "svc-ingest writer is failing OpenSearch bulk writes"
+            description: >-
+              Sustained OpenSearch write errors on pod
+              {{`{{ $labels.pod }}`}} for at least
+              {{ .Values.prometheusRule.opensearchErrorsFor }} (current
+              rate {{`{{ $value | humanize }}`}}/s) -- check OpenSearch
+              cluster health and the writer's bulk-write error logs for the
+              failing error_code label.
+{{- end }}

@@ -12,8 +12,9 @@ use chrono::{DateTime, Utc};
 use skauswatch_ocsf::JsonVal;
 use tracing::Instrument as _;
 
-use crate::buffer::{DeliveredEvent, EventBuffer, JetStreamBuffer, NormalizedEvent};
-use crate::config::Config;
+use crate::buffer::jetstream;
+use crate::buffer::{DeliveredEvent, EventBuffer, NormalizedEvent};
+use crate::config::{self, Config, NatsAuthConfig};
 use crate::opensearch;
 
 /// Batch size pulled per `consume()` call (Spec §7a `NATS_CONSUMER_PREFETCH`
@@ -77,7 +78,7 @@ fn effective_failure_count(delivery_count: Option<u64>, local_count: u32) -> u32
 }
 
 /// Whether two JetStream stream subject prefixes — each expanded to the
-/// wildcard `{prefix}.>` by [`JetStreamBuffer`] — would collide, one
+/// wildcard `{prefix}.>` by [`crate::buffer::JetStreamBuffer`] — would collide, one
 /// capturing messages meant for the other. True when one prefix's
 /// dot-separated tokens are a prefix of the other's (including exact
 /// equality), the case a `{prefix}.>` wildcard cannot distinguish between.
@@ -450,7 +451,7 @@ async fn run_loop(
 /// Builds the dead-letter sink `run` routes permanently-failing events to
 /// (Spec §7c "moved to a separate ... dlq stream"). Opens a fresh,
 /// independent JetStream connection rather than reusing `run`'s `buffer`
-/// parameter: [`JetStreamBuffer`]'s stream is created with the multi-token
+/// parameter: [`crate::buffer::JetStreamBuffer`]'s stream is created with the multi-token
 /// wildcard subject `{subject_prefix}.>` (see
 /// `buffer::jetstream::JetStreamBuffer::consumer`), so publishing a
 /// literal `{subject_prefix}.dlq` message through the *same* buffer would
@@ -462,11 +463,21 @@ async fn run_loop(
 /// subject prefix, so a misconfiguration cannot silently reintroduce that
 /// loop.
 ///
+/// Connects via [`jetstream::connect`] (Spec §7a / P2 NATS auth
+/// hardening) rather than a bare `async_nats::connect`, and sets the
+/// stream's retention to `DLQ_RETENTION_DAYS` (default 30 days, Spec §15
+/// open question #6) via [`crate::buffer::JetStreamBuffer::with_max_age`] — dead-lettered
+/// events are bounded, not kept forever, and every successful DLQ publish
+/// increments `svc_ingest_writer_events_dlq_total` (see [`route_to_dlq`]),
+/// the metric an operator alerts on for "any event landed in the DLQ".
+///
 /// # Errors
 /// Returns an error if [`DLQ_SUBJECT_PREFIX`] collides with `cfg`'s
-/// ingest subject prefix, the NATS connection cannot be established, the
-/// dead-letter buffer fails to construct, or its backing JetStream stream
-/// cannot be provisioned (see [`JetStreamBuffer::ensure_stream`]).
+/// ingest subject prefix, `DLQ_RETENTION_DAYS` is set but not a valid
+/// integer, the NATS connection cannot be established (including a
+/// misconfigured `NATS_CREDS_FILE`), the dead-letter buffer fails to
+/// construct, or its backing JetStream stream cannot be
+/// provisioned/updated (see [`crate::buffer::JetStreamBuffer::ensure_stream`]).
 async fn build_dlq_buffer(cfg: &Config) -> anyhow::Result<Arc<dyn EventBuffer>> {
     if subject_prefixes_collide(DLQ_SUBJECT_PREFIX, &cfg.nats_jetstream_subject_prefix) {
         anyhow::bail!(
@@ -477,18 +488,21 @@ async fn build_dlq_buffer(cfg: &Config) -> anyhow::Result<Arc<dyn EventBuffer>> 
             cfg.nats_jetstream_subject_prefix
         );
     }
-    let client = async_nats::connect(&cfg.nats_url)
+    let retention = config::dlq_retention_from_env()
+        .map_err(|e| anyhow::anyhow!("dlq retention config: {e}"))?;
+    let auth = NatsAuthConfig::from_env().map_err(|e| anyhow::anyhow!("nats auth config: {e}"))?;
+    let dlq = jetstream::connect(&cfg.nats_url, &auth, DLQ_SUBJECT_PREFIX)
         .await
-        .map_err(|e| anyhow::anyhow!("dlq nats connect: {e}"))?;
-    let context = async_nats::jetstream::new(client);
-    let dlq = JetStreamBuffer::new(context, DLQ_SUBJECT_PREFIX)
-        .map_err(|e| anyhow::anyhow!("dlq buffer init: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("dlq buffer init: {e}"))?
+        .with_max_age(retention);
     // The DLQ buffer is push-only — nothing ever calls `consume()` on it
     // (see `JetStreamBuffer::ensure_stream`'s doc comment), so unlike the
     // main ingest buffer its stream is never created as a side effect of
     // the writer's own loop. Provision it explicitly here, before the
     // buffer is ever handed to `route_to_dlq`, or every dead-letter push
-    // would fail with "no stream found for given subject".
+    // would fail with "no stream found for given subject". Also converges
+    // an already-existing DLQ stream's retention to `retention` (see
+    // `JetStreamBuffer::ensure_stream`'s doc comment).
     dlq.ensure_stream()
         .await
         .map_err(|e| anyhow::anyhow!("dlq stream provisioning: {e}"))?;
@@ -1153,5 +1167,134 @@ mod tests {
             Ok(inner) => assert!(inner.is_err(), "unreachable NATS must surface as an Err"),
             Err(_) => panic!("run() should fail fast on an unreachable NATS connect, not hang"),
         }
+    }
+
+    // -- DLQ metric hardening (Spec §15 open question #6) ------------------
+
+    /// Minimal `metrics::Recorder` tracking counter increments by name,
+    /// installed via `metrics::with_local_recorder` (a `thread_local!`,
+    /// scoped only to the closure passed to it) rather than
+    /// `metrics::set_global_recorder` — deliberately NOT the same shape as
+    /// `crate::otel`'s own test recorder: the global recorder slot can only
+    /// be claimed once per process, and `crate::otel`'s test module already
+    /// claims it within the same shared `cargo test` binary
+    /// (`install_test_metrics_recorder`, private to that module, so this
+    /// module can't reuse it). A thread-local recorder sidesteps that
+    /// collision entirely: no install-once guard needed, and no risk of a
+    /// flaky result from losing a race against another file's test for the
+    /// one process-global slot.
+    #[derive(Clone, Default)]
+    struct CountingRecorder {
+        counts: Arc<std::sync::Mutex<HashMap<String, u64>>>,
+    }
+
+    impl CountingRecorder {
+        fn count_for(&self, name: &str) -> u64 {
+            self.counts.lock().unwrap().get(name).copied().unwrap_or(0)
+        }
+    }
+
+    struct CountingCounterHandle {
+        counts: Arc<std::sync::Mutex<HashMap<String, u64>>>,
+        name: String,
+    }
+
+    impl metrics::CounterFn for CountingCounterHandle {
+        fn increment(&self, value: u64) {
+            *self
+                .counts
+                .lock()
+                .unwrap()
+                .entry(self.name.clone())
+                .or_insert(0) += value;
+        }
+
+        fn absolute(&self, value: u64) {
+            self.counts.lock().unwrap().insert(self.name.clone(), value);
+        }
+    }
+
+    impl metrics::Recorder for CountingRecorder {
+        fn describe_counter(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+        fn describe_gauge(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+        fn describe_histogram(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            metrics::Counter::from_arc(Arc::new(CountingCounterHandle {
+                counts: self.counts.clone(),
+                name: key.name().to_owned(),
+            }))
+        }
+        fn register_gauge(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+        fn register_histogram(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    /// Spec §15 open question #6: proves a successful [`route_to_dlq`] call
+    /// increments `svc_ingest_writer_events_dlq_total` — the metric an
+    /// operator alerts on for "any event landed in the DLQ". A plain
+    /// (non-`#[tokio::test]`) `#[test]`: `metrics::with_local_recorder`
+    /// takes a *synchronous* closure (`impl FnOnce() -> T`) and can't itself
+    /// `.await`, so this drives a hand-built current-thread Tokio runtime's
+    /// `block_on` from inside that closure instead — every `.await` point
+    /// `route_to_dlq`/`InMemoryBuffer::push` hits stays on this one OS
+    /// thread (a `new_current_thread` runtime never migrates work to
+    /// another thread), so the thread-local recorder this scope installs
+    /// remains visible for the whole call.
+    #[test]
+    fn route_to_dlq_success_increments_dlq_metric() {
+        let recorder = CountingRecorder::default();
+        let dlq: Arc<dyn EventBuffer> = Arc::new(InMemoryBuffer::new(10));
+        let event = sample_event("dedup-dlq-metric", "tenant-a");
+
+        let pushed = metrics::with_local_recorder(&recorder, || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build current-thread runtime");
+            rt.block_on(route_to_dlq(&dlq, &event, "test dlq reason", Utc::now()))
+        });
+
+        assert!(
+            pushed,
+            "route_to_dlq must report success pushing to a healthy sink"
+        );
+        assert_eq!(
+            recorder.count_for("svc_ingest_writer_events_dlq_total"),
+            1,
+            "a successful DLQ publish must increment svc_ingest_writer_events_dlq_total"
+        );
     }
 }

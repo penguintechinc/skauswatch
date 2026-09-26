@@ -90,7 +90,10 @@ spec:
             - name: SPIFFE_ENDPOINT_SOCKET
               value: "unix://{{ .Values.spire.socketDir }}/agent.sock"
         {{- end }}
-        {{- if or .Values.volumeMounts .Values.spire.enabled }}
+        {{- with (include "skauswatch-svc-ingest.natsAuthEnv" . | trim) }}
+        {{- . | nindent 12 }}
+        {{- end }}
+        {{- if or .Values.volumeMounts .Values.spire.enabled (and .Values.nats.auth.enabled (eq .Values.nats.auth.mode "credsFile")) }}
         volumeMounts:
           {{- with .Values.volumeMounts }}
           {{- toYaml . | nindent 12 }}
@@ -102,8 +105,13 @@ spec:
             readOnly: true
             {{- end }}
           {{- end }}
+          {{- if and .Values.nats.auth.enabled (eq .Values.nats.auth.mode "credsFile") }}
+          - name: nats-creds
+            mountPath: {{ .Values.nats.auth.credsFile.mountPath }}
+            readOnly: true
+          {{- end }}
         {{- end }}
-      {{- if or .Values.volumes .Values.spire.enabled }}
+      {{- if or .Values.volumes .Values.spire.enabled (and .Values.nats.auth.enabled (eq .Values.nats.auth.mode "credsFile")) }}
       volumes:
         {{- with .Values.volumes }}
         {{- toYaml . | nindent 8 }}
@@ -119,6 +127,14 @@ spec:
             path: {{ .Values.spire.socketDir }}
             type: DirectoryOrCreate
           {{- end }}
+        {{- end }}
+        {{- if and .Values.nats.auth.enabled (eq .Values.nats.auth.mode "credsFile") }}
+        - name: nats-creds
+          secret:
+            secretName: {{ .Values.nats.auth.credsFile.secretName | default (include "skauswatch-svc-ingest.secretName" .) }}
+            items:
+              - key: {{ .Values.nats.auth.credsFile.secretKey }}
+                path: {{ .Values.nats.auth.credsFile.secretKey }}
         {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}

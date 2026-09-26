@@ -13,6 +13,7 @@ use opentelemetry::propagation::{Extractor, Injector};
 use tokio::sync::OnceCell;
 
 use super::{AckHandle, AckHandleInner, BufferError, DeliveredEvent, EventBuffer, NormalizedEvent};
+use crate::config::NatsAuthConfig;
 
 /// Header carrying the server-validated tenant, so `consume` can rebuild
 /// a [`NormalizedEvent`] without trusting anything read back off the wire
@@ -83,6 +84,133 @@ pub(super) fn extract_trace_context(headers: &async_nats::HeaderMap) -> opentele
     })
 }
 
+// ---------------------------------------------------------------------
+// NATS client auth hardening (Spec §7a / P2). Before this, every NATS
+// connection this crate opened was unauthenticated and plaintext — no
+// creds/nkeys/TLS at all. `connect_options` is optional and back-compatible
+// by construction: a default (all-`None`/`false`) `NatsAuthConfig`
+// produces the exact same unauthenticated `ConnectOptions::default()`
+// behavior every connection used before this hardening, so a local/dev
+// deployment that sets none of the `NATS_*` auth env vars is unaffected —
+// never fails startup for missing NATS auth.
+// ---------------------------------------------------------------------
+
+/// Which NATS auth mechanism [`connect_options`] applies for a given
+/// [`NatsAuthConfig`] — factored out as a pure, synchronous decision (no
+/// `async_nats` type touched yet) so the precedence rule itself (`.creds`
+/// file > NKey seed > user/password > none) is unit-testable without
+/// needing to inspect `async_nats::ConnectOptions`'s internal auth state,
+/// which has no public accessors. Carries the selected credential(s)
+/// directly (rather than a bare enum discriminant + a second lookup back
+/// into `auth`) so callers never need an `.unwrap()`/`.expect()` to
+/// re-extract an `Option` this function already proved is `Some`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NatsAuthMode<'a> {
+    /// No `NATS_*` auth env var set — today's unauthenticated behavior,
+    /// preserved for local/dev.
+    None,
+    CredsFile(&'a str),
+    Nkey(&'a str),
+    UserPassword(&'a str, &'a str),
+}
+
+/// Selects a [`NatsAuthMode`] from `auth`'s precedence order. Exposed only
+/// within this module — see [`connect_options`], the sole caller, and the
+/// `nats_auth_mode_*` tests exercising this precedence directly.
+fn select_nats_auth_mode(auth: &NatsAuthConfig) -> NatsAuthMode<'_> {
+    if let Some(path) = auth.creds_file.as_deref() {
+        NatsAuthMode::CredsFile(path)
+    } else if let Some(seed) = auth.nkey.as_deref() {
+        NatsAuthMode::Nkey(seed)
+    } else if let (Some(user), Some(password)) = (auth.user.as_deref(), auth.password.as_deref()) {
+        NatsAuthMode::UserPassword(user, password)
+    } else {
+        NatsAuthMode::None
+    }
+}
+
+/// Installs `aws-lc-rs` as the process-wide default `rustls` crypto
+/// provider, exactly once — required before `async_nats`'s own TLS
+/// handshake code (`ClientConfig::builder()`, using the same vendored
+/// `rustls` this crate pins via `Cargo.toml`) can select a default
+/// provider. This workspace resolves both `ring` and `aws-lc-rs` into the
+/// dependency graph, so `rustls` can't auto-select one on its own and
+/// errors instead of connecting. Mirrors the identical, already-established
+/// `ensure_default_crypto_provider` in
+/// `services/worker-vault-sync/src/providers/mod.rs` — same problem
+/// (`rcgen` pins `aws_lc_rs` explicitly while other crates default to
+/// `ring`), same fix, same backend choice, kept as its own copy here per
+/// that module's own doc comment ("to avoid touching already-stable,
+/// already-tested code") rather than a shared helper neither crate
+/// currently exposes to the other.
+fn ensure_default_crypto_provider() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        // Ignore the `Err` (returns the already-installed provider) — a
+        // race with another caller installing first is fine, we only care
+        // that *some* default ends up installed before first use.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
+/// Builds the [`async_nats::ConnectOptions`] every NATS connection in this
+/// crate should use, applying whichever [`NatsAuthMode`] `auth` selects
+/// plus TLS if `auth.tls` is set. See this section's module comment for the
+/// back-compat guarantee.
+///
+/// # Errors
+/// Returns [`BufferError::Transport`] only if `NATS_CREDS_FILE` is set but
+/// the file cannot be read or parsed (`async_nats`'s own `.creds`-format
+/// parse) — never fails for absent auth.
+pub(crate) async fn connect_options(
+    auth: &NatsAuthConfig,
+) -> Result<async_nats::ConnectOptions, BufferError> {
+    let options = async_nats::ConnectOptions::new();
+    let mut options = match select_nats_auth_mode(auth) {
+        NatsAuthMode::None => options,
+        NatsAuthMode::CredsFile(path) => options
+            .credentials_file(path)
+            .await
+            .map_err(|e| BufferError::Transport(format!("NATS_CREDS_FILE {path:?}: {e}")))?,
+        NatsAuthMode::Nkey(seed) => options.nkey(seed.to_owned()),
+        NatsAuthMode::UserPassword(user, password) => {
+            options.user_and_password(user.to_owned(), password.to_owned())
+        }
+    };
+    if auth.tls {
+        ensure_default_crypto_provider();
+        options = options.require_tls(true);
+    }
+    Ok(options)
+}
+
+/// Connects to `url` applying `auth` (see [`connect_options`]) and builds a
+/// [`JetStreamBuffer`] publishing/consuming under `subject_prefix` — the
+/// auth-hardened counterpart to hand-rolling `async_nats::connect(url)` +
+/// `async_nats::jetstream::new(client)` + [`JetStreamBuffer::new`]. Used by
+/// `crate::writer::build_dlq_buffer`'s dead-letter-sink connection.
+/// `crate::bootstrap::build_event_buffer` (the shared main ingest buffer —
+/// out of this task's file scope) still connects unauthenticated pending
+/// its own adoption of this helper.
+///
+/// # Errors
+/// Returns an error if `auth` cannot be turned into `ConnectOptions` (see
+/// [`connect_options`]), the NATS server is unreachable, or `subject_prefix`
+/// is invalid (see [`JetStreamBuffer::new`]).
+pub async fn connect(
+    url: &str,
+    auth: &NatsAuthConfig,
+    subject_prefix: &str,
+) -> Result<JetStreamBuffer, BufferError> {
+    let options = connect_options(auth).await?;
+    let client = options
+        .connect(url)
+        .await
+        .map_err(|e| BufferError::Transport(format!("connect nats: {e}")))?;
+    let context = async_nats::jetstream::new(client);
+    JetStreamBuffer::new(context, subject_prefix)
+}
+
 /// The seam [`JetStreamBuffer::push`] calls through. The only production
 /// implementor is `async_nats::jetstream::Context` below — an ordinary
 /// two-await forward to the SDK. Existing as a trait (rather than calling
@@ -145,6 +273,12 @@ pub struct JetStreamBuffer {
     subject_prefix: String,
     context: Option<async_nats::jetstream::Context>,
     consumer: OnceCell<async_nats::jetstream::consumer::PullConsumer>,
+    /// Backing stream retention (Spec §15 open question #6), applied via
+    /// [`Self::with_max_age`] — `None` (the default) preserves the exact
+    /// unlimited-retention behavior every stream had before this
+    /// hardening. Only `crate::writer::build_dlq_buffer`'s dead-letter
+    /// sink sets this; the main ingest buffer is left at `None`.
+    max_age: Option<Duration>,
 }
 
 impl JetStreamBuffer {
@@ -162,7 +296,22 @@ impl JetStreamBuffer {
             subject_prefix: subject_prefix.to_owned(),
             context: Some(client),
             consumer: OnceCell::new(),
+            max_age: None,
         })
+    }
+
+    /// Sets this buffer's backing stream `max_age` (Spec §15 open question
+    /// #6, `DLQ_RETENTION_DAYS`) — a builder-style setter so
+    /// `JetStreamBuffer::new(..)?.with_max_age(retention)` composes at the
+    /// call site rather than needing a second constructor. Only takes
+    /// effect the next time [`Self::stream_config`] is read
+    /// ([`Self::ensure_stream`]/[`Self::consumer`]'s lazy stream creation);
+    /// see [`Self::ensure_stream`]'s doc comment for how an
+    /// already-existing stream converges to a changed value.
+    #[must_use]
+    pub fn with_max_age(mut self, max_age: Duration) -> Self {
+        self.max_age = Some(max_age);
+        self
     }
 
     /// Test-only constructor: builds a buffer whose `push` is routed
@@ -180,6 +329,7 @@ impl JetStreamBuffer {
             subject_prefix: subject_prefix.to_owned(),
             context: None,
             consumer: OnceCell::new(),
+            max_age: None,
         }
     }
 
@@ -191,13 +341,16 @@ impl JetStreamBuffer {
 
     /// This buffer's backing JetStream stream config — a single wildcard
     /// subject (`{subject_prefix}.>`) capturing every tenant's traffic
-    /// under this prefix. Shared by [`Self::consumer`] and
-    /// [`Self::ensure_stream`] so both create (or idempotently fetch) the
-    /// exact same stream definition.
+    /// under this prefix, retained for `self.max_age` (`Duration::ZERO` —
+    /// JetStream's "unlimited" sentinel — when unset, i.e. every buffer
+    /// except a DLQ sink built via [`Self::with_max_age`]). Shared by
+    /// [`Self::consumer`] and [`Self::ensure_stream`] so both create (or
+    /// idempotently fetch) the exact same stream definition.
     fn stream_config(&self) -> async_nats::jetstream::stream::Config {
         async_nats::jetstream::stream::Config {
             name: self.stream_name(),
             subjects: vec![format!("{}.>", self.subject_prefix)],
+            max_age: self.max_age.unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -218,10 +371,20 @@ impl JetStreamBuffer {
     /// given subject". Callers of a push-only buffer must call this once
     /// after construction, before the first `push`.
     ///
+    /// When `self.max_age` is set (the DLQ sink), also `update_stream`s an
+    /// already-existing stream to the currently configured retention —
+    /// `get_or_create_stream` only creates when absent, it does not
+    /// retroactively change an existing stream's config, so a DLQ stream
+    /// created before an operator changed `DLQ_RETENTION_DAYS` (or before
+    /// this hardening added retention at all) would otherwise keep
+    /// whatever policy it happened to be created with forever. Skipped
+    /// entirely for the main ingest buffer (`max_age: None`) — no extra
+    /// round trip added to its existing behavior.
+    ///
     /// # Errors
     /// Returns an error if this buffer has no bound JetStream context (a
     /// test-only instance built via `with_acker`), or the stream cannot
-    /// be created/fetched.
+    /// be created/fetched/updated.
     pub async fn ensure_stream(&self) -> Result<(), BufferError> {
         let context = self.context.as_ref().ok_or_else(|| {
             BufferError::Transport(
@@ -234,11 +397,41 @@ impl JetStreamBuffer {
             .get_or_create_stream(self.stream_config())
             .await
             .map_err(|e| BufferError::Transport(e.to_string()))?;
+        if self.max_age.is_some() {
+            context
+                .update_stream(self.stream_config())
+                .await
+                .map_err(|e| BufferError::Transport(e.to_string()))?;
+        }
         Ok(())
     }
 
-    /// Lazily binds (creating on first use) the durable, explicit-ack
-    /// pull consumer every `consume()` call fetches from.
+    /// Lazily binds (creating on first use) the durable, explicit-ack pull
+    /// consumer every `consume()` call fetches from.
+    ///
+    /// Resolves Spec §15 open question #1 ("is a single shared durable
+    /// consumer safe when multiple writer replicas run, or does it
+    /// duplicate-process?"): **yes, safe, kept as-is.** This is a JetStream
+    /// *pull* consumer (`consumer::pull::Config`, not a push/ordered
+    /// consumer) with `AckPolicy::Explicit` — pull consumers are
+    /// explicitly designed for exactly this multi-subscriber "queue group"
+    /// shape: each replica's own `stream.get_or_create_consumer(durable_name,
+    /// ..)` call idempotently binds to the *same* server-side durable
+    /// (identical name + config), and each replica's own `fetch()` request
+    /// registers independent pull interest against it. The broker hands
+    /// out *disjoint* batches of unacked messages per pull request — never
+    /// the same message to two concurrent pulls — and only redelivers a
+    /// given message if its `ack_wait` elapses or it's explicitly `Nak`ed
+    /// (see `EventBuffer::ack`/`nack`), not because a second replica also
+    /// asked for messages. There is no server-side or client-side
+    /// duplication risk from running N writer replicas against one durable
+    /// name; see
+    /// `tests::two_concurrent_consumers_on_shared_durable_process_every_message_exactly_once`
+    /// for the proof against a real broker, which *is* this open
+    /// question's resolution rather than just documentation of an
+    /// assumption. A per-replica durable name (keyed off `POD_NAME`/
+    /// `HOSTNAME`) was the spec's fallback recommendation if this turned
+    /// out unsafe — not needed.
     async fn consumer(
         &self,
     ) -> Result<&async_nats::jetstream::consumer::PullConsumer, BufferError> {
@@ -860,6 +1053,248 @@ mod tests {
         assert!(
             result.is_ok(),
             "push against an ensure_stream-provisioned stream must succeed: {result:?}"
+        );
+    }
+
+    // -- NATS client auth hardening (Spec §7a / P2) ------------------------
+
+    #[test]
+    fn nats_auth_mode_prefers_creds_file_over_everything_else() {
+        let auth = NatsAuthConfig {
+            creds_file: Some("/etc/nats/user.creds".to_owned()),
+            nkey: Some("seed".to_owned()),
+            user: Some("u".to_owned()),
+            password: Some("p".to_owned()),
+            tls: false,
+        };
+        assert_eq!(
+            select_nats_auth_mode(&auth),
+            NatsAuthMode::CredsFile("/etc/nats/user.creds")
+        );
+    }
+
+    #[test]
+    fn nats_auth_mode_prefers_nkey_over_user_password() {
+        let auth = NatsAuthConfig {
+            creds_file: None,
+            nkey: Some("SUANQ...seed".to_owned()),
+            user: Some("u".to_owned()),
+            password: Some("p".to_owned()),
+            tls: false,
+        };
+        assert_eq!(
+            select_nats_auth_mode(&auth),
+            NatsAuthMode::Nkey("SUANQ...seed")
+        );
+    }
+
+    #[test]
+    fn nats_auth_mode_falls_back_to_user_password() {
+        let auth = NatsAuthConfig {
+            user: Some("derek".to_owned()),
+            password: Some("s3cr3t".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(
+            select_nats_auth_mode(&auth),
+            NatsAuthMode::UserPassword("derek", "s3cr3t")
+        );
+    }
+
+    #[test]
+    fn nats_auth_mode_is_none_when_nothing_set() {
+        assert_eq!(
+            select_nats_auth_mode(&NatsAuthConfig::default()),
+            NatsAuthMode::None
+        );
+    }
+
+    /// Back-compat guarantee (this section's module doc comment): a default
+    /// `NatsAuthConfig` must produce a `ConnectOptions` that behaves exactly
+    /// like the unauthenticated default every NATS connection used before
+    /// this hardening — proven end to end against a real broker rather than
+    /// just asserted from `select_nats_auth_mode` alone, since
+    /// `ConnectOptions`'s internal auth state has no public accessors to
+    /// inspect directly.
+    #[tokio::test]
+    async fn connect_options_with_no_auth_set_connects_successfully() {
+        let (_container, url) = start_test_nats().await;
+        let options = connect_options(&NatsAuthConfig::default())
+            .await
+            .expect("build connect options");
+        let result = options.connect(&url).await;
+        assert!(
+            result.is_ok(),
+            "default NatsAuthConfig must connect exactly like unauthenticated \
+             async_nats::connect: {result:?}"
+        );
+    }
+
+    /// `NATS_CREDS_FILE` pointing at a nonexistent path must surface as a
+    /// clean [`BufferError::Transport`], never a panic — no live broker
+    /// needed, since the failure happens at the file-read step before any
+    /// network I/O.
+    #[tokio::test]
+    async fn connect_options_surfaces_a_missing_creds_file_cleanly() {
+        let auth = NatsAuthConfig {
+            creds_file: Some("/nonexistent/path/does-not-exist.creds".to_owned()),
+            ..Default::default()
+        };
+        let result = connect_options(&auth).await;
+        assert!(
+            matches!(result, Err(BufferError::Transport(_))),
+            "a missing creds file must be a clean BufferError, got {result:?}"
+        );
+    }
+
+    // -- DLQ retention (Spec §15 open question #6) -------------------------
+
+    /// Proves [`JetStreamBuffer::with_max_age`] + [`JetStreamBuffer::
+    /// ensure_stream`] actually set the DLQ stream's server-side `max_age`
+    /// to the configured retention — against a real (Docker,
+    /// `testcontainers`) broker, not just asserting `stream_config()`'s
+    /// in-memory shape.
+    #[tokio::test]
+    async fn ensure_stream_sets_configured_max_age_on_the_dlq_stream() {
+        let (_container, url) = start_test_nats().await;
+        let client = async_nats::connect(&url)
+            .await
+            .expect("connect to test nats");
+        let context = async_nats::jetstream::new(client);
+        let retention = Duration::from_secs(30 * 24 * 60 * 60);
+        let buffer = JetStreamBuffer::new(context.clone(), "svc-ingest-dlq-retention-test")
+            .expect("build dlq test buffer")
+            .with_max_age(retention);
+
+        buffer
+            .ensure_stream()
+            .await
+            .expect("ensure_stream must provision the DLQ stream");
+
+        let mut stream = context
+            .get_stream(buffer.stream_name())
+            .await
+            .expect("fetch provisioned dlq stream");
+        let info = stream.info().await.expect("fetch dlq stream info");
+        assert_eq!(
+            info.config.max_age, retention,
+            "DLQ stream max_age must match the configured 30-day retention"
+        );
+    }
+
+    // -- Shared durable pull consumer, multi-replica (Spec §15 open
+    // question #1) ----------------------------------------------------
+
+    /// Drains `buffer` in batches of `batch` until `seen` (shared across
+    /// both concurrently-running replicas in
+    /// [`two_concurrent_consumers_on_shared_durable_process_every_message_exactly_once`])
+    /// has collected `total` dedup keys, acking every delivered event as it
+    /// goes. Rechecks `seen`'s length before every `consume()` call so both
+    /// replicas stop promptly once every published event has been claimed
+    /// by either one of them.
+    async fn drain_until_total(
+        buffer: &JetStreamBuffer,
+        seen: &Arc<std::sync::Mutex<Vec<String>>>,
+        total: usize,
+        batch: usize,
+    ) {
+        loop {
+            if seen.lock().expect("seen mutex poisoned").len() >= total {
+                return;
+            }
+            let Ok(delivered) = buffer.consume(batch).await else {
+                continue;
+            };
+            for d in delivered {
+                seen.lock()
+                    .expect("seen mutex poisoned")
+                    .push(d.event.dedup_key.clone());
+                buffer
+                    .ack(d.handle)
+                    .await
+                    .expect("ack a fanout-test delivered event");
+            }
+        }
+    }
+
+    /// Resolves Spec §15 open question #1 WITH EVIDENCE (this test *is* the
+    /// resolution, not just documentation of an assumption — see
+    /// [`JetStreamBuffer::consumer`]'s doc comment): two independent
+    /// [`JetStreamBuffer`]s, each its own NATS connection simulating a
+    /// separate writer replica process, bind to the *same* durable pull
+    /// consumer (deterministic `{stream_name}-consumer` name, derived from
+    /// the shared `subject_prefix` both buffers are built with) and pull
+    /// concurrently. Asserts every published event is delivered exactly
+    /// once across the two replicas combined — no duplicate processing, no
+    /// loss — the exact question raised for running the writer with
+    /// multiple pods.
+    #[tokio::test]
+    async fn two_concurrent_consumers_on_shared_durable_process_every_message_exactly_once() {
+        const TOTAL_EVENTS: usize = 40;
+        const PULL_BATCH: usize = 5;
+        let prefix = "svc-ingest-consumer-fanout-test";
+
+        let (_container, url) = start_test_nats().await;
+
+        let publisher_client = async_nats::connect(&url).await.expect("connect publisher");
+        let publisher = JetStreamBuffer::new(async_nats::jetstream::new(publisher_client), prefix)
+            .expect("build publisher buffer");
+        // `push` alone never creates the backing stream (see
+        // `JetStreamBuffer::ensure_stream`'s doc comment) — provision it
+        // explicitly before publishing, same as the DLQ sink does.
+        publisher
+            .ensure_stream()
+            .await
+            .expect("provision the fanout-test stream");
+        for i in 0..TOTAL_EVENTS {
+            publisher
+                .push(sample_event(&format!("dedup-fanout-{i}")))
+                .await
+                .expect("publish fanout event");
+        }
+
+        // Two independent connections/buffers simulate two separate writer
+        // replica pods, both binding to the SAME durable name.
+        let client_a = async_nats::connect(&url).await.expect("connect replica a");
+        let replica_a = JetStreamBuffer::new(async_nats::jetstream::new(client_a), prefix)
+            .expect("build replica a buffer");
+        let client_b = async_nats::connect(&url).await.expect("connect replica b");
+        let replica_b = JetStreamBuffer::new(async_nats::jetstream::new(client_b), prefix)
+            .expect("build replica b buffer");
+
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let drained = tokio::time::timeout(
+            Duration::from_secs(30),
+            futures::future::join(
+                drain_until_total(&replica_a, &seen, TOTAL_EVENTS, PULL_BATCH),
+                drain_until_total(&replica_b, &seen, TOTAL_EVENTS, PULL_BATCH),
+            ),
+        )
+        .await;
+        assert!(
+            drained.is_ok(),
+            "both replicas did not finish draining all {TOTAL_EVENTS} events within 30s — \
+             possible message loss/stall"
+        );
+
+        let collected = seen.lock().expect("seen mutex poisoned").clone();
+        assert_eq!(
+            collected.len(),
+            TOTAL_EVENTS,
+            "expected exactly {TOTAL_EVENTS} deliveries across both replicas combined, got {} — \
+             a shared durable pull consumer must never lose a message",
+            collected.len()
+        );
+        let unique: std::collections::HashSet<&String> = collected.iter().collect();
+        assert_eq!(
+            unique.len(),
+            TOTAL_EVENTS,
+            "expected {TOTAL_EVENTS} DISTINCT dedup keys across both replicas, got {} unique out \
+             of {} deliveries — a shared durable pull consumer must never double-deliver the same \
+             message to two concurrent pullers",
+            unique.len(),
+            collected.len()
         );
     }
 }

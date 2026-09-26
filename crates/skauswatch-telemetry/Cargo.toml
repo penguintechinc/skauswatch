@@ -18,9 +18,28 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Pinned to the exact versions `services/svc-ingest/Cargo.toml` already uses
+# for its traces+logs OTLP bridge (`src/otel.rs`) so Cargo resolves a single
+# shared instance of each crate across the workspace instead of a version
+# split. Only the `metrics` feature is requested here (default-features
+# disabled) since this crate's OTLP bridge is metrics-only; `svc-ingest`'s
+# own `trace`/`logs`/`rt-tokio` feature requests still apply workspace-wide
+# via Cargo's additive feature unification.
+opentelemetry = "=0.32.0"
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = [
+    "metrics",
+] }
+opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = [
+    "grpc-tonic",
+    "metrics",
+] }
 
 [dev-dependencies]
 axum-test = { workspace = true }
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = [
+    "metrics",
+    "testing",
+] }
 
 [lints]
 workspace = true

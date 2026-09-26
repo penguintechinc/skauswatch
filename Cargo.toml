@@ -261,12 +261,14 @@ axum-test = "=21.0.0"
 # SPIFFE Workload API (skauswatch-identity): SVID-based mTLS + JWT-SVID
 # federation. rustls/tokio-rustls are pinned to the exact versions already
 # resolved transitively elsewhere in the tree (reqwest's "rustls" feature,
-# sqlx's "tls-rustls" feature) — see `cargo tree -i rustls@0.23.42` — so
+# sqlx's "tls-rustls" feature) — see `cargo tree -i rustls@0.23.45` — so
 # adding them as direct dependencies here does not move anything already
 # locked. tokio-rustls is dev-only (mTLS handshake tests); rustls itself is
 # a runtime dependency (building `rustls::ServerConfig`/`ClientConfig`).
+# rustls pinned to 0.23.45 to resolve RUSTSEC-2026-0285 (gh-146): TLS 1.3
+# handshake messages accepted across encryption-level boundaries in <0.23.45.
 spiffe = { version = "=0.16.0", default-features = false, features = ["workload-api"] }
-rustls = "=0.23.42"
+rustls = "=0.23.45"
 tokio-rustls = "=0.26.4"
 
 # Vault cloud-sync (Phase 12): Azure Key Vault / GCP Secret Manager /
