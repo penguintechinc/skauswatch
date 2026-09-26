@@ -89,8 +89,17 @@ uuid = { workspace = true }
 # Pinned directly (not `{ workspace = true }`) per the Spec's exact
 # requirement (§7b, §14c2): "Do NOT allow cargo to bump to a newer 0.y.z or
 # 1.x without explicit review and smoke test re-run." default-features off
-# — only the `jetstream` feature is needed, no core-NATS pub/sub surface.
-async-nats = { version = "=0.50.0", default-features = false, features = ["jetstream"] }
+# — only `jetstream` (core-NATS pub/sub surface not needed) and `nkeys`
+# (Spec §7a / P2 NATS client auth hardening) are enabled. `nkeys` gates
+# `ConnectOptions::{credentials_file, credentials, nkey}` — without it
+# those methods don't exist on this build of the crate at all — needed for
+# `NATS_CREDS_FILE`/`NATS_NKEY` support in `buffer::jetstream::
+# connect_options`; `user_and_password`/`require_tls` are not
+# feature-gated. Pulls in the `nkeys`+transitive `ed25519-dalek` crates
+# (new dependency edge, exact-pinned via `Cargo.lock` like everything
+# else) — no alternative: this is the only auth surface `async-nats`
+# exposes for `.creds`/NKey-seed authentication.
+async-nats = { version = "=0.50.0", default-features = false, features = ["jetstream", "nkeys"] }
 # Task 1.4: SHA-256-hash ingest tokens before any DB lookup/storage (Spec
 # §6b) — already workspace-pinned (`[workspace.dependencies]`, `=0.10.9`),
 # used the same way by `crates/skauswatch-scan-core`. Coordinator-approved
