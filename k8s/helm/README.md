@@ -139,7 +139,7 @@ as the standard PSA "ratchet" pattern — every `restricted` violation is
 still visible (audit log + `kubectl` warning) without blocking anything,
 so the gap to full `restricted` stays measured rather than silent.
 Everything else in `skauswatch` (manager, s3scan, pki, sshca, logs,
-codescan-backend, worker-codescan, webui) is already fully
+codescan-backend, depgate, worker-codescan, webui) is already fully
 `restricted`-compliant (`runAsNonRoot`, `drop: [ALL]`, no added
 capabilities, `seccompProfile: RuntimeDefault` — added by this pass to
 every chart's `podSecurityContext`).
