@@ -29,7 +29,13 @@ pub mod jetstream;
 
 #[cfg(any(test, feature = "testutil"))]
 pub use inmemory::InMemoryBuffer;
-pub use jetstream::JetStreamBuffer;
+// `JetStreamBuffer` itself is reached via `crate::buffer::jetstream::
+// JetStreamBuffer` (or `crate::buffer::jetstream::connect`, which returns
+// one) — every call site now goes through `jetstream::connect`
+// (Spec §7a / P2 NATS auth hardening), so this re-export had no remaining
+// user and became a dead-code `unused_imports` warning (`-D warnings`
+// gate failure) once `bootstrap.rs`/`writer.rs` stopped naming the type
+// directly.
 
 /// A normalized OCSF event ready to be durably buffered — already stamped
 /// with the caller's server-validated tenant (never a payload/param

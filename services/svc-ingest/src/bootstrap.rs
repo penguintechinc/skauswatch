@@ -47,8 +47,9 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use crate::admin;
-use crate::buffer::{EventBuffer, JetStreamBuffer};
-use crate::config::Config;
+use crate::buffer::EventBuffer;
+use crate::buffer::jetstream;
+use crate::config::{Config, NatsAuthConfig};
 use crate::identity_store::IdentityStore;
 use crate::listeners::{http, otlp, syslog};
 
@@ -66,15 +67,26 @@ type ListenerOutcome = (&'static str, anyhow::Result<()>);
 /// receiver-mode listener publishes through (and every writer-mode
 /// consumer drains), per `cfg.nats_url`/`cfg.nats_jetstream_subject_prefix`.
 ///
+/// Connects via [`jetstream::connect`] (Spec §7a / P2 NATS auth
+/// hardening) — the same auth-applying helper `crate::writer::
+/// build_dlq_buffer` uses for the dead-letter sink's connection, so both
+/// the main ingest connection and the DLQ connection authenticate
+/// identically from one source of truth rather than two independent
+/// `ConnectOptions` builders. [`NatsAuthConfig::from_env`] is
+/// back-compatible by construction: no `NATS_*` auth env var set produces
+/// the exact same unauthenticated connection this used before hardening —
+/// never fails startup for missing NATS auth.
+///
 /// # Errors
-/// Returns an error if the NATS server is unreachable or the configured
-/// subject prefix is invalid (see [`JetStreamBuffer::new`]).
+/// Returns an error if `NATS_TLS` is set to something other than `true`/
+/// `false`, `NATS_USER`/`NATS_PASSWORD` is only half-set (see
+/// [`NatsAuthConfig::from_env`]), the NATS server is unreachable
+/// (including a misconfigured `NATS_CREDS_FILE`), or the configured
+/// subject prefix is invalid (see [`crate::buffer::JetStreamBuffer::new`]).
 async fn build_event_buffer(cfg: &Config) -> anyhow::Result<Arc<dyn EventBuffer>> {
-    let client = async_nats::connect(&cfg.nats_url)
+    let auth = NatsAuthConfig::from_env().map_err(|e| anyhow::anyhow!("nats auth config: {e}"))?;
+    let buffer = jetstream::connect(&cfg.nats_url, &auth, &cfg.nats_jetstream_subject_prefix)
         .await
-        .map_err(|e| anyhow::anyhow!("connect nats: {e}"))?;
-    let context = async_nats::jetstream::new(client);
-    let buffer = JetStreamBuffer::new(context, &cfg.nats_jetstream_subject_prefix)
         .map_err(|e| anyhow::anyhow!("event buffer init: {e}"))?;
     Ok(Arc::new(buffer))
 }
@@ -631,6 +643,55 @@ mod tests {
                 axum::http::StatusCode::NOT_FOUND,
                 "{method} {uri} returned 404 -- route is not mounted"
             );
+        }
+    }
+
+    // -- build_event_buffer (Spec §7a / P2 NATS auth hardening) ------------
+
+    /// `build_event_buffer` (the MAIN ingest connection every receiver-mode
+    /// listener publishes through and every writer-mode consumer drains)
+    /// now goes through [`jetstream::connect`] — the same auth-applying
+    /// helper `crate::writer::build_dlq_buffer` uses for the DLQ sink's own
+    /// connection — rather than a bare, separately unauthenticated
+    /// `async_nats::connect`. Mirrors `writer::tests::
+    /// run_fails_cleanly_when_dlq_nats_is_unreachable`: an unreachable NATS
+    /// server must surface as a clean `Err`, never panic or hang, proving
+    /// this call site was actually rewired onto the shared auth-aware path
+    /// rather than silently left on the old one. The auth-mode-selection
+    /// logic itself (which `NatsAuthConfig` field wins, and that a missing
+    /// `.creds` file surfaces cleanly) is exercised directly, without
+    /// needing a live broker, against `buffer::jetstream::{
+    /// select_nats_auth_mode, connect_options}` in that module's own
+    /// tests — both `build_event_buffer` and `build_dlq_buffer` are thin
+    /// callers of that one shared implementation, so proving it once there
+    /// covers both call sites; this test only proves *this* call site is
+    /// wired through it.
+    #[tokio::test]
+    async fn build_event_buffer_fails_cleanly_when_nats_is_unreachable() {
+        let cfg = Config {
+            http_port: 0,
+            syslog_port: 0,
+            syslog_tls_port: 0,
+            otlp_grpc_port: 0,
+            otlp_http_port: 0,
+            opensearch_url: String::new(),
+            nats_url: "nats://127.0.0.1:1".to_owned(),
+            nats_jetstream_subject_prefix: "svc-ingest.logs".to_owned(),
+            snapshot_repo: "skauswatch-snapshots".to_owned(),
+            syslog_udp_enabled: false,
+            syslog_trusted_cidrs: Vec::new(),
+            syslog_udp_tenant_id: None,
+        };
+
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(10), build_event_buffer(&cfg))
+                .await;
+
+        match result {
+            Ok(inner) => assert!(inner.is_err(), "unreachable NATS must surface as an Err"),
+            Err(_) => panic!(
+                "build_event_buffer should fail fast on an unreachable NATS connect, not hang"
+            ),
         }
     }
 }
