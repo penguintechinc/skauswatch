@@ -12,6 +12,77 @@
 //! tests.
 
 use std::env;
+use std::sync::OnceLock;
+use std::time::Duration;
+
+/// Bounds every ad hoc `reqwest::Client` this crate builds for an outbound
+/// hop (git_provider.rs/git_write.rs's GitHub/GitLab REST calls,
+/// tree_fetch.rs's archive downloads, main.rs's own `/healthz` self-probe) —
+/// audit finding (issue #149, HIGH): a hung/slow git host or self-probe
+/// target must never wedge the worker indefinitely. Mirrors
+/// `services/depgate/src/config.rs::HttpClientConfig` exactly.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpClientConfig {
+    /// Whole-request timeout in seconds
+    /// (`WORKER_CODESCAN_HTTP_TIMEOUT_SECS`, default 30).
+    pub timeout_secs: u64,
+    /// TCP+TLS connect timeout in seconds
+    /// (`WORKER_CODESCAN_HTTP_CONNECT_TIMEOUT_SECS`, default 10).
+    pub connect_timeout_secs: u64,
+}
+
+impl HttpClientConfig {
+    /// Loads the shared bounds from the environment. Back-compat: unset env
+    /// vars preserve prior behavior except now bounded (previously
+    /// unbounded — no timeout at all on a bare `reqwest::Client::new()`).
+    pub fn from_env() -> Self {
+        Self {
+            timeout_secs: env::var("WORKER_CODESCAN_HTTP_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+            connect_timeout_secs: env::var("WORKER_CODESCAN_HTTP_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+        }
+    }
+}
+
+/// Builds a bounded `reqwest::Client` per [`HttpClientConfig`].
+/// `ClientBuilder::build()` only fails on conflicting TLS-backend/proxy
+/// config, none of which this call site sets, but the `Result` is still
+/// surfaced (never `.unwrap()`/`.expect()`) so a future change to this
+/// builder can't silently become a panic.
+pub fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    let cfg = HttpClientConfig::from_env();
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(cfg.timeout_secs))
+        .connect_timeout(Duration::from_secs(cfg.connect_timeout_secs))
+        .build()
+}
+
+/// Process-wide shared bounded client, replacing the per-request
+/// `Client::new()`/`reqwest::Client::new()` this crate previously built
+/// fresh (and unbounded) at every git_provider.rs/git_write.rs/
+/// tree_fetch.rs/main.rs call site. `OnceLock::get_or_init`'s initializer
+/// can't propagate a `Result`, so a builder failure (practically
+/// unreachable — see [`build_http_client`]'s doc comment) logs and falls
+/// back to an unbounded default rather than panicking.
+pub fn http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            build_http_client().unwrap_or_else(|e| {
+                tracing::error!(
+                    error = %e,
+                    "bounded http client build failed, falling back to unbounded default"
+                );
+                reqwest::Client::new()
+            })
+        })
+        .clone()
+}
 
 /// Worker configuration loaded from environment variables.
 #[derive(Clone, Debug)]
@@ -367,5 +438,27 @@ mod tests {
         let cfg = WorkerConfig::from_env().expect("from_env never fails");
         assert!(!cfg.consumer_name.is_empty());
         assert!(!cfg.redis_url.is_empty());
+    }
+
+    #[test]
+    fn http_client_config_defaults_are_bounded() {
+        // regression: gh-149 — this crate's ad hoc reqwest::Client sites
+        // must never build with an unbounded (no-timeout) default.
+        assert!(std::env::var("WORKER_CODESCAN_HTTP_TIMEOUT_SECS").is_err());
+        assert!(std::env::var("WORKER_CODESCAN_HTTP_CONNECT_TIMEOUT_SECS").is_err());
+        let cfg = HttpClientConfig::from_env();
+        assert_eq!(cfg.timeout_secs, 30);
+        assert_eq!(cfg.connect_timeout_secs, 10);
+    }
+
+    #[test]
+    fn http_client_builds_successfully_with_default_bounds() {
+        // Asserts `ClientBuilder::build()` actually succeeds for the exact
+        // options this crate sets (timeout + connect_timeout only).
+        assert!(build_http_client().is_ok());
+        // `http_client()`'s OnceLock-backed accessor must also return a
+        // usable client on first (and repeat) call.
+        let _ = http_client();
+        let _ = http_client();
     }
 }

@@ -676,8 +676,18 @@ impl RegistryClient {
         crates_base: Option<String>,
         go_base: Option<String>,
     ) -> Self {
+        // The 5s whole-request timeout is deliberately shorter than this
+        // crate's `WORKER_CODESCAN_HTTP_TIMEOUT_SECS` default (30s) — a
+        // per-dependency license lookup that hasn't answered in 5s is
+        // treated as unavailable rather than blocking the scan (see
+        // `scan_diff`'s doc comment: per-dependency failures record
+        // `license_name: None`, never propagate). `connect_timeout` still
+        // comes from the shared config (audit finding, issue #149, HIGH) so
+        // a hung TCP connect to a registry can't wedge indefinitely either.
+        let connect_timeout_secs = crate::config::HttpClientConfig::from_env().connect_timeout_secs;
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(connect_timeout_secs))
             .build()
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "failed to build license-registry HTTP client with timeout, using default");
