@@ -477,3 +477,69 @@ snapshotRepoJob:
       memory: 64Mi
   restartPolicy: OnFailure
   backoffLimit: 3
+
+# --- Ops observability (PodDisruptionBudget / PrometheusRule /
+# ServiceMonitor / PodMonitor) ------------------------------------------
+# Release-audit Medium finding: this chart shipped 0 PodDisruptionBudgets
+# and 0 PrometheusRule/ServiceMonitor objects. All four below assume the
+# Prometheus Operator CRDs (monitoring.coreos.com/v1, policy/v1 is core)
+# are already installed in-cluster -- disable the relevant toggle if not
+# (e.g. a cluster still on unmanaged scrape configs).
+
+# Voluntary-disruption budgets for both Deployments. maxUnavailable (not
+# minAvailable) deliberately -- at the beta/alpha default of
+# replicaCount: 1, minAvailable: 1 would block ALL voluntary disruptions
+# (including node drains) since 0 replicas could ever remain healthy;
+# maxUnavailable: 1 computes desiredHealthy = replicas - 1, which is 0 at
+# replicas: 1, so it always permits eviction of the sole pod while still
+# capping disruption to 1 pod at a time once replicaCount scales up (prod:
+# 3+, see receiver/writer.replicaCount above).
+pdb:
+  enabled: true
+  receiver:
+    maxUnavailable: 1
+  writer:
+    maxUnavailable: 1
+
+# Label most Prometheus Operator installs (kube-prometheus-stack's default
+# ruleSelector/serviceMonitorSelector/podMonitorSelector) require to
+# discover a PrometheusRule/ServiceMonitor/PodMonitor -- conventionally the
+# Prometheus Operator's own Helm release name. Override per-cluster if that
+# release isn't named "prometheus"; set to "" to omit the label entirely
+# (e.g. an Operator configured with an empty/any selector).
+monitoring:
+  releaseLabel: "prometheus"
+
+# Alerts on the three failure-mode metrics that already exist --
+# services/svc-ingest/src/otel.rs::metric_names (WRITER_OPENSEARCH_ERRORS_TOTAL,
+# BUFFER_FULL_REJECTIONS_TOTAL) and writer.rs's DLQ counter
+# (svc_ingest_writer_events_dlq_total). See templates/prometheusrule.yaml.
+prometheusRule:
+  enabled: true
+  additionalLabels: {}
+  # DLQ events are precious (each one is data that failed OpenSearch
+  # bulk-write) -- fire fast, but still require the condition to hold
+  # across at least one more scrape rather than a single noisy sample.
+  dlqFor: "1m"
+  bufferFullFor: "5m"
+  opensearchErrorsFor: "5m"
+
+# Scrapes the receiver's Service (templates/service-receiver.yaml) on its
+# "metrics" port (:9090). See templates/servicemonitor.yaml.
+serviceMonitor:
+  enabled: true
+  additionalLabels: {}
+  interval: "30s"
+  scrapeTimeout: "10s"
+
+# Optional alternative scrape path for the writer Deployment, which has NO
+# Service (deployment-writer.yaml's port comment) -- Prometheus already
+# reaches its :9090 by pod IP via the CiliumNetworkPolicy ingress rule in
+# ciliumnetworkpolicy-writer.yaml, so this is off by default. Enable only
+# if the cluster's Prometheus Operator install needs an explicit
+# PodMonitor rather than relying on that CNP-permitted pod-IP scrape.
+podMonitor:
+  enabled: false
+  additionalLabels: {}
+  interval: "30s"
+  scrapeTimeout: "10s"

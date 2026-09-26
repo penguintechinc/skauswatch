@@ -1,0 +1,45 @@
+# ServiceMonitor -- release-audit Medium finding (0 ServiceMonitor objects
+# existed). Scrapes the receiver's Service (templates/service-receiver.yaml)
+# on its "metrics" port (:9090/tcp, Prometheus text format).
+#
+# The writer Deployment has NO Service at all (see
+# templates/deployment-writer.yaml's port comment and
+# templates/service-receiver.yaml's header comment) -- a ServiceMonitor
+# requires a backing Service object, so it cannot target the writer.
+# Prometheus already reaches the writer's :9090 by pod IP via the
+# same-namespace scrape rule in templates/ciliumnetworkpolicy-writer.yaml
+# (CiliumNetworkPolicy ingress `fromEndpoints: app.kubernetes.io/name:
+# prometheus`). Set .Values.podMonitor.enabled to true instead if the
+# cluster's Prometheus Operator install needs an explicit scrape object for
+# the writer rather than relying on that CNP-permitted pod-IP path --
+# templates/podmonitor.yaml.
+#
+# Requires the Prometheus Operator CRDs (monitoring.coreos.com/v1)
+# installed in-cluster -- disable serviceMonitor.enabled if not.
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "skauswatch-svc-ingest.receiver.fullname" . }}
+  labels:
+    {{- include "skauswatch-svc-ingest.receiver.labels" . | nindent 4 }}
+    {{- if .Values.monitoring.releaseLabel }}
+    release: {{ .Values.monitoring.releaseLabel | quote }}
+    {{- end }}
+    {{- with .Values.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "skauswatch-svc-ingest.receiver.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout | quote }}
+{{- end }}
