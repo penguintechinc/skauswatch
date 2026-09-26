@@ -29,6 +29,54 @@ pub(crate) fn spiffe_env() -> String {
     env_or("SPIFFE_ENV", "beta")
 }
 
+/// Bounds every ad hoc `reqwest::Client` this crate builds for an outbound
+/// hop (siem.rs's logs/OpenSearch probes, codescan.rs's worker-codescan
+/// proxy, main.rs's own `/healthz` self-probe) — audit finding (issue #149,
+/// HIGH): a hung/slow peer must never wedge the caller indefinitely. Mirrors
+/// `services/depgate/src/config.rs::HttpClientConfig` exactly.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct HttpClientConfig {
+    /// Whole-request timeout in seconds (`MANAGER_HTTP_TIMEOUT_SECS`,
+    /// default 30). Call sites that already set their own per-request
+    /// `.timeout()` (siem.rs, codescan.rs) still override this per call —
+    /// this is only the client-level fallback.
+    pub(crate) timeout_secs: u64,
+    /// TCP+TLS connect timeout in seconds
+    /// (`MANAGER_HTTP_CONNECT_TIMEOUT_SECS`, default 10).
+    pub(crate) connect_timeout_secs: u64,
+}
+
+impl HttpClientConfig {
+    /// Loads the shared bounds from the environment. Back-compat: unset env
+    /// vars preserve prior behavior except now bounded (previously
+    /// unbounded — no timeout at all on a bare `reqwest::Client::new()`).
+    pub(crate) fn from_env() -> Self {
+        Self {
+            timeout_secs: env_or("MANAGER_HTTP_TIMEOUT_SECS", "30")
+                .parse()
+                .unwrap_or(30),
+            connect_timeout_secs: env_or("MANAGER_HTTP_CONNECT_TIMEOUT_SECS", "10")
+                .parse()
+                .unwrap_or(10),
+        }
+    }
+}
+
+/// Builds a bounded `reqwest::Client` per [`HttpClientConfig`] — replaces a
+/// bare `reqwest::Client::new()` at this crate's outbound call sites.
+/// `ClientBuilder::build()` only fails on conflicting TLS-backend/proxy
+/// config, none of which this call site sets, but the `Result` is still
+/// surfaced (never `.unwrap()`/`.expect()`) so a future change to this
+/// builder can't silently become a panic — callers fold it into their
+/// existing `reqwest::Error` handling via `?`/`map_err`.
+pub(crate) fn http_client() -> Result<reqwest::Client, reqwest::Error> {
+    let cfg = HttpClientConfig::from_env();
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(cfg.timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(cfg.connect_timeout_secs))
+        .build()
+}
+
 /// Auth settings mirroring the v1 `AuthConfig` defaults.
 #[derive(Debug, Clone)]
 pub struct AuthSettings {
@@ -415,5 +463,24 @@ mod tests {
     fn spiffe_env_defaults_to_beta_when_unset() {
         assert!(std::env::var("SPIFFE_ENV").is_err());
         assert_eq!(spiffe_env(), "beta");
+    }
+
+    #[test]
+    fn http_client_config_defaults_are_bounded() {
+        // regression: gh-149 — this crate's ad hoc reqwest::Client sites
+        // must never build with an unbounded (no-timeout) default.
+        assert!(std::env::var("MANAGER_HTTP_TIMEOUT_SECS").is_err());
+        assert!(std::env::var("MANAGER_HTTP_CONNECT_TIMEOUT_SECS").is_err());
+        let cfg = HttpClientConfig::from_env();
+        assert_eq!(cfg.timeout_secs, 30);
+        assert_eq!(cfg.connect_timeout_secs, 10);
+    }
+
+    #[test]
+    fn http_client_builds_successfully_with_default_bounds() {
+        // Asserts `ClientBuilder::build()` actually succeeds for the exact
+        // options this crate sets (timeout + connect_timeout only) — the
+        // invariant documented on `http_client`'s doc comment.
+        assert!(http_client().is_ok());
     }
 }

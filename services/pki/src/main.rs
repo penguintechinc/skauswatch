@@ -5,7 +5,7 @@
 use std::net::SocketAddr;
 
 use clap::{Parser, Subcommand};
-use skauswatch_pki::{grpc, health, maintenance, routes, state};
+use skauswatch_pki::{config, grpc, health, maintenance, routes, state};
 
 /// SkausWatch PKI server.
 #[derive(Parser)]
@@ -157,7 +157,18 @@ async fn shutdown_signal() {
 
 async fn healthcheck() -> anyhow::Result<()> {
     let url = format!("http://127.0.0.1:{}/healthz", http_port());
-    let resp = reqwest::Client::new()
+    // Audit finding (issue #149, HIGH): bound connect time
+    // (`PKI_HTTP_CONNECT_TIMEOUT_SECS`, default 10s) — the explicit 3s
+    // `.timeout()` below still overrides the client-level whole-request
+    // default per call, unchanged from before.
+    let http_cfg = config::HttpClientConfig::from_env();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(http_cfg.timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(
+            http_cfg.connect_timeout_secs,
+        ))
+        .build()?;
+    let resp = client
         .get(&url)
         .timeout(std::time::Duration::from_secs(3))
         .send()
