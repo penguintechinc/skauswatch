@@ -232,7 +232,13 @@ impl AuditSink for TracingAuditSink {
 /// reading that env var and constructing this field; tests set it directly.
 #[derive(Clone)]
 pub(crate) struct AppState {
-    /// HTTP client used for OpenSearch ISM/snapshot calls.
+    /// HTTP client used for OpenSearch ISM/snapshot calls. Production
+    /// callers get one built by `crate::bootstrap::build_admin_state`, which
+    /// applies `OPENSEARCH_TIMEOUT_SECS` (release audit Finding A, HIGH —
+    /// see `config::opensearch_timeout_from_env`'s own doc comment) so a
+    /// hung/slow OpenSearch can no longer wedge a lifecycle/restore request
+    /// indefinitely; this module's own file scope does not include the
+    /// client construction itself.
     pub http: reqwest::Client,
     /// OpenSearch base URL.
     pub opensearch_url: Arc<str>,
