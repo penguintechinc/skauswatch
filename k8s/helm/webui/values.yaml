@@ -155,3 +155,30 @@ configMapData:
   vault-backend-url: "http://skauswatch-vault:8080"
   codescan-backend-url: "http://skauswatch-codescan-backend:5005"
   monitor-url: "http://skauswatch-monitor:8003"
+
+# --- Ops observability (PodDisruptionBudget) ------------------------------
+# Release-audit finding (gh-148, 0 PodDisruptionBudgets existed). Assumes
+# policy/v1 (core API, always available) -- no CRD dependency, unlike the
+# PrometheusRule/ServiceMonitor note below.
+
+# maxUnavailable (not minAvailable) deliberately -- at replicaCount: 1
+# (alpha/beta/gamma), minAvailable: 1 would block ALL voluntary
+# disruptions (including node drains) since 0 replicas could ever remain
+# healthy; maxUnavailable: 1 computes desiredHealthy = replicas - 1, which
+# is 0 at replicas: 1, so it always permits eviction of the sole pod while
+# still capping disruption to 1 pod at a time once replicaCount scales up
+# (prod: 3, see replicaCount above).
+pdb:
+  enabled: true
+  maxUnavailable: 1
+
+# NO PrometheusRule / ServiceMonitor for this chart (release-audit gh-150
+# scope) -- services/webui/src is a plain Express BFF (server/index.ts)
+# with no prom-client dependency, no /metrics route, and no metrics
+# containerPort in templates/deployment.yaml (grep-verified: only "http").
+# A ServiceMonitor needs a named metrics port on the Service to scrape, and
+# a target-down PrometheusRule needs a ServiceMonitor/PodMonitor producing
+# an `up{job=...}` series in the first place -- neither precondition holds
+# here, so adding either would either fail to render anything meaningful or
+# alert permanently on a target that was never scraped. Revisit if webui
+# ever gains a metrics endpoint (e.g. via prom-client + a /metrics route).
