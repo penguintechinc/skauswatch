@@ -1,14 +1,17 @@
-//! HTTPS OCSF/JSON ingest listener (`:8443`) — a byte-for-byte port of v1
-//! `ingest/http_handler.py`, hardened with the auth/tenancy/licensing this
-//! service shipped without (see `docs/v2-port/feature-flags.md`'s
-//! `services/logs` gap). Exposes `POST /ingest` (the endpoint the manager's
-//! siem router proxies to via `LOGS_URL`) and `GET /healthz` + `/readyz`
-//! (the manager's liveness and readiness probes), both on the v1 `HTTP_PORT`
+//! Plain-HTTP OCSF/JSON ingest listener (`:8443`) — a byte-for-byte port of
+//! v1 `ingest/http_handler.py`, hardened with the auth/tenancy/licensing
+//! this service shipped without (see `docs/v2-port/feature-flags.md`'s
+//! `services/logs` gap). TLS is terminated by the service mesh/ingress in
+//! front of this listener, not by the process itself — the listener binds
+//! a plain `tokio::net::TcpListener` (see `crate::bootstrap::
+//! run_receiver`). Exposes `POST /ingest` (the endpoint the manager's siem
+//! router proxies to via `LOGS_URL`) and `GET /healthz` + `/readyz` (the
+//! manager's liveness and readiness probes), both on the v1 `HTTP_PORT`
 //! (5010).
 //!
 //! `crate::bootstrap::run_receiver` merges [`router`]'s result onto the
-//! same HTTPS server as `crate::admin`'s admin surface (see that module's
-//! doc comment).
+//! same plain-HTTP server as `crate::admin`'s admin surface (see that
+//! module's doc comment).
 //!
 //! `POST /ingest` now requires a valid tenant-bearing bearer JWT
 //! (`skauswatch_auth::tenant_middleware`) and the `LOG_INGEST_FLAG` PostHog
@@ -21,7 +24,7 @@
 //!
 //! Task 3.0b fix: this handler used to write straight to OpenSearch via
 //! `opensearch::write_bulk`, bypassing the JetStream-backed
-//! [`crate::buffer::EventBuffer`] entirely — so HTTPS-ingested events got
+//! [`crate::buffer::EventBuffer`] entirely — so HTTP-ingested events got
 //! none of the durability the buffer→writer architecture exists to
 //! provide, unlike syslog/OTLP which already enqueued correctly. Every
 //! normalized document is now pushed through the same `EventBuffer` seam

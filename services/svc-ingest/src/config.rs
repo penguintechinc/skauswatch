@@ -4,8 +4,11 @@
 //! and NATS config block in `docs/v2-port/ingest-module-spec.md` §3b/§7a.
 
 use std::net::IpAddr;
+use std::time::Duration;
 
-/// Default HTTPS OCSF/JSON ingest port (Spec §3b).
+/// Default plain-HTTP OCSF/JSON ingest port (Spec §3b) — TLS is terminated
+/// by the service mesh/ingress in front of this listener, not by the
+/// process itself; see `listeners::http`'s module doc comment.
 const DEFAULT_HTTP_PORT: u16 = 8443;
 /// Default syslog UDP/TCP port — unprivileged; override + `NET_BIND_SERVICE`
 /// for the standard privileged `:514` in production (Spec §3b).
@@ -31,7 +34,9 @@ const DEFAULT_SNAPSHOT_REPO: &str = "skauswatch-snapshots";
 /// Loaded configuration for `skauswatch-svc-ingest`.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// HTTPS OCSF/JSON ingest port (`HTTP_PORT`).
+    /// Plain-HTTP OCSF/JSON ingest port (`HTTP_PORT`) — mesh/ingress
+    /// terminates TLS in front of it (`listeners::http`'s module doc
+    /// comment).
     pub http_port: u16,
     /// Syslog UDP/TCP port (`SYSLOG_PORT`).
     pub syslog_port: u16,
@@ -280,6 +285,136 @@ pub enum ConfigError {
     /// A `SYSLOG_TRUSTED_CIDRS` entry was not a valid `network/prefix_len`.
     #[error("invalid CIDR entry: {0}")]
     Cidr(String),
+    /// `NATS_USER`/`NATS_PASSWORD` were only partially set — fail closed
+    /// rather than silently connecting unauthenticated when the operator
+    /// clearly intended to configure auth (see [`NatsAuthConfig`]).
+    #[error("NATS_USER and NATS_PASSWORD must both be set together, or neither")]
+    NatsPartialUserPassword,
+}
+
+/// Default DLQ JetStream stream retention (`DLQ_RETENTION_DAYS`, Spec §15
+/// open question #6) — bounds a dead-lettered event's lifetime instead of
+/// growing the DLQ stream forever, while giving an operator a full month to
+/// notice and drain a stuck DLQ.
+const DEFAULT_DLQ_RETENTION_DAYS: u32 = 30;
+
+/// Parses `DLQ_RETENTION_DAYS` into a [`Duration`], defaulting to
+/// [`DEFAULT_DLQ_RETENTION_DAYS`] when unset/empty. A pure function of the
+/// raw string (mirrors this module's own `from_env()`/`from_values()`
+/// split) so the parsing logic is unit-testable without mutating process
+/// environment state.
+fn dlq_retention_from_value(raw: Option<&str>) -> Result<Duration, ConfigError> {
+    let days = match raw.map(str::trim).filter(|s| !s.is_empty()) {
+        None => DEFAULT_DLQ_RETENTION_DAYS,
+        Some(s) => s
+            .parse::<u32>()
+            .map_err(|_| ConfigError::Int("DLQ_RETENTION_DAYS"))?,
+    };
+    Ok(Duration::from_secs(u64::from(days) * 24 * 60 * 60))
+}
+
+/// Loads `DLQ_RETENTION_DAYS` from the environment (see
+/// [`dlq_retention_from_value`]) — used by `crate::writer::build_dlq_buffer`
+/// to set the dead-letter JetStream stream's `max_age`. Kept independent of
+/// [`Config`] (a plain function, not a `Config` field) so adding this knob
+/// never requires updating the several exhaustive `Config { .. }`
+/// struct-literal test fixtures scattered across this crate (`auth.rs`,
+/// `backfill.rs`, `listeners/otlp`, `listeners/syslog`) that construct
+/// every `Config` field by hand with no `..Default::default()` spread.
+pub fn dlq_retention_from_env() -> Result<Duration, ConfigError> {
+    dlq_retention_from_value(std::env::var("DLQ_RETENTION_DAYS").ok().as_deref())
+}
+
+/// NATS client authentication settings (Spec §7a / P2 hardening —
+/// `buffer::jetstream::connect_options` applies these to
+/// `async_nats::ConnectOptions`). Loaded independently of [`Config`] for
+/// the same reason as [`dlq_retention_from_env`]: adding a new `NATS_*`
+/// auth env var must never require touching every other exhaustive
+/// `Config { .. }` struct-literal test fixture in this crate that doesn't
+/// use `..Default::default()`.
+///
+/// All fields default to `None`/`false` — an operator who sets none of the
+/// `NATS_*` auth env vars gets exactly today's unauthenticated connection
+/// (local/dev); this never fails startup for missing NATS auth.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct NatsAuthConfig {
+    /// Path to a `.creds` file (`NATS_CREDS_FILE`).
+    pub creds_file: Option<String>,
+    /// An NKey seed (`NATS_NKEY`) — secret, never logged (see
+    /// [`NatsAuthConfig`]'s custom [`std::fmt::Debug`] impl below).
+    pub nkey: Option<String>,
+    /// Username (`NATS_USER`), always paired with `password`.
+    pub user: Option<String>,
+    /// Password (`NATS_PASSWORD`) — secret, never logged.
+    pub password: Option<String>,
+    /// Whether to require TLS to the NATS server (`NATS_TLS`).
+    pub tls: bool,
+}
+
+impl std::fmt::Debug for NatsAuthConfig {
+    /// Masks `nkey`/`password` — `Config` (and this type) may end up in an
+    /// ad hoc `{cfg:?}` diagnostic someday; a secret must never be one
+    /// `derive(Debug)` away from a log line (`critical-rules.md` Token &
+    /// Secret Hygiene: "never log full token values").
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NatsAuthConfig")
+            .field("creds_file", &self.creds_file)
+            .field("nkey", &self.nkey.as_ref().map(|_| "***"))
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("tls", &self.tls)
+            .finish()
+    }
+}
+
+impl NatsAuthConfig {
+    /// Loads NATS client auth settings from the environment. Never fails on
+    /// missing/absent auth; only a set-but-invalid `NATS_TLS` value or a
+    /// partially-set `NATS_USER`/`NATS_PASSWORD` pair produce a
+    /// [`ConfigError`].
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_values(
+            std::env::var("NATS_CREDS_FILE").ok().as_deref(),
+            std::env::var("NATS_NKEY").ok().as_deref(),
+            std::env::var("NATS_USER").ok().as_deref(),
+            std::env::var("NATS_PASSWORD").ok().as_deref(),
+            std::env::var("NATS_TLS").ok().as_deref(),
+        )
+    }
+
+    /// Pure `from_values` counterpart to [`Self::from_env`], mirroring this
+    /// module's own `Config::from_env()`/`Config::from_values()` split for
+    /// unit-testability without mutating process environment state.
+    fn from_values(
+        creds_file: Option<&str>,
+        nkey: Option<&str>,
+        user: Option<&str>,
+        password: Option<&str>,
+        tls: Option<&str>,
+    ) -> Result<Self, ConfigError> {
+        let creds_file = creds_file.filter(|s| !s.is_empty()).map(str::to_owned);
+        let nkey = nkey.filter(|s| !s.is_empty()).map(str::to_owned);
+        let user = user.filter(|s| !s.is_empty()).map(str::to_owned);
+        let password = password.filter(|s| !s.is_empty()).map(str::to_owned);
+        if user.is_some() != password.is_some() {
+            return Err(ConfigError::NatsPartialUserPassword);
+        }
+        let tls = match tls.map(str::trim) {
+            None | Some("") => false,
+            Some(s) => match s.to_ascii_lowercase().as_str() {
+                "true" => true,
+                "false" => false,
+                _ => return Err(ConfigError::Bool("NATS_TLS")),
+            },
+        };
+        Ok(Self {
+            creds_file,
+            nkey,
+            user,
+            password,
+            tls,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -501,5 +636,108 @@ mod tests {
         assert!(!cfg.syslog_udp_enabled);
         assert!(cfg.syslog_trusted_cidrs.is_empty());
         assert_eq!(cfg.syslog_udp_tenant_id, None);
+    }
+
+    // -- NatsAuthConfig -----------------------------------------------
+
+    /// An operator setting none of the `NATS_*` auth env vars must get
+    /// exactly today's unauthenticated behavior — the back-compat
+    /// requirement this whole feature is optional on top of.
+    #[test]
+    fn nats_auth_config_defaults_to_no_auth() {
+        let auth = NatsAuthConfig::from_values(None, None, None, None, None).unwrap();
+        assert_eq!(auth.creds_file, None);
+        assert_eq!(auth.nkey, None);
+        assert_eq!(auth.user, None);
+        assert_eq!(auth.password, None);
+        assert!(!auth.tls);
+    }
+
+    #[test]
+    fn nats_auth_config_reads_creds_file() {
+        let auth =
+            NatsAuthConfig::from_values(Some("/etc/nats/user.creds"), None, None, None, None)
+                .unwrap();
+        assert_eq!(auth.creds_file, Some("/etc/nats/user.creds".to_owned()));
+    }
+
+    #[test]
+    fn nats_auth_config_reads_nkey() {
+        let auth =
+            NatsAuthConfig::from_values(None, Some("SUANQ...seed"), None, None, None).unwrap();
+        assert_eq!(auth.nkey, Some("SUANQ...seed".to_owned()));
+    }
+
+    #[test]
+    fn nats_auth_config_reads_user_and_password_together() {
+        let auth =
+            NatsAuthConfig::from_values(None, None, Some("derek"), Some("s3cr3t"), None).unwrap();
+        assert_eq!(auth.user, Some("derek".to_owned()));
+        assert_eq!(auth.password, Some("s3cr3t".to_owned()));
+    }
+
+    /// A half-set `NATS_USER`/`NATS_PASSWORD` pair is a misconfiguration,
+    /// not a valid "no auth" state — fail closed rather than silently
+    /// downgrading to an unauthenticated connection the operator didn't
+    /// intend.
+    #[test]
+    fn nats_auth_config_rejects_user_without_password() {
+        let err = NatsAuthConfig::from_values(None, None, Some("derek"), None, None).unwrap_err();
+        assert_eq!(err, ConfigError::NatsPartialUserPassword);
+    }
+
+    #[test]
+    fn nats_auth_config_rejects_password_without_user() {
+        let err = NatsAuthConfig::from_values(None, None, None, Some("s3cr3t"), None).unwrap_err();
+        assert_eq!(err, ConfigError::NatsPartialUserPassword);
+    }
+
+    #[test]
+    fn nats_auth_config_parses_tls_true_case_insensitively() {
+        let auth = NatsAuthConfig::from_values(None, None, None, None, Some("True")).unwrap();
+        assert!(auth.tls);
+    }
+
+    #[test]
+    fn nats_auth_config_rejects_invalid_tls_value() {
+        let err = NatsAuthConfig::from_values(None, None, None, None, Some("yes")).unwrap_err();
+        assert_eq!(err, ConfigError::Bool("NATS_TLS"));
+    }
+
+    /// Secrets must never appear verbatim in a `{auth:?}` diagnostic.
+    #[test]
+    fn nats_auth_config_debug_masks_secrets() {
+        let auth = NatsAuthConfig::from_values(
+            None,
+            Some("SUPER-SECRET-SEED"),
+            Some("derek"),
+            Some("hunter2"),
+            None,
+        )
+        .unwrap();
+        let debug = format!("{auth:?}");
+        assert!(!debug.contains("SUPER-SECRET-SEED"), "{debug}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(debug.contains("derek"), "username is not a secret: {debug}");
+    }
+
+    // -- dlq_retention_from_value ---------------------------------------
+
+    #[test]
+    fn dlq_retention_defaults_to_thirty_days() {
+        let retention = dlq_retention_from_value(None).unwrap();
+        assert_eq!(retention, Duration::from_secs(30 * 24 * 60 * 60));
+    }
+
+    #[test]
+    fn dlq_retention_reads_custom_days() {
+        let retention = dlq_retention_from_value(Some("7")).unwrap();
+        assert_eq!(retention, Duration::from_secs(7 * 24 * 60 * 60));
+    }
+
+    #[test]
+    fn dlq_retention_invalid_value_is_config_error_not_panic() {
+        let err = dlq_retention_from_value(Some("not-a-number")).unwrap_err();
+        assert_eq!(err, ConfigError::Int("DLQ_RETENTION_DAYS"));
     }
 }

@@ -7,11 +7,13 @@
 //! Builds the shared, once-per-process dependencies every listener needs
 //! (the JetStream-backed [`crate::buffer::EventBuffer`], the OTLP gRPC
 //! listener's `IdentityStore` + shared SPIFFE workload identity, and the
-//! HTTPS ingest listener's `AppState`), then runs every protocol listener
-//! concurrently in a [`JoinSet`]: syslog UDP/TCP/TLS, OTLP gRPC/HTTP, and
-//! the HTTPS OCSF/JSON listener (which already carries its own
-//! `/healthz`+`/readyz` — see `listeners::http`, `docs/v2-port/
-//! ingest-module-spec.md` §3b). The same HTTPS server also carries
+//! plain-HTTP ingest listener's `AppState`), then runs every protocol
+//! listener concurrently in a [`JoinSet`]: syslog UDP/TCP/TLS, OTLP
+//! gRPC/HTTP, and the plain-HTTP OCSF/JSON listener (TLS terminated by the
+//! service mesh/ingress in front of it, not by this process — which
+//! already carries its own `/healthz`+`/readyz` — see `listeners::http`,
+//! `docs/v2-port/ingest-module-spec.md` §3b). The same plain-HTTP server
+//! also carries
 //! `crate::admin`'s ISM hot/warm/cold admin surface (`PUT /api/v1/admin/
 //! ingest/lifecycle`, `POST /api/v1/admin/ingest/restore`), merged onto the
 //! ingest router — a distinct `/api/v1/admin/...` path prefix from
@@ -26,8 +28,8 @@
 //! No separate `skauswatch_telemetry::Readiness` flag is threaded through
 //! receiver mode: `listeners::http::router`'s own `/readyz` (out of this
 //! gate's file scope — Task 1.3) already answers 200 unconditionally once
-//! the HTTPS listener is bound and serving, which is the same "ready once
-//! bound" contract a `Readiness` flag would otherwise express.
+//! the plain-HTTP listener is bound and serving, which is the same "ready
+//! once bound" contract a `Readiness` flag would otherwise express.
 //!
 //! # Writer mode ([`run_writer`])
 //!
@@ -96,7 +98,7 @@ async fn build_grpc_identity_store() -> anyhow::Result<IdentityStore> {
     Ok(IdentityStore::new(pool))
 }
 
-/// Builds the HTTPS OCSF/JSON ingest listener's shared [`http::AppState`]
+/// Builds the plain-HTTP OCSF/JSON ingest listener's shared [`http::AppState`]
 /// — factored out of [`run_receiver`] so it is unit-testable without a
 /// live NATS/license-server connection (see this module's own tests).
 /// Takes the same [`EventBuffer`] every other receiver-mode listener
@@ -235,7 +237,8 @@ async fn drain_listeners(
 /// # Errors
 /// Returns an error if a shared dependency (NATS, Postgres, the SPIFFE
 /// Workload API in production posture, `JWT_VERIFY_KEY`, the license
-/// client config) cannot be built, the HTTPS ingest port cannot be bound,
+/// client config) cannot be built, the plain-HTTP ingest port cannot be
+/// bound,
 /// or any listener exits with an error before shutdown was requested.
 pub(crate) async fn run_receiver(cfg: Config) -> anyhow::Result<()> {
     let buffer = build_event_buffer(&cfg).await?;
