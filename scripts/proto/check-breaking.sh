@@ -8,7 +8,7 @@
 #
 # Usage: scripts/proto/check-breaking.sh
 
-set -eu
+set -euo pipefail
 
 # Same pin as .github/workflows/proto.yml — keep the two in sync.
 BUF_IMAGE="bufbuild/buf:1.72.0@sha256:65bd496a89c762ad7151ca9e7d885a45dacb3671a8e8ec39738b9f844d3405ea"
