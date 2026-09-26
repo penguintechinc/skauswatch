@@ -344,6 +344,8 @@ impl OracleProvider {
         let secrets_host = host_of(&secrets_base);
 
         let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(http_timeout_secs()))
+            .connect_timeout(std::time::Duration::from_secs(http_connect_timeout_secs()))
             .build()
             .map_err(|e| ProviderError::Failed(format!("oracle: build http client: {e}")))?;
 
@@ -429,6 +431,30 @@ fn http_date_now() -> String {
     chrono::Utc::now()
         .format("%a, %d %b %Y %H:%M:%S GMT")
         .to_string()
+}
+
+/// Reads a positive-integer-seconds env var, falling back to `default` when
+/// unset, empty, or unparseable.
+fn env_secs(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+/// Whole-request timeout for the OCI Vault client
+/// (`WORKER_VAULT_SYNC_HTTP_TIMEOUT_SECS`, default 30s) — audit finding
+/// (issue #149, HIGH): a hung/slow OCI endpoint must never wedge the sync
+/// worker indefinitely. Back-compat: unset preserves prior behavior except
+/// now bounded (previously unbounded).
+fn http_timeout_secs() -> u64 {
+    env_secs("WORKER_VAULT_SYNC_HTTP_TIMEOUT_SECS", 30)
+}
+
+/// TCP+TLS connect timeout for the OCI Vault client
+/// (`WORKER_VAULT_SYNC_HTTP_CONNECT_TIMEOUT_SECS`, default 10s).
+fn http_connect_timeout_secs() -> u64 {
+    env_secs("WORKER_VAULT_SYNC_HTTP_CONNECT_TIMEOUT_SECS", 10)
 }
 
 fn host_of(base_url: &str) -> String {
@@ -720,6 +746,21 @@ mod tests {
 
     fn provider_for(server: &MockServer) -> OracleProvider {
         OracleProvider::new(&test_credentials(), &test_config(server)).expect("build provider")
+    }
+
+    #[test]
+    fn http_timeout_defaults_are_bounded_when_env_unset() {
+        // regression: gh-149 — the OCI http client must never build with an
+        // unbounded (no-timeout) default. `env_secs` can't be exercised with
+        // an env override here (workspace denies `unsafe_code`, which
+        // `std::env::set_var` requires), so this only asserts the
+        // no-env-var-set default path, matching production's common case.
+        assert_eq!(
+            env_secs("WORKER_VAULT_SYNC_HTTP_TIMEOUT_SECS_NONEXISTENT", 30),
+            30
+        );
+        assert!(http_timeout_secs() > 0);
+        assert!(http_connect_timeout_secs() > 0);
     }
 
     #[test]

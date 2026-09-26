@@ -60,6 +60,14 @@ pub struct TaxiiConfig {
     /// configured feeds — `ThreatFeed.update_frequency` is still stored and
     /// returned via the status API for a future per-feed scheduler).
     pub poll_interval: Duration,
+    /// Per-request timeout against a TAXII feed server
+    /// (`MONITOR_TAXII_HTTP_TIMEOUT_SECS`; default 30s). Audit finding
+    /// (issue #149, HIGH): previously unbounded — one hung feed would wedge
+    /// the whole poll loop indefinitely.
+    pub http_timeout: Duration,
+    /// TCP+TLS connect timeout (`MONITOR_TAXII_HTTP_CONNECT_TIMEOUT_SECS`;
+    /// default 10s).
+    pub http_connect_timeout: Duration,
 }
 
 impl TaxiiConfig {
@@ -77,6 +85,16 @@ impl TaxiiConfig {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(Duration::from_secs)
                 .unwrap_or(Duration::from_secs(3600)),
+            http_timeout: std::env::var("MONITOR_TAXII_HTTP_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_secs(30)),
+            http_connect_timeout: std::env::var("MONITOR_TAXII_HTTP_CONNECT_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_secs(10)),
         }
     }
 }
@@ -252,7 +270,11 @@ pub async fn run(store: Arc<ThreatStore>, cfg: TaxiiConfig, license: Arc<License
     }
     seed_feeds(&store, &cfg).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(cfg.http_timeout)
+        .connect_timeout(cfg.http_connect_timeout)
+        .build()
+        .unwrap_or_default();
     let mut ticker = tokio::time::interval(cfg.poll_interval);
     loop {
         ticker.tick().await;
@@ -481,6 +503,8 @@ mod tests {
                 ("Feed B".to_owned(), "https://b.example.test/".to_owned()),
             ],
             poll_interval: Duration::from_secs(60),
+            http_timeout: Duration::from_secs(30),
+            http_connect_timeout: Duration::from_secs(10),
         };
         seed_feeds(&store, &cfg).await;
 
@@ -499,6 +523,9 @@ mod tests {
         assert!(!cfg.enabled);
         assert!(cfg.feed_urls.is_empty());
         assert_eq!(cfg.poll_interval, Duration::from_secs(3600));
+        // regression: gh-149 — the feed-poll client must never build unbounded.
+        assert_eq!(cfg.http_timeout, Duration::from_secs(30));
+        assert_eq!(cfg.http_connect_timeout, Duration::from_secs(10));
     }
 
     #[tokio::test]
@@ -511,6 +538,8 @@ mod tests {
             enabled: false,
             feed_urls: vec![],
             poll_interval: Duration::from_secs(1),
+            http_timeout: Duration::from_secs(30),
+            http_connect_timeout: Duration::from_secs(10),
         };
         let license = skauswatch_testkit::license::dev_license("skauswatch");
         // Must return promptly rather than entering the poll loop — the
@@ -533,6 +562,8 @@ mod tests {
                 "https://seeded.example.test/".to_owned(),
             )],
             poll_interval: Duration::from_millis(20),
+            http_timeout: Duration::from_secs(30),
+            http_connect_timeout: Duration::from_secs(10),
         };
         let license = skauswatch_testkit::license::gated_license("skauswatch");
         let handle = tokio::spawn(run(store.clone(), cfg, license));

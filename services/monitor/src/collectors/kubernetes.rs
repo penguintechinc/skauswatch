@@ -45,6 +45,14 @@ pub struct KubernetesConfig {
     pub ca_cert_path: String,
     /// `MONITOR_COLLECTOR_K8S_POLL_INTERVAL_SECS`; default 30s.
     pub poll_interval: Duration,
+    /// Per-request timeout against the in-cluster API server
+    /// (`MONITOR_COLLECTOR_K8S_HTTP_TIMEOUT_SECS`; default 10s — short,
+    /// since a stuck poll blocks the next tick of `poll_interval`).
+    /// Audit finding (issue #149, HIGH): previously unbounded.
+    pub http_timeout: Duration,
+    /// TCP+TLS connect timeout (`MONITOR_COLLECTOR_K8S_HTTP_CONNECT_TIMEOUT_SECS`;
+    /// default 5s).
+    pub http_connect_timeout: Duration,
 }
 
 impl KubernetesConfig {
@@ -62,6 +70,16 @@ impl KubernetesConfig {
             .and_then(|v| v.parse::<u64>().ok())
             .map(Duration::from_secs)
             .unwrap_or(Duration::from_secs(30));
+        let http_timeout = env::var("MONITOR_COLLECTOR_K8S_HTTP_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(10));
+        let http_connect_timeout = env::var("MONITOR_COLLECTOR_K8S_HTTP_CONNECT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(5));
         Self {
             enabled,
             api_server,
@@ -70,6 +88,8 @@ impl KubernetesConfig {
             ca_cert_path: env::var("MONITOR_COLLECTOR_K8S_CA_CERT_PATH")
                 .unwrap_or_else(|_| DEFAULT_CA_CERT_PATH.to_owned()),
             poll_interval,
+            http_timeout,
+            http_connect_timeout,
         }
     }
 }
@@ -199,10 +219,14 @@ pub async fn poll_once(
 
 /// Builds the HTTPS client trusting the in-cluster CA (falls back to the
 /// system trust store if the CA file can't be read — e.g. running outside
-/// a real cluster during development).
-fn build_client(ca_cert_path: &str) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder();
-    if let Ok(pem) = std::fs::read(ca_cert_path)
+/// a real cluster during development). Bounded by `cfg`'s request/connect
+/// timeouts (audit finding, issue #149, HIGH) — a stuck API server must
+/// never wedge the poll loop indefinitely.
+fn build_client(cfg: &KubernetesConfig) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
+        .timeout(cfg.http_timeout)
+        .connect_timeout(cfg.http_connect_timeout);
+    if let Ok(pem) = std::fs::read(&cfg.ca_cert_path)
         && let Ok(cert) = reqwest::Certificate::from_pem(&pem)
     {
         builder = builder.add_root_certificate(cert);
@@ -213,7 +237,7 @@ fn build_client(ca_cert_path: &str) -> reqwest::Client {
 /// Poll loop: re-reads the service account token every cycle (tokens are
 /// rotated by the kubelet periodically) and polls on `cfg.poll_interval`.
 pub async fn run(cfg: KubernetesConfig, tenant_id: String, sink: IngestHandle) {
-    let client = build_client(&cfg.ca_cert_path);
+    let client = build_client(&cfg);
     let mut ticker = tokio::time::interval(cfg.poll_interval);
     loop {
         ticker.tick().await;
@@ -351,12 +375,24 @@ mod tests {
         assert_eq!(cfg.token_path, DEFAULT_TOKEN_PATH);
         assert_eq!(cfg.ca_cert_path, DEFAULT_CA_CERT_PATH);
         assert_eq!(cfg.poll_interval, Duration::from_secs(30));
+        // regression: gh-149 — the client must never build unbounded.
+        assert_eq!(cfg.http_timeout, Duration::from_secs(10));
+        assert_eq!(cfg.http_connect_timeout, Duration::from_secs(5));
     }
 
     #[test]
     fn build_client_falls_back_to_the_system_trust_store_when_the_ca_file_is_missing() {
         // Exercises the "CA file can't be read" branch without needing a
         // real in-cluster service account mount.
-        let _client = build_client("/nonexistent/ca.crt");
+        let cfg = KubernetesConfig {
+            enabled: false,
+            api_server: String::new(),
+            token_path: String::new(),
+            ca_cert_path: "/nonexistent/ca.crt".to_owned(),
+            poll_interval: Duration::from_secs(30),
+            http_timeout: Duration::from_secs(10),
+            http_connect_timeout: Duration::from_secs(5),
+        };
+        let _client = build_client(&cfg);
     }
 }
