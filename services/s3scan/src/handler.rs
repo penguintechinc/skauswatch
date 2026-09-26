@@ -112,7 +112,10 @@ impl S3ScanHandler {
         Self {
             pool,
             producer,
-            http: reqwest::Client::new(),
+            // Audit finding (issue #149, HIGH): bounded per
+            // `crate::config::HttpClientConfig` — a hung/slow VirusTotal/OTX
+            // peer must never wedge this worker's task-processing loop.
+            http: crate::config::http_client(),
             cfg,
             envelope,
             scan_engine,

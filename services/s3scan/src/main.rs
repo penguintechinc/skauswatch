@@ -239,7 +239,18 @@ async fn healthcheck() -> anyhow::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080u16);
     let url = format!("http://127.0.0.1:{port}/healthz");
-    let resp = reqwest::Client::new()
+    // Audit finding (issue #149, HIGH): bound connect time
+    // (`S3SCAN_HTTP_CONNECT_TIMEOUT_SECS`, default 10s) — the explicit 3s
+    // `.timeout()` below still overrides the client-level whole-request
+    // default per call, unchanged from before.
+    let http_cfg = config::HttpClientConfig::from_env();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(http_cfg.timeout_secs))
+        .connect_timeout(std::time::Duration::from_secs(
+            http_cfg.connect_timeout_secs,
+        ))
+        .build()?;
+    let resp = client
         .get(&url)
         .timeout(std::time::Duration::from_secs(3))
         .send()
