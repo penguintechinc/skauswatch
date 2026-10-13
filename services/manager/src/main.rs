@@ -83,8 +83,9 @@ async fn serve() -> anyhow::Result<()> {
     let _license_bg = state.license.spawn_refresh();
 
     // v1-shape /healthz (DB + Redis probes) replaces the generic telemetry
-    // health router; /readyz keeps the readiness gate. The fallback serves
-    // the v1 Quart framework-404 envelope for unknown routes.
+    // health router; /readyz keeps the readiness gate; /version stays
+    // alongside them. The fallback serves the v1 Quart framework-404
+    // envelope for unknown routes.
     // Global rate limit (security hardening Fix 2) is applied here, at the
     // outermost layer of the fully assembled app, never inside
     // `routes::router()` — see `rate_limit` module docs for why: the many
@@ -94,11 +95,18 @@ async fn serve() -> anyhow::Result<()> {
     // `/auth/*` limiter is scoped inside `routes::router()` itself, since
     // it wraps a small dedicated sub-router (`auth::public_router()`)
     // rather than the whole app.
-    let app = rate_limit::apply_global(
-        routes::router(state.clone())
-            .merge(health::router(state.clone(), readiness.clone()))
-            .fallback(error::fallback_not_found),
-    );
+    //
+    // `health::router` (`/healthz`, `/readyz`, `/version`) is merged in
+    // AFTER `rate_limit::apply_global`, never as part of the `Router` value
+    // passed into it — first-run microk8s deploy bug (same anti-pattern
+    // already fixed on `services/logs`/`services/monitor`): health used to
+    // be merged inside the argument to `apply_global`, so k8s probe
+    // traffic (no JWT, high frequency) shared the same governed bucket as
+    // ordinary API traffic and could be 429'd once the global burst was
+    // exhausted.
+    let app = rate_limit::apply_global(routes::router(state.clone()))
+        .merge(health::router(state.clone(), readiness.clone()))
+        .fallback(error::fallback_not_found);
 
     let addr: SocketAddr = ([0, 0, 0, 0], http_port()).into();
     let listener = tokio::net::TcpListener::bind(addr).await?;
