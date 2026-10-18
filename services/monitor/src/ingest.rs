@@ -36,7 +36,7 @@ use crate::models::{BaseEvent, Severity};
 use crate::threat_intel::matcher::EventMatcher;
 
 /// PostHog flag gating collector ingest — `skauswatch.log-ingest` in
-/// `services/manager/src/flags.rs::CORE_FLAGS` (already reserved there,
+/// `services/manager/src/flags.rs::MODULE_FLAGS` (already reserved there,
 /// unused until this port). Checked dynamically per-event (not once at
 /// collector startup) so operators can kill ingest live without a redeploy,
 /// per `general.md`'s "graceful degradation" flag philosophy — collectors

@@ -833,7 +833,7 @@ fn ai_enabled_value(raw: Option<&str>) -> bool {
     raw.is_none_or(|v| v.eq_ignore_ascii_case("true"))
 }
 
-/// The `skauswatch.ai-review` PostHog flag (`crate::flags::CORE_FLAGS`) —
+/// The `skauswatch.ai-review` PostHog flag (`crate::flags::MODULE_FLAGS`) —
 /// general enablement, layered on top of (never a replacement for) the
 /// `AI_ENABLED` env-var kill-switch above. Both gates must pass; this one
 /// was previously missing entirely, so the feature had no flag-based

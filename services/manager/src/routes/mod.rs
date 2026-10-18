@@ -82,14 +82,16 @@ pub fn router(state: AppState) -> Router {
         .merge(openapi::public_router())
         .merge(siem::public_router());
 
-    // Gated on the same flag as the operator half — see `flags::CORE_FLAGS`
+    // Gated on the same flag as the operator half — see `flags::MODULE_FLAGS`
     // `skauswatch.endpoint` and the module docs above (HMAC agent tier).
     let agent = gated(endpoint::agent_router(), &state, "skauswatch.endpoint");
 
     let protected = auth::protected_router()
         .merge(license::router())
         .merge(admin::router())
-        .merge(gated(users::router(), &state, "skauswatch.users"))
+        // user/IAM is Core (always-on foundation) — never behind a module
+        // flag, see `crate::flags` module docs.
+        .merge(users::router())
         .merge(tenants::router())
         .merge(gated(alerts::router(), &state, "skauswatch.alerts"))
         .merge(gated(
@@ -231,7 +233,6 @@ mod tests {
         // (which would mean the route was never mounted at all) or a 200
         // (which would mean the gate never ran).
         for (method_path, flag) in [
-            ("GET /api/v1/users", "skauswatch.users"),
             ("GET /api/v1/alerts", "skauswatch.alerts"),
             ("GET /api/v1/threat-intel/iocs", "skauswatch.threat-intel"),
             ("GET /api/v1/approvals", "skauswatch.approvals"),
@@ -276,6 +277,14 @@ mod tests {
             .authorization_bearer(&token)
             .await;
         license_res.assert_status_ok();
+
+        // users is Core (always-on foundation), never behind a module flag
+        // — must stay reachable even with every module flag off.
+        let users_res = server
+            .get("/api/v1/users")
+            .authorization_bearer(&token)
+            .await;
+        users_res.assert_status_ok();
     }
 
     #[tokio::test]
@@ -286,7 +295,7 @@ mod tests {
         let (server, state) = full_server().await;
         let (_, token) = test_support::authed_user(&state, "unflagged@example.com", "admin").await;
         let res = server
-            .get("/api/v1/users")
+            .get("/api/v1/alerts")
             .authorization_bearer(&token)
             .await;
         res.assert_status_ok();

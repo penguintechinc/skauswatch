@@ -22,7 +22,7 @@ use crate::threat_intel::store::{StoreError, ThreatStore};
 
 /// PostHog flag gating the TAXII feed poller and its REST surface —
 /// `skauswatch.threat-intel`, already reserved in `services/manager/src/
-/// flags.rs::CORE_FLAGS` and already used by manager's *separate*
+/// flags.rs::MODULE_FLAGS` and already used by manager's *separate*
 /// IOC-CRUD routes (`routes/threat_intel.rs`) — sharing the key is
 /// intentional: enabling "threat intel" as a product feature enables both
 /// subsystems together, see `mod.rs` module docs for why they're still
