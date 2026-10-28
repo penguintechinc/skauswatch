@@ -1,0 +1,116 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /crates/skauswatch-ai
+      - /crates/skauswatch-auth
+      - /crates/skauswatch-common
+      - /crates/skauswatch-db
+      - /crates/skauswatch-identity
+      - /crates/skauswatch-ocsf
+      - /crates/skauswatch-proto
+      - /crates/skauswatch-s3
+      - /crates/skauswatch-scan-core
+      - /crates/skauswatch-spire-entry
+      - /crates/skauswatch-streams
+      - /crates/skauswatch-telemetry
+      - /crates/skauswatch-testkit
+      - /crates/skauswatch-vault
+      - /services/codescan-backend
+      - /services/depgate
+      - /services/endpoint-agent
+      - /services/logs
+      - /services/manager
+      - /services/monitor
+      - /services/pki
+      - /services/s3scan
+      - /services/scanner
+      - /services/sshca
+      - /services/svc-ingest
+      - /services/vault
+      - /services/worker-codescan
+      - /services/worker-vault-sync
+    schedule:
+      interval: weekly
+    groups:
+      all-dependencies:
+        applies-to: version-updates
+        patterns:
+          - '*'
+      security:
+        applies-to: security-updates
+        patterns:
+          - '*'
+  - package-ecosystem: docker
+    directories:
+      - /packages/spire-agent-lxd
+      - /services/codescan-backend
+      - /services/depgate
+      - /services/endpoint-agent
+      - /services/logs
+      - /services/manager
+      - /services/monitor
+      - /services/pki
+      - /services/s3scan
+      - /services/scanner
+      - /services/sshca
+      - /services/svc-ingest
+      - /services/vault
+      - /services/webui
+      - /services/worker-codescan
+      - /services/worker-vault-sync
+    schedule:
+      interval: weekly
+    groups:
+      all-dependencies:
+        applies-to: version-updates
+        patterns:
+          - '*'
+      security:
+        applies-to: security-updates
+        patterns:
+          - '*'
+  - package-ecosystem: github-actions
+    directories:
+      - /
+    schedule:
+      interval: weekly
+    groups:
+      all-dependencies:
+        applies-to: version-updates
+        patterns:
+          - '*'
+      security:
+        applies-to: security-updates
+        patterns:
+          - '*'
+  - package-ecosystem: npm
+    directories:
+      - /
+      - /services/webui
+    schedule:
+      interval: weekly
+    groups:
+      all-dependencies:
+        applies-to: version-updates
+        patterns:
+          - '*'
+      security:
+        applies-to: security-updates
+        patterns:
+          - '*'
+  - package-ecosystem: pip
+    directories:
+      - /tests/parity
+    schedule:
+      interval: weekly
+    groups:
+      all-dependencies:
+        applies-to: version-updates
+        patterns:
+          - '*'
+      security:
+        applies-to: security-updates
+        patterns:
+          - '*'
